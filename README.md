@@ -219,11 +219,22 @@ worth a different model; one could rescue an answer from a tool call the model t
 The classifier here is the union of all five, and the suite is every failure any of them
 ever saw. That is the part worth having.
 
+## Repo
+
+```
+core/    the npm package `providerkit`
+site/    providerkit.dev — also open source
+```
+
+`bun install`, then `cd core && bun run test`. See [AGENTS.md](./AGENTS.md) for the layout,
+the invariants worth not regressing, and what is left to build.
+
 ## Status
 
-Working and tested: the seam, the error classifier, retry and backup-model fallback, the
-idle watchdog, cost math, the fetch/SSE transport, tool-argument salvage, the Anthropic and
-OpenAI-shape adapters, the tool kernel, schema clamping, and the compaction decisions.
+Working and tested (218 tests): the seam, the error classifier, retry and backup-model
+fallback, the idle watchdog, cost math, the fetch/SSE transport, tool-argument salvage, the
+Anthropic and OpenAI-shape adapters, the tool kernel, schema clamping, and the compaction
+decisions.
 
 Not yet: the Gemini and Responses adapters, and the multi-key rotation pool.
 

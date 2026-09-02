@@ -2,3 +2,7 @@ node_modules
 dist
 *.tsbuildinfo
 .DS_Store
+
+# Copied in at publish time from the repo root — one source of truth.
+core/README.md
+core/LICENSE
