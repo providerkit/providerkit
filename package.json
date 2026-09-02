@@ -11,12 +11,16 @@
     "build": "bun run --filter providerkit build",
     "test": "bun run --filter providerkit test",
     "typecheck": "bun run --filter '*' typecheck",
-    "lint": "bun run --filter '*' lint",
+    "lint": "eslint core/src core/test site/src",
     "format": "prettier --write .",
     "dev:site": "bun run --filter providerkit-site dev",
     "build:site": "bun run --filter providerkit-site build"
   },
   "devDependencies": {
-    "prettier": "^3.4.2"
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^7.0.0",
+    "prettier": "^3.4.2",
+    "typescript-eslint": "^8.18.2"
   }
 }
