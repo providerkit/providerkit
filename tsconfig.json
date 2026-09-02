@@ -19,7 +19,12 @@
     "forceConsistentCasingInFileNames": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    // Source imports carry the real `.ts` extension (what Bun resolves, and
+    // what the repos this was extracted from write); tsc rewrites them to
+    // `.js` on emit so the published ESM is spec-correct.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "test"]

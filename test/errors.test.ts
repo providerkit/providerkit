@@ -98,9 +98,9 @@ describe("the body outranks the status for the 4xx family", () => {
 
   it("entitlement wins over quota when both words appear", () => {
     // "upgrade your plan" is a quota phrase; "plan does not include" is stronger.
-    expect(kindOf(apiError(403, { message: "plan does not include this — upgrade your plan" }))).toBe(
-      "entitlement",
-    );
+    expect(
+      kindOf(apiError(403, { message: "plan does not include this — upgrade your plan" })),
+    ).toBe("entitlement");
   });
 
   it.each([
