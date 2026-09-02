@@ -5,3 +5,5 @@ export * from "./watchdog.ts";
 export * from "./usage.ts";
 export * from "./transport.ts";
 export * from "./tool-args.ts";
+export * from "./providers/anthropic.ts";
+export * from "./providers/openai.ts";
