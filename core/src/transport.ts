@@ -101,7 +101,9 @@ export async function postJson<T = unknown>(opts: RequestInit_): Promise<T> {
 }
 
 /**
- * POST an SSE request and yield each `data:` payload, trimmed.
+ * POST an SSE request and yield each `data:` payload, trimmed — plus the bare
+ * JSON object a vendor appends outside the framing, which is only ever an
+ * error (see `payloadOf`).
  *
  * Frames are split on the blank line the spec requires, so a payload
  * containing a bare newline survives; `[DONE]` is swallowed here rather than in
@@ -132,7 +134,15 @@ export async function* streamSse(opts: RequestInit_): AsyncGenerator<string> {
       if (!line.startsWith("data:")) continue;
       parts.push(line.slice(5).replace(/^ /, ""));
     }
-    if (parts.length === 0) return null;
+    // Gemini abandons the framing to report a mid-stream failure: the
+    // google.rpc.Status is appended as a bare JSON object with no `data:` on
+    // it. Dropped here it never reaches an adapter, and a 429 or a 503 that
+    // lands after the headers reads as an empty, successful turn. Requiring an
+    // object keeps comments and `event:`-only frames returning null.
+    if (parts.length === 0) {
+      const bare = frame.trim();
+      return bare.startsWith("{") ? bare : null;
+    }
     const payload = parts.join("\n").trim();
     return payload.length > 0 ? payload : null;
   }

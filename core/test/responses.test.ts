@@ -42,6 +42,28 @@ async function collect(stream: AsyncIterable<ProviderChunk>): Promise<ProviderCh
   return out;
 }
 
+/**
+ * What a caller does with the fragments: the last STATED id or name wins and
+ * arguments concatenate. The seam's assembly contract, spelled out here so the
+ * tests below assert the ToolCall a loop actually ends up dispatching.
+ */
+function assemble(chunks: ProviderChunk[]) {
+  const calls = new Map<number, { index: number; id: string; name: string; arguments: string }>();
+  for (const fragment of chunks.flatMap((c) => c.toolCalls ?? [])) {
+    const call = calls.get(fragment.index) ?? {
+      index: fragment.index,
+      id: "",
+      name: "",
+      arguments: "",
+    };
+    if (fragment.id) call.id = fragment.id;
+    if (fragment.name) call.name = fragment.name;
+    call.arguments += fragment.arguments ?? "";
+    calls.set(fragment.index, call);
+  }
+  return [...calls.values()];
+}
+
 const j = (o: unknown) => JSON.stringify(o);
 
 const provider = (over: Partial<Parameters<typeof createResponsesProvider>[0]> = {}) =>
@@ -235,6 +257,87 @@ describe("responses tool calls", () => {
     expect(byIndex(0)).toBe('{"n":1}');
     expect(byIndex(1)).toBe('{"n":2}');
   });
+
+  it("takes the identity from done when the skeleton carried none", async () => {
+    // The ChatGPT surface opens a call with the `fc_…` id alone and states the
+    // `call_id` and the name only on done. Seeding the slot with `""` would
+    // survive them and leave the loop a nameless call it cannot dispatch,
+    // answered with `call_id: ""` on the turn after.
+    const { fetchImpl } = recorder([
+      j({ type: "response.output_item.added", item: { type: "function_call", id: "fc_1" } }),
+      j({ type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"q":"x"}' }),
+      j({
+        type: "response.output_item.done",
+        item: {
+          type: "function_call",
+          id: "fc_1",
+          call_id: "call_real",
+          name: "search",
+          arguments: '{"q":"x"}',
+        },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+
+    // The skeleton states nothing it does not know — no empty id, no empty name.
+    expect(chunks.flatMap((c) => c.toolCalls ?? [])).toEqual([
+      { index: 0 },
+      { index: 0, arguments: '{"q":"x"}' },
+      { index: 0, id: "call_real", name: "search" },
+    ]);
+    expect(assemble(chunks)).toEqual([
+      { index: 0, id: "call_real", name: "search", arguments: '{"q":"x"}' },
+    ]);
+  });
+
+  it("lets a done that renames the call win over the skeleton", async () => {
+    const { fetchImpl } = recorder([
+      j({
+        type: "response.output_item.added",
+        item: { type: "function_call", id: "fc_1", call_id: "call_draft", name: "searc" },
+      }),
+      j({
+        type: "response.output_item.done",
+        item: {
+          type: "function_call",
+          id: "fc_1",
+          call_id: "call_final",
+          name: "search",
+          arguments: "{}",
+        },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ]);
+    expect(assemble(await collect(provider({ fetchImpl }).createStream(hi, [])))).toEqual([
+      { index: 0, id: "call_final", name: "search", arguments: "{}" },
+    ]);
+  });
+
+  it("drops a done-only call with no call_id instead of handing one over unrunnable", async () => {
+    // Nothing was streamed for it, so it can still be dropped — and a turn
+    // whose only call vanished must not finish as tool_calls, or the loop
+    // goes looking for a call that is not there.
+    const { fetchImpl } = recorder([
+      j({
+        type: "response.output_item.done",
+        item: { type: "function_call", id: "fc_9", name: "search", arguments: '{"q":"x"}' },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+
+    expect(chunks.flatMap((c) => c.toolCalls ?? [])).toEqual([]);
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("stop");
+  });
+
+  it("says nothing on a done that restates exactly what already streamed", async () => {
+    const { fetchImpl } = recorder(TOOL_TURN);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    // The identity is unchanged and the snapshot equals the fragments: the
+    // only frames are the skeleton and the two argument deltas.
+    expect(chunks.flatMap((c) => c.toolCalls ?? [])).toHaveLength(3);
+  });
 });
 
 // ── finish reasons and failures ───────────────────────────────────────────
@@ -327,6 +430,21 @@ describe("responses request", () => {
     // No system ROLE on this shape — both system turns lift into instructions.
     expect(seen[0]!.body.instructions).toBe("be brief\n\nand kind");
     expect(seen[0]!.body.input).toHaveLength(1);
+  });
+
+  it("reaches a backend that serves the endpoint off /v1", async () => {
+    // The ChatGPT subscription surface has no version segment. Appending
+    // /v1 there is a 404, and classify() reads a 404 as kind "model" — the
+    // user is told their model id is wrong when the path was.
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider({
+        fetchImpl,
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        path: "/responses",
+      }).createStream(hi, []),
+    );
+    expect(seen[0]!.url).toBe("https://chatgpt.com/backend-api/codex/responses");
   });
 
   it("asks for a reasoning summary whenever effort is on — the deltas need it", async () => {

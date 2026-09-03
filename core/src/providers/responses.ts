@@ -38,9 +38,19 @@ export interface ResponsesConfig {
   /** Extra request headers — where a subscription backend's account id goes
    *  (`ChatGPT-Account-Id`), which those backends reject the request without. */
   headers?: Record<string, string>;
+  /**
+   * Where this backend serves the endpoint, when it is not `/v1/responses`.
+   * The ChatGPT subscription surface serves it at `/backend-api/codex/responses`
+   * with no version segment, so that backend needs
+   * `{ baseUrl: "https://chatgpt.com/backend-api/codex", path: "/responses" }`.
+   * Without the override the POST 404s, and a 404 classifies as "model" — the
+   * user is told the model id does not exist when the path was the problem.
+   */
+  path?: string;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
+const DEFAULT_PATH = "/v1/responses";
 
 /**
  * `response.incomplete` means the turn was cut short, and the seam has one word
@@ -226,10 +236,13 @@ function streamError(
   );
 }
 
-/** What has been streamed for one in-flight function call, so the authoritative
- *  snapshot on `.done` can be diffed against it instead of duplicated. */
+/** What has already gone out for one in-flight function call — identity and
+ *  arguments both — so the authoritative snapshot on `.done` can be diffed
+ *  against it instead of duplicated. */
 interface PendingCall {
   index: number;
+  id: string;
+  name: string;
   streamed: string;
 }
 
@@ -306,7 +319,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       let sawToolCall = false;
 
       for await (const data of streamSse({
-        url: apiUrl(baseUrl, "/v1/responses"),
+        url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
         headers: { authorization: `Bearer ${config.apiKey}`, ...config.headers },
         body: request,
         provider: id,
@@ -341,14 +354,23 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             // Normally empty here, but a backend that already has the whole
             // call sends it in the skeleton.
             const seeded = item.arguments ?? "";
-            pending.set(item.id, { index, streamed: seeded });
+            pending.set(item.id, {
+              index,
+              id: item.call_id ?? "",
+              name: item.name ?? "",
+              streamed: seeded,
+            });
+            // Only the fields the skeleton actually states. An empty `id` here
+            // is not "unknown", it is a wrong answer: a consumer takes the last
+            // stated value, so `""` written into the slot survives the real
+            // `call_id` arriving on `.done`.
             yield {
               type: "delta",
               toolCalls: [
                 {
                   index,
-                  id: item.call_id ?? "",
-                  name: item.name ?? "",
+                  ...(item.call_id ? { id: item.call_id } : {}),
+                  ...(item.name ? { name: item.name } : {}),
                   ...(seeded ? { arguments: seeded } : {}),
                 },
               ],
@@ -367,37 +389,54 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           case "response.output_item.done": {
             const item = event.item;
             if (item?.type !== "function_call") break;
-            sawToolCall = true;
             const known = item.id ? pending.get(item.id) : undefined;
             if (item.id) pending.delete(item.id);
             const snapshot = item.arguments ?? "";
+
             if (!known) {
               // A backend that emits neither the skeleton nor the deltas — the
-              // whole call arrives here or not at all.
+              // whole call arrives here or not at all. Without a `call_id`
+              // there is nothing to answer it with: the caller's
+              // `function_call_output` would quote `""` and take a 400 reading
+              // "No tool output found for function call" one turn later, so the
+              // call is dropped rather than handed over unrunnable. Dropping is
+              // only possible here, where nothing has been streamed for it yet.
+              if (!item.call_id) break;
+              sawToolCall = true;
               yield {
                 type: "delta",
                 toolCalls: [
                   {
                     index: nextIndex++,
-                    id: item.call_id ?? "",
-                    name: item.name ?? "",
+                    id: item.call_id,
+                    ...(item.name ? { name: item.name } : {}),
                     arguments: snapshot,
                   },
                 ],
               };
               break;
             }
+
             // The snapshot is authoritative, but the fragments already went
             // out: re-emitting it whole concatenates the JSON with itself and
             // every argument parse fails. Send only what the deltas missed —
             // which is all of it when they never came.
-            if (snapshot.length > known.streamed.length && snapshot.startsWith(known.streamed)) {
-              yield {
-                type: "delta",
-                toolCalls: [
-                  { index: known.index, arguments: snapshot.slice(known.streamed.length) },
-                ],
-              };
+            const tail =
+              snapshot.length > known.streamed.length && snapshot.startsWith(known.streamed)
+                ? snapshot.slice(known.streamed.length)
+                : "";
+            // `.done` restates the identity, and on a backend that leaves it
+            // out of the skeleton this is the only frame that carries it. It
+            // rides last so it WINS: the alternative is a caller assembling a
+            // nameless call it has no tool to dispatch, quoting an empty
+            // `call_id` back on the turn after.
+            const restated = {
+              ...(item.call_id && item.call_id !== known.id ? { id: item.call_id } : {}),
+              ...(item.name && item.name !== known.name ? { name: item.name } : {}),
+              ...(tail ? { arguments: tail } : {}),
+            };
+            if (Object.keys(restated).length > 0) {
+              yield { type: "delta", toolCalls: [{ index: known.index, ...restated }] };
             }
             break;
           }
