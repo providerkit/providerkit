@@ -21,9 +21,10 @@ do about the failure in front of them, fast, and to keep reading comfortably for
 ## Proof on hand
 
 Five pooled production codebases (~9,100 lines), three independently-derived identical 60s
-watchdogs, two repos shipping the same five fixes on the same day, 344 tests, 13 error kinds, and
-a classifier that runs the real published package in the reader's browser. No users, no
-testimonials, no adopters — none may be invented.
+watchdogs, two of them shipping the same five fixes on the same day, 380 tests, 13 error kinds,
+one migration that deleted 634 lines from an MV3 extension, and a classifier that runs the real
+published package in the reader's browser. Nothing beyond that list: no testimonials, no
+benchmarks, no download counts — none may be invented, and none may be implied.
 
 ## Chosen direction — "Optical Bench" (seed 805dd357, assigned index 5)
 

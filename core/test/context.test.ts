@@ -55,11 +55,11 @@ describe("messageTokens", () => {
 
 describe("needsCompaction on a small window", () => {
   it("does not demand compaction before the first turn has reported usage", () => {
-    // Found migrating tabrunner, which had carried this guard locally. Its
-    // windows are LEARNED from a provider's own length rejection, so a genuine
-    // 8k ceiling reaches this function. Without the guard the threshold goes
-    // negative, every turn reads as full, and the run folds an empty history
-    // forever.
+    // Found during the first migration, in an app that had carried this guard
+    // locally. Its windows are LEARNED from a provider's own length rejection,
+    // so a genuine 8k ceiling reaches this function. Without the guard the
+    // threshold goes negative, every turn reads as full, and the run folds an
+    // empty history forever.
     for (const window of [8_000, 20_000, 32_000]) {
       expect(needsCompaction(0, window)).toBe(false);
     }

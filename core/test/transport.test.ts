@@ -50,7 +50,7 @@ describe("apiUrl", () => {
 describe("parseSseStream", () => {
   // The framing half, reachable on its own. An app that must keep its own
   // envelope — translated error copy, its own log levels, a token refresh —
-  // takes this and skips streamSse; tabrunner is the first to do it.
+  // takes this and skips streamSse. The first adopter did exactly that.
   it("parses a body without going through the request envelope", async () => {
     const body = sseResponse(['data: {"a":1}\n\n', "data: [DONE]\n\n"]).body!;
     expect(await collect(parseSseStream(body))).toEqual(['{"a":1}']);

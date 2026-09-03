@@ -14,27 +14,25 @@ MIT · open source · `providerkit.dev`
 > The site rebuild has landed. That brief holds the committed direction, the palette, the
 > list of what must **not** survive, and the agent-channel decisions; `site/DESIGN.md` (with
 > its `site/.impeccable/design.json` sidecar) is the built design system, written from the
-> shipped pages rather than ahead of them. `PRODUCT.md` holds product truth. Read the brief
+> shipped pages rather than ahead of them. Read the brief
 > for _why_ a rule exists and DESIGN.md for _what_ the rule is.
 
 ## Why it exists
 
-Extracted from five of Gus's production codebases that had each independently grown the same
-layer — roughly **9,100 lines solving one ~2,000-line problem**:
+Extracted from five private production codebases that had each independently grown the same
+layer — roughly **9,100 lines solving one ~2,000-line problem**, spanning three generations of
+the same idea: abstract classes with per-vendor subclasses (3,266 lines, the oldest), two
+seams typed against OpenAI's own parameter types, and two newer ones — a provider-neutral
+seam, and a fetch-only transport built to survive MV3.
 
-| Codebase               | Kernel lines | Generation                                       |
-| ---------------------- | -----------: | ------------------------------------------------ |
-| `packages/falai/agent` |        3,266 | oldest — abstract classes, per-vendor subclasses |
-| `tabrunner/chrome`     |        2,078 | newest transport — fetch-only, MV3-safe          |
-| `smartgenius`          |       ~1,900 | newest seam — provider-neutral types             |
-| `olhary`               |        1,178 | OpenAI-param-typed seam                          |
-| `featury`              |          649 | OpenAI-param-typed seam                          |
-
-The duplication was actively expensive: on **2026-09-01** featury and olhary shipped the same
-five fixes independently (idle watchdog, `AbortSignal.any` bridging, TTFT, OpenRouter route
-pin, per-call effort). Three separate 60-second idle watchdogs existed, identical to the
+The duplication was actively expensive. On one day in September 2026 two of them shipped the
+same five fixes independently (idle watchdog, `AbortSignal.any` bridging, TTFT, OpenRouter
+route pin, per-call effort). Three separate 60-second idle watchdogs existed, identical to the
 constant. Five error classifiers existed, **each holding knowledge none of the others had** —
 which is the single highest-value merge in the package.
+
+The source repos are private and are not named here; nothing about the package depends on
+knowing which they were.
 
 ## Layout
 
@@ -83,21 +81,19 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
   is set to `public` so a release can't silently go private.
 - **`core/` is the role, not the identity.** If adapters ever split for bundle size they
   become `@providerkit/gemini` siblings — same scope, no rename, no broken links.
-- **GitHub: org `providerkit`, repo `providerkit/providerkit`.** Matches the `falai-dev`
-  precedent and allows maintainers later without a repo transfer.
+- **GitHub: org `providerkit`, repo `providerkit/providerkit`.** An org rather than a personal
+  repo, so maintainers can be added later without a transfer.
 - Release scripts match the other packages in `dev/packages`:
   `bun run release:patch|minor|major`. `prepublishOnly` runs lint → typecheck → test →
   build → `sync:docs` (which copies the root README and LICENSE into `core/`, so they are
   tracked once and `.gitignore`d inside `core/`).
 
 - **Site deploys to Cloudflare Pages** on push to `main`, project `providerkit`. Needs
-  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repo secrets — same names and
-  values as the other repos.
+  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repo secrets.
 - **The repo must be public.** A free npm org can only host public packages, and a free
   GitHub org only gets unlimited Actions minutes on public repos. It is MIT anyway.
 
-**Not yet done:** point the providerkit.dev DNS at the Pages project. `0.1.0` is on npm;
-the next release waits on tabrunner proving the API (see **Next**).
+**Not yet done:** point the providerkit.dev DNS at the Pages project. `0.2.0` is on npm.
 
 ## State
 
@@ -136,7 +132,7 @@ un-learned.
 
 1. **Retry a stream only while nothing has been emitted.** Past the first chunk the stream is
    committed — a retry replays tokens the reader already saw. Same rule governs the
-   backup-model walker (falai's original did _not_ have this, and would restart an answer in
+   backup-model walker (the oldest of the five did _not_ have this, and would restart an answer in
    another model's voice mid-render).
 2. **The watchdog aborts its OWN controller**, bridging the caller's via `AbortSignal.any`.
    That is what keeps a user's Stop (never retried) distinguishable from our timeout (always
@@ -171,36 +167,34 @@ un-learned.
 
 ## Next
 
-1. **tabrunner — in progress, uncommitted.** classifier, tool-arg salvage, rate-limit parsing
-   and the SSE framing are on the package; **−634 lines**, all six of its gates green including
-   the MV3 bundle. It stays in the working tree until `0.2.0` is on npm, because its CI runs
-   `bun install --frozen-lockfile` and cannot resolve the local `link:`.
-2. Then smartgenius → featury → olhary.
-3. **falai last, as `@falai/agent` v3** — it is the only consumer with a public API to break
-   (six exported provider classes plus three error functions, and `OpenAICompatibleProvider`
-   is an `abstract class` others extend). Clean break, major bump, no compat shims.
+`0.2.0` is on npm and one codebase has migrated onto it, deleting **634 lines** — a Chrome MV3
+extension, which is the hardest of the runtimes this package promises. Four more private
+migrations follow; they are tracked in `ROADMAP.local.md`, which is deliberately not in this
+repo because it is a map of codebases that are not open.
 
-Consume via bun `catalog:` in each repo so upgrades stay opt-in per app and one bad publish
-cannot take down five apps at once. **Each migration should be net-negative in lines** — if a
-repo grows, the cut line was drawn in the wrong place.
+Two open chores: point the providerkit.dev DNS at the Pages project, and set the org avatar
+(`brand/providerkit-avatar-1024.png` — GitHub has no API for it).
 
-### What tabrunner taught — apply to the next four
+**Every migration must be net-negative in lines.** If an adopting repo grows, the cut line was
+drawn in the wrong place and the fix belongs here, not in the adopter.
 
-- **Split the envelope from the framing wherever both exist.** tabrunner could take `streamSse`'s
-  SSE reader but not its error envelope: its failure line is translated, its log level splits on
-  whether the kind is one the chat already explains. That is not tabrunner being odd — an app with
-  its own copy, log levels or auth refresh is the normal case. `parseSseStream` is now exported
-  beside `streamSse` for exactly that. Expect the same shape elsewhere and cut there **before** an
-  adopter has to keep a copy.
-- **Not everything should migrate.** `context-window.ts` stays in tabrunner: it learns the real
-  ceiling from a length rejection instead of guessing from a model name, which is better than the
-  regex ladder here, and it is tied to extension storage. Do not re-attempt it in the next repo —
-  a worse shared version is not a win.
+### What the first migration taught
+
+- **Split the envelope from the framing wherever both exist.** The adopter could take
+  `streamSse`'s SSE reader but not its error envelope: its failure line is translated, and its
+  log level splits on whether the kind is one its own UI already explains. That is not one app
+  being odd — an app with its own copy, log levels or auth refresh is the normal case.
+  `parseSseStream` is exported beside `streamSse` for exactly that. Expect the same shape
+  elsewhere and cut there **before** an adopter has to keep a copy.
+- **Not everything should migrate.** The adopter's context-window ladder stayed put: it learns
+  the real ceiling from a provider's own length rejection instead of guessing from a model
+  name, which is better than the regex ladder here, and it is tied to that app's storage. A
+  worse shared version is not a win — leaving a module behind is a valid outcome.
 - **Widening a union is a breaking change downstream even when nothing throws.** The merged
-  classifier answers 13 kinds where tabrunner's answered eight-or-`undefined`, so its
-  kind→copy map needed two new strings in three locales. Keep such maps exhaustive
-  (`satisfies Record<ErrorKind, …>`) so a 14th kind fails the build rather than silently falling
-  through to a status code.
+  classifier answers 13 kinds where the adopter's answered eight-or-`undefined`, so its
+  kind→copy map needed two new strings in every locale it ships. Keep such maps exhaustive
+  (`satisfies Record<ErrorKind, …>`) so a 14th kind fails the build rather than silently
+  falling through to a status code.
 
 ## House rules
 

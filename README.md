@@ -111,10 +111,11 @@ fallback, the idle watchdog, cost math, the fetch/SSE transport, tool-argument s
 Anthropic, OpenAI-shape, Responses and Gemini adapters, the multi-key rotation pool,
 rate-limit reset windows, the tool kernel, schema clamping, and the compaction decisions.
 
-That is the whole extraction. What is not yet proven is adoption: **nothing consumes this
-package yet, including the five codebases it came from.** The claim it is built on is that
-every adopting codebase gets smaller, and until one migrates that claim is untested — so
-the version stays where it is until one does.
+That is the whole extraction, and the claim it rests on is that an adopting codebase gets
+**smaller**. The first migration — a Chrome MV3 extension, the hardest runtime of the five
+and the one with no Node, no bundler escape hatch and no zod — **deleted 634 lines** and kept
+every one of its six gates green. If a repo grows on adopting this, the boundary was drawn in
+the wrong place.
 
 ## License
 
