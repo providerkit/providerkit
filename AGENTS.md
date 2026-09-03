@@ -61,7 +61,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 347 tests
+bun run test                 # vitest, 352 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -101,7 +101,7 @@ the next release waits on tabrunner proving the API (see **Next**).
 
 ## State
 
-**Built, tested, green** (347 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (352 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
@@ -160,7 +160,7 @@ un-learned.
 ## Next
 
 1. **tabrunner — in progress, uncommitted.** classifier, tool-arg salvage, rate-limit parsing
-   and the SSE framing are on the package; **-539 lines**, all six of its gates green including
+   and the SSE framing are on the package; **−634 lines**, all six of its gates green including
    the MV3 bundle. It stays in the working tree until `0.2.0` is on npm, because its CI runs
    `bun install --frozen-lockfile` and cannot resolve the local `link:`.
 2. Then smartgenius → featury → olhary.

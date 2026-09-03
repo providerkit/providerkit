@@ -55,7 +55,7 @@ Explicitly **not** an agent framework. No loop, no prompts, no graph, no memory,
 
 ## Capabilities and Constraints
 
-**Shipped and tested (347 tests):** the provider seam; the merged error classifier (13 kinds);
+**Shipped and tested (352 tests):** the provider seam; the merged error classifier (13 kinds);
 retry with full-jitter backoff and backup-model fallback; the idle stream watchdog and TTFT;
 fetch/SSE transport; tool-argument salvage; Anthropic, OpenAI-shape, Responses and Gemini
 adapters; the multi-key rotation pool; rate-limit reset windows; the tool kernel; schema
@@ -94,7 +94,7 @@ Real, verifiable, and load-bearing — this is the proof the positioning rests o
   separately in three of those repos.
 - **2026-09-01:** featury and olhary shipped the same five fixes on the same day, independently.
   Provable from their git logs.
-- **347 passing tests**; 101 exported symbols; 13 error kinds.
+- **352 passing tests**; 102 exported symbols; 13 error kinds.
 - The live classifier on the site runs the real published package in the reader's browser.
 
 **Must not be fabricated:** there are no users, no testimonials, no adopters, no benchmarks,
