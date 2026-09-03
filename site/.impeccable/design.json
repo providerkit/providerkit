@@ -1,0 +1,472 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-03T09:20:00Z",
+  "title": "Design System: providerkit",
+  "extensions": {
+    "colorMeta": {
+      "paper": {
+        "role": "neutral",
+        "displayName": "Bench Ground",
+        "canonical": "oklch(21.2% 0.009 255)",
+        "light": "#eef1f4",
+        "tonalRamp": [
+          "#090b0e",
+          "#222428",
+          "#3d4044",
+          "#5a5e63",
+          "#7a7e83",
+          "#9b9fa4",
+          "#c4c8cc",
+          "#ebeff3"
+        ]
+      },
+      "paper-2": {
+        "role": "neutral",
+        "displayName": "Inset Ground",
+        "canonical": "oklch(24.2% 0.013 258)",
+        "light": "#e5eaef",
+        "tonalRamp": [
+          "#090b0f",
+          "#212429",
+          "#3c4046",
+          "#595e65",
+          "#797e85",
+          "#9a9fa6",
+          "#c3c8cf",
+          "#eaeff5"
+        ]
+      },
+      "paper-3": {
+        "role": "neutral",
+        "displayName": "Deep Inset",
+        "canonical": "oklch(26.7% 0.015 256)",
+        "light": "#dbe2e9",
+        "tonalRamp": [
+          "#080b10",
+          "#20242a",
+          "#3b4047",
+          "#585e66",
+          "#787e86",
+          "#999fa7",
+          "#c2c8d0",
+          "#eaeff6"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "oklch(93.2% 0.009 247)",
+        "light": "#191d23",
+        "tonalRamp": [
+          "#090b0e",
+          "#212427",
+          "#3d4044",
+          "#5a5e62",
+          "#797e82",
+          "#9b9fa3",
+          "#c4c8cc",
+          "#ebeff3"
+        ]
+      },
+      "ink-2": {
+        "role": "neutral",
+        "displayName": "Reading Ink",
+        "canonical": "oklch(79.4% 0.017 250)",
+        "light": "#303740",
+        "tonalRamp": [
+          "#070c11",
+          "#1f252b",
+          "#3a4048",
+          "#575e67",
+          "#767e87",
+          "#979fa8",
+          "#c1c8d1",
+          "#e8eff8"
+        ]
+      },
+      "ink-3": {
+        "role": "neutral",
+        "displayName": "Label Ink",
+        "canonical": "oklch(62.8% 0.022 250)",
+        "light": "#5b6672",
+        "tonalRamp": [
+          "#060c12",
+          "#1d252d",
+          "#38414a",
+          "#555f6a",
+          "#747f8a",
+          "#95a0ab",
+          "#bfc9d3",
+          "#e6f0fa"
+        ]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(30.7% 0.017 255)",
+        "light": "#c7cfd8",
+        "tonalRamp": [
+          "#080b11",
+          "#20242b",
+          "#3b4048",
+          "#585e67",
+          "#777e87",
+          "#989fa8",
+          "#c1c8d1",
+          "#e9eff7"
+        ]
+      },
+      "rule-strong": {
+        "role": "neutral",
+        "displayName": "Dimension Line",
+        "canonical": "oklch(37.9% 0.020 254)",
+        "light": "#9aa6b2",
+        "tonalRamp": [
+          "#070c12",
+          "#1e252c",
+          "#394049",
+          "#565e69",
+          "#757e89",
+          "#979faa",
+          "#c0c8d2",
+          "#e7eff9"
+        ]
+      },
+      "beam": {
+        "role": "primary",
+        "displayName": "Collimated Teal",
+        "canonical": "oklch(73.2% 0.117 184)",
+        "light": "#0b6a62",
+        "tonalRamp": [
+          "#001510",
+          "#00312a",
+          "#005046",
+          "#007165",
+          "#009385",
+          "#3bb4a6",
+          "#75ddcf",
+          "#a5fff6"
+        ]
+      },
+      "ray-retry": {
+        "role": "secondary",
+        "displayName": "Retry Amber",
+        "canonical": "oklch(75.5% 0.136 72)",
+        "light": "#a85408",
+        "tonalRamp": [
+          "#230000",
+          "#431300",
+          "#653000",
+          "#894e00",
+          "#ad6e00",
+          "#ce903b",
+          "#f6bb70",
+          "#ffe39e"
+        ]
+      },
+      "ray-account": {
+        "role": "secondary",
+        "displayName": "Account Red",
+        "canonical": "oklch(68.0% 0.163 27)",
+        "light": "#b3261e",
+        "tonalRamp": [
+          "#2f0000",
+          "#540000",
+          "#7b0509",
+          "#a42c26",
+          "#cb4f45",
+          "#ed7569",
+          "#ffa395",
+          "#ffcdbf"
+        ]
+      },
+      "ray-context": {
+        "role": "secondary",
+        "displayName": "Context Blue",
+        "canonical": "oklch(72.3% 0.118 253)",
+        "light": "#1f5fa8",
+        "tonalRamp": [
+          "#000630",
+          "#002252",
+          "#0b4076",
+          "#295f9c",
+          "#4880c0",
+          "#6da2e0",
+          "#99cbff",
+          "#c4f3ff"
+        ]
+      },
+      "ray-ours": {
+        "role": "secondary",
+        "displayName": "Ours Violet",
+        "canonical": "oklch(70.4% 0.127 303)",
+        "light": "#6b3fa0",
+        "tonalRamp": [
+          "#15002c",
+          "#2f104d",
+          "#4d2c70",
+          "#6c4995",
+          "#8d69b9",
+          "#ad8cda",
+          "#d6b6ff",
+          "#fcdfff"
+        ]
+      },
+      "ray-inert": {
+        "role": "secondary",
+        "displayName": "Inert Graphite",
+        "canonical": "oklch(67.1% 0.025 252)",
+        "light": "#5b6672",
+        "tonalRamp": [
+          "#060c13",
+          "#1d252e",
+          "#37414c",
+          "#545f6b",
+          "#737f8c",
+          "#95a0ad",
+          "#bec9d5",
+          "#e5f0fc"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The masthead wordmark only. One per site."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section headings, dimensioned from the margin by a hairline and a 2.5rem witness mark."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "A dimensioned statistic sitting above its own dimension line. Tabular lining figures."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "A specimen or callout heading, indented 1.1rem behind its witness tick."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "All prose, capped at a 46rem measure. 1.72 leading is functional for hour-long reads."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Every small label: leaders, captions, field labels, dimension labels, sidebar groups. Sentence case, never tracked caps."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Commit Mono, in code specimens and in any field where the reader types a status or pastes a response body."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "trace",
+        "value": "stroke-dashoffset 1400→0 over 420ms cubic-bezier(0.22, 0.8, 0.3, 1)",
+        "purpose": "The signature move: a changed verdict re-draws its ray from the source through the lens to the exit lane. The only motion in the system."
+      },
+      {
+        "name": "land",
+        "value": "circle r 0→3.5 over the last 30% of 420ms, ease-out",
+        "purpose": "The beam's landing dot arrives after the ray reaches the exit."
+      },
+      {
+        "name": "rule-thicken",
+        "value": "90ms linear on border-bottom-width / text-decoration-thickness",
+        "purpose": "Hover and focus on links, actions and inputs: the rule thickens 1px→2px. No colour flash, no movement."
+      }
+    ],
+    "breakpoints": [
+      { "name": "plate", "value": "62rem" },
+      { "name": "bench-min", "value": "46rem" }
+    ],
+    "widths": [
+      { "name": "docs-measure", "value": "47rem" },
+      { "name": "prose-cap", "value": "46rem" },
+      { "name": "plate", "value": "67.5rem" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Action Link",
+      "kind": "button",
+      "refersTo": "action-link",
+      "description": "The button equivalent. There are no filled buttons: an action is a labelled leader with a teal rule that thickens on hover.",
+      "html": "<a class=\"ds-action\" href=\"#\">Get started</a>",
+      "css": ".ds-action { display: inline-block; color: var(--ink, #e4e9ee); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.8125rem; font-weight: 500; text-decoration: none; border-bottom: 1px solid var(--beam, #35c0b1); border-radius: 0; padding-bottom: 0.2rem; transition: border-bottom-width 90ms linear; } .ds-action::after { content: ' \\2192'; color: var(--beam, #35c0b1); } .ds-action:hover { border-bottom-width: 2px; } .ds-action:focus-visible { outline: 2px solid var(--beam, #35c0b1); outline-offset: 3px; }"
+    },
+    {
+      "name": "Prose Link",
+      "kind": "custom",
+      "refersTo": "action-link",
+      "description": "Ink text with a teal underline as its leader. Never a coloured word on its own.",
+      "html": "<p class=\"ds-prose\">Read the <a class=\"ds-link\" href=\"#\">error taxonomy</a> before reasoning about a failure.</p>",
+      "css": ".ds-prose { color: var(--ink-2, #b4bdc7); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 1.0625rem; line-height: 1.72; margin: 0; } .ds-link { color: var(--ink, #e4e9ee); text-decoration: underline; text-decoration-color: var(--beam, #35c0b1); text-decoration-thickness: 1px; text-underline-offset: 0.22em; transition: text-decoration-thickness 90ms linear; } .ds-link:hover { color: var(--beam, #35c0b1); text-decoration-thickness: 2px; }"
+    },
+    {
+      "name": "Field",
+      "kind": "input",
+      "refersTo": "field-input",
+      "description": "No border, no fill, no radius: one dimension line under mono type. Focus thickens the rule to teal without shifting the text.",
+      "html": "<div class=\"ds-field\"><label for=\"ds-status\">HTTP status — leave blank if it never got one</label><input id=\"ds-status\" type=\"text\" value=\"429\" /></div>",
+      "css": ".ds-field label { display: block; margin-bottom: 0.35rem; color: var(--ink-3, #7f8a96); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.8125rem; } .ds-field input { width: 100%; padding: 0.4rem 0; border: none; border-bottom: 1px solid var(--rule-strong, #3b434d); border-radius: 0; background: none; color: var(--ink, #e4e9ee); font-family: 'Commit Mono', ui-monospace, monospace; font-size: 0.875rem; line-height: 1.6; } .ds-field input:focus { outline: none; border-bottom-color: var(--beam, #35c0b1); border-bottom-width: 2px; padding-bottom: calc(0.4rem - 1px); }"
+    },
+    {
+      "name": "Leader Label",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "The replacement for the tracked all-caps eyebrow. A sentence-case label whose rule runs out to fill the line toward its referent.",
+      "html": "<p class=\"ds-leader\"><span>Thirteen failure kinds, each named by what fixes it</span></p>",
+      "css": ".ds-leader { display: flex; align-items: center; gap: 0.6rem; margin: 0; color: var(--ink-3, #7f8a96); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.8125rem; font-weight: 500; letter-spacing: 0.01em; } .ds-leader::after { content: ''; flex: 1; border-top: 1px solid var(--rule, #2a3038); }"
+    },
+    {
+      "name": "Dimensioned Figure",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "A statistic drawn as a dimension: value, dimension line with a witness tick at each end, label beneath. Never a stat card.",
+      "html": "<div class=\"ds-dim\"><span class=\"ds-dim-value\">218</span><span class=\"ds-dim-rule\"></span><span class=\"ds-dim-label\">tests, every failure any of them saw</span></div>",
+      "css": ".ds-dim { display: flex; flex-direction: column; gap: 0.4rem; max-width: 12rem; } .ds-dim-value { color: var(--ink, #e4e9ee); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 3.25rem; font-weight: 500; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums lining-nums; } .ds-dim-rule { position: relative; border-top: 1px solid var(--rule-strong, #3b434d); height: 0; } .ds-dim-rule::before, .ds-dim-rule::after { content: ''; position: absolute; top: -3px; height: 7px; border-left: 1px solid var(--rule-strong, #3b434d); } .ds-dim-rule::before { left: 0; } .ds-dim-rule::after { right: 0; } .ds-dim-label { color: var(--ink-3, #7f8a96); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.8125rem; line-height: 1.4; }"
+    },
+    {
+      "name": "Section Heading",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "A heading dimensioned from the margin: a hairline across the top with a heavier 2.5rem witness mark at its left. Not an underline, not a box.",
+      "html": "<h2 class=\"ds-h2\">Five codebases learned this separately.</h2>",
+      "css": ".ds-h2 { position: relative; margin: 0; padding-top: 0.9rem; border-top: 1px solid var(--rule, #2a3038); color: var(--ink, #e4e9ee); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 2.1875rem; font-weight: 600; line-height: 1.22; letter-spacing: -0.017em; font-variant-numeric: tabular-nums lining-nums; } .ds-h2::before { content: ''; position: absolute; top: -1px; left: 0; width: 2.5rem; border-top: 2px solid var(--ink-3, #7f8a96); }"
+    },
+    {
+      "name": "Aside",
+      "kind": "card",
+      "refersTo": "aside",
+      "description": "A callout with a leader rule in its own wavelength. No fill, no border box, sentence-case title.",
+      "html": "<aside class=\"ds-aside ds-aside-caution\"><p class=\"ds-aside-title\">Caution</p><p class=\"ds-aside-body\">Once a chunk has been emitted the turn cannot be retried.</p></aside>",
+      "css": ".ds-aside { border: none; border-left: 2px solid var(--ray, #7f8a96); border-radius: 0; background: none; padding: 0.1rem 0 0.1rem 1.1rem; } .ds-aside-caution { --ray: var(--ray-retry, #e4a040); } .ds-aside-title { margin: 0 0 0.25rem; color: var(--ray); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.875rem; font-weight: 600; letter-spacing: 0; text-transform: none; } .ds-aside-body { margin: 0; color: var(--ink-2, #b4bdc7); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 1.0625rem; line-height: 1.72; }"
+    },
+    {
+      "name": "Sidebar Entry",
+      "kind": "nav",
+      "refersTo": null,
+      "description": "The current page is witnessed by a teal tick in the margin, never filled with a pill or a highlight.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item\" href=\"#\">Getting started</a><a class=\"ds-nav-item ds-nav-current\" href=\"#\" aria-current=\"page\">Errors</a><a class=\"ds-nav-item\" href=\"#\">Retries and fallback</a></nav>",
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 0.35rem; padding-left: 0.75rem; font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.875rem; } .ds-nav-item { position: relative; color: var(--ink-3, #7f8a96); text-decoration: none; padding: 0.1rem 0; } .ds-nav-item:hover { color: var(--ink, #e4e9ee); text-decoration: underline; text-decoration-color: var(--rule-strong, #3b434d); text-underline-offset: 0.22em; } .ds-nav-current { color: var(--ink, #e4e9ee); font-weight: 600; } .ds-nav-current::before { content: ''; position: absolute; left: -0.75rem; top: 0.35rem; bottom: 0.35rem; border-left: 2px solid var(--beam, #35c0b1); }"
+    },
+    {
+      "name": "Copy Page As Markdown",
+      "kind": "button",
+      "refersTo": "copy-md",
+      "description": "The human half of the agent channel. Underlined label control that never dead-ends: if the clipboard refuses it opens the .md instead.",
+      "html": "<button class=\"ds-copy-md\" type=\"button\"><span>Copy page as Markdown</span></button>",
+      "css": ".ds-copy-md { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0 0 0.2rem; border: none; border-bottom: 1px solid var(--rule-strong, #3b434d); border-radius: 0; background: none; color: var(--ink-3, #7f8a96); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.8125rem; cursor: pointer; white-space: nowrap; } .ds-copy-md:hover { color: var(--ink, #e4e9ee); border-bottom-color: var(--beam, #35c0b1); } .ds-copy-md[data-state=\"done\"] { color: var(--beam, #35c0b1); border-bottom-color: var(--beam, #35c0b1); } .ds-copy-md[data-state=\"failed\"] { color: var(--ray-retry, #e4a040); border-bottom-color: var(--ray-retry, #e4a040); }"
+    },
+    {
+      "name": "Exit Lane",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "One lane of the Optical Bench's exit ladder. Every lane is always present unlit; the verdict's band is raised and the verdict itself struck forward as three hairlines.",
+      "html": "<svg class=\"ds-bench\" viewBox=\"0 0 420 96\" width=\"420\" height=\"96\" role=\"img\" aria-label=\"Three exit lanes, the middle one struck forward\"><g class=\"ds-lane\"><line x1=\"0\" y1=\"16\" x2=\"300\" y2=\"16\" stroke=\"var(--ray-retry, #e4a040)\" stroke-dasharray=\"8 5\" stroke-width=\"1.25\"/><text x=\"312\" y=\"20\">overload</text></g><g class=\"ds-lane ds-lit\"><line x1=\"0\" y1=\"48\" x2=\"300\" y2=\"48\" stroke=\"var(--ray-retry, #e4a040)\" stroke-dasharray=\"8 5\" stroke-width=\"1.25\"/><line x1=\"0\" y1=\"45.4\" x2=\"300\" y2=\"45.4\" stroke=\"var(--ray-retry, #e4a040)\" stroke-width=\"1\"/><line x1=\"0\" y1=\"50.6\" x2=\"300\" y2=\"50.6\" stroke=\"var(--ray-retry, #e4a040)\" stroke-width=\"1\"/><circle cx=\"300\" cy=\"48\" r=\"3.5\" fill=\"var(--ray-retry, #e4a040)\"/><text x=\"312\" y=\"52\">rate</text></g><g class=\"ds-lane\"><line x1=\"0\" y1=\"80\" x2=\"300\" y2=\"80\" stroke=\"var(--ray-inert, #8b97a5)\" stroke-width=\"0.75\"/><text x=\"312\" y=\"84\">unknown</text></g></svg>",
+      "css": ".ds-bench { display: block; font-family: 'Archivo Variable', system-ui, sans-serif; } .ds-bench text { fill: var(--ink-3, #7f8a96); font-size: 13px; opacity: 0.5; } .ds-bench .ds-lane line { opacity: 0.32; } .ds-bench .ds-lit line { opacity: 1; } .ds-bench .ds-lit text { fill: var(--ink, #e4e9ee); font-weight: 600; opacity: 1; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Optical Bench",
+    "overview": "Optics has named its defects by their correction for two centuries — spherical, coma, astigmatism, chromatic — and diagnosed them with ray fans and spot diagrams. providerkit does the same thing to LLM failure: it names thirteen kinds by what fixes each one, not by the vendor or the status code that carried it. So the site is drawn as an optical layout plot. Scattered rays enter, one element sorts them, and what leaves is parallel, evenly spaced, and named.\n\nThe consequence that governs every decision: a line is drafting, or it is deleted. Every rule has to be doing a draftsman's job — an optical centreline, a dimension line with witness ticks, a leader running from a label to the thing it names — and if it cannot name its job it is decoration and comes out. That single test is what keeps this world from sliding into the broadsheet-editorial look its hairlines could otherwise become.\n\nColour is wavelength, and a wavelength stands for a remedy: amber is time, red is money or plan, blue is sending less, violet is our own bad request, graphite is nothing to do. Teal is reserved for what leaves the seam normalized. That coding is the taxonomy, which also means it can never be spent on emphasis. The audience reads long technical prose at 3am during an incident, so light is cool technical paper and dark is an anodized lab bench under work light — never a void.",
+    "keyCharacteristics": [
+      "Drafting line work only: centrelines, dimension lines with witness ticks, leader lines.",
+      "Zero radius everywhere; no cards, no boxes, no dividers, no shadows.",
+      "Colour is a remedy code, never decoration or emphasis.",
+      "Every state legible without hue — line style and words carry it too.",
+      "The whole set is always shown unlit; the selected one is struck forward.",
+      "Tabular lining figures throughout. Numbers on a drafting sheet line up."
+    ],
+    "rules": [
+      {
+        "name": "The Wavelength Rule",
+        "body": "A hue in this system always names a remedy. It is never used for emphasis, never for hierarchy, never for delight. If a new element needs to stand out and it is not a classified failure, it gets more ink or more line frequency — not a colour.",
+        "section": "colors"
+      },
+      {
+        "name": "The Beam Rule",
+        "body": "Teal is what leaves the seam normalized. It never appears on a failure, a warning, or an error state.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two-Ground Rule",
+        "body": "Every colour ships a light and a dark value and the roles never swap. A token that looks right on one ground and is invented on the other is not finished.",
+        "section": "colors"
+      },
+      {
+        "name": "The No-Eyebrow Rule",
+        "body": "Never a tracked ALL-CAPS label above a heading. A label earns attention from the rule that runs out of it to its referent, so the type never has to shout.",
+        "section": "typography"
+      },
+      {
+        "name": "The Tabular Rule",
+        "body": "Every figure is tabular-nums lining-nums, on headings, table cells, dimension values and code alike.",
+        "section": "typography"
+      },
+      {
+        "name": "The Sentence-Case Rule",
+        "body": "Labels, buttons, aside titles and sidebar groups are sentence case.",
+        "section": "typography"
+      },
+      {
+        "name": "The Bench Rule",
+        "body": "The primary composition is a horizontal axis with things dimensioned off it. Never newspaper columns — column-first layouts are what tip drafting hairlines into broadsheet editorial.",
+        "section": "layout"
+      },
+      {
+        "name": "The Measure Rule",
+        "body": "Prose is capped at 46rem no matter how wide the plate is. Widening the container never widens the reading column.",
+        "section": "layout"
+      },
+      {
+        "name": "The No-Shadow Rule",
+        "body": "No box-shadow, no drop-shadow, no soft grey glow, on any element, in either theme. If something needs to come forward, give it more ink or raise its opacity.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Inset Rule",
+        "body": "A tinted surface is always recessed, never elevated. paper-2 and paper-3 read as material removed from the sheet.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Zero-Radius Rule",
+        "body": "border-radius is 0. There is no radius scale to pick from. The lens arc is the only curve in the system.",
+        "section": "shapes"
+      },
+      {
+        "name": "The No-Box Rule",
+        "body": "No cards, no bordered containers, no dividers between grid cells, no uniform-radius tiles. Grouping comes from density, indentation and depth. If a layout needs a box to be legible, the spacing is wrong.",
+        "section": "shapes"
+      },
+      {
+        "name": "The Drafting-Semantics Rule",
+        "body": "Every rule must be able to name its drafting job — optical centreline, dimension line, leader, or witness tick. A rule that is only separating things is decoration and comes out.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do give every rule a drafting job — centreline, dimension line, leader, or witness tick — and delete any rule that cannot name one.",
+      "Do show the whole set unlit and strike the selected one forward, rather than showing only the selection.",
+      "Do carry every state in a line style and in words as well as a hue; the taxonomy has to read for someone who cannot separate the colours.",
+      "Do cap prose at 46rem regardless of container width.",
+      "Do let a wide diagram scroll horizontally inside its own container rather than reflowing it into something that is no longer a bench.",
+      "Do keep both grounds finished — a token invented on one ground and guessed on the other is not done.",
+      "Do end every error and empty state somewhere useful, the way the copy-markdown control opens the .md when the clipboard refuses."
+    ],
+    "donts": [
+      "Don't use a card, a bordered container, a divider between cells, or any uniform-radius tile. Group by density and depth.",
+      "Don't add a box-shadow, drop shadow, or soft grey glow anywhere, in either theme.",
+      "Don't write a tracked ALL-CAPS eyebrow above a heading. Use a leader with a rule.",
+      "Don't join small labels with middle dots (A · B · C). That meta string is retired.",
+      "Don't spend a wavelength on emphasis. Amber, red, blue and violet mean retry, account, context and ours; teal means normalized output. Emphasis is ink weight and line frequency.",
+      "Don't introduce a border radius. The lens arc is the only curve in the system.",
+      "Don't reach for Inter or JetBrains Mono. Both are retired from this project as category defaults.",
+      "Don't compose in newspaper columns. The plate is a horizontal bench.",
+      "Don't make monospace the default for small labels. Mono is for code and for values the reader types or pastes; labels are Archivo.",
+      "Don't ship a near-black ground with one bright accent. Dark is a lab bench under work light, not a void."
+    ]
+  }
+}
