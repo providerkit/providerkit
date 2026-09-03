@@ -34,7 +34,9 @@ providerkit/            ← repo root (this folder), git root
 ├── core/               ← the npm package `providerkit`
 │   ├── src/
 │   └── test/
-├── site/               ← providerkit.dev — Vite + React, open source
+├── site/               ← providerkit.dev — Astro + Starlight, open source
+│   └── src/content/docs/  ← the docs, as plain markdown (guides/ is hand-written,
+│                             reference/ is TypeDoc output and gitignored)
 ├── brand/              ← the mark, the OG card, and generate.ts — see brand/README.md
 ├── .github/workflows/  ← CI, and Cloudflare Pages deploy for providerkit.dev
 ├── README.md           ← the pitch; single source of truth, copied into core/ on publish

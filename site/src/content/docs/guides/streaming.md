@@ -1,0 +1,61 @@
+---
+title: Streaming and the watchdog
+description: The idle watchdog that catches a stream which stops sending, plus time-to-first-token.
+---
+
+The nastiest streaming failure is not an error. It is a provider that accepts the request,
+returns 200, sends a few bytes — and then nothing. No error, no close, no timeout. Every SDK's
+default is to wait forever, and the symptom is the worst kind: none at all.
+
+A request timeout does not catch it either. The request succeeded. What died is the _gap between
+chunks_.
+
+## Watching a stream
+
+```ts
+import { streamWatch, watchChunks } from "@providerkit/core";
+
+const watch = streamWatch({ provider: "anthropic", idleMs: 60_000, signal: callerSignal });
+
+try {
+  const chunks = provider.createStream(messages, tools, { signal: watch.signal });
+  for await (const chunk of watchChunks(watch, chunks)) {
+    handle(chunk);
+  }
+} finally {
+  watch.dispose();
+}
+```
+
+`watchChunks` calls `sawByte()` for you on each chunk and re-arms the timer. If `idleMs` passes
+with no chunk, `watch.signal` aborts, and `watch.classify(err)` turns the resulting abort into a
+`timeout` — distinguishing _the provider went quiet_ from _the caller pressed Stop_, which land
+as the same `AbortError` otherwise.
+
+Default idle is 60 seconds (`STREAM_IDLE_MS`). Three of the five codebases providerkit came from
+had independently arrived at exactly that number.
+
+:::danger[Always `dispose()`]
+The watchdog holds a timer. Without `dispose()` in a `finally`, a long-lived process leaks one
+per stream.
+:::
+
+## Bridging the caller's signal
+
+`streamWatch` composes your signal with its own using `AbortSignal.any`, which is deliberate:
+`AbortSignal.any` aborts **synchronously** when an input is already aborted. An event listener
+cannot catch that case — if the caller aborted before you subscribed, the event has already
+fired and your handler never runs.
+
+Where the runtime supports it the timer is `unref`'d, so a pending watchdog never holds a Node
+process open on its own.
+
+## Time to first token
+
+```ts
+const ttft = watch.firstChunkMs(); // null until the first chunk arrives
+```
+
+TTFT is the number users actually feel — total duration is dominated by answer length, but the
+wait before _anything_ appears is the perceived latency. It is also the first thing to move when
+a provider degrades, usually well before the error rate does.

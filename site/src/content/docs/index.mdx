@@ -1,0 +1,163 @@
+---
+title: providerkit
+description: One seam for every LLM provider, plus the failure handling you only learn in production. Zero dependencies, fetch-only, MIT.
+template: splash
+hero:
+  tagline: One seam for every LLM provider — plus the failure handling you only learn in production. Not a framework&#58; no loop, no prompts, no graph. Your loop is where your product lives.
+  image:
+    file: ../../assets/mark.svg
+  actions:
+    - text: Get started
+      link: /guides/getting-started/
+      icon: right-arrow
+    - text: Try the classifier
+      link: "#live"
+      variant: secondary
+    - text: GitHub
+      link: https://github.com/providerkit/providerkit
+      variant: minimal
+      icon: external
+---
+
+import Classifier from "../../components/Classifier.tsx";
+
+<p class="pk-meta">
+  <span>zero runtime dependencies</span> <i>·</i> <span>fetch only</span> <i>·</i>
+  <span>Bun · Node · Workers · Deno · MV3</span> <i>·</i> <span>MIT</span>
+</p>
+
+```bash
+bun add @providerkit/core
+```
+
+<p class="pk-eyebrow">What actually breaks</p>
+
+## The interface is the easy part.
+
+Most "unified LLM interface" libraries stop at the interface. That is not where the time goes.
+This is where the time goes.
+
+<div class="pk-grid">
+  <div class="pk-cell">
+    <h3>The stream that never ends</h3>
+    <p>
+      A provider accepts the request and then sends nothing. Every SDK's default is to wait forever,
+      and the symptom is the worst kind: none at all.
+    </p>
+  </div>
+  <div class="pk-cell">
+    <h3>The socket four levels down</h3>
+    <p>
+      A dead connection carries no HTTP status, and the useful code sits on
+      <code>cause.cause.cause</code>. Miss it and every network blip reads as permanent.
+    </p>
+  </div>
+  <div class="pk-cell">
+    <h3>One cause, five statuses</h3>
+    <p>
+      Running out of credit arrives as 429, 402, 403 and 400 depending on the vendor. Status alone
+      tells you to retry an empty balance.
+    </p>
+  </div>
+  <div class="pk-cell">
+    <h3>The 429 that is really a full prompt</h3>
+    <p>
+      Waiting fixes a throttle and does nothing for an overflowing context window. They arrive under
+      the same status.
+    </p>
+  </div>
+  <div class="pk-cell">
+    <h3>Cache tokens, counted twice</h3>
+    <p>
+      Anthropic reports cache reads outside the input count; OpenAI reports them inside it. Hand
+      both through unreconciled and the same conversation costs two different things.
+    </p>
+  </div>
+  <div class="pk-cell">
+    <h3>The answer that was already there</h3>
+    <p>
+      A turn cut off at its output ceiling leaves invalid JSON — and a run reports nothing while the
+      answer sits in the fragments.
+    </p>
+  </div>
+</div>
+
+<p class="pk-eyebrow" id="live">
+  Live
+</p>
+
+## Every failure, named by what fixes it.
+
+The classifier is pure, so it runs right here. Pick a real provider failure — or paste your own —
+and see the answer to the only question an error has: _what do I do now?_
+
+<Classifier client:load />
+
+<p class="pk-eyebrow">Use</p>
+
+## Small surface. Boring on purpose.
+
+One provider interface, one error type, and the handful of primitives a loop actually needs
+underneath it.
+
+```ts
+import { createAnthropicProvider } from "@providerkit/core";
+
+const provider = createAnthropicProvider({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  model: "claude-sonnet-5",
+});
+
+for await (const chunk of provider.createStream(messages, tools, { effort: "medium" })) {
+  if (chunk.content) write(chunk.content);
+  // one usage shape across every provider
+  if (chunk.usage) record(chunk.usage);
+}
+```
+
+```ts
+import { ProviderError, isTransient, isBackupEligible } from "@providerkit/core";
+
+try {
+  /* ... */
+} catch (raw) {
+  const err = ProviderError.from("anthropic", raw);
+
+  if (err.kind === "context") return compactAndRetry();
+  if (isBackupEligible(err.kind)) return otherModel();
+  if (isTransient(err.kind)) return retry(err.retryAfterMs);
+  surface(err); // .body has their actual words
+}
+```
+
+<p class="pk-eyebrow">Origin</p>
+
+## Five codebases learned this separately.
+
+providerkit was extracted from five production codebases that had each independently grown the
+same layer — **about 9,100 lines solving one ~2,000-line problem**. They had three separate
+60-second idle watchdogs, identical down to the constant. On one day in September 2026, two of
+them shipped the same five fixes independently.
+
+They had also each learned a **different** part of it. One walked the cause chain for dead
+sockets. One parsed Gemini's RetryInfo. One read the body before the status and knew the quota
+wordings in five languages. One knew Anthropic's 529 and when a failure is worth a different
+model. One could rescue an answer from a tool call the model truncated.
+
+<div class="pk-stats">
+  <div class="pk-stat">
+    <b>5</b>
+    <span>codebases pooled</span>
+  </div>
+  <div class="pk-stat">
+    <b>13</b>
+    <span>failure kinds, by their fix</span>
+  </div>
+  <div class="pk-stat">
+    <b>0</b>
+    <span>runtime dependencies</span>
+  </div>
+</div>
+
+The classifier here is the union of all five, and the test suite is every failure any of them ever
+saw. That is the part worth having.

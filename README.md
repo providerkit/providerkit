@@ -40,171 +40,43 @@ loop is where your product lives; it should stay yours. This is everything under
 ## Use
 
 ```ts
-import { createAnthropicProvider, drainStream } from "@providerkit/core";
+import { createAnthropicProvider, ProviderError, isTransient } from "@providerkit/core";
 
 const provider = createAnthropicProvider({
   apiKey: process.env.ANTHROPIC_API_KEY!,
   model: "claude-sonnet-5",
 });
 
-for await (const chunk of provider.createStream(messages, tools, { effort: "medium" })) {
-  if (chunk.content) process.stdout.write(chunk.content);
-  if (chunk.usage) console.log(chunk.usage); // one meaning across every provider
-}
-```
-
-`createOpenAIProvider` speaks the dialect most gateways do, so it serves OpenAI, OpenRouter,
-DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio:
-
-```ts
-const provider = createOpenAIProvider({
-  apiKey: process.env.OPENROUTER_API_KEY!,
-  baseUrl: "https://openrouter.ai/api",
-  id: "openrouter",
-  model: "deepseek/deepseek-v4-pro",
-  // Keep the prompt cache warm: it lives on the upstream host's account, and
-  // OpenRouter's default routing hops hosts between rounds — every hop is a
-  // cold cache, in both latency and effective input cost.
-  providerOrder: ["deepinfra", "fireworks"],
-});
-```
-
-### Failures, named by what fixes them
-
-```ts
-import { ProviderError, isTransient, isBackupEligible } from "@providerkit/core";
-
 try {
-  // …
+  for await (const chunk of provider.createStream(messages, tools, { effort: "medium" })) {
+    if (chunk.content) write(chunk.content);
+    if (chunk.usage) record(chunk.usage); // one usage shape across every provider
+  }
 } catch (raw) {
   const err = ProviderError.from("anthropic", raw);
-
-  err.kind; // "overload" | "rate" | "quota" | "entitlement" | "auth" | "context" | …
-  err.retryAfterMs; // honoured from Retry-After, vendor reset headers, or Gemini's RetryInfo
-  err.body; // the provider's actual words, never "400 status code (no body)"
-
-  if (err.kind === "context") compactAndRetry();
-  else if (isBackupEligible(err.kind)) tryAnotherModel();
-  else if (isTransient(err.kind)) retry();
-  else surface(err);
+  if (err.kind === "context") return compactAndRetry();
+  if (isTransient(err.kind)) return retry(err.retryAfterMs);
+  surface(err); // .body has their actual words
 }
 ```
 
-### Retrying, safely
+**Full documentation lives at [providerkit.dev](https://providerkit.dev)** — it is the single
+source of truth for usage, and this README deliberately stays a front door so the two cannot
+drift.
 
-```ts
-import { withStreamRetry, streamWithBackupModels } from "@providerkit/core";
+| Guide                                                                   | What it covers                                   |
+| ----------------------------------------------------------------------- | ------------------------------------------------ |
+| [Getting started](https://providerkit.dev/guides/getting-started/)      | Install, first stream, swapping vendors          |
+| [The provider seam](https://providerkit.dev/guides/providers/)          | Message, chunk and tool shapes                   |
+| [Errors](https://providerkit.dev/guides/errors/)                        | The thirteen kinds, and why status is not enough |
+| [Retries and fallback](https://providerkit.dev/guides/retries/)         | Backoff, the commitment rule, backup models      |
+| [Streaming and the watchdog](https://providerkit.dev/guides/streaming/) | The stream that stops sending; TTFT              |
+| [Tools](https://providerkit.dev/guides/tools/)                          | Tool kernel, truncated-argument salvage, zod     |
+| [Context and compaction](https://providerkit.dev/guides/context/)       | When to compact, and where to cut                |
+| [Usage and cost](https://providerkit.dev/guides/usage/)                 | Reconciling cache tokens, cost, savings          |
 
-// Retries only while NOTHING has been emitted. Past the first chunk the stream
-// is committed — a retry would replay tokens already on the reader's screen.
-const stream = withStreamRetry((signal) => provider.createStream(messages, tools, { signal }));
-
-// Walks [primary, ...backups] on overload and rate limits only; an auth failure
-// or an invalid request would land identically on every backup.
-const withFallback = streamWithBackupModels((model) => run(model), {
-  models: ["claude-opus-5", "claude-sonnet-5"],
-});
-```
-
-### The watchdog
-
-```ts
-import { streamWatch, watchChunks } from "@providerkit/core";
-
-const watch = streamWatch({ provider: "openai", signal: userSignal });
-for await (const chunk of watchChunks(
-  watch,
-  provider.createStream(messages, tools, {
-    signal: watch.signal,
-  }),
-)) {
-  // any byte re-arms the deadline
-}
-watch.firstChunkMs(); // TTFT — the number a prompt-cache pin exists to shrink
-```
-
-A stream that goes 60 seconds without a byte is aborted and surfaced as a transient
-`timeout`. The watchdog aborts its _own_ controller and only bridges the caller's, so your
-user's Stop stays distinguishable from our deadline: one is never retried, the other always
-is.
-
-### Tools
-
-JSON Schema by default, so the core needs no zod:
-
-```ts
-import { defineTool, ToolRegistry } from "@providerkit/core";
-
-const search = defineTool({
-  name: "search",
-  description: "Search the corpus",
-  inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
-  run: async ({ q }, ctx) => findAll(q, { signal: ctx.signal }),
-});
-
-const outcome = await search.invoke(rawArgsFromModel);
-// { ok: false, kind: "invalid_input" | "timeout" | "aborted" | "failed", error }
-```
-
-A failing tool is **data**, not an exception — the loop feeds `error` back so the model can
-correct itself. Only a caller's abort escapes.
-
-With zod, from the optional entry point:
-
-```ts
-import { zodTool } from "@providerkit/core/zod";
-
-const submit = zodTool({
-  name: "submit",
-  description: "Submit the final answer",
-  isTerminal: true,
-  clampOverflow: true, // a terminal tool gets no second chance
-  input: z.object({ summary: z.string().max(2000) }),
-  run: async (input) => input,
-});
-```
-
-### Truncated tool calls
-
-```ts
-import { parseToolArgs, isCompleteJson } from "@providerkit/core";
-
-// Never throws. A turn cut off mid-argument keeps every field that closed
-// before the cut, plus the half-written one the cut landed in.
-const args = parseToolArgs(rawArgumentString);
-```
-
-### Compaction
-
-The decisions, not the prompt — the summary is yours to write:
-
-```ts
-import { needsCompaction, pickCut, applyCompaction, historyBudgetTokens } from "@providerkit/core";
-
-if (needsCompaction(lastInputTokens, contextWindow)) {
-  const cut = pickCut(messages, historyBudgetTokens(contextWindow));
-  messages = applyCompaction(messages, cut, await summarize(messages.slice(0, cut)));
-}
-```
-
-`pickCut` never splits a tool call from its result (every provider rejects the orphan with a
-400 — the failure compaction was called to avoid), never cuts into the system prompt, and
-always keeps the newest message.
-
-### Cost
-
-The arithmetic, not the rates. A price table is volatile data about a catalogue that differs
-per application, and a wrong number shipped in a library is a wrong number in everyone's
-ledger — so you keep the numbers, verifiable line by line against a vendor's price sheet:
-
-```ts
-import { UsageTracker } from "@providerkit/core";
-
-const tracker = new UsageTracker();
-tracker.add(usage, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }); // USD per Mtok
-tracker.costUsd;
-tracker.cacheSavingsUsd; // what the cache saved, for the "is caching even working" question
-```
+The [API reference](https://providerkit.dev/reference/) is generated from the source, so it
+cannot drift either.
 
 ## Origin
 
@@ -224,8 +96,9 @@ ever saw. That is the part worth having.
 ## Repo
 
 ```
-core/    the npm package `providerkit`
-site/    providerkit.dev — also open source
+core/     the npm package `@providerkit/core`
+site/     providerkit.dev — Astro + Starlight, also open source
+brand/    the mark, the OG card, and the generator for both
 ```
 
 `bun install`, then `cd core && bun run test`. See [AGENTS.md](./AGENTS.md) for the layout,

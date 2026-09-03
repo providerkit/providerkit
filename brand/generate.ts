@@ -63,6 +63,10 @@ console.log("site:");
 mkdirSync(SITE_PUBLIC, { recursive: true });
 copyFileSync(`${HERE}/providerkit-mark.svg`, `${SITE_PUBLIC}/favicon.svg`);
 console.log("  ./site/public/favicon.svg");
+// Starlight imports the logo from src/assets so Astro can process it.
+mkdirSync(`${ROOT}/site/src/assets`, { recursive: true });
+copyFileSync(`${HERE}/providerkit-mark.svg`, `${ROOT}/site/src/assets/mark.svg`);
+console.log("  ./site/src/assets/mark.svg");
 // apple-touch-icon sits on whatever colour the OS puts behind it — the opaque
 // tile, not the transparent mark.
 png(avatar, 180, `${SITE_PUBLIC}/apple-touch-icon.png`);
