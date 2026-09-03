@@ -99,7 +99,7 @@ copy and content, the collimator mark and its geometry, the teal as the collimat
 the failure-family semantics (retry / account / context / ours / inert), the classifier's logic
 in `Classifier.tsx`, Astro + Starlight, and every route.
 
-## Agent channel
+## Agent channel — BUILT (except the copy control)
 
 Agents read this site as much as people do, and they never render the visual world — they want
 the markdown underneath. Both halves ship with the rebuild; neither costs the design anything.
@@ -115,7 +115,8 @@ the markdown underneath. Both halves ship with the rebuild; neither costs the de
   code _against_, so the exact signatures matter more than the prose. The shipped `.d.ts` is the
   precise contract; the generated reference is its readable form.
 - **A "Copy page as Markdown" control** is the human half of the same feature. It is a real UI
-  element in the Read register and belongs in the rebuild, not bolted on afterwards.
+  element in the Read register and belongs in the rebuild, not bolted on afterwards. **Still to
+  do — the only part of this section the rebuild still owes.**
 - Optional, not decided: a generated `kinds.json` (13 kinds x `{kind, fix, isTransient,
 isBackupEligible}`, emitted from `core/src` so it cannot drift). It is the most-queried fact
   about the package and an agent mid-incident wants it as data.
@@ -136,6 +137,8 @@ This section is for agents _using_ it.
   building; if Commit Mono is impractical, choose another non-default mono — not JetBrains Mono.
 - Whether the ~85 generated TypeDoc reference pages take the full world or a deliberately plainer
   Read register. Decide during the build from how the generated markup actually renders.
-- Whether `kinds.json` ships (see Agent channel).
+- Whether `kinds.json` ships (see Agent channel). Still undecided.
+- The "Copy page as Markdown" control is the rebuild's to add; everything else in the agent
+  channel is shipped and verified (94 pages, 94 `.md` files, 1:1).
 - DESIGN.md is written at finish, from the built world, not before. Its absence is deliberate and
   is not a gap to fill by inventing tokens ahead of the build.

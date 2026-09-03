@@ -11,7 +11,7 @@
     "build": "bun run --filter @providerkit/core build",
     "test": "bun run --filter @providerkit/core test",
     "typecheck": "bun run build && bun run --filter '*' typecheck",
-    "lint": "eslint core/src core/test site/src/components brand",
+    "lint": "eslint core/src core/test site/src/components site/src/pages brand",
     "format": "prettier --write .",
     "dev:site": "bun run build && bun run --filter providerkit-site dev",
     "build:site": "bun run build && bun run --filter providerkit-site build",
