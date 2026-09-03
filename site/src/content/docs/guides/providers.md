@@ -80,11 +80,38 @@ because a budget at or above the ceiling leaves no room to answer and the turn e
 
 ## Adapters
 
-| Factory                   | Shape                   | Notes                                                                            |
-| ------------------------- | ----------------------- | -------------------------------------------------------------------------------- |
-| `createAnthropicProvider` | Anthropic Messages      | `bearer: true` sends a subscription token instead of `x-api-key`                 |
-| `createOpenAIProvider`    | OpenAI Chat Completions | any compatible endpoint via `baseUrl`; `providerOrder` pins OpenRouter upstreams |
+| Factory                   | Shape                   | Notes                                                                             |
+| ------------------------- | ----------------------- | --------------------------------------------------------------------------------- |
+| `createAnthropicProvider` | Anthropic Messages      | `bearer: true` sends a subscription token instead of `x-api-key`                  |
+| `createOpenAIProvider`    | OpenAI Chat Completions | any compatible endpoint via `baseUrl`; `providerOrder` pins OpenRouter upstreams  |
+| `createResponsesProvider` | OpenAI Responses        | reasoning items replay across turns; also serves the ChatGPT subscription backend |
+| `createGeminiProvider`    | Gemini REST             | no SDK; thought signatures survive tool turns, and thoughts bill as output        |
 
 `providerOrder` exists for cache warmth, not preference. OpenRouter's prompt cache lives on the
 upstream host's account, and default routing hops between hosts — every hop is a cold cache,
 which costs both latency and input tokens. Fallbacks stay enabled; it is a preference, not a lock.
+
+## Bringing your own envelope
+
+The four adapters go through `streamSse`, which is one `fetch`, one classified error and one SSE
+reader. Some apps can only take the last of those three. An extension with translated failure
+copy, its own log levels, or a token refresh in front of every request has to build the request
+and read the failure itself — but it should not be writing a fourth SSE parser to do it.
+
+```ts
+import { parseSseStream } from "@providerkit/core";
+
+const res = await myFetchWithAuth(url, init);
+if (!res.ok) throw myOwnTranslatedError(res); // your envelope, your wording
+for await (const payload of parseSseStream(res.body!)) {
+  handle(JSON.parse(payload));
+}
+```
+
+It yields each frame's `data:` payload: frames split on the blank line the spec requires (so a
+payload containing a newline survives), CRLF normalised, continuation lines joined, `[DONE]`
+swallowed, and the final frame emitted even when the stream ends without its trailing blank line.
+
+It also yields a bare JSON object appended **outside** the framing, because Gemini reports a
+mid-stream failure that way — dropped, a 429 that lands after the headers reads as an empty,
+successful turn.

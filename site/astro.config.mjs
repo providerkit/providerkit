@@ -123,6 +123,7 @@ export default defineConfig({
           items: [
             { label: "Errors", slug: "guides/errors" },
             { label: "Retries and fallback", slug: "guides/retries" },
+            { label: "Limits and key pools", slug: "guides/limits" },
             { label: "Streaming and the watchdog", slug: "guides/streaming" },
           ],
         },
