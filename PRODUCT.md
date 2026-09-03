@@ -17,15 +17,15 @@ They arrive in one of two situations, and the second is the one that matters:
    Vercel AI SDK, LiteLLM, and hand-rolling it.
 2. **Debugging a production incident.** A run died at 3am. They have a status code, a body,
    and a stack trace, and they need to know whether to retry, switch models, compact, or
-   surface it. *(Inferred from the package's own origin: every one of its thirteen error
-   kinds exists because a real run failed in one of the five source codebases.)*
+   surface it. _(Inferred from the package's own origin: every one of its thirteen error
+   kinds exists because a real run failed in one of the five source codebases.)_
 
 The second situation is where the package earns its keep, and readers arriving in it are
 looking for a specific answer, not an overview.
 
 ## Product Purpose
 
-`@providerkit/core` is the layer *underneath* an agent loop: one seam across every LLM
+`@providerkit/core` is the layer _underneath_ an agent loop: one seam across every LLM
 provider, plus the failure handling that only gets learned in production.
 
 Success is a developer deleting code. Every adopting codebase should be net-negative in lines
@@ -66,8 +66,8 @@ kernel; schema clamping; compaction decisions; cost maths.
 imported by the kernel. No price tables ship — rates change weekly and a stale table is worse
 than none.
 
-**Terminology that must stay consistent:** *kind* (not "type" or "code") for a classified
-failure; *seam* for the provider-neutral boundary; *loop* for the caller's own agent loop.
+**Terminology that must stay consistent:** _kind_ (not "type" or "code") for a classified
+failure; _seam_ for the provider-neutral boundary; _loop_ for the caller's own agent loop.
 
 ## Brand Commitments
 

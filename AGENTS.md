@@ -8,6 +8,16 @@ prompts, no memory, no graph — those are where a product lives and they stay i
 
 MIT · open source · `providerkit.dev`
 
+> **Before touching anything under `site/`, read
+> [`site/.impeccable/surfaces/site-src-content-docs-index-mdx.md`](site/.impeccable/surfaces/site-src-content-docs-index-mdx.md).**
+>
+> The site is mid-replacement. Its current look is the generated-design default — near-black
+> ground with one bright accent, tracked ALL-CAPS eyebrows, middle-dot meta strings, identical
+> rounded cards — and it is being rebuilt, not refined. That brief holds the committed
+> direction, the palette, the list of what must **not** survive, and the agent-channel
+> decisions. `PRODUCT.md` holds product truth. There is no `DESIGN.md` yet by design: it is
+> written at finish from the built world, so do not invent one ahead of the build.
+
 ## Why it exists
 
 Extracted from five of Gus's production codebases that had each independently grown the same

@@ -2,7 +2,7 @@
 version: 1
 slug: "site-src-content-docs-index-mdx"
 primary_target: "site/src/content/docs/index.mdx"
-related_targets: ["site/src/content/docs/guides","site/astro.config.mjs"]
+related_targets: ["site/src/content/docs/guides", "site/astro.config.mjs"]
 ---
 
 ## Scope and mode
@@ -33,7 +33,7 @@ optical layout plot for LLM failure. It refuses the category default it currentl
 ground, one neon accent, identical rounded cards, tracked ALL-CAPS eyebrows, middle-dot meta strings.
 
 OWN-WORLD: Cool technical paper `#EEF1F4`, graphite ink `#191D23`, hairline axis `#9AA6B2`. Rays
-are wavelength-coded by remedy, and that coding *is* the taxonomy: retry amber `#C2610B`, account
+are wavelength-coded by remedy, and that coding _is_ the taxonomy: retry amber `#C2610B`, account
 red `#B3261E`, context blue `#1F5FA8`, ours violet `#6B3FA0`, inert graphite `#5B6672`. The
 collimated beam keeps the brand teal `#0E7C73` — what leaves the lens is normalized. Dark mode is
 the lab bench (anodized black), never a void. Line work follows drafting semantics: dash-dot
@@ -60,25 +60,82 @@ decoration; and the composition is a horizontal bench, never newspaper columns.
 
 ## Challenger verdicts and raises
 
-- **Struck cathode gauze** — *competitive* (holds product clarity). Kept: **every alternative
+- **Struck cathode gauze** — _competitive_ (holds product clarity). Kept: **every alternative
   present at once as an unlit ghost, the classified one struck forward**, and **no boxes, rules or
   dividers — group by density and depth**. This is the raise that kills the card grid.
-- **Night instrument six-pack** — *declined*. Kept: **show trend as well as value; deviation reads
+- **Night instrument six-pack** — _declined_. Kept: **show trend as well as value; deviation reads
   before the alarm.** The classifier shows a verdict's neighbours, not only its verdict.
-- **Accretion-disk threshold** — *competitive* (product clarity, one idea). Kept: **an irreversible
+- **Accretion-disk threshold** — _competitive_ (product clarity, one idea). Kept: **an irreversible
   threshold rendered as a place.** The retries guide draws the commitment boundary — once a chunk
   is emitted the turn cannot be retried — as a real horizon in the layout, not a paragraph.
-- **Riley moiré gallery** — *declined*. Kept: **contrast from line frequency, not from adding a
+- **Riley moiré gallery** — _declined_. Kept: **contrast from line frequency, not from adding a
   hue.** Emphasis comes from ray density before it comes from another colour.
-- **Colour-chord counterpoint** — *declined*. Kept: **states legible beyond colour.** Every failure
+- **Colour-chord counterpoint** — _declined_. Kept: **states legible beyond colour.** Every failure
   family must be readable without hue — required for the classifier and an accessibility floor.
-- **Push Pin poster** — *declined*. Kept: **one emblematic figure anchors each section.** Each
+- **Push Pin poster** — _declined_. Kept: **one emblematic figure anchors each section.** Each
   guide opens with its own diagram rather than uniform prose.
+
+## Rebuild, do not refactor
+
+This is a replacement world, not a refinement. The current implementation is **evidence and
+anti-reference only**. Do not polish it, do not port its classes, do not keep "the good parts".
+
+Nothing below survives into the new build:
+
+- `site/src/styles/brand.css` in its entirety — including every `--pk-*` token and the whole
+  `pk-` class family. Delete the file and author the new world from the direction contract.
+- The `.pk-eyebrow` device: a tracked ALL-CAPS label above a heading. Drafting has its own label
+  grammar (leader line to referent, dimensioned callout); use that instead.
+- The `.pk-meta` middle-dot string (`A · B · C`).
+- `.pk-grid` / `.pk-cell` / `.pk-stats` / `.pk-stat` — identical rounded cards with one shared
+  radius and a hairline gap. The cathode-gauze raise forbids boxes and dividers outright.
+- `--pk-radius: 10px` applied uniformly to every surface.
+- Monospace as the default for every small label.
+- Inter and JetBrains Mono. Both are category defaults and are retired.
+- The near-black-plus-one-bright-accent ground.
+
+What _is_ preserved, because it is product truth or a brand commitment, not visual habit: all
+copy and content, the collimator mark and its geometry, the teal as the collimated-beam role,
+the failure-family semantics (retry / account / context / ours / inert), the classifier's logic
+in `Classifier.tsx`, Astro + Starlight, and every route.
+
+## Agent channel
+
+Agents read this site as much as people do, and they never render the visual world — they want
+the markdown underneath. Both halves ship with the rebuild; neither costs the design anything.
+
+- **`starlight-llms-txt`** for `/llms.txt`, `/llms-full.txt`, `/llms-small.txt`. Sizing decision:
+  8 guides plus ~85 generated TypeDoc pages is too much for one context file, so scope
+  `llms-small.txt` to the guides and let `llms-full.txt` carry guides plus reference. The plugin
+  takes include/exclude globs. Verified: the plugin does **not** emit per-page markdown.
+- **Per-page `.md`**, Bun-style — `providerkit.dev/guides/errors.md` returning `text/markdown`
+  from a small Astro endpoint over the content collection. This is the one agents use most:
+  `llms.txt` says the page exists, the `.md` fetches it without spending tokens on HTML chrome.
+- **Point `llms.txt` at the API reference explicitly.** This is a library that coding agents write
+  code _against_, so the exact signatures matter more than the prose. The shipped `.d.ts` is the
+  precise contract; the generated reference is its readable form.
+- **A "Copy page as Markdown" control** is the human half of the same feature. It is a real UI
+  element in the Read register and belongs in the rebuild, not bolted on afterwards.
+- Optional, not decided: a generated `kinds.json` (13 kinds x `{kind, fix, isTransient,
+isBackupEligible}`, emitted from `core/src` so it cannot drift). It is the most-queried fact
+  about the package and an agent mid-incident wants it as data.
+
+Do not build an MCP server. MCP is a transport for capability, not a distribution format for
+text: the site is static on Cloudflare Pages with nothing running to host one, it needs per-user
+client configuration where a URL needs none, and it cannot be crawled or cached. The only version
+that would earn its keep is exposing the classifier as a tool — and `bun add @providerkit/core`
+puts the real classifier in the agent's own process, which beats a network round trip for pure
+computation.
+
+Keep this separate from the repo's `AGENTS.md`, which addresses agents working _on_ providerkit.
+This section is for agents _using_ it.
 
 ## Unresolved
 
 - Font availability unverified (Archivo via Fontsource; Commit Mono self-hosted). Confirm before
   building; if Commit Mono is impractical, choose another non-default mono — not JetBrains Mono.
-- Whether the 85 generated TypeDoc reference pages take the full world or a deliberately plainer
+- Whether the ~85 generated TypeDoc reference pages take the full world or a deliberately plainer
   Read register. Decide during the build from how the generated markup actually renders.
-- DESIGN.md is written at finish, from the built world, not before.
+- Whether `kinds.json` ships (see Agent channel).
+- DESIGN.md is written at finish, from the built world, not before. Its absence is deliberate and
+  is not a gap to fill by inventing tokens ahead of the build.
