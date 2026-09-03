@@ -4,7 +4,7 @@
 //
 // Adapters keep only their per-event mapping; everything about being an HTTP
 // client lives here once.
-import { classify, isTransportFailure, ProviderError } from "./errors.ts";
+import { classifyHttp, isTransportFailure, ProviderError } from "./errors.ts";
 
 export interface RequestInit_ {
   url: string;
@@ -62,7 +62,7 @@ export function retryAfterFromHeaders(headers: Headers, now = Date.now()): numbe
 /** Turn a non-2xx response into the classified error every caller branches on. */
 async function errorFor(provider: string, res: Response): Promise<ProviderError> {
   const text = await res.text().catch(() => "");
-  const kind = classify({ status: res.status, error: text }, res.status, text);
+  const kind = classifyHttp(res.status, text);
   const message = text
     ? `${provider} ${res.status}: ${text.slice(0, 500)}`
     : `${provider} ${res.status} ${res.statusText}`;

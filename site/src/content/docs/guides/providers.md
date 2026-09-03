@@ -61,6 +61,24 @@ arguments a few characters at a time, so a call is only complete at the `finish`
 Take the **last** one, never the sum. `drainStream` already does this.
 :::
 
+### Reasoning that must ride back
+
+```ts
+interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+  thoughtSignature?: string; // Gemini's opaque reasoning token
+}
+```
+
+Gemini returns an opaque signature alongside a tool call, and it must go back **verbatim** on
+the next turn. Drop it and the model resumes from a chain of thought that no longer contains
+the call it just made — it re-plans, and often re-issues the tool call you already answered.
+
+Nothing else in the seam is opaque, so it is the one field a store must round-trip without
+understanding. If your history layer normalises tool calls, keep this field.
+
 ## Options
 
 ```ts

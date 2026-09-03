@@ -5,7 +5,8 @@
 // its own chain of thought on the next turn. Written straight against the REST
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
-import { classify, parseRetryAfterMs, ProviderError } from "../errors.ts";
+import { classifyHttp, parseRetryAfterMs, ProviderError } from "../errors.ts";
+import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -22,8 +23,12 @@ import type {
 export interface GeminiConfig {
   apiKey: string;
   model: string;
-  /** Any endpoint speaking the Gemini REST dialect — Vertex, or a proxy.
-   *  Defaults to the Generative Language API. */
+  /** Any endpoint speaking the Generative Language REST dialect — a proxy or
+   *  gateway. Defaults to the Generative Language API.
+   *
+   *  Not Vertex: it serves `/v1/projects/…/locations/…/publishers/google/models`
+   *  and authenticates with a Bearer token, and both the path and the
+   *  `x-goog-api-key` header are fixed below. Vertex would be its own adapter. */
   baseUrl?: string;
   /** Names the provider in errors and logs. */
   id?: string;
@@ -63,18 +68,23 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Tool-call arguments as the OBJECT Gemini's `functionCall.args` requires. A
- * bare JSON scalar or array is wrapped rather than rejected, and arguments that
- * do not parse at all degrade to `{}` — a truncated argument string is a
- * recoverable turn, not a reason to fail the whole request on replay.
+ * Tool-call arguments as the OBJECT Gemini's `functionCall.args` requires.
+ *
+ * A bare JSON scalar or array is wrapped rather than rejected — the shared
+ * `parseToolArgs` drops a non-object as a protocol violation, which is right
+ * for reading a fresh tool call and wrong here, where replaying `{}` deletes an
+ * argument the model did send. Everything else defers to it, so a truncated or
+ * double-escaped argument string is salvaged on replay rather than degraded to
+ * `{}`.
  */
 function parseArgs(json: string): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(json);
-    return isJsonObject(parsed) ? parsed : { value: parsed };
+    if (!isJsonObject(parsed)) return { value: parsed };
   } catch {
-    return {};
+    // Unparseable — the salvage below is the whole point.
   }
+  return parseToolArgs(json);
 }
 
 /** Same rule for a tool RESULT, which `functionResponse.response` also requires
@@ -241,7 +251,7 @@ interface GeminiResponse {
  */
 function streamError(provider: string, error: GeminiStatus): ProviderError {
   const body = JSON.stringify(error);
-  const kind = classify(body, error.code, body);
+  const kind = classifyHttp(error.code, body);
   return new ProviderError(
     provider,
     kind === "unknown" ? "overload" : kind,

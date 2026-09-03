@@ -10,7 +10,7 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
-import { classify, ProviderError } from "../errors.ts";
+import { classifyHttp, ProviderError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -227,7 +227,7 @@ function streamError(
   const message = error?.message ?? "responses stream failed";
   const code = error?.code;
   const text = code ? `${code} ${message}` : message;
-  const kind = classify(text, undefined, text);
+  const kind = classifyHttp(undefined, text);
   return new ProviderError(
     provider,
     kind === "unknown" ? "overload" : kind,

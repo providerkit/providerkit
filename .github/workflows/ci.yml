@@ -25,8 +25,8 @@ jobs:
         with:
           bun-version: latest
 
-      # Cache do bun: poupa baixar o registry inteiro a cada run. A chave é o
-      # lockfile, então só invalida quando uma dependência muda de fato.
+      # Cache bun's store: saves re-downloading the whole registry every run.
+      # Keyed on the lockfile, so it only invalidates when a dependency moves.
       - uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache

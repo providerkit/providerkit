@@ -461,7 +461,7 @@ describe("toGeminiContents", () => {
     expect(responses).toEqual([{ output: "plain text" }, { output: 42 }, { output: [1, 2] }]);
   });
 
-  it("wraps non-object arguments and degrades unparseable ones to {}", () => {
+  it("wraps non-object arguments and salvages a truncated one", () => {
     const args = toGeminiContents([
       {
         role: "assistant",
@@ -473,7 +473,11 @@ describe("toGeminiContents", () => {
       },
     ]).contents[0]!.parts.map((p) => (p as { functionCall: { args: unknown } }).functionCall.args);
 
-    expect(args).toEqual([{ value: "just a string" }, {}]);
+    // The truncated call keeps the field the cut landed in. It used to degrade
+    // to `{}` here — a bare JSON.parse in this adapter, while the package's own
+    // salvage sat unused two files away. Replaying `{}` deletes an argument the
+    // model did send, which is the failure `parseToolArgs` exists to prevent.
+    expect(args).toEqual([{ value: "just a string" }, { q: "trunc" }]);
   });
 
   it("carries images as inlineData, on user turns and on tool results", () => {

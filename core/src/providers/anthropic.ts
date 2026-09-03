@@ -1,5 +1,6 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
 import { ProviderError } from "../errors.ts";
+import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -15,13 +16,22 @@ import type {
 export interface AnthropicConfig {
   apiKey: string;
   model: string;
+  /** Any endpoint speaking the Anthropic Messages dialect — a proxy or gateway.
+   *  Defaults to Anthropic itself. */
   baseUrl?: string;
+  /** Names the provider in errors and logs. The subscription backend is the
+   *  reason this is not hardcoded: a token failure there is a re-login, not a
+   *  bad API key, and the two must not read the same in a ledger. */
+  id?: string;
   /** Bound default; a per-call `effort` overrides it. */
   effort?: Effort;
   /** Anthropic requires an output ceiling on every request. */
   maxTokens?: number;
   version?: string;
   fetchImpl?: typeof fetch;
+  /** Merged into every request. The subscription backend needs its own beta
+   *  headers, and a gateway in front usually wants one of its own. */
+  headers?: Record<string, string>;
   /** Send the key as a Bearer instead of `x-api-key` — what a subscription
    *  access token needs. */
   bearer?: boolean;
@@ -125,21 +135,13 @@ export function toAnthropicMessages(messages: readonly ChatMessage[]): {
         type: "tool_use",
         id: call.id,
         name: call.name,
-        input: safeParse(call.arguments),
+        input: parseToolArgs(call.arguments),
       });
     }
     if (blocks.length > 0) pushBlocks("assistant", blocks);
   }
 
   return { ...(system ? { system } : {}), messages: out };
-}
-
-function safeParse(raw: string): unknown {
-  try {
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
 }
 
 interface AnthropicEvent {
@@ -167,9 +169,10 @@ interface AnthropicEvent {
 
 export function createAnthropicProvider(config: AnthropicConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
+  const id = config.id ?? "anthropic";
 
   return {
-    id: "anthropic",
+    id,
     model: config.model,
 
     async *createStream(
@@ -230,9 +233,10 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           ...(config.bearer
             ? { authorization: `Bearer ${config.apiKey}` }
             : { "x-api-key": config.apiKey }),
+          ...config.headers,
         },
         body: request,
-        provider: "anthropic",
+        provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
       })) {
@@ -245,12 +249,9 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
 
         switch (event.type) {
           case "error":
-            throw new ProviderError(
-              "anthropic",
-              "overload",
-              event.error?.message ?? "anthropic stream error",
-              { code: event.error?.type },
-            );
+            throw new ProviderError(id, "overload", event.error?.message ?? `${id} stream error`, {
+              code: event.error?.type,
+            });
 
           case "message_start": {
             const usage = event.message?.usage;

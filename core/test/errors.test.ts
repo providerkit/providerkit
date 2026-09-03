@@ -5,6 +5,7 @@
 // here is a lesson being un-learned.
 import { describe, expect, it } from "vitest";
 import {
+  classifyHttp,
   classify,
   describeProviderError,
   isBackupEligible,
@@ -124,6 +125,26 @@ describe("the body outranks the status for the 4xx family", () => {
     const kind = kindOf(apiError(429, { message: "Rate limit reached for gpt-5.6" }));
     expect(kind).toBe("rate");
     expect(isBackupEligible(kind)).toBe(true);
+  });
+});
+
+describe("classifyHttp — the response-shaped entry point", () => {
+  it("keeps body-outranks-status through the new door", () => {
+    // Invariant 3 has to hold whichever way the caller arrives. Three adapters
+    // used to reach `classify` by inventing an error object to fill a slot they
+    // had no value for, in three different spellings; nothing pinned that
+    // shape, so nothing would have caught it drifting.
+    expect(classifyHttp(429, "prompt is too long: 250000 tokens > 200000 maximum")).toBe("context");
+    expect(classifyHttp(429, "Rate limit reached: Limit 30000 tokens per min (TPM)")).toBe("rate");
+    expect(classifyHttp(400, '{"error":{"message":"credit balance is too low"}}')).toBe("quota");
+  });
+
+  it("falls back to the status when the body says nothing", () => {
+    expect(classifyHttp(401, "")).toBe("auth");
+    expect(classifyHttp(529, "")).toBe("overload");
+    // No status either — a body-only failure, which is how the Responses
+    // adapter reports a mid-stream error envelope.
+    expect(classifyHttp(undefined, '{"error":{"message":"API key not valid"}}')).toBe("auth");
   });
 });
 

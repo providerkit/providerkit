@@ -320,6 +320,21 @@ const matches = (patterns: readonly RegExp[], text: string): boolean =>
  * entitlement beats quota beats auth — each earlier category's fix is useless
  * for the later ones.
  */
+/**
+ * The kind of a failure that arrived as an HTTP response — a status and a body,
+ * with nothing thrown.
+ *
+ * `classify` below is for a caught error, and it reads `status` and the body
+ * text off that error when they are not passed separately. A response has no
+ * error object, so callers were inventing one to fill the slot: a bare body
+ * string, the same text twice, a `{ status, error }` literal. All three are
+ * inert — nothing on them can satisfy `isAbort` or `isTransportFailure` — so
+ * they were three spellings of `undefined`.
+ */
+export function classifyHttp(status: number | undefined, body: string): ErrorKind {
+  return classify(undefined, status, body);
+}
+
 export function classify(err: unknown, status?: number, body?: string): ErrorKind {
   if (isAbort(err)) return "aborted";
   if (isTransportFailure(err)) return "network";
