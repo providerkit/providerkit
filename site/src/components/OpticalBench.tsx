@@ -205,7 +205,13 @@ export default function OpticalBench() {
                   <text className="src-note" x="288" y={AXIS_Y + 12} textAnchor="end">
                     {status.trim() ? `${status} · pasted` : "no status · pasted"}
                   </text>
-                  <line className="src-tick" x1={SRC_X} y1={AXIS_Y - 7} x2={SRC_X} y2={AXIS_Y + 7} />
+                  <line
+                    className="src-tick"
+                    x1={SRC_X}
+                    y1={AXIS_Y - 7}
+                    x2={SRC_X}
+                    y2={AXIS_Y + 7}
+                  />
                 </g>
               </>
             )}
