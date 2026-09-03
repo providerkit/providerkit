@@ -35,7 +35,8 @@ providerkit/            ← repo root (this folder), git root
 │   ├── src/
 │   └── test/
 ├── site/               ← providerkit.dev — Vite + React, open source
-├── brand/              ← the mark, its exports, and render.sh — see brand/README.md
+├── brand/              ← the mark, the OG card, and generate.ts — see brand/README.md
+├── .github/workflows/  ← CI, and Cloudflare Pages deploy for providerkit.dev
 ├── README.md           ← the pitch; single source of truth, copied into core/ on publish
 └── LICENSE             ← same
 ```
@@ -78,9 +79,13 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
   build → `sync:docs` (which copies the root README and LICENSE into `core/`, so they are
   tracked once and `.gitignore`d inside `core/`).
 
-**Not yet done:** create the GitHub org + repo and push; reserve `@providerkit`; first
-`npm publish`; pick a host for providerkit.dev (falai/site carries firebase, netlify and
-vercel configs — none chosen here yet).
+- **Site deploys to Cloudflare Pages** on push to `main`, project `providerkit`. Needs
+  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repo secrets — same names and
+  values as the other repos.
+- **The repo must be public.** A free npm org can only host public packages, and a free
+  GitHub org only gets unlimited Actions minutes on public repos. It is MIT anyway.
+
+**Not yet done:** first `npm publish`; point the providerkit.dev DNS at the Pages project.
 
 ## State
 
@@ -100,7 +105,7 @@ vercel configs — none chosen here yet).
 | `context.ts`             | compaction decisions — `needsCompaction`, `pickCut`, `applyCompaction` |
 | `providers/anthropic.ts` | Anthropic shape                                                        |
 | `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)         |
-| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                         |
+| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                   |
 
 **Not built yet:** Gemini adapter · Responses adapter · multi-key rotation pool.
 

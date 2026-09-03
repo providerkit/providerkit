@@ -1,0 +1,51 @@
+name: Deploy Site
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "core/**"
+      - "brand/**"
+      - "package.json"
+      - "bun.lock"
+
+concurrency:
+  group: deploy-site
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      # Builds core first — the site imports it through its exports map.
+      - name: Build
+        run: bun run build:site
+
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # Deploy via Bun — `wrangler pages deploy` only uploads the built dir, so it
+        # sidesteps the npm/workspace-manifest issue. `--branch=main` forces a
+        # production deploy (CI checkout is detached, so wrangler can't infer it).
+        run: bunx wrangler@latest pages deploy site/dist --project-name=providerkit --branch=main

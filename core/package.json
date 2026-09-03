@@ -46,11 +46,11 @@
     "format": "prettier --write .",
     "sync:docs": "cp ../README.md ../LICENSE .",
     "prepublishOnly": "bun run lint && bun run typecheck && bun run test && bun run build && bun run sync:docs",
-    "release": "bun publish",
-    "release:patch": "bun pm version patch && bun publish",
-    "release:minor": "bun pm version minor && bun publish",
-    "release:major": "bun pm version major && bun publish",
-    "release:alpha": "bun publish --tag alpha"
+    "release": "bun publish --access public",
+    "release:patch": "bun pm version patch && bun publish --access public",
+    "release:minor": "bun pm version minor && bun publish --access public",
+    "release:major": "bun pm version major && bun publish --access public",
+    "release:alpha": "bun publish --access public --tag alpha"
   },
   "peerDependencies": {
     "zod": "^4"

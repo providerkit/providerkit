@@ -11,7 +11,10 @@ const FIX: Record<ErrorKind, { fix: string; family: Family }> = {
   network: { fix: "Retry. The request never reached them.", family: "retry" },
   overload: { fix: "Retry — or fall back to another model.", family: "retry" },
   rate: { fix: "Wait out the window, or rotate the key or model.", family: "retry" },
-  quota: { fix: "Top up, or wait for the window to reset. Retrying will not help.", family: "acct" },
+  quota: {
+    fix: "Top up, or wait for the window to reset. Retrying will not help.",
+    family: "acct",
+  },
   entitlement: { fix: "Change the plan. A new key and a top-up both fail here.", family: "acct" },
   auth: { fix: "Fix the credential. Every retry lands the same.", family: "acct" },
   model: { fix: "Use a model this endpoint actually serves.", family: "ours" },
@@ -146,8 +149,8 @@ function Classifier() {
               }}
             />
             <p className="hint">
-              Paste a real one. This runs the actual classifier from the package, in your
-              browser — nothing is sent anywhere.
+              Paste a real one. This runs the actual classifier from the package, in your browser —
+              nothing is sent anywhere.
             </p>
           </div>
         </div>
@@ -180,9 +183,7 @@ function Classifier() {
             </div>
             <div className="row">
               <span>retryAfterMs</span>
-              <span className={err.retryAfterMs ? "yes" : "no"}>
-                {err.retryAfterMs ?? "—"}
-              </span>
+              <span className={err.retryAfterMs ? "yes" : "no"}>{err.retryAfterMs ?? "—"}</span>
             </div>
             <div className="row">
               <span>status</span>
@@ -280,9 +281,9 @@ export function App() {
         <div className="wrap">
           <h1>The layer under your agent loop.</h1>
           <p className="lede">
-            One seam for every LLM provider — plus <strong>the failure handling you only
-            learn in production</strong>. Not a framework: no loop, no prompts, no graph.
-            Your loop is where your product lives.
+            One seam for every LLM provider — plus{" "}
+            <strong>the failure handling you only learn in production</strong>. Not a framework: no
+            loop, no prompts, no graph. Your loop is where your product lives.
           </p>
           <div className="cta">
             <Install />
@@ -305,8 +306,8 @@ export function App() {
           <p className="eyebrow">What actually breaks</p>
           <h2>The interface is the easy part.</h2>
           <p className="sub">
-            Most "unified LLM interface" libraries stop at the interface. That is not where
-            the time goes. This is where the time goes.
+            Most "unified LLM interface" libraries stop at the interface. That is not where the time
+            goes. This is where the time goes.
           </p>
           <div className="grid">
             {BREAKS.map((b) => (
@@ -324,8 +325,8 @@ export function App() {
           <p className="eyebrow">Live</p>
           <h2>Every failure, named by what fixes it.</h2>
           <p className="sub">
-            The classifier is pure, so it runs right here. Pick a real provider failure — or
-            paste your own — and see the answer to the only question an error has:{" "}
+            The classifier is pure, so it runs right here. Pick a real provider failure — or paste
+            your own — and see the answer to the only question an error has:{" "}
             <em>what do I do now?</em>
           </p>
           <Classifier />
@@ -337,8 +338,8 @@ export function App() {
           <p className="eyebrow">Use</p>
           <h2>Small surface. Boring on purpose.</h2>
           <p className="sub">
-            One provider interface, one error type, and the handful of primitives a loop
-            actually needs underneath it.
+            One provider interface, one error type, and the handful of primitives a loop actually
+            needs underneath it.
           </p>
           <div className="two-up">
             <Code>{`import { createAnthropicProvider } from "@providerkit/core";
@@ -376,18 +377,18 @@ try { /* ... */ } catch (raw) {
           <p className="eyebrow">Origin</p>
           <h2>Five codebases learned this separately.</h2>
           <p>
-            providerkit was extracted from five production codebases that had each
-            independently grown the same layer — <strong>about 9,100 lines solving one
-            ~2,000-line problem</strong>. They had three separate 60-second idle watchdogs,
-            identical down to the constant. On one day in September 2026, two of them
-            shipped the same five fixes independently.
+            providerkit was extracted from five production codebases that had each independently
+            grown the same layer —{" "}
+            <strong>about 9,100 lines solving one ~2,000-line problem</strong>. They had three
+            separate 60-second idle watchdogs, identical down to the constant. On one day in
+            September 2026, two of them shipped the same five fixes independently.
           </p>
           <p>
-            They had also each learned a <strong>different</strong> part of it. One walked
-            the cause chain for dead sockets. One parsed Gemini's RetryInfo. One read the
-            body before the status and knew the quota wordings in five languages. One knew
-            Anthropic's 529 and when a failure is worth a different model. One could rescue
-            an answer from a tool call the model truncated.
+            They had also each learned a <strong>different</strong> part of it. One walked the cause
+            chain for dead sockets. One parsed Gemini's RetryInfo. One read the body before the
+            status and knew the quota wordings in five languages. One knew Anthropic's 529 and when
+            a failure is worth a different model. One could rescue an answer from a tool call the
+            model truncated.
           </p>
           <div className="stat-row">
             <div className="stat">
@@ -404,8 +405,8 @@ try { /* ... */ } catch (raw) {
             </div>
           </div>
           <p style={{ marginTop: 28 }}>
-            The classifier here is the union of all five, and the test suite is every failure
-            any of them ever saw. That is the part worth having.
+            The classifier here is the union of all five, and the test suite is every failure any of
+            them ever saw. That is the part worth having.
           </p>
         </div>
       </section>

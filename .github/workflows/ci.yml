@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Agents commit in small slices, so pushes to main land in bursts. Keying the
+# group on the ref collapses a burst into one run — superseded runs are
+# cancelled instead of billed. PRs get their own group so they never cancel
+# each other, or a main run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Cache do bun: poupa baixar o registry inteiro a cada run. A chave é o
+      # lockfile, então só invalida quando uma dependência muda de fato.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      - name: Format check
+        run: bun run format:check
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+      # The package's whole portability claim is that one build runs in Bun,
+      # Node, Workers, Deno and an MV3 service worker. A single Node built-in
+      # or `process` reference in core/src silently breaks MV3, and nothing
+      # else in CI would catch it — the tests run in Bun, where it all works.
+      - name: Portability guard (no Node built-ins in core/src)
+        run: |
+          if grep -rnE 'from "node:|require\(|\bprocess\.env|\bBuffer\b|__dirname' core/src; then
+            echo "::error::core/src must stay free of Node built-ins — see AGENTS.md invariants"
+            exit 1
+          fi
+          echo "core/src is clean"
+
+      # Builds core, then the site against core's published exports — so the
+      # site build doubles as a check that the package bundles for a browser.
+      - name: Build
+        run: bun run build:site
