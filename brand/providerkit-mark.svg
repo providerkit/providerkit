@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="providerkit">
+  <title>providerkit</title>
+  <!-- A collimator. Rays arrive at whatever angle they arrive at; the lens is
+       the seam; what leaves is parallel and evenly spaced. That is the package:
+       every provider's shape goes in, one shape comes out.
+       In-rays run under the lens, out-rays clear it — they enter, clean light
+       leaves. Keep that gap: closed up, lens and rays fuse into one blob. -->
+  <g fill="none" stroke="#8A94A3" stroke-width="5" stroke-linecap="round">
+    <path d="M10 14 L29 21" />
+    <path d="M10 32 L29 32" />
+    <path d="M10 50 L29 43" />
+  </g>
+  <path d="M32 12 Q44 32 32 52 Q20 32 32 12 Z" fill="#0FA398" />
+  <g fill="none" stroke="#0FA398" stroke-width="5" stroke-linecap="round">
+    <path d="M40 21 L54 21" />
+    <path d="M40 32 L54 32" />
+    <path d="M40 43 L54 43" />
+  </g>
+</svg>

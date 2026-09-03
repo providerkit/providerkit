@@ -35,6 +35,7 @@ providerkit/            ← repo root (this folder), git root
 │   ├── src/
 │   └── test/
 ├── site/               ← providerkit.dev — Vite + React, open source
+├── brand/              ← the mark, its exports, and render.sh — see brand/README.md
 ├── README.md           ← the pitch; single source of truth, copied into core/ on publish
 └── LICENSE             ← same
 ```

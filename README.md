@@ -1,3 +1,5 @@
+<img src="brand/providerkit-mark.svg" alt="" width="76" align="left" hspace="4" vspace="2">
+
 # providerkit
 
 **The layer under your agent loop.** One seam for every LLM provider, plus the failure
