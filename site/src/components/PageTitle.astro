@@ -1,0 +1,60 @@
+---
+/*
+  The page title, plus the human half of the agent channel.
+
+  Every page already serves its own source at `<path>.md` for agents; this hands
+  the same thing to a person in one click, so the reader who is about to paste
+  this page into a model does not have to strip the chrome by hand.
+*/
+const { entry } = Astro.locals.starlightRoute;
+
+// The splash page carries its own masthead under the bench, so Starlight's
+// title slot stays empty there rather than printing a second h1.
+const isSplash = entry.data.template === "splash";
+
+// Mirrors src/pages/[...slug].md.ts, which keys on the same entry id.
+const markdownHref = `/${entry.id}.md`;
+---
+
+{
+  !isSplash && (
+    <div class="page-head">
+      <h1 id="_top">{entry.data.title}</h1>
+      <button class="copy-md" type="button" data-md={markdownHref} title={markdownHref}>
+        <span data-label>Copy page as Markdown</span>
+      </button>
+    </div>
+  )
+}
+
+<script>
+  // Copy the page's own source. If the clipboard is unavailable — an insecure
+  // origin, a browser that refuses — open the markdown instead, so the control
+  // always ends somewhere useful rather than failing silently.
+  document.querySelectorAll<HTMLButtonElement>(".copy-md").forEach((button) => {
+    const label = button.querySelector<HTMLElement>("[data-label]");
+    const href = button.dataset.md;
+    if (!label || !href) return;
+
+    const settle = (state: string, text: string) => {
+      button.dataset.state = state;
+      label.textContent = text;
+      setTimeout(() => {
+        delete button.dataset.state;
+        label.textContent = "Copy page as Markdown";
+      }, 2400);
+    };
+
+    button.addEventListener("click", async () => {
+      try {
+        const response = await fetch(href);
+        if (!response.ok) throw new Error(String(response.status));
+        await navigator.clipboard.writeText(await response.text());
+        settle("done", "Copied");
+      } catch {
+        window.open(href, "_blank", "noopener");
+        settle("failed", "Opened the .md instead");
+      }
+    });
+  });
+</script>

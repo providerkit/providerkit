@@ -1,0 +1,992 @@
+/*
+  The optical bench.
+
+  Optics has named its defects by their correction for two centuries — spherical,
+  coma, astigmatism, chromatic — and diagnosed them with ray fans and spot
+  diagrams. This site borrows that grammar because the package does the same
+  thing: it names failures by what fixes them. So every rule here is a drafting
+  rule (a centreline, a dimension, a leader to its referent) and never a border;
+  colour is a wavelength standing for a remedy, never decoration.
+
+  Two consequences worth stating, because both are easy to undo by habit:
+    - No cards. Grouping comes from density and depth, not from boxes.
+    - No colour-only states. Every band also carries a line style, because the
+      classifier has to be readable by someone who cannot separate the hues.
+*/
+
+/* --- Wavelengths, ink and paper ------------------------------------------ */
+
+:root {
+  /* Dark is the lab bench: anodized graphite under work light, never a void. */
+  --paper: #16191d;
+  --paper-2: #1c2026;
+  --paper-3: #21262d;
+  --ink: #e4e9ee;
+  --ink-2: #b4bdc7;
+  --ink-3: #7f8a96;
+  --rule: #2a3038;
+  --rule-strong: #3b434d;
+
+  --beam: #35c0b1;
+  --ray-retry: #e4a040;
+  --ray-account: #ec6a5e;
+  --ray-context: #6fa9ee;
+  --ray-ours: #b08be0;
+  --ray-inert: #8b97a5;
+
+  --sl-font: "Archivo Variable";
+  --sl-font-mono: "Commit Mono";
+
+  --lead: 0.75rem; /* leader-line length; the label's distance from its referent */
+}
+
+:root[data-theme="light"] {
+  /* Light is the layout plot: cool technical paper, graphite ink. */
+  --paper: #eef1f4;
+  --paper-2: #e5eaef;
+  --paper-3: #dbe2e9;
+  --ink: #191d23;
+  --ink-2: #303740;
+  --ink-3: #5b6672;
+  --rule: #c7cfd8;
+  --rule-strong: #9aa6b2;
+
+  /* Darkened from the direction's plate values so every wavelength clears 4.5:1
+     as text on paper; as line work they were already fine. */
+  --beam: #0b6a62;
+  --ray-retry: #a85408;
+  --ray-account: #b3261e;
+  --ray-context: #1f5fa8;
+  --ray-ours: #6b3fa0;
+  --ray-inert: #5b6672;
+}
+
+/* Starlight's own tokens, re-pointed at the bench. Declared once: every value
+   here is a var() that resolves against whichever palette is in force, so the
+   light theme needs no second copy — and this stays at :root specificity, which
+   the per-template overrides below depend on. */
+:root {
+  --sl-color-white: var(--ink);
+  --sl-color-gray-1: var(--ink);
+  --sl-color-gray-2: var(--ink-2);
+  --sl-color-gray-3: var(--ink-3);
+  --sl-color-gray-4: var(--rule-strong);
+  --sl-color-gray-5: var(--rule);
+  --sl-color-gray-6: var(--paper-2);
+  --sl-color-gray-7: var(--paper-2);
+  --sl-color-black: var(--paper);
+
+  --sl-color-text: var(--ink-2);
+  --sl-color-text-accent: var(--beam);
+  --sl-color-accent: var(--beam);
+  --sl-color-accent-high: var(--ink);
+  --sl-color-accent-low: var(--paper-3);
+  --sl-color-bg: var(--paper);
+  --sl-color-bg-nav: var(--paper);
+  --sl-color-bg-sidebar: var(--paper);
+  --sl-color-bg-inline-code: var(--paper-3);
+  --sl-color-bg-accent: var(--beam);
+  --sl-color-hairline: var(--rule);
+  --sl-color-hairline-light: var(--rule);
+  --sl-color-hairline-shade: var(--rule);
+  --sl-color-text-invert: var(--paper);
+
+  --sl-color-orange: var(--ray-retry);
+  --sl-color-orange-high: var(--ray-retry);
+  --sl-color-red: var(--ray-account);
+  --sl-color-red-high: var(--ray-account);
+  --sl-color-blue: var(--ray-context);
+  --sl-color-blue-high: var(--ray-context);
+  --sl-color-purple: var(--ray-ours);
+  --sl-color-purple-high: var(--ray-ours);
+  --sl-color-green: var(--beam);
+  --sl-color-green-high: var(--beam);
+
+  /* Shadow is not a drafting mark. Depth here comes from ink weight. */
+  --sl-shadow-sm: none;
+  --sl-shadow-md: none;
+  --sl-shadow-lg: none;
+
+  --sl-text-body: 1.0625rem;
+  --sl-line-height: 1.72;
+  --sl-line-height-headings: 1.22;
+  --sl-content-width: 47rem;
+}
+
+/* --- Type ---------------------------------------------------------------- */
+
+body {
+  font-synthesis-weight: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Archivo carries tabular lining figures. Numbers on a drafting sheet line up. */
+:where(h1, h2, h3, h4, h5, h6, th, td, .dim-value, code, kbd) {
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.017em;
+}
+
+h1 {
+  letter-spacing: -0.022em;
+}
+
+.sl-markdown-content :is(h2, h3) {
+  margin-top: 2.75rem;
+}
+
+/* A heading is dimensioned from the margin, the way a callout is on a plot:
+   a short witness mark at the left, then the text. Not an underline, not a box. */
+.sl-markdown-content h2 {
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--rule);
+  position: relative;
+}
+
+.sl-markdown-content h2::before {
+  content: "";
+  position: absolute;
+  inset-block-start: -1px;
+  inset-inline-start: 0;
+  width: 2.5rem;
+  border-top: 2px solid var(--ink-3);
+}
+
+.sl-markdown-content p,
+.sl-markdown-content li {
+  text-wrap: pretty;
+}
+
+/* --- Links: a leader to the referent, not a coloured word ---------------- */
+
+.sl-markdown-content a:not(:where(.not-content *)) {
+  color: var(--ink);
+  text-decoration-color: var(--beam);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+  transition: text-decoration-thickness 90ms linear;
+}
+
+.sl-markdown-content a:not(:where(.not-content *)):hover {
+  color: var(--beam);
+  text-decoration-thickness: 2px;
+}
+
+/* --- Code: a specimen strip, inset into the sheet ------------------------ */
+
+.sl-markdown-content :not(pre) > code {
+  border: none;
+  padding: 0.12em 0.36em;
+  font-size: 0.9em;
+}
+
+.expressive-code .frame pre,
+.sl-markdown-content pre {
+  border-radius: 0;
+  border: 1px solid var(--rule);
+  border-inline-start: 2px solid var(--rule-strong);
+  background: var(--paper-2);
+}
+
+.expressive-code .frame {
+  --ec-frm-edBg: var(--paper-2);
+  --ec-frm-edTabBarBg: var(--paper-2);
+  --ec-frm-edTabBarBrdBtmCol: var(--rule);
+  --ec-frm-edActTabBg: var(--paper);
+  --ec-frm-edActTabIndTopCol: var(--beam);
+  --ec-frm-frameBoxShdCssVal: none;
+  --ec-brdRad: 0;
+  --ec-codeFontFml: "Commit Mono", var(--sl-font-system-mono);
+  --ec-uiFontFml: "Archivo Variable", var(--sl-font-system);
+}
+
+/* A terminal titlebar with three coloured dots is somebody else's world. An
+   install line is a specimen like any other code on this sheet. */
+.expressive-code .frame.is-terminal .header {
+  display: none;
+}
+
+.expressive-code .frame.is-terminal pre {
+  border-top: 1px solid var(--rule);
+}
+
+/* --- Asides: a callout with a leader, not a filled panel ------------------ */
+
+.starlight-aside {
+  border-radius: 0;
+  border: none;
+  border-inline-start: 2px solid var(--aside-ray, var(--ink-3));
+  background: none;
+  padding: 0.1rem 0 0.1rem 1.1rem;
+}
+
+.starlight-aside--note {
+  --aside-ray: var(--ray-context);
+}
+.starlight-aside--tip {
+  --aside-ray: var(--beam);
+}
+.starlight-aside--caution {
+  --aside-ray: var(--ray-retry);
+}
+.starlight-aside--danger {
+  --aside-ray: var(--ray-account);
+}
+
+.starlight-aside__title {
+  color: var(--aside-ray);
+  font-weight: 600;
+  font-size: var(--sl-text-sm);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.starlight-aside__content {
+  color: var(--ink-2);
+}
+
+/* --- Tables: rules where a rule means something -------------------------- */
+
+.sl-markdown-content table {
+  border-collapse: collapse;
+  font-size: var(--sl-text-sm);
+}
+
+.sl-markdown-content :is(th, td) {
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  padding: 0.5rem 1rem 0.5rem 0;
+  text-align: start;
+  vertical-align: baseline;
+}
+
+.sl-markdown-content th {
+  color: var(--ink-3);
+  font-weight: 500;
+  border-bottom-color: var(--rule-strong);
+}
+
+/* --- Chrome: the bench rails --------------------------------------------- */
+
+.header {
+  border-bottom: 1px solid var(--rule);
+  box-shadow: none;
+}
+
+#starlight__sidebar,
+.sidebar-pane {
+  border-inline-end: 1px solid var(--rule);
+}
+
+.sidebar-content summary,
+.sidebar-content .large {
+  color: var(--ink-3);
+  font-weight: 500;
+  font-size: var(--sl-text-xs);
+  letter-spacing: 0.01em;
+}
+
+/* The current page is marked the way a dimension is witnessed: a tick in the
+   margin, not a filled pill. */
+.sidebar-content a[aria-current="page"] {
+  background: none;
+  color: var(--ink);
+  font-weight: 600;
+  position: relative;
+}
+
+.sidebar-content a[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: -0.75rem;
+  inset-block: 0.35rem;
+  border-inline-start: 2px solid var(--beam);
+}
+
+.sidebar-content a:hover {
+  color: var(--ink);
+  background: none;
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 0.22em;
+}
+
+/* Search: an input rule, not a capsule. */
+site-search button[data-open-modal] {
+  border: none;
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 0;
+  background: none;
+  color: var(--ink-3);
+}
+
+site-search dialog {
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  background: var(--paper);
+}
+
+.right-sidebar {
+  border-inline-start: 1px solid var(--rule);
+}
+
+starlight-toc a {
+  border-radius: 0;
+  border-inline-start: 1px solid var(--rule);
+  color: var(--ink-3);
+}
+
+starlight-toc a[aria-current="true"] {
+  border-inline-start-color: var(--beam);
+  color: var(--ink);
+  background: none;
+  font-weight: 500;
+}
+
+.pagination-links a {
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  box-shadow: none;
+  background: none;
+}
+
+.pagination-links a:hover {
+  border-color: var(--rule-strong);
+}
+
+/* --- Drafting primitives ------------------------------------------------- */
+
+/*
+  A label with a leader running to what it names. This replaces the tracked
+  all-caps eyebrow: the line does the pointing, so the type does not have to
+  shout to be understood as a label.
+*/
+.leader {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--sl-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.leader::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--rule);
+}
+
+/* A dimensioned value: the number, the extension line, the label under it. */
+.dim {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.dim-value {
+  color: var(--ink);
+  font-size: clamp(2.25rem, 5vw, 3.25rem);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.dim-rule {
+  position: relative;
+  border-top: 1px solid var(--rule-strong);
+  height: 0;
+}
+
+/* Witness ticks at both ends, exactly as a dimension line is drawn. */
+.dim-rule::before,
+.dim-rule::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  height: 7px;
+  border-inline-start: 1px solid var(--rule-strong);
+}
+
+.dim-rule::before {
+  inset-inline-start: 0;
+}
+.dim-rule::after {
+  inset-inline-end: 0;
+}
+
+.dim-label {
+  color: var(--ink-3);
+  font-size: var(--sl-text-xs);
+  line-height: 1.4;
+}
+
+/* --- The landing plate ---------------------------------------------------- */
+
+/* Splash pages carry no sidebar, so the sheet can open to the full plate. */
+html:not([data-has-sidebar]) {
+  --sl-content-width: 78rem;
+}
+
+/* Without a hero, Starlight still opens a panel for the page title — and the
+   splash page carries its own masthead, so that panel is empty. Drop it rather
+   than leaving a ruled, empty band across the top of the plate. */
+html:not([data-has-sidebar]) .main-pane .content-panel:first-of-type {
+  display: none;
+}
+
+/* Islands must not become grid items in place of the markup they wrap. Astro
+   ships this rule; stating it here means the plate does not depend on that. */
+astro-island,
+astro-slot,
+astro-static-slot {
+  display: contents;
+}
+
+/* The plate: the bench spans it, and under the axis the masthead and the
+   console sit side by side, both left-aligned to their own column. */
+.plate {
+  display: grid;
+  gap: 2.75rem 4rem;
+  grid-template-columns: minmax(0, 1fr);
+  margin-block: 1rem 2.5rem;
+}
+
+@media (min-width: 62rem) {
+  .plate {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  /* Descendant, not child: the island wrapper is `display: contents`, which
+     changes the box tree and not the DOM, so `>` would never match through it. */
+  .plate .bench-plate {
+    grid-column: 1 / -1;
+  }
+
+  /* The masthead reads first even though the island prints first. */
+  .plate .masthead {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .plate .bench-console {
+    grid-column: 2;
+    grid-row: 2;
+  }
+}
+
+/* A grid item is `min-width: auto` by default, so the bench's own min-width
+   would push the whole plate — and with it the page — wider than the viewport
+   instead of scrolling inside its own frame. */
+.plate :is(.bench-plate, .bench-console, .masthead) {
+  min-width: 0;
+  margin-block: 0;
+}
+
+html:not([data-has-sidebar]) .sl-markdown-content > * {
+  max-width: 46rem;
+}
+
+/* The bench, the specimen columns and the dimension row are plate-wide; prose
+   stays at reading measure. */
+html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dims) {
+  max-width: none;
+}
+
+.masthead {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  align-self: start;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: clamp(2.4rem, 6vw, 3.6rem);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+
+.masthead p {
+  margin: 0;
+  max-width: 44rem;
+  color: var(--ink-2);
+  font-size: 1.15rem;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.masthead-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.75rem;
+  margin-top: 0.4rem;
+  font-size: var(--sl-text-sm);
+}
+
+/* An action is a labelled leader, not a capsule: the rule under it points the
+   way the arrow does. */
+.masthead-actions a {
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+  border-bottom: 1px solid var(--beam);
+  padding-bottom: 0.2rem;
+  transition: border-bottom-width 90ms linear;
+}
+
+.masthead-actions a::after {
+  content: " →";
+  color: var(--beam);
+}
+
+.masthead-actions a:hover {
+  border-bottom-width: 2px;
+}
+
+/* --- The bench ------------------------------------------------------------ */
+
+.bench {
+  margin-block: 1rem;
+}
+
+.bench-plate {
+  margin: 0;
+}
+
+/* A layout plot has a natural width. Below it the plate scrolls, the way a wide
+   drawing does — it is never reflowed into something that is not a bench. */
+.bench-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.bench-svg {
+  display: block;
+  width: 100%;
+  min-width: 46rem;
+  height: auto;
+  font-family: var(--sl-font), var(--sl-font-system);
+}
+
+.bench-plate figcaption {
+  margin-top: 0.5rem;
+}
+
+/* Below the plate's natural width the drawing scrolls in its own frame, so say
+   so — a diagram that is quietly cropped just looks broken. */
+.bench-hint {
+  margin: 0.5rem 0 0;
+  color: var(--ink-3);
+  font-size: var(--sl-text-xs);
+}
+
+@media (min-width: 48rem) {
+  .bench-hint {
+    display: none;
+  }
+}
+
+.ax {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+}
+
+.lens {
+  fill: var(--beam);
+  fill-opacity: 0.07;
+  stroke: var(--beam);
+  stroke-width: 1.25;
+}
+
+/* Incoming rays: present but unlit, so the whole fan is visible at once. They
+   are drawn outside the buttons and never take a pointer — see the component. */
+.ray {
+  stroke: var(--ink-3);
+  stroke-width: 0.9;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.ray.near {
+  stroke: var(--ink);
+  opacity: 0.9;
+}
+
+.ray.on {
+  stroke: currentColor;
+  stroke-width: 1.4;
+  opacity: 0.7;
+}
+
+.src {
+  cursor: pointer;
+}
+
+.src-hit {
+  fill: transparent;
+}
+
+.src-break {
+  fill: var(--paper);
+}
+
+.src-tick {
+  stroke: var(--ink-3);
+  stroke-width: 0.9;
+  opacity: 0.5;
+}
+
+.src-label {
+  fill: var(--ink-3);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.src-note {
+  fill: var(--ink-3);
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.src:hover .src-label,
+.src:focus-visible .src-label {
+  fill: var(--ink);
+}
+
+.src.on .src-label {
+  fill: currentColor;
+  font-weight: 600;
+}
+
+.src.on .src-note {
+  fill: currentColor;
+  opacity: 0.9;
+}
+
+.src.on .src-tick {
+  stroke: currentColor;
+  opacity: 0.7;
+}
+
+.src:focus {
+  outline: none;
+}
+
+.src:focus-visible .src-hit {
+  stroke: var(--beam);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+/* Exit lanes. Unlit is the resting state of the entire taxonomy; the verdict's
+   band is raised with it so the neighbours read too. */
+.lane-line {
+  opacity: 0.32;
+}
+
+.lane-label {
+  fill: var(--ink-3);
+  font-size: 13px;
+  opacity: 0.5;
+}
+
+.lane.near .lane-line {
+  opacity: 0.5;
+}
+.lane.near .lane-label {
+  opacity: 0.85;
+}
+
+.lane.lit .lane-line {
+  opacity: 0;
+}
+.lane.lit .lane-label {
+  fill: var(--ink);
+  font-weight: 600;
+  opacity: 1;
+}
+
+.band-label {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.45;
+}
+
+.band-note {
+  fill: var(--ink-3);
+  font-size: 11px;
+  opacity: 0.4;
+}
+
+.band.near .band-label,
+.band.near .band-note {
+  opacity: 0.95;
+}
+
+.beam line {
+  stroke: currentColor;
+  fill: none;
+}
+
+.beam circle {
+  fill: currentColor;
+}
+
+/* The signature move: the beam re-traces itself whenever the verdict changes.
+   A ray being drawn is the one motion this world already contains. */
+@media (prefers-reduced-motion: no-preference) {
+  .beam line {
+    stroke-dasharray: 1400;
+    animation: trace 420ms cubic-bezier(0.22, 0.8, 0.3, 1) both;
+  }
+
+  .beam circle {
+    animation: land 420ms ease-out both;
+  }
+
+  @keyframes trace {
+    from {
+      stroke-dashoffset: 1400;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  @keyframes land {
+    0%,
+    70% {
+      r: 0;
+    }
+    100% {
+      r: 3.5;
+    }
+  }
+}
+
+/* --- The console ---------------------------------------------------------- */
+
+.bench-console {
+  display: grid;
+  gap: 2.25rem;
+  align-content: start;
+}
+
+.field {
+  margin-top: 1.1rem;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--ink-3);
+  font-size: var(--sl-text-xs);
+}
+
+.field :is(input, textarea) {
+  width: 100%;
+  padding: 0.4rem 0;
+  border: none;
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 0;
+  background: none;
+  color: var(--ink);
+  font-family: var(--sl-font-mono), var(--sl-font-system-mono);
+  font-size: var(--sl-text-sm);
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.field :is(input, textarea):focus {
+  outline: none;
+  border-bottom-color: var(--beam);
+  border-bottom-width: 2px;
+  padding-bottom: calc(0.4rem - 1px);
+}
+
+.field-note {
+  margin-top: 0.9rem;
+  color: var(--ink-3);
+  font-size: var(--sl-text-xs);
+  line-height: 1.5;
+}
+
+.verdict-kind {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin: 1.1rem 0 0;
+  color: var(--ray);
+  font-family: var(--sl-font-mono), var(--sl-font-system-mono);
+  font-size: 1.6rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+/* The marker repeats the lane's own dot: the readout and the plate agree. */
+.verdict-mark {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--ray);
+}
+
+.verdict-band {
+  color: var(--ink-3);
+  font-family: var(--sl-font), var(--sl-font-system);
+  font-size: var(--sl-text-xs);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.verdict-fix {
+  margin: 0.7rem 0 0;
+  color: var(--ink);
+  font-size: 1.05rem;
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+/* An index leader: name, dotted run, value. Drafting sets tables this way. */
+.readout {
+  margin: 1.5rem 0 0;
+  font-size: var(--sl-text-sm);
+}
+
+.readout > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.3rem 0;
+}
+
+.readout dt {
+  color: var(--ink-3);
+  font-family: var(--sl-font-mono), var(--sl-font-system-mono);
+  font-size: var(--sl-text-xs);
+}
+
+.readout > div::after {
+  content: "";
+  order: 1;
+  flex: 1;
+  align-self: center;
+  border-bottom: 1px dotted var(--rule-strong);
+}
+
+.readout dd {
+  order: 2;
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--sl-font-mono), var(--sl-font-system-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Specimens: the failure inventory, grouped by density, never boxed ---- */
+
+.specimens {
+  display: grid;
+  gap: 2.25rem 3.5rem;
+  margin-block: 2rem;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+}
+
+.specimens h3 {
+  margin: 0 0 0.5rem;
+  padding-left: 1.1rem;
+  position: relative;
+  color: var(--ink);
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Each specimen is witnessed by a tick, the way an item on a plot is called out. */
+.specimens h3::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0.62em;
+  width: 0.65rem;
+  border-top: 1px solid var(--rule-strong);
+}
+
+.specimens p {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--ink-2);
+  font-size: var(--sl-text-sm);
+  line-height: 1.62;
+  text-wrap: pretty;
+}
+
+/* --- Dimensioned figures -------------------------------------------------- */
+
+.dims {
+  display: grid;
+  gap: 2rem 3rem;
+  margin-block: 2.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+
+/* --- Copy page as Markdown ------------------------------------------------ */
+
+.page-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.copy-md {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0 0.2rem;
+  border: none;
+  border-bottom: 1px solid var(--rule-strong);
+  background: none;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: var(--sl-text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.copy-md:hover {
+  color: var(--ink);
+  border-bottom-color: var(--beam);
+}
+
+.copy-md[data-state="done"] {
+  color: var(--beam);
+  border-bottom-color: var(--beam);
+}
+
+.copy-md[data-state="failed"] {
+  color: var(--ray-retry);
+  border-bottom-color: var(--ray-retry);
+}
+
+/* The agent channel, stated where a reader can find it. Agents read this site
+   as much as people do; this is the one line that tells a person so. */
+.agents-note {
+  margin-top: 1.75rem;
+  color: var(--ink-3);
+  font-size: var(--sl-text-xs);
+  line-height: 1.6;
+}
+
+.agents-note code {
+  font-size: 0.95em;
+}

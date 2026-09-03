@@ -24,7 +24,19 @@ export default defineConfig({
       description: DESCRIPTION,
       logo: { src: "./src/assets/mark.svg", alt: "" },
       favicon: "/favicon.svg",
-      customCss: ["./src/styles/brand.css"],
+      // Archivo is the drafting grotesque (one variable file carries 100–900);
+      // Commit Mono is the code face. Both OFL, both self-hosted — no third-party
+      // font request, and neither is the category default the site is avoiding.
+      customCss: [
+        "@fontsource-variable/archivo/wght.css",
+        "@fontsource-variable/archivo/wght-italic.css",
+        "@fontsource/commit-mono/latin-400.css",
+        "@fontsource/commit-mono/latin-600.css",
+        "./src/styles/bench.css",
+      ],
+      // The page title slot also carries "Copy page as Markdown" — the human
+      // half of the per-page .md endpoint.
+      components: { PageTitle: "./src/components/PageTitle.astro" },
       social: [{ icon: "github", label: "GitHub", href: REPO }],
       // The reference is generated from the TSDoc already in core/src, so it
       // cannot drift from the code the way a hand-written one does.
@@ -42,10 +54,15 @@ export default defineConfig({
             "  Cloudflare Workers, Deno and a Chrome MV3 service worker.",
             "- Errors are classified into 13 kinds named by what FIXES them, not by vendor",
             "  or HTTP status. See the Errors guide before reasoning about a failure.",
+            "- All 13 kinds with their remedy, `isTransient` and `isBackupEligible` flags",
+            "  are available as data at https://providerkit.dev/kinds.json",
+            "- Every page also serves its own markdown: append `.md` to any path, e.g.",
+            "  https://providerkit.dev/guides/errors.md",
           ].join("\n"),
           optionalLinks: [
             { label: "npm", url: "https://www.npmjs.com/package/@providerkit/core" },
             { label: "Source", url: REPO },
+            { label: "Error kinds as JSON", url: "https://providerkit.dev/kinds.json" },
           ],
           // Serve the original markdown rather than markdown reconstructed from
           // rendered HTML: code fences and tables survive exactly, and it skips
@@ -74,6 +91,9 @@ export default defineConfig({
           entryPoints: ["../core/src/index.ts", "../core/src/zod.ts"],
           tsconfig: "../core/tsconfig.json",
           output: "reference",
+          // Two entry points, so the generated group has two children named after
+          // the import paths they document.
+          sidebar: { label: "API reference", collapsed: true },
           typeDoc: { excludeInternal: true, useCodeBlocks: true, parametersFormat: "table" },
         }),
       ],
