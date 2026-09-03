@@ -1,5 +1,5 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
-import { ProviderError } from "../errors.ts";
+import { streamError } from "../errors.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
@@ -248,10 +248,12 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         }
 
         switch (event.type) {
+          // A failure the backend reports after its headers went out. Classified
+          // rather than assumed transient: this shape carries `overloaded_error`
+          // most of the time, but a prompt found too long mid-stream arrives the
+          // same way, and retrying that one only fails it again more slowly.
           case "error":
-            throw new ProviderError(id, "overload", event.error?.message ?? `${id} stream error`, {
-              code: event.error?.type,
-            });
+            throw streamError(id, event.error);
 
           case "message_start": {
             const usage = event.message?.usage;

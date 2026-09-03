@@ -3,6 +3,7 @@
 // This is the dialect most gateways speak, so one adapter serves OpenAI,
 // OpenRouter, DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio.
 // Their divergences are small and named where they appear.
+import { streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -119,6 +120,9 @@ interface OpenAIChunk {
     completion_tokens?: number;
     prompt_tokens_details?: { cached_tokens?: number };
   } | null;
+  /** Present only on the in-band failure below — never beside a choice.
+   *  `code` is the numeric HTTP status on the gateways, a slug on OpenAI. */
+  error?: { message?: string; code?: string | number; type?: string };
 }
 
 export function createOpenAIProvider(config: OpenAIConfig): Provider {
@@ -188,6 +192,14 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         } catch {
           continue;
         }
+
+        // A failure the backend reports after its headers went out. The
+        // gateways speaking this dialect — OpenRouter above all — report a
+        // throttle or an upstream outage this way rather than as a status
+        // line, and a frame carrying `error` carries no choices: unread, it
+        // falls through both branches below and the turn ends as a successful
+        // zero-token completion nobody retries.
+        if (chunk.error) throw streamError(id, chunk.error);
 
         // A usage-only frame carries no choices — this shape sends it last.
         if (chunk.usage) {

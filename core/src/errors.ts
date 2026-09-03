@@ -221,6 +221,12 @@ export function isTransportFailure(err: unknown): boolean {
     const message = readString(current, "message");
     if (name === "APIConnectionError" || name === "APIConnectionTimeoutError") return true;
     if (code !== undefined && TRANSPORT_CODES.has(code)) return true;
+    // undici — Node's fetch, and Bun's — parks the real reason in `code` while
+    // the thrown error says only "terminated", which is the most common way a
+    // stream dies mid-body. Its whole family shares one prefix; enumerating
+    // them ages badly, the prefix does not. UND_ERR_ABORTED is the caller's
+    // Stop wearing the same prefix, and is never ours to retry.
+    if (code?.startsWith("UND_ERR_") && code !== "UND_ERR_ABORTED") return true;
     // A bare TypeError is also what a real bug throws ("x is not a function"),
     // so the MESSAGE is checked, not just the type — misfiling one of those
     // would retry a genuine bug three times and hide it.
@@ -299,6 +305,21 @@ const CONTENT_PATTERNS: readonly RegExp[] = [
   /safety|PROHIBITED_CONTENT|blocked|refusal/i,
 ];
 
+/**
+ * A throttle said in words rather than in a 429.
+ *
+ * Every other kind has body evidence; rate had only the status, which is
+ * exactly the evidence an in-band failure lacks — an SSE response is already
+ * 200 when the throttle lands, so the reason arrives as a payload with no
+ * status line at all. Checked below the status branches, so it only ever
+ * catches what would otherwise fall through to "unknown".
+ */
+const RATE_PATTERNS: readonly RegExp[] = [
+  /rate[_\s-]?limit/i,
+  /too many requests/i,
+  /RESOURCE_EXHAUSTED/,
+];
+
 /** Theirs and temporary, said in words rather than a status. Gemini reports
  *  UNAVAILABLE/INTERNAL in the body; gateways say "capacity". */
 const OVERLOAD_PATTERNS: readonly RegExp[] = [
@@ -362,6 +383,7 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
   // "the model is still loading" — both are worth another attempt.
   if (code === 529 || code === 409) return "overload";
   if (code !== undefined && code >= 500) return "overload";
+  if (matches(RATE_PATTERNS, text)) return "rate";
   if (matches(OVERLOAD_PATTERNS, text)) return "overload";
   if (/timed out|timeout/i.test(text)) return "timeout";
   if (code !== undefined && code >= 400) return "invalid";
@@ -392,6 +414,48 @@ export function parseRetryAfterMs(err: unknown, body?: string): number | undefin
   if (/^\d+$/.test(value)) return Number(value) * 1000;
   const date = Date.parse(value);
   return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+/**
+ * A failure the backend reports INSIDE an already-200 stream.
+ *
+ * The transport classified everything that failed before the body opened; this
+ * is the rest, and every streaming shape has the same hole. An SSE response
+ * commits to 200 the moment its headers go out, so a throttle, an overload, or
+ * a prompt found too long after the fact arrives as a payload in the body
+ * rather than as a status line. Left unread it matches no branch an adapter
+ * models, the loop skips it, and the turn ends as a successful zero-token
+ * completion: retry sees nothing to retry, and a key pool never rotates off an
+ * exhausted key.
+ *
+ * `error` is the vendor's own payload, whatever shape it came in — the numeric
+ * HTTP `code` Gemini and OpenRouter use, the slug OpenAI and Anthropic put in
+ * `code`/`type`, the canonical `status` name. The whole thing serializes into
+ * the searchable body, so RetryInfo's `retryDelay` is honoured wherever it sits.
+ *
+ * `unknown` is floored to "overload" rather than kept: a stream that dies after
+ * its headers is by construction a transient upstream fault, and "unknown" is
+ * never retried. Everything the body DOES name keeps its own kind — which is
+ * what tells the caller to wait, rotate a key, or compact instead of retrying
+ * a failure that will repeat.
+ */
+export function streamError(provider: string, error: unknown): ProviderError {
+  const body = JSON.stringify(error ?? {}) ?? "";
+  const status = readNumber(error, "code") ?? readNumber(error, "status");
+  const code =
+    readString(error, "code") ?? readString(error, "status") ?? readString(error, "type");
+  const kind = classifyHttp(status, body);
+  return new ProviderError(
+    provider,
+    kind === "unknown" ? "overload" : kind,
+    `${provider} stream error: ${readString(error, "message") ?? code ?? "no reason given"}`,
+    {
+      ...(status !== undefined ? { status } : {}),
+      ...(code ? { code } : {}),
+      retryAfterMs: parseRetryAfterMs(error, body),
+      body: body.slice(0, 2_000),
+    },
+  );
 }
 
 /** The loggable surface of a failure — so a dead run never reads

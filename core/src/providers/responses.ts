@@ -10,7 +10,7 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
-import { classifyHttp, ProviderError } from "../errors.ts";
+import { streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -209,31 +209,6 @@ function usageChunk(usage: ResponsesUsage): ProviderChunk {
       outputTokens: usage.output_tokens ?? 0,
     },
   };
-}
-
-/**
- * A failure the backend reports inside an already-200 stream. The transport
- * classified everything that failed before the body opened; this is the rest.
- *
- * Classified from the code and message so a mid-stream throttle or overload
- * still reaches the retry layer as itself. An unrecognized one falls back to
- * "overload" rather than "unknown": a stream that dies after its headers is by
- * construction a transient upstream fault, and "unknown" is never retried.
- */
-function streamError(
-  provider: string,
-  error: { message?: string; code?: string } | undefined,
-): ProviderError {
-  const message = error?.message ?? "responses stream failed";
-  const code = error?.code;
-  const text = code ? `${code} ${message}` : message;
-  const kind = classifyHttp(undefined, text);
-  return new ProviderError(
-    provider,
-    kind === "unknown" ? "overload" : kind,
-    `${provider} stream error: ${message}`,
-    { ...(code ? { code } : {}), body: text.slice(0, 2_000) },
-  );
 }
 
 /** What has already gone out for one in-flight function call — identity and
@@ -460,6 +435,9 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             return;
           }
 
+          // The two ways this shape reports a failure after its headers went
+          // out: a terminal `response.failed`, or a bare error frame from a
+          // gateway in front of it.
           case "response.failed":
             throw streamError(id, event.response?.error);
 

@@ -5,7 +5,7 @@
 // its own chain of thought on the next turn. Written straight against the REST
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
-import { classifyHttp, parseRetryAfterMs, ProviderError } from "../errors.ts";
+import { streamError } from "../errors.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
@@ -232,41 +232,6 @@ interface GeminiResponse {
   error?: GeminiStatus;
 }
 
-/**
- * A failure the backend reports inside an already-200 stream. The transport
- * classified everything that failed before the body opened; this is the rest.
- *
- * `?alt=sse` commits to 200 the moment the headers go out, so a throttle or an
- * overload that lands after that arrives as a Status payload in the body — not
- * as a status line. Without this branch the payload matches neither
- * `usageMetadata` nor `candidates`, the loop skips it, and the turn ends as a
- * successful zero-token completion: retry.ts sees nothing to retry and the key
- * pool never rotates off an exhausted key.
- *
- * The whole Status is the searchable body, because RetryInfo's `retryDelay`
- * sits in `details` and honouring it beats guessing a backoff. An unrecognized
- * one falls back to "overload" rather than "unknown": a stream that dies after
- * its headers is by construction a transient upstream fault, and "unknown" is
- * never retried.
- */
-function streamError(provider: string, error: GeminiStatus): ProviderError {
-  const body = JSON.stringify(error);
-  const kind = classifyHttp(error.code, body);
-  return new ProviderError(
-    provider,
-    kind === "unknown" ? "overload" : kind,
-    `${provider} stream error: ${error.message ?? error.status ?? "no reason given"}`,
-    {
-      ...(error.code !== undefined ? { status: error.code } : {}),
-      // The canonical name (RESOURCE_EXHAUSTED, UNAVAILABLE) is what Gemini
-      // gives instead of a machine-readable code.
-      ...(error.status ? { code: error.status } : {}),
-      retryAfterMs: parseRetryAfterMs(error, body),
-      body: body.slice(0, 2_000),
-    },
-  );
-}
-
 export function createGeminiProvider(config: GeminiConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "gemini";
@@ -348,6 +313,9 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
           continue;
         }
 
+        // `?alt=sse` commits to 200 the moment the headers go out, so a
+        // throttle or an overload landing after that arrives here as a
+        // google.rpc.Status in the body rather than as a status line.
         if (chunk.error) throw streamError(id, chunk.error);
 
         if (chunk.usageMetadata) {
