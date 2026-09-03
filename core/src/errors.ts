@@ -274,7 +274,6 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   /upgrade your plan/i,
   /quota\b[^.]{0,40}\b(?:exhausted|exceeded|will be refreshed)/i,
   /balance (?:is )?(?:too low|not enough|insufficient)/i,
-  /per\s*day|PerDay|insufficient_quota|billing/i,
   /余额不足/,
   /欠费/,
   /额度(?:不足|已用完)/,

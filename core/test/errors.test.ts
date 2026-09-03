@@ -148,6 +148,37 @@ describe("classifyHttp — the response-shaped entry point", () => {
   });
 });
 
+describe("a quota wording must be the message, not a word inside it", () => {
+  // These patterns run BEFORE the 429-means-rate fallback and `quota` is
+  // permanent, so anything they over-match turns a two-second throttle into a
+  // dead run telling the user to top up. The merge that pooled five
+  // classifiers brought in a catch-all — /per\s*day|PerDay|insufficient_quota|billing/ —
+  // whose last two alternatives are already covered precisely above and whose
+  // first two fire on any body that merely NAMES a daily ceiling.
+  it("leaves a per-minute throttle alone when it also states the daily ceiling", () => {
+    expect(
+      classifyHttp(429, "Rate limit reached: Limit 20 per minute, 1000 per day. Try again in 2s."),
+    ).toBe("rate");
+  });
+
+  it("leaves a rate limit alone when the body merely links to a billing page", () => {
+    expect(
+      classifyHttp(429, "Rate limit exceeded. See https://console.example.com/settings/billing."),
+    ).toBe("rate");
+  });
+
+  it("still names the quota wordings that mean it", () => {
+    expect(
+      classifyHttp(
+        429,
+        '{"error":{"message":"You exceeded your current quota, check your plan and billing details","type":"insufficient_quota"}}',
+      ),
+    ).toBe("quota");
+    expect(classifyHttp(429, "You have reached your daily limit of 500 requests")).toBe("quota");
+    expect(classifyHttp(400, '{"error":"insufficient_quota"}')).toBe("quota");
+  });
+});
+
 describe("context overflow is not a rate limit", () => {
   it.each([
     "This model's maximum context length is 128000 tokens",
