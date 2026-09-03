@@ -55,12 +55,15 @@ Explicitly **not** an agent framework. No loop, no prompts, no graph, no memory,
 
 ## Capabilities and Constraints
 
-**Shipped and tested (218 tests):** the provider seam; the merged error classifier (13 kinds);
+**Shipped and tested (344 tests):** the provider seam; the merged error classifier (13 kinds);
 retry with full-jitter backoff and backup-model fallback; the idle stream watchdog and TTFT;
-fetch/SSE transport; tool-argument salvage; Anthropic and OpenAI-shape adapters; the tool
-kernel; schema clamping; compaction decisions; cost maths.
+fetch/SSE transport; tool-argument salvage; Anthropic, OpenAI-shape, Responses and Gemini
+adapters; the multi-key rotation pool; rate-limit reset windows; the tool kernel; schema
+clamping; compaction decisions; cost maths.
 
-**Not yet built:** Gemini adapter, Responses adapter, multi-key rotation pool.
+**Not yet built:** nothing in the extraction's scope. What is unbuilt is *adoption* — no
+codebase consumes the package yet, so the "every adopting codebase gets smaller" claim is
+still unmeasured. tabrunner migrates first, and that is what gates the next release.
 
 **Hard constraints:** zero runtime dependencies. `fetch` only. zod is an optional peer, never
 imported by the kernel. No price tables ship — rates change weekly and a stale table is worse
@@ -91,7 +94,7 @@ Real, verifiable, and load-bearing — this is the proof the positioning rests o
   separately in three of those repos.
 - **2026-09-01:** featury and olhary shipped the same five fixes on the same day, independently.
   Provable from their git logs.
-- **218 passing tests**; 90 exported symbols; 13 error kinds.
+- **344 passing tests**; 100 exported symbols; 13 error kinds.
 - The live classifier on the site runs the real published package in the reader's browser.
 
 **Must not be fabricated:** there are no users, no testimonials, no adopters, no benchmarks,

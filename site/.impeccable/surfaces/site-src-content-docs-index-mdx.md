@@ -21,7 +21,7 @@ do about the failure in front of them, fast, and to keep reading comfortably for
 ## Proof on hand
 
 Five pooled production codebases (~9,100 lines), three independently-derived identical 60s
-watchdogs, two repos shipping the same five fixes on the same day, 218 tests, 13 error kinds, and
+watchdogs, two repos shipping the same five fixes on the same day, 344 tests, 13 error kinds, and
 a classifier that runs the real published package in the reader's browser. No users, no
 testimonials, no adopters — none may be invented.
 
@@ -136,9 +136,20 @@ This section is for agents _using_ it.
 - Whether the ~85 generated TypeDoc reference pages take the full world or a deliberately plainer
   Read register. Currently they inherit the Read register unchanged and it holds; revisit if the
   generated markup starts fighting the drafting grammar.
-- Whether each remaining guide earns its own figure. The retries commitment horizon and the
-  streaming watchdog timeline carry information prose cannot; the other six may not.
-- DESIGN.md is written at finish, from the built world, not before.
+
+## Resolved at finish
+
+- **Two guide figures, not eight.** `CommitmentHorizon.astro` (retries) and
+  `WatchdogTimeline.astro` (streaming) shipped. A figure is earned by having spatial
+  information to carry — a threshold, an interval — not by being a page. The other six
+  guides get none, and that is the answer, not a deferral.
+- **Both figures are Astro, not React.** They are static, so they ship zero JavaScript; and
+  the guide's `.md` source grows by two lines instead of two hundred, which is what keeps
+  the agent channel worth having. The guides became `.mdx` to import them.
+- **DESIGN.md written**, at the repo root, from the built world. It is the maintenance
+  record — palette roles, the drafting primitives, the three load-bearing facts about the
+  bench, and the seven rules that keep the world coherent. This brief stays the record of
+  the decision; DESIGN.md is the record of the result.
 
 ## Settled during the build
 

@@ -62,7 +62,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 218 tests
+bun run test                 # vitest, 344 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -97,11 +97,12 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 - **The repo must be public.** A free npm org can only host public packages, and a free
   GitHub org only gets unlimited Actions minutes on public repos. It is MIT anyway.
 
-**Not yet done:** first `npm publish`; point the providerkit.dev DNS at the Pages project.
+**Not yet done:** point the providerkit.dev DNS at the Pages project. `0.1.0` is on npm;
+the next release waits on tabrunner proving the API (see **Next**).
 
 ## State
 
-**Built, tested, green** (218 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (344 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                          |
 | ------------------------ | ---------------------------------------------------------------------- |
@@ -117,9 +118,15 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | `context.ts`             | compaction decisions — `needsCompaction`, `pickCut`, `applyCompaction` |
 | `providers/anthropic.ts` | Anthropic shape                                                        |
 | `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)         |
+| `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend         |
+| `providers/gemini.ts`    | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output |
+| `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator    |
+| `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets |
 | `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                   |
 
-**Not built yet:** Gemini adapter · Responses adapter · multi-key rotation pool.
+**Not built yet:** nothing in the extraction's scope. Every concern the plan named is in.
+What is unproven is *adoption* — no codebase consumes this yet, so "every adopting codebase
+gets smaller" is still a claim, not a measurement.
 
 ## Invariants — do not regress these
 
@@ -153,11 +160,12 @@ un-learned.
 
 ## Next
 
-1. Finish the Gemini and Responses adapters, and the key pool.
-2. **Migrate tabrunner first** — hardest runtime (MV3, no Node, no zod) and the strongest
+1. **Migrate tabrunner first** — hardest runtime (MV3, no Node, no zod) and the strongest
    existing implementation, so it pressure-tests the API where it is most likely to break.
-3. Then smartgenius → featury → olhary.
-4. **falai last, as `@falai/agent` v3** — it is the only consumer with a public API to break
+   This is also the release gate: the version does not move until one real consumer proves
+   the API.
+2. Then smartgenius → featury → olhary.
+3. **falai last, as `@falai/agent` v3** — it is the only consumer with a public API to break
    (six exported provider classes plus three error functions, and `OpenAICompatibleProvider`
    is an `abstract class` others extend). Clean break, major bump, no compat shims.
 

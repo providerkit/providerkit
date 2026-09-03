@@ -106,12 +106,15 @@ the invariants worth not regressing, and what is left to build.
 
 ## Status
 
-Working and tested (218 tests): the seam, the error classifier, retry and backup-model
+Working and tested (344 tests): the seam, the error classifier, retry and backup-model
 fallback, the idle watchdog, cost math, the fetch/SSE transport, tool-argument salvage, the
-Anthropic and OpenAI-shape adapters, the tool kernel, schema clamping, and the compaction
-decisions.
+Anthropic, OpenAI-shape, Responses and Gemini adapters, the multi-key rotation pool,
+rate-limit reset windows, the tool kernel, schema clamping, and the compaction decisions.
 
-Not yet: the Gemini and Responses adapters, and the multi-key rotation pool.
+That is the whole extraction. What is not yet proven is adoption: **nothing consumes this
+package yet, including the five codebases it came from.** The claim it is built on is that
+every adopting codebase gets smaller, and until one migrates that claim is untested — so
+the version stays where it is until one does.
 
 ## License
 
