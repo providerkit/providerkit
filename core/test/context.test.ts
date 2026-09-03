@@ -53,6 +53,21 @@ describe("messageTokens", () => {
   });
 });
 
+describe("needsCompaction on a small window", () => {
+  it("does not demand compaction before the first turn has reported usage", () => {
+    // Found migrating tabrunner, which had carried this guard locally. Its
+    // windows are LEARNED from a provider's own length rejection, so a genuine
+    // 8k ceiling reaches this function. Without the guard the threshold goes
+    // negative, every turn reads as full, and the run folds an empty history
+    // forever.
+    for (const window of [8_000, 20_000, 32_000]) {
+      expect(needsCompaction(0, window)).toBe(false);
+    }
+    // A real overrun on a small window still fires.
+    expect(needsCompaction(7_900, 8_000)).toBe(true);
+  });
+});
+
 describe("needsCompaction", () => {
   it("fires while the reserve still fits — before the 400, not after", () => {
     const window = 200_000;

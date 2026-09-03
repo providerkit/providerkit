@@ -56,6 +56,13 @@ export function conversationTokens(messages: readonly ChatMessage[]): number {
  * that is not a guess. Estimate only when there is no reported count yet.
  */
 export function needsCompaction(inputTokens: number, contextWindow: number): boolean {
+  // A window at or below the reserve puts the threshold at zero or less, and
+  // every turn — including one that has not reported usage yet — then reads as
+  // already full. That loops: folding a history this side of its first answer
+  // changes nothing, so the next check says the same thing. Small windows are
+  // not hypothetical; a caller that learns a real ceiling from a rejection
+  // (rather than guessing one) can legitimately arrive here with 8k.
+  if (inputTokens <= 0) return false;
   return inputTokens >= contextWindow - CONTEXT_RESERVE_TOKENS;
 }
 
