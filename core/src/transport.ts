@@ -146,7 +146,11 @@ export async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGe
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      // Normalized on the BUFFER, not on the decoded read: a network read can
+      // end between the CR and the LF, and normalizing each read separately
+      // leaves that CR stranded on the end of a payload — a JSON parse error
+      // that only ever reproduces under a particular packet split.
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
 
       let boundary = buffer.indexOf("\n\n");
       while (boundary !== -1) {
