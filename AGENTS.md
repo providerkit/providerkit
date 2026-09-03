@@ -159,10 +159,10 @@ un-learned.
 
 ## Next
 
-1. **Migrate tabrunner first** — hardest runtime (MV3, no Node, no zod) and the strongest
-   existing implementation, so it pressure-tests the API where it is most likely to break.
-   This is also the release gate: the version does not move until one real consumer proves
-   the API.
+1. **tabrunner — in progress, uncommitted.** classifier, tool-arg salvage, rate-limit parsing
+   and the SSE framing are on the package; **-539 lines**, all six of its gates green including
+   the MV3 bundle. It stays in the working tree until `0.2.0` is on npm, because its CI runs
+   `bun install --frozen-lockfile` and cannot resolve the local `link:`.
 2. Then smartgenius → featury → olhary.
 3. **falai last, as `@falai/agent` v3** — it is the only consumer with a public API to break
    (six exported provider classes plus three error functions, and `OpenAICompatibleProvider`
@@ -171,6 +171,24 @@ un-learned.
 Consume via bun `catalog:` in each repo so upgrades stay opt-in per app and one bad publish
 cannot take down five apps at once. **Each migration should be net-negative in lines** — if a
 repo grows, the cut line was drawn in the wrong place.
+
+### What tabrunner taught — apply to the next four
+
+- **Split the envelope from the framing wherever both exist.** tabrunner could take `streamSse`'s
+  SSE reader but not its error envelope: its failure line is translated, its log level splits on
+  whether the kind is one the chat already explains. That is not tabrunner being odd — an app with
+  its own copy, log levels or auth refresh is the normal case. `parseSseStream` is now exported
+  beside `streamSse` for exactly that. Expect the same shape elsewhere and cut there **before** an
+  adopter has to keep a copy.
+- **Not everything should migrate.** `context-window.ts` stays in tabrunner: it learns the real
+  ceiling from a length rejection instead of guessing from a model name, which is better than the
+  regex ladder here, and it is tied to extension storage. Do not re-attempt it in the next repo —
+  a worse shared version is not a win.
+- **Widening a union is a breaking change downstream even when nothing throws.** The merged
+  classifier answers 13 kinds where tabrunner's answered eight-or-`undefined`, so its
+  kind→copy map needed two new strings in three locales. Keep such maps exhaustive
+  (`satisfies Record<ErrorKind, …>`) so a 14th kind fails the build rather than silently falling
+  through to a status code.
 
 ## House rules
 
