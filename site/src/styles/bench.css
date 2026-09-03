@@ -687,22 +687,28 @@ html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dim
 }
 
 /* Exit lanes. Unlit is the resting state of the entire taxonomy; the verdict's
-   band is raised with it so the neighbours read too. */
+   band is raised with it so the neighbours read too.
+
+   Resting does NOT mean dim. The claim this drawing makes is that you can read
+   the whole taxonomy at once, so every lane name has to clear 4.5:1 while unlit
+   — dimming text with opacity multiplied --ink-3 down to 2.2:1 and broke both
+   the claim and the contrast floor. The three steps are carried by ink weight
+   instead, which is what this world uses for depth everywhere else; opacity is
+   left to the line work, where the 3:1 graphics floor applies. */
 .lane-line {
-  opacity: 0.32;
+  opacity: 0.55;
 }
 
 .lane-label {
   fill: var(--ink-3);
   font-size: 13px;
-  opacity: 0.5;
 }
 
 .lane.near .lane-line {
-  opacity: 0.5;
+  opacity: 0.8;
 }
 .lane.near .lane-label {
-  opacity: 0.85;
+  fill: var(--ink-2);
 }
 
 .lane.lit .lane-line {
@@ -711,24 +717,25 @@ html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dim
 .lane.lit .lane-label {
   fill: var(--ink);
   font-weight: 600;
-  opacity: 1;
 }
 
 .band-label {
   font-size: 12px;
   font-weight: 600;
-  opacity: 0.45;
+  opacity: 0.85;
 }
 
 .band-note {
   fill: var(--ink-3);
   font-size: 11px;
-  opacity: 0.4;
 }
 
-.band.near .band-label,
+.band.near .band-label {
+  opacity: 1;
+}
+
 .band.near .band-note {
-  opacity: 0.95;
+  fill: var(--ink-2);
 }
 
 .beam line {
@@ -989,4 +996,178 @@ html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dim
 
 .agents-note code {
   font-size: 0.95em;
+}
+
+/* --- Guide figures -------------------------------------------------------- */
+
+/* One emblematic figure per guide, in the same drafting grammar as the bench:
+   dimensioned spans rather than labelled ones, witness lines that carry the
+   causation, dash-dot for a reference line. These two exist because their
+   subject is spatial — a threshold, and an interval — and prose can only
+   assert what a drawing shows. The other six guides get none for that reason. */
+
+/* Label sizes below are in viewBox units, and the figure renders at roughly
+   0.75x in the Read register's measure — so each is set for what lands on the
+   page, not for what the number says. */
+.fig-svg {
+  display: block;
+  width: 100%;
+  min-width: 38rem;
+  height: auto;
+  font-family: var(--sl-font), var(--sl-font-system);
+}
+
+.fig-axis {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+}
+
+/* The reference line the whole retries figure is about. Dash-dot, weighted
+   above everything else on the plate: it is a wall, not an annotation. */
+.fig-horizon {
+  stroke: var(--ink);
+  stroke-width: 1.75;
+}
+
+.fig-title {
+  fill: var(--ink);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.fig-zone-label {
+  font-size: 15.5px;
+  font-weight: 600;
+  fill: var(--ink-2);
+}
+
+.fig-zone-note {
+  font-size: 14px;
+  fill: var(--ink-3);
+}
+
+.fig-zone.retry .fig-zone-label,
+.fig-zone.retry .fig-dim {
+  color: var(--ray-retry);
+  fill: var(--ray-retry);
+  stroke: var(--ray-retry);
+}
+
+.fig-zone.committed .fig-zone-label,
+.fig-zone.committed .fig-dim {
+  color: var(--beam);
+  fill: var(--beam);
+  stroke: var(--beam);
+}
+
+/* Dimension lines carry their own witness ticks as separate segments, so the
+   same class styles both the span and its ends. */
+.fig-dim {
+  stroke: var(--ink-3);
+  stroke-width: 1;
+}
+
+.fig-tick {
+  stroke: var(--ink-2);
+  stroke-width: 1.25;
+}
+
+/* A witness line ties an event to its consequence one row down. Faint on
+   purpose — it is the drawing's grammar, not its content. */
+.fig-witness {
+  stroke: var(--rule-strong);
+  stroke-width: 0.75;
+  stroke-dasharray: 2 3;
+}
+
+.fig-note {
+  fill: var(--ink-3);
+  font-size: 14px;
+}
+
+/* Output that has left the lens keeps the collimated beam's colour. */
+.fig-chunks line,
+.fig-chunk {
+  stroke: var(--beam);
+  stroke-width: 1.5;
+}
+
+.fig-fail line {
+  stroke: var(--ray-account);
+  stroke-width: 1.75;
+}
+
+.fig-return {
+  fill: none;
+  stroke-width: 1.4;
+}
+
+.fig-return.allowed {
+  stroke: var(--ray-retry);
+}
+
+.fig-arrowhead {
+  fill: var(--ray-retry);
+}
+
+/* The blocked path is drawn dashed and stops dead: it is an attempt, not a
+   route. Colour alone never carries this — the dash does. */
+.fig-return.blocked {
+  stroke: var(--ink-3);
+  stroke-dasharray: 5 4;
+}
+
+.fig-stop {
+  stroke: var(--ink);
+  stroke-width: 3;
+}
+
+.fig-outcome {
+  font-size: 15.5px;
+  font-weight: 500;
+  text-anchor: middle;
+}
+
+.fig-outcome.allowed {
+  fill: var(--ray-retry);
+}
+
+.fig-outcome.blocked {
+  fill: var(--ink-3);
+}
+
+/* --- the watchdog's timer rows --- */
+
+.fig-timer-cap {
+  stroke: var(--beam);
+  stroke-width: 1.5;
+}
+
+.fig-timer-live {
+  stroke: var(--ink-2);
+  stroke-width: 1.5;
+}
+
+/* What was left on the clock when the next chunk cancelled it. */
+.fig-timer-ghost {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.fig-timer-cut {
+  stroke: var(--beam);
+  stroke-width: 1.25;
+}
+
+/* A timeout is a retry-family kind, so it wears the retry wavelength. */
+.fig-fire {
+  stroke: var(--ray-retry);
+  stroke-width: 2.5;
+}
+
+.fig-fire-label {
+  fill: var(--ray-retry);
+  font-size: 15.5px;
+  font-weight: 600;
 }

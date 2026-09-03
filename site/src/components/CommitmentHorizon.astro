@@ -1,0 +1,157 @@
+---
+/**
+ * The commitment horizon — the retries guide's one figure.
+ *
+ * Prose can state the rule ("retry only while nothing has been emitted") but it
+ * cannot show that the rule is about a PLACE. The same failure, on the same
+ * stream, is free on one side of a line and irreversible on the other; what
+ * moved is not the error, it is where in the turn it landed.
+ *
+ * So the horizon is drawn as a wall, and the second failure's return path runs
+ * into it. The first chunk's tick and the horizon are the same x on purpose:
+ * emitting is the event that builds the wall.
+ */
+const W = 1000;
+const H = 312;
+
+const AXIS_Y = 168;
+const START_X = 130; // the request goes out
+const HORIZON_X = 470; // the first chunk reaches the caller
+const END_X = 930;
+
+const FAIL_EARLY_X = 300;
+const FAIL_LATE_X = 790;
+
+const RETURN_Y = 240; // where both return paths run
+
+/** Output ticks. The first one IS the horizon — that is the whole point. */
+const CHUNKS = Array.from({ length: 9 }, (_, i) => HORIZON_X + i * 34);
+---
+
+<figure class="bench-plate">
+  <div class="bench-scroll">
+    <svg
+      class="fig-svg"
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label="A stream's timeline. Before the first chunk reaches the caller a failure can be retried from the top; after it, the return path is blocked by the commitment horizon and the failure propagates."
+    >
+      <defs>
+        <marker
+          id="commitment-arrow"
+          viewBox="0 0 8 8"
+          refX="7"
+          refY="4"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path class="fig-arrowhead" d="M 0 0 L 8 4 L 0 8 Z" />
+        </marker>
+      </defs>
+
+      {/* The horizon, drawn before everything so the line work sits on top. */}
+      <line
+        class="fig-horizon"
+        x1={HORIZON_X}
+        y1="52"
+        x2={HORIZON_X}
+        y2="264"
+        stroke-dasharray="14 5 2 5"
+      />
+      <text class="fig-title" x={HORIZON_X} y="40" text-anchor="middle">
+        the first chunk reaches the caller
+      </text>
+
+      {/* Dimensions: the two regions, witnessed at both ends the way a drawing
+          dimensions a span rather than labelling it. */}
+      <g class="fig-zone retry">
+        <text class="fig-zone-label" x={(START_X + HORIZON_X) / 2} y="88" text-anchor="middle">
+          retryable
+        </text>
+        <text class="fig-zone-note" x={(START_X + HORIZON_X) / 2} y="104" text-anchor="middle">
+          nothing has reached the caller yet
+        </text>
+        <line class="fig-dim" x1={START_X} y1="120" x2={HORIZON_X - 8} y2="120" />
+        <line class="fig-dim" x1={START_X} y1="114" x2={START_X} y2="126" />
+        <line class="fig-dim" x1={HORIZON_X - 8} y1="114" x2={HORIZON_X - 8} y2="126" />
+      </g>
+
+      <g class="fig-zone committed">
+        <text class="fig-zone-label" x={(HORIZON_X + END_X) / 2} y="88" text-anchor="middle">
+          committed
+        </text>
+        <text class="fig-zone-note" x={(HORIZON_X + END_X) / 2} y="104" text-anchor="middle">
+          the answer is already on their screen
+        </text>
+        <line class="fig-dim" x1={HORIZON_X + 8} y1="120" x2={END_X} y2="120" />
+        <line class="fig-dim" x1={HORIZON_X + 8} y1="114" x2={HORIZON_X + 8} y2="126" />
+        <line class="fig-dim" x1={END_X} y1="114" x2={END_X} y2="126" />
+      </g>
+
+      {/* The turn's own axis. */}
+      <line class="fig-axis" x1="60" y1={AXIS_Y} x2={W - 60} y2={AXIS_Y} />
+
+      {/* The request, and the witness line the early retry returns to. */}
+      <line class="fig-tick" x1={START_X} y1={AXIS_Y - 8} x2={START_X} y2={AXIS_Y + 8} />
+      <line class="fig-witness" x1={START_X} y1={AXIS_Y + 8} x2={START_X} y2={RETURN_Y + 6} />
+      <text class="fig-note" x={START_X} y={AXIS_Y - 16} text-anchor="middle">request</text>
+
+      {/* Output. Evenly spaced because what matters is that it is flowing. */}
+      <g class="fig-chunks">
+        {
+          CHUNKS.map((x) => (
+            <line x1={x} y1={AXIS_Y - 6} x2={x} y2={AXIS_Y + 6} />
+          ))
+        }
+      </g>
+
+      {/* Two identical failures. Everything that differs, differs downstream. */}
+      {
+        [FAIL_EARLY_X, FAIL_LATE_X].map((x) => (
+          <g class="fig-fail">
+            <line x1={x - 5} y1={AXIS_Y - 5} x2={x + 5} y2={AXIS_Y + 5} />
+            <line x1={x + 5} y1={AXIS_Y - 5} x2={x - 5} y2={AXIS_Y + 5} />
+            <text class="fig-note" x={x} y={AXIS_Y - 16} text-anchor="middle">
+              the stream drops
+            </text>
+          </g>
+        ))
+      }
+
+      {/* Left: the return path completes. */}
+      <path
+        class="fig-return allowed"
+        marker-end="url(#commitment-arrow)"
+        d={`M ${FAIL_EARLY_X} ${AXIS_Y + 10} L ${FAIL_EARLY_X} ${RETURN_Y - 12} Q ${FAIL_EARLY_X} ${RETURN_Y} ${FAIL_EARLY_X - 12} ${RETURN_Y} L ${START_X + 9} ${RETURN_Y}`}
+      />
+      <text class="fig-outcome allowed" x={(START_X + FAIL_EARLY_X) / 2} y={RETURN_Y + 24}>
+        attempt 2 starts clean
+      </text>
+
+      {/* Right: the same path, stopped by the horizon. */}
+      <path
+        class="fig-return blocked"
+        d={`M ${FAIL_LATE_X} ${AXIS_Y + 10} L ${FAIL_LATE_X} ${RETURN_Y - 12} Q ${FAIL_LATE_X} ${RETURN_Y} ${FAIL_LATE_X - 12} ${RETURN_Y} L ${HORIZON_X + 20} ${RETURN_Y}`}
+      />
+      <line
+        class="fig-stop"
+        x1={HORIZON_X + 14}
+        y1={RETURN_Y - 12}
+        x2={HORIZON_X + 14}
+        y2={RETURN_Y + 12}
+      />
+      <text class="fig-outcome blocked" x={(HORIZON_X + FAIL_LATE_X) / 2} y={RETURN_Y + 24}>
+        no way back — it propagates
+      </text>
+    </svg>
+  </div>
+  <p class="bench-hint">Wider than this screen — scroll the figure sideways.</p>
+  <figcaption class="leader">
+    <span>
+      Fig. — the same failure, twice. <code>withStreamRetry</code> retries only to the left of the
+      horizon; past it a retry would replay tokens the reader has already seen, so the error is
+      handed to the caller instead.
+    </span>
+  </figcaption>
+</figure>

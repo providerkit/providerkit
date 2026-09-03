@@ -3,6 +3,8 @@ title: Retries and fallback
 description: Full-jitter backoff, the commitment rule that keeps a retried stream from replaying tokens, and walking a list of backup models.
 ---
 
+import CommitmentHorizon from "../../../components/CommitmentHorizon.astro";
+
 ## Backoff
 
 ```ts
@@ -30,6 +32,8 @@ during a backoff wait returns immediately rather than after the delay.
 ## Streams: retry only while nothing has been emitted
 
 This is the rule that matters, and the one that is easy to get wrong.
+
+<CommitmentHorizon />
 
 ```ts
 import { withStreamRetry } from "@providerkit/core";

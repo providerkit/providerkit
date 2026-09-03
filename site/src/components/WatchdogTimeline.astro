@@ -1,0 +1,130 @@
+---
+/**
+ * The watchdog timeline — the streaming guide's one figure.
+ *
+ * The idle watchdog is hard to describe because the thing that fires it is an
+ * absence. Prose has to say "the timer re-arms on every chunk" and hope; a
+ * drawing can show four timers being cancelled and the fifth running out, which
+ * is the whole mechanism in one read.
+ *
+ * Horizontal distance is time, and it is to scale: the armed window is always
+ * the same length, so the ghost of each cancelled timer shows exactly how much
+ * of it was left when the next chunk arrived.
+ */
+const W = 1000;
+const H = 312;
+
+const AXIS_Y = 150;
+const START_X = 110;
+
+/** 60 s of idle, drawn once and reused — the scale of the whole figure. */
+const WINDOW_W = 320;
+
+/** Irregular on purpose: real chunks do not arrive on a metronome. */
+const CHUNKS = [330, 392, 446, 512, 560];
+
+const ROW_TOP = 182;
+const ROW_STEP = 18;
+const rowY = (i: number) => ROW_TOP + i * ROW_STEP;
+
+const FIRE_X = CHUNKS[CHUNKS.length - 1]! + WINDOW_W;
+const FIRE_ROW = rowY(CHUNKS.length - 1);
+const DIM_Y = 278;
+---
+
+<figure class="bench-plate">
+  <div class="bench-scroll">
+    <svg
+      class="fig-svg"
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label="A stream's timeline. Each arriving chunk cancels the pending idle timer and arms a new one; after the last chunk the window runs its full sixty seconds and aborts the stream."
+    >
+      {/* Time. */}
+      <line class="fig-axis" x1="60" y1={AXIS_Y} x2={W - 60} y2={AXIS_Y} />
+
+      <line class="fig-tick" x1={START_X} y1={AXIS_Y - 8} x2={START_X} y2={AXIS_Y + 8} />
+      <text class="fig-note" x={START_X} y={AXIS_Y - 16} text-anchor="middle">request</text>
+
+      {/* TTFT — dimensioned rather than labelled, because it is a span. */}
+      <text class="fig-zone-label" x={(START_X + CHUNKS[0]!) / 2} y="78" text-anchor="middle">
+        TTFT
+      </text>
+      <text class="fig-zone-note" x={(START_X + CHUNKS[0]!) / 2} y="94" text-anchor="middle">
+        the wait people actually feel
+      </text>
+      <line class="fig-dim" x1={START_X} y1="110" x2={CHUNKS[0]} y2="110" />
+      <line class="fig-dim" x1={START_X} y1="104" x2={START_X} y2="116" />
+      <line class="fig-dim" x1={CHUNKS[0]} y1="104" x2={CHUNKS[0]} y2="116" />
+
+      {/* Every chunk: a tick on the axis, and a witness line down to the timer
+          it arms. The descent is the causal link, drawn rather than captioned. */}
+      {
+        CHUNKS.map((x, i) => (
+          <g>
+            <line class="fig-chunk" x1={x} y1={AXIS_Y - 6} x2={x} y2={AXIS_Y + 6} />
+            <line class="fig-witness" x1={x} y1={AXIS_Y + 6} x2={x} y2={rowY(i) - 6} />
+          </g>
+        ))
+      }
+      <text class="fig-note" x={CHUNKS[0]} y={AXIS_Y - 16} text-anchor="middle">first chunk</text>
+      <text class="fig-note" x={CHUNKS[CHUNKS.length - 1]} y={AXIS_Y - 16} text-anchor="middle">
+        last chunk
+      </text>
+
+      {/* The timers. Four are cut short; the fifth is the one that matters. */}
+      {
+        CHUNKS.map((x, i) => {
+          const next = CHUNKS[i + 1];
+          const full = x + WINDOW_W;
+          const y = rowY(i);
+          return (
+            <g class="fig-timer">
+              <line class="fig-timer-cap" x1={x} y1={y - 5} x2={x} y2={y + 5} />
+              {next === undefined ? (
+                <line class="fig-timer-live" x1={x} y1={y} x2={full} y2={y} />
+              ) : (
+                <>
+                  <line class="fig-timer-live" x1={x} y1={y} x2={next} y2={y} />
+                  <line class="fig-timer-ghost" x1={next} y1={y} x2={full} y2={y} />
+                  <line class="fig-timer-cut" x1={next} y1={y - 5} x2={next} y2={y + 5} />
+                </>
+              )}
+            </g>
+          );
+        })
+      }
+
+      {/* Where the absence becomes an error. */}
+      <line class="fig-fire" x1={FIRE_X} y1={FIRE_ROW - 10} x2={FIRE_X} y2={FIRE_ROW + 10} />
+      <text class="fig-fire-label" x={FIRE_X + 10} y={FIRE_ROW + 4}>aborts</text>
+
+      {/* The window, dimensioned once on the timer that ran its full length. */}
+      <line class="fig-dim" x1={CHUNKS[CHUNKS.length - 1]} y1={DIM_Y} x2={FIRE_X} y2={DIM_Y} />
+      <line
+        class="fig-dim"
+        x1={CHUNKS[CHUNKS.length - 1]}
+        y1={DIM_Y - 6}
+        x2={CHUNKS[CHUNKS.length - 1]}
+        y2={DIM_Y + 6}
+      />
+      <line class="fig-dim" x1={FIRE_X} y1={DIM_Y - 6} x2={FIRE_X} y2={DIM_Y + 6} />
+      <text
+        class="fig-zone-note"
+        x={(CHUNKS[CHUNKS.length - 1]! + FIRE_X) / 2}
+        y={DIM_Y + 22}
+        text-anchor="middle"
+      >
+        idleMs — 60 s by default
+      </text>
+    </svg>
+  </div>
+  <p class="bench-hint">Wider than this screen — scroll the figure sideways.</p>
+  <figcaption class="leader">
+    <span>
+      Fig. — each chunk cancels the pending timer and arms a new one, so the ghosts are the time
+      that was left. Only silence reaches the end of a window, and{" "}
+      <code>watch.classify()</code> is what tells that abort apart from the caller pressing Stop.
+    </span>
+  </figcaption>
+</figure>

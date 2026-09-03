@@ -3,12 +3,16 @@ title: Streaming and the watchdog
 description: The idle watchdog that catches a stream which stops sending, plus time-to-first-token.
 ---
 
+import WatchdogTimeline from "../../../components/WatchdogTimeline.astro";
+
 The nastiest streaming failure is not an error. It is a provider that accepts the request,
 returns 200, sends a few bytes — and then nothing. No error, no close, no timeout. Every SDK's
 default is to wait forever, and the symptom is the worst kind: none at all.
 
 A request timeout does not catch it either. The request succeeded. What died is the _gap between
 chunks_.
+
+<WatchdogTimeline />
 
 ## Watching a stream
 
