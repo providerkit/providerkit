@@ -133,12 +133,25 @@ This section is for agents _using_ it.
 
 ## Unresolved
 
-- Font availability unverified (Archivo via Fontsource; Commit Mono self-hosted). Confirm before
-  building; if Commit Mono is impractical, choose another non-default mono — not JetBrains Mono.
 - Whether the ~85 generated TypeDoc reference pages take the full world or a deliberately plainer
-  Read register. Decide during the build from how the generated markup actually renders.
-- Whether `kinds.json` ships (see Agent channel). Still undecided.
-- The "Copy page as Markdown" control is the rebuild's to add; everything else in the agent
-  channel is shipped and verified (94 pages, 94 `.md` files, 1:1).
-- DESIGN.md is written at finish, from the built world, not before. Its absence is deliberate and
-  is not a gap to fill by inventing tokens ahead of the build.
+  Read register. Currently they inherit the Read register unchanged and it holds; revisit if the
+  generated markup starts fighting the drafting grammar.
+- Whether each remaining guide earns its own figure. The retries commitment horizon and the
+  streaming watchdog timeline carry information prose cannot; the other six may not.
+- DESIGN.md is written at finish, from the built world, not before.
+
+## Settled during the build
+
+- **Fonts: Archivo Variable + Commit Mono**, both OFL-1.1, both on Fontsource, both self-hosted.
+  One 32 KB latin variable file covers 100–900 for Archivo. Inter and JetBrains Mono are retired.
+- **Light-mode wavelengths were darkened** from the direction's plate values — retry to `#A85408`,
+  the beam teal to `#0B6A62` — so every one clears 4.5:1 as text on `#EEF1F4`. As line work the
+  originals were already fine; contrast is not a place to keep a swatch for its own sake.
+- **`kinds.json` ships.** It stopped being speculative once the bench needed the same data: the
+  editorial `fix` prose lives on the site, the flags come from the package's own `isTransient` /
+  `isBackupEligible`, and one `Record<ErrorKind, …>` makes the list exhaustive by compilation.
+- **"Copy page as Markdown" shipped** as a `PageTitle` override, next to the title on every Read
+  page. It falls back to opening the `.md` when the clipboard refuses rather than failing silently.
+- **The rays are not the buttons.** A diagonal line's bounding box is a huge swath of the plate and
+  seven of them overlap, so the label strip is the button and the rays are drawn separately with
+  `pointer-events: none`. Found by driving the page, not by reading it.

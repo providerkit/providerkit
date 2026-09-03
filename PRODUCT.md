@@ -95,8 +95,9 @@ Real, verifiable, and load-bearing — this is the proof the positioning rests o
 - The live classifier on the site runs the real published package in the reader's browser.
 
 **Must not be fabricated:** there are no users, no testimonials, no adopters, no benchmarks,
-no download counts, and no case studies. The package is unpublished as of this writing. Any
-social proof would be invented.
+no download counts, and no case studies. `@providerkit/core@0.1.0` went to npm on 2026-09-03 and
+nothing has adopted it yet — not even the five codebases it came from. Any social proof would be
+invented.
 
 ## Product Principles
 
