@@ -69,6 +69,33 @@ looking for the signatures — `ECONNRESET`, `UND_ERR_SOCKET`, `fetch failed`, a
 Miss that walk and every transient network blip reads as a permanent failure, which is how a run
 dies on a hiccup that a single retry would have cleared.
 
+## The failure that arrives inside a 200
+
+An SSE response commits to 200 the moment its headers go out. Everything that goes wrong after
+that — a throttle, an upstream outage, a prompt the backend only measured once it started — has
+nowhere to be but the body.
+
+Every shape does this, in its own dialect: a `{"error":…}` frame on the OpenAI shape and the
+gateways in front of it, an `error` event on Anthropic, `response.failed` on Responses, a bare
+`google.rpc.Status` on Gemini. All four adapters read theirs and throw a classified
+`ProviderError` — the same one a pre-body failure would have produced.
+
+This is the failure mode worth knowing about even if you never call the helper yourself, because
+the version that goes unread is invisible: the payload matches no branch, the loop skips it, and
+the turn ends as a **successful, zero-token completion**. Nothing to retry, nothing in the log,
+and a key pool that never rotates off a spent key.
+
+```ts
+import { streamError } from "@providerkit/core";
+
+// Writing your own adapter? This is the branch to keep.
+if (payload.error) throw streamError("my-gateway", payload.error);
+```
+
+`unknown` is floored to `overload` here and nowhere else: a stream that dies after its headers is
+by construction a transient upstream fault, and `unknown` is never retried. Everything the body
+does name keeps its own kind.
+
 ## Retry-After
 
 `parseRetryAfterMs` reads a server-requested wait from a `Retry-After` header (both the seconds

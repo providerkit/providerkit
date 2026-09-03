@@ -61,7 +61,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 352 tests
+bun run test                 # vitest, 380 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -101,7 +101,7 @@ the next release waits on tabrunner proving the API (see **Next**).
 
 ## State
 
-**Built, tested, green** (352 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (380 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
@@ -123,9 +123,11 @@ the next release waits on tabrunner proving the API (see **Next**).
 | `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets |
 | `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                       |
 
-**Not built yet:** nothing in the extraction's scope. Every concern the plan named is in.
-What is unproven is _adoption_ — no codebase consumes this yet, so "every adopting codebase
-gets smaller" is still a claim, not a measurement.
+Plus `test/golden.test.ts` — the cross-vendor conformance matrix. Not a module: the one place
+the four adapters are asked the same question, on recorded wire bytes, and have to agree.
+
+**Not built yet:** nothing in the extraction's scope. Every concern the plan named is in,
+verification included.
 
 ## Invariants — do not regress these
 
@@ -156,6 +158,16 @@ un-learned.
    `grep -rE 'from "node:|require\(|\bprocess\.env|\bBuffer\b' core/src`
 9. **Price tables never ship here.** Volatile data on a vendor's schedule; a wrong number in
    a library is a wrong number in everyone's ledger. Callers pass `ModelRate`.
+10. **Four adapters, one answer.** The same turn on four wires assembles into the same text,
+    reasoning, tool calls, usage and finish reason; the same failure classifies the same way.
+    `test/golden.test.ts` is that check — a divergence passes four green per-adapter suites and
+    breaks the app that switches provider. It is also the only suite fed BYTES the way a socket
+    delivers them (mid-frame reads, CRLF split across a read, keep-alives, `[DONE]`), which is
+    where three of its four findings came from.
+11. **A failure inside a 200 is still a failure.** An SSE response commits to 200 at its headers,
+    so a throttle landing after them arrives as a body payload. Unread, the turn ends as a
+    successful zero-token completion: nothing retries, nothing logs, no key rotates. One
+    `streamError` for all four shapes.
 
 ## Next
 
