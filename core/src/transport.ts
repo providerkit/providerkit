@@ -100,53 +100,48 @@ export async function postJson<T = unknown>(opts: RequestInit_): Promise<T> {
   return (await res.json()) as T;
 }
 
-/**
- * POST an SSE request and yield each `data:` payload, trimmed — plus the bare
- * JSON object a vendor appends outside the framing, which is only ever an
- * error (see `payloadOf`).
- *
- * Frames are split on the blank line the spec requires, so a payload
- * containing a bare newline survives; `[DONE]` is swallowed here rather than in
- * every adapter. CRLF is normalized — some gateways send it, and a `\r` left on
- * the end of a JSON payload is a parse error nobody enjoys debugging.
- */
-export async function* streamSse(opts: RequestInit_): AsyncGenerator<string> {
-  const res = await send(opts);
-  if (!res.ok) throw await errorFor(opts.provider, res);
-  // A 2xx with no body at all is an upstream anomaly, not a request we got
-  // wrong — worth the same retry a 5xx gets.
-  if (!res.body) {
-    throw new ProviderError(opts.provider, "overload", `${opts.provider}: empty response body`, {
-      status: res.status,
-    });
+/** Pull the `data:` payload out of one SSE frame, joining continuation lines
+ *  the way the spec says to. Returns null for a comment or a frame carrying
+ *  only an `event:` name. */
+function payloadOf(frame: string): string | null {
+  const parts: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    parts.push(line.slice(5).replace(/^ /, ""));
   }
+  // Gemini abandons the framing to report a mid-stream failure: the
+  // google.rpc.Status is appended as a bare JSON object with no `data:` on
+  // it. Dropped here it never reaches an adapter, and a 429 or a 503 that
+  // lands after the headers reads as an empty, successful turn. Requiring an
+  // object keeps comments and `event:`-only frames returning null.
+  if (parts.length === 0) {
+    const bare = frame.trim();
+    return bare.startsWith("{") ? bare : null;
+  }
+  const payload = parts.join("\n").trim();
+  return payload.length > 0 ? payload : null;
+}
 
-  const reader = res.body.getReader();
+/**
+ * Yield each `data:` payload of an SSE body, trimmed — plus the bare JSON
+ * object a vendor appends outside the framing, which is only ever an error
+ * (see `payloadOf`).
+ *
+ * Frames are split on the blank line the spec requires, so a payload containing
+ * a bare newline survives; `[DONE]` is swallowed here rather than in every
+ * adapter. CRLF is normalized — some gateways send it, and a `\r` left on the
+ * end of a JSON payload is a parse error nobody enjoys debugging.
+ *
+ * Exported apart from `streamSse` because the envelope above it is the half an
+ * adopting app most often cannot take: an app with its own translated error
+ * copy, its own log levels, or its own auth refresh has to keep building the
+ * request and reading the failure itself. Framing is the half nobody should
+ * write twice — hand it a `res.body` and keep your own envelope.
+ */
+export async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-
-  /** Pull the `data:` payload out of one SSE frame, joining continuation
-   *  lines the way the spec says to. Returns null for a comment or a frame
-   *  carrying only an `event:` name. */
-  function payloadOf(frame: string): string | null {
-    const parts: string[] = [];
-    for (const line of frame.split("\n")) {
-      if (!line.startsWith("data:")) continue;
-      parts.push(line.slice(5).replace(/^ /, ""));
-    }
-    // Gemini abandons the framing to report a mid-stream failure: the
-    // google.rpc.Status is appended as a bare JSON object with no `data:` on
-    // it. Dropped here it never reaches an adapter, and a 429 or a 503 that
-    // lands after the headers reads as an empty, successful turn. Requiring an
-    // object keeps comments and `event:`-only frames returning null.
-    if (parts.length === 0) {
-      const bare = frame.trim();
-      return bare.startsWith("{") ? bare : null;
-    }
-    const payload = parts.join("\n").trim();
-    return payload.length > 0 ? payload : null;
-  }
-
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -169,4 +164,21 @@ export async function* streamSse(opts: RequestInit_): AsyncGenerator<string> {
   } finally {
     reader.releaseLock();
   }
+}
+
+/**
+ * POST an SSE request and stream its payloads: the envelope (auth, the
+ * classified error, the retry hints) plus `parseSseStream`.
+ */
+export async function* streamSse(opts: RequestInit_): AsyncGenerator<string> {
+  const res = await send(opts);
+  if (!res.ok) throw await errorFor(opts.provider, res);
+  // A 2xx with no body at all is an upstream anomaly, not a request we got
+  // wrong — worth the same retry a 5xx gets.
+  if (!res.body) {
+    throw new ProviderError(opts.provider, "overload", `${opts.provider}: empty response body`, {
+      status: res.status,
+    });
+  }
+  yield* parseSseStream(res.body);
 }

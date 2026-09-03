@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ProviderError } from "../src/errors.ts";
-import { apiUrl, postJson, retryAfterFromHeaders, streamSse } from "../src/transport.ts";
+import {
+  apiUrl,
+  parseSseStream,
+  postJson,
+  retryAfterFromHeaders,
+  streamSse,
+} from "../src/transport.ts";
 
 /** A Response whose body streams the given chunks, as the network would. */
 function sseResponse(chunks: string[], init: ResponseInit = {}): Response {
@@ -38,6 +44,27 @@ describe("apiUrl", () => {
     ["https://api.x.com/v1", "chat", "https://api.x.com/v1/chat"],
   ])("%s + %s", (base, path, expected) => {
     expect(apiUrl(base, path)).toBe(expected);
+  });
+});
+
+describe("parseSseStream", () => {
+  // The framing half, reachable on its own. An app that must keep its own
+  // envelope — translated error copy, its own log levels, a token refresh —
+  // takes this and skips streamSse; tabrunner is the first to do it.
+  it("parses a body without going through the request envelope", async () => {
+    const body = sseResponse(['data: {"a":1}\n\n', "data: [DONE]\n\n"]).body!;
+    expect(await collect(parseSseStream(body))).toEqual(['{"a":1}']);
+  });
+
+  it("releases the reader when the consumer stops early", async () => {
+    const body = sseResponse(['data: {"a":1}\n\n', 'data: {"b":2}\n\n']).body!;
+    for await (const chunk of parseSseStream(body)) {
+      expect(chunk).toBe('{"a":1}');
+      break;
+    }
+    // A held lock would make this throw — the `finally` is what prevents a
+    // leaked reader on every aborted turn.
+    expect(() => body.getReader()).not.toThrow();
   });
 });
 

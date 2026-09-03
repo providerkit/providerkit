@@ -61,7 +61,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 344 tests
+bun run test                 # vitest, 347 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -101,7 +101,7 @@ the next release waits on tabrunner proving the API (see **Next**).
 
 ## State
 
-**Built, tested, green** (344 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (347 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
@@ -110,7 +110,7 @@ the next release waits on tabrunner proving the API (see **Next**).
 | `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker        |
 | `watchdog.ts`            | 60s idle deadline + TTFT                                                   |
 | `usage.ts`               | cost arithmetic (rates stay with the caller)                               |
-| `transport.ts`           | fetch + SSE + the error envelope                                           |
+| `transport.ts`           | fetch + the error envelope, and `parseSseStream` on its own                |
 | `tool-args.ts`           | truncation salvage + double-escape healing                                 |
 | `tools.ts`               | validated, cancellable, time-bounded tool calls + registry                 |
 | `schema.ts`              | clamp overflow to advertised bounds                                        |
