@@ -11,12 +11,11 @@ MIT · open source · `providerkit.dev`
 > **Before touching anything under `site/`, read
 > [`site/.impeccable/surfaces/site-src-content-docs-index-mdx.md`](site/.impeccable/surfaces/site-src-content-docs-index-mdx.md).**
 >
-> The site is mid-replacement. Its current look is the generated-design default — near-black
-> ground with one bright accent, tracked ALL-CAPS eyebrows, middle-dot meta strings, identical
-> rounded cards — and it is being rebuilt, not refined. That brief holds the committed
-> direction, the palette, the list of what must **not** survive, and the agent-channel
-> decisions. `PRODUCT.md` holds product truth. There is no `DESIGN.md` yet by design: it is
-> written at finish from the built world, so do not invent one ahead of the build.
+> The site rebuild has landed. That brief holds the committed direction, the palette, the
+> list of what must **not** survive, and the agent-channel decisions; `site/DESIGN.md` (with
+> its `site/.impeccable/design.json` sidecar) is the built design system, written from the
+> shipped pages rather than ahead of them. `PRODUCT.md` holds product truth. Read the brief
+> for _why_ a rule exists and DESIGN.md for _what_ the rule is.
 
 ## Why it exists
 
@@ -104,28 +103,28 @@ the next release waits on tabrunner proving the API (see **Next**).
 
 **Built, tested, green** (344 tests; typecheck, lint, build, and the MV3 guard all clean):
 
-| Module                   | What it holds                                                          |
-| ------------------------ | ---------------------------------------------------------------------- |
-| `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`            |
-| `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them          |
-| `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker    |
-| `watchdog.ts`            | 60s idle deadline + TTFT                                               |
-| `usage.ts`               | cost arithmetic (rates stay with the caller)                           |
-| `transport.ts`           | fetch + SSE + the error envelope                                       |
-| `tool-args.ts`           | truncation salvage + double-escape healing                             |
-| `tools.ts`               | validated, cancellable, time-bounded tool calls + registry             |
-| `schema.ts`              | clamp overflow to advertised bounds                                    |
-| `context.ts`             | compaction decisions — `needsCompaction`, `pickCut`, `applyCompaction` |
-| `providers/anthropic.ts` | Anthropic shape                                                        |
-| `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)         |
-| `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend         |
-| `providers/gemini.ts`    | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output |
-| `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator    |
+| Module                   | What it holds                                                              |
+| ------------------------ | -------------------------------------------------------------------------- |
+| `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`                |
+| `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them              |
+| `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker        |
+| `watchdog.ts`            | 60s idle deadline + TTFT                                                   |
+| `usage.ts`               | cost arithmetic (rates stay with the caller)                               |
+| `transport.ts`           | fetch + SSE + the error envelope                                           |
+| `tool-args.ts`           | truncation salvage + double-escape healing                                 |
+| `tools.ts`               | validated, cancellable, time-bounded tool calls + registry                 |
+| `schema.ts`              | clamp overflow to advertised bounds                                        |
+| `context.ts`             | compaction decisions — `needsCompaction`, `pickCut`, `applyCompaction`     |
+| `providers/anthropic.ts` | Anthropic shape                                                            |
+| `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)             |
+| `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend             |
+| `providers/gemini.ts`    | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output    |
+| `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator        |
 | `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets |
-| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                   |
+| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                       |
 
 **Not built yet:** nothing in the extraction's scope. Every concern the plan named is in.
-What is unproven is *adoption* — no codebase consumes this yet, so "every adopting codebase
+What is unproven is _adoption_ — no codebase consumes this yet, so "every adopting codebase
 gets smaller" is still a claim, not a measurement.
 
 ## Invariants — do not regress these

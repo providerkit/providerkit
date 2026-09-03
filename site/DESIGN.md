@@ -420,6 +420,27 @@ A statistic is drawn as a dimension: the value in figure role, a dimension line 
 tick at each end (`::before` / `::after`, 7px, `rule-strong`), then the label beneath at
 `ink-3`. Never a stat card.
 
+### Guide figures
+
+Two guides carry a drawn figure, and only two. Both are Astro components, so they ship no
+JavaScript — and the guide's `.md` source grows by two lines instead of two hundred, which is
+what keeps the agent channel worth having.
+
+- **`CommitmentHorizon.astro`** (retries) — the same failure twice, once either side of the
+  first emitted chunk. The horizon is a dash-dot centreline drawn as a wall at 1.75px, and the
+  late failure's return path is dashed and runs into it. The retryable span is dimensioned in
+  `ray-retry`, the committed span in `beam`.
+- **`WatchdogTimeline.astro`** (streaming) — four idle timers cancelled by an arriving chunk,
+  stacked one per row, against a fifth that runs its full window. Each cancelled timer keeps a
+  dashed ghost of the time that was left, and a witness line drops from each chunk on the axis
+  to the timer it arms.
+
+A figure is earned by having **spatial** information to carry — a threshold, an interval — not
+by being a page. The other six guides get none, and that is a decision rather than a backlog.
+
+Label sizes in these figures are authored in viewBox units against a ~748px rendered measure,
+so they are set for what lands on the page (a 12px label would render at 9).
+
 ### Reference pages (Read register)
 
 The ~85 generated TypeDoc pages take the world's **colour, type and rules but none of its
@@ -449,6 +470,8 @@ hand-written guide is explicitly not extended to them.
   is not done.
 - **Do** end every error and empty state somewhere useful, the way the copy-markdown control
   opens the `.md` when the clipboard refuses.
+- **Do** make a guide figure earn itself on spatial information. If prose states it just as
+  well, the figure is decoration and the guide is better without it.
 
 ### Don't:
 

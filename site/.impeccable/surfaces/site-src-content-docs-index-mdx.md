@@ -146,10 +146,11 @@ This section is for agents _using_ it.
 - **Both figures are Astro, not React.** They are static, so they ship zero JavaScript; and
   the guide's `.md` source grows by two lines instead of two hundred, which is what keeps
   the agent channel worth having. The guides became `.mdx` to import them.
-- **DESIGN.md written**, at the repo root, from the built world. It is the maintenance
-  record — palette roles, the drafting primitives, the three load-bearing facts about the
-  bench, and the seven rules that keep the world coherent. This brief stays the record of
-  the decision; DESIGN.md is the record of the result.
+- **`site/DESIGN.md` written**, from the built world, with a machine-readable
+  `site/.impeccable/design.json` sidecar. This brief stays the record of the _decision_;
+  DESIGN.md is the record of the _result_ — measured values, component specs, and the
+  do/don't list. Do not start a second one at the repo root: there was briefly one there,
+  and one design document per surface is the whole point.
 
 ## Settled during the build
 

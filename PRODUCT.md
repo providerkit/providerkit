@@ -61,7 +61,7 @@ fetch/SSE transport; tool-argument salvage; Anthropic, OpenAI-shape, Responses a
 adapters; the multi-key rotation pool; rate-limit reset windows; the tool kernel; schema
 clamping; compaction decisions; cost maths.
 
-**Not yet built:** nothing in the extraction's scope. What is unbuilt is *adoption* — no
+**Not yet built:** nothing in the extraction's scope. What is unbuilt is _adoption_ — no
 codebase consumes the package yet, so the "every adopting codebase gets smaller" claim is
 still unmeasured. tabrunner migrates first, and that is what gates the next release.
 

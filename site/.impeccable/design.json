@@ -325,7 +325,7 @@
       "kind": "custom",
       "refersTo": null,
       "description": "A statistic drawn as a dimension: value, dimension line with a witness tick at each end, label beneath. Never a stat card.",
-      "html": "<div class=\"ds-dim\"><span class=\"ds-dim-value\">218</span><span class=\"ds-dim-rule\"></span><span class=\"ds-dim-label\">tests, every failure any of them saw</span></div>",
+      "html": "<div class=\"ds-dim\"><span class=\"ds-dim-value\">344</span><span class=\"ds-dim-rule\"></span><span class=\"ds-dim-label\">tests, every failure any of them saw</span></div>",
       "css": ".ds-dim { display: flex; flex-direction: column; gap: 0.4rem; max-width: 12rem; } .ds-dim-value { color: var(--ink, #e4e9ee); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 3.25rem; font-weight: 500; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums lining-nums; } .ds-dim-rule { position: relative; border-top: 1px solid var(--rule-strong, #3b434d); height: 0; } .ds-dim-rule::before, .ds-dim-rule::after { content: ''; position: absolute; top: -3px; height: 7px; border-left: 1px solid var(--rule-strong, #3b434d); } .ds-dim-rule::before { left: 0; } .ds-dim-rule::after { right: 0; } .ds-dim-label { color: var(--ink-3, #7f8a96); font-family: 'Archivo Variable', system-ui, sans-serif; font-size: 0.8125rem; line-height: 1.4; }"
     },
     {
