@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ProviderError, isBackupEligible, isTransient, type ErrorKind } from "providerkit";
+import { ProviderError, isBackupEligible, isTransient, type ErrorKind } from "@providerkit/core";
 
 const REPO = "https://github.com/providerkit/providerkit";
 const NPM = "https://www.npmjs.com/package/providerkit";
@@ -216,7 +216,7 @@ function Code({ children }: { children: string }) {
 
 function Install() {
   const [copied, setCopied] = useState(false);
-  const command = "bun add providerkit";
+  const command = "bun add @providerkit/core";
   return (
     <button
       className="install"
@@ -341,7 +341,7 @@ export function App() {
             actually needs underneath it.
           </p>
           <div className="two-up">
-            <Code>{`import { createAnthropicProvider } from "providerkit";
+            <Code>{`import { createAnthropicProvider } from "@providerkit/core";
 
 const provider = createAnthropicProvider({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -357,7 +357,7 @@ for await (const chunk of provider.createStream(
 }`}</Code>
             <Code>{`import {
   ProviderError, isTransient, isBackupEligible,
-} from "providerkit";
+} from "@providerkit/core";
 
 try { /* ... */ } catch (raw) {
   const err = ProviderError.from("anthropic", raw);

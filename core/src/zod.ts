@@ -1,4 +1,4 @@
-// The optional zod ergonomics — `providerkit/zod`.
+// The optional zod ergonomics — `@providerkit/core/zod`.
 //
 // Kept behind its own entry point so the core stays dependency-free for
 // consumers that have no zod (a browser extension counting every byte, for

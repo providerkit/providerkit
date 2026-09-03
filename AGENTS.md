@@ -63,13 +63,16 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 ## Naming and publishing — decided
 
-- **npm: bare `providerkit`.** No scope. `npm i providerkit` is the pitch, and an
-  unscoped name that was still free is the scarce asset here.
-- **Reserve the `@providerkit` npm org defensively** and never publish the flagship under
-  it. This is the standard shape: `vite` + `@vitejs/*`, `next` + `@next/*`, `astro` +
-  `@astrojs/*`, `svelte` + `@sveltejs/*`. Nobody types `@vitejs/vite`.
-- **GitHub: org `providerkit`, repo `providerkit/providerkit`.** Verified free. Matches the
-  `falai-dev` precedent and allows maintainers later without a repo transfer.
+- **npm: `@providerkit/core`.** The bare name is permanently unavailable — npm rejects it
+  with a 403, "too similar to existing package provider-kit". That check normalizes
+  punctuation, so `providerkit` and `provider-kit` are the same name to the registry and
+  no appeal changes that. The scope was already reserved, so this costs nothing but the
+  extra characters. Scoped packages publish restricted by default; `publishConfig.access`
+  is set to `public` so a release can't silently go private.
+- **`core/` is the role, not the identity.** If adapters ever split for bundle size they
+  become `@providerkit/gemini` siblings — same scope, no rename, no broken links.
+- **GitHub: org `providerkit`, repo `providerkit/providerkit`.** Matches the `falai-dev`
+  precedent and allows maintainers later without a repo transfer.
 - Release scripts match the other packages in `dev/packages`:
   `bun run release:patch|minor|major`. `prepublishOnly` runs lint → typecheck → test →
   build → `sync:docs` (which copies the root README and LICENSE into `core/`, so they are
@@ -97,7 +100,7 @@ vercel configs — none chosen here yet).
 | `context.ts`             | compaction decisions — `needsCompaction`, `pickCut`, `applyCompaction` |
 | `providers/anthropic.ts` | Anthropic shape                                                        |
 | `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)         |
-| `zod.ts`                 | `providerkit/zod` — optional peer, typed tools                         |
+| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                         |
 
 **Not built yet:** Gemini adapter · Responses adapter · multi-key rotation pool.
 

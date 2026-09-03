@@ -8,8 +8,8 @@
     "site"
   ],
   "scripts": {
-    "build": "bun run --filter providerkit build",
-    "test": "bun run --filter providerkit test",
+    "build": "bun run --filter @providerkit/core build",
+    "test": "bun run --filter @providerkit/core test",
     "typecheck": "bun run --filter '*' typecheck",
     "lint": "eslint core/src core/test site/src",
     "format": "prettier --write .",

@@ -2,7 +2,7 @@
 //
 // JSON Schema first, on purpose. A zod dependency would be dead weight for a
 // consumer that has none — and one of the codebases this came from is exactly
-// that. `providerkit/zod` adds the ergonomic wrapper for everyone else, and
+// that. `@providerkit/core/zod` adds the ergonomic wrapper for everyone else, and
 // stays an optional peer.
 //
 // The one rule worth stating: a tool FAILING is not an exception here. A model

@@ -6,7 +6,7 @@
 handling you only learn in production.
 
 ```bash
-bun add providerkit   # npm / pnpm / yarn all fine
+bun add @providerkit/core   # npm / pnpm / yarn all fine
 ```
 
 Zero runtime dependencies. `fetch` only — no vendor SDKs, no Node built-ins — so the same
@@ -40,7 +40,7 @@ loop is where your product lives; it should stay yours. This is everything under
 ## Use
 
 ```ts
-import { createAnthropicProvider, drainStream } from "providerkit";
+import { createAnthropicProvider, drainStream } from "@providerkit/core";
 
 const provider = createAnthropicProvider({
   apiKey: process.env.ANTHROPIC_API_KEY!,
@@ -72,7 +72,7 @@ const provider = createOpenAIProvider({
 ### Failures, named by what fixes them
 
 ```ts
-import { ProviderError, isTransient, isBackupEligible } from "providerkit";
+import { ProviderError, isTransient, isBackupEligible } from "@providerkit/core";
 
 try {
   // …
@@ -93,7 +93,7 @@ try {
 ### Retrying, safely
 
 ```ts
-import { withStreamRetry, streamWithBackupModels } from "providerkit";
+import { withStreamRetry, streamWithBackupModels } from "@providerkit/core";
 
 // Retries only while NOTHING has been emitted. Past the first chunk the stream
 // is committed — a retry would replay tokens already on the reader's screen.
@@ -109,7 +109,7 @@ const withFallback = streamWithBackupModels((model) => run(model), {
 ### The watchdog
 
 ```ts
-import { streamWatch, watchChunks } from "providerkit";
+import { streamWatch, watchChunks } from "@providerkit/core";
 
 const watch = streamWatch({ provider: "openai", signal: userSignal });
 for await (const chunk of watchChunks(
@@ -133,7 +133,7 @@ is.
 JSON Schema by default, so the core needs no zod:
 
 ```ts
-import { defineTool, ToolRegistry } from "providerkit";
+import { defineTool, ToolRegistry } from "@providerkit/core";
 
 const search = defineTool({
   name: "search",
@@ -152,7 +152,7 @@ correct itself. Only a caller's abort escapes.
 With zod, from the optional entry point:
 
 ```ts
-import { zodTool } from "providerkit/zod";
+import { zodTool } from "@providerkit/core/zod";
 
 const submit = zodTool({
   name: "submit",
@@ -167,7 +167,7 @@ const submit = zodTool({
 ### Truncated tool calls
 
 ```ts
-import { parseToolArgs, isCompleteJson } from "providerkit";
+import { parseToolArgs, isCompleteJson } from "@providerkit/core";
 
 // Never throws. A turn cut off mid-argument keeps every field that closed
 // before the cut, plus the half-written one the cut landed in.
@@ -179,7 +179,7 @@ const args = parseToolArgs(rawArgumentString);
 The decisions, not the prompt — the summary is yours to write:
 
 ```ts
-import { needsCompaction, pickCut, applyCompaction, historyBudgetTokens } from "providerkit";
+import { needsCompaction, pickCut, applyCompaction, historyBudgetTokens } from "@providerkit/core";
 
 if (needsCompaction(lastInputTokens, contextWindow)) {
   const cut = pickCut(messages, historyBudgetTokens(contextWindow));
@@ -198,7 +198,7 @@ per application, and a wrong number shipped in a library is a wrong number in ev
 ledger — so you keep the numbers, verifiable line by line against a vendor's price sheet:
 
 ```ts
-import { UsageTracker } from "providerkit";
+import { UsageTracker } from "@providerkit/core";
 
 const tracker = new UsageTracker();
 tracker.add(usage, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }); // USD per Mtok

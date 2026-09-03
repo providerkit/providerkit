@@ -11,7 +11,7 @@
     "lint": "eslint src"
   },
   "dependencies": {
-    "providerkit": "workspace:*",
+    "@providerkit/core": "workspace:*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
