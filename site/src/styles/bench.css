@@ -215,6 +215,15 @@ h1 {
   border-top: 1px solid var(--rule);
 }
 
+/* `--ec-brdRad` covers the frame and nothing else: the copy control and its
+   "Copied!" tooltip carry their own 0.2rem, and the search hint kbd its own
+   4px. Three rounded objects is three too many in a world whose only curve is
+   the lens. */
+.expressive-code :is(button, .feedback),
+kbd {
+  border-radius: 0;
+}
+
 /* --- Asides: a callout with a leader, not a filled panel ------------------ */
 
 .starlight-aside {
@@ -306,6 +315,14 @@ h1 {
   inset-inline-start: -0.75rem;
   inset-block: 0.35rem;
   border-inline-start: 2px solid var(--beam);
+}
+
+/* Starlight rounds every sidebar link to 4px. Invisible at rest because we take
+   its background away, but the focus ring traces it — 108 rounded corners on a
+   reference page, in a world whose only curve is the lens. */
+.sidebar-content a,
+.sidebar-pane a {
+  border-radius: 0;
 }
 
 .sidebar-content a:hover {
@@ -429,8 +446,15 @@ starlight-toc a[aria-current="true"] {
 
 /* --- The landing plate ---------------------------------------------------- */
 
-/* Splash pages carry no sidebar, so the sheet can open to the full plate. */
-html:not([data-has-sidebar]) {
+/* Splash pages carry no sidebar, so the sheet can open to the full plate.
+
+   `:root` is here to win, not to scope: Starlight ships this exact selector at
+   67.5rem and loads after us, so an identical selector loses on source order
+   alone and the plate silently rendered 168px narrower than it was drawn for.
+   That mattered beyond the margins — the bench is a 1240-unit viewBox, so at
+   1080px it scaled to 87% and every 13px label in the exit ladder rendered at
+   11.3px. At 78rem the plate carries the bench at its drawn size. */
+html:root:not([data-has-sidebar]) {
   --sl-content-width: 78rem;
 }
 
@@ -473,6 +497,15 @@ astro-static-slot {
   .plate .masthead {
     grid-column: 1;
     grid-row: 2;
+    /* The console runs ~260px longer than the masthead, and with the masthead
+       packed to the top all of that fell out as one void under the left
+       column. Stretching the column and dropping the agent note to its foot
+       spends the difference as a deliberate gap between two groups instead. */
+    align-self: stretch;
+  }
+
+  .plate .masthead .agents-note {
+    margin-top: auto;
   }
 
   .plate .bench-console {
@@ -489,6 +522,18 @@ astro-static-slot {
   margin-block: 0;
 }
 
+/* Starlight puts `margin-top: 1rem` on every markdown sibling, and that lands
+   on grid ITEMS too — so in each of these grids every cell after the first was
+   pushed a rem down inside its own track while the first stretched to cover it.
+   It showed as the first dimensioned figure and the first specimen sitting a
+   rem higher than their rows, and as a phantom rem between every readout line.
+   A grid's own gap owns its spacing; nothing else may add to it. */
+.specimens > *,
+.dims > *,
+.readout > * {
+  margin-top: 0;
+}
+
 html:not([data-has-sidebar]) .sl-markdown-content > * {
   max-width: 46rem;
 }
@@ -497,6 +542,16 @@ html:not([data-has-sidebar]) .sl-markdown-content > * {
    stays at reading measure. */
 html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dims) {
   max-width: none;
+}
+
+/* A code specimen is not prose, and the measure rule is about prose. Held at
+   46rem the two landing samples overflowed their own frames — the longest line
+   wants 779px against 733px of box — so the page scrolled a `for await` line
+   sideways while 340px of plate sat empty beside it. For an audience that
+   reads the code before it reads the copy, that is the worst thing on the
+   page. Wide enough for these samples, still far short of the plate. */
+html:not([data-has-sidebar]) .sl-markdown-content > .expressive-code {
+  max-width: 56rem;
 }
 
 .masthead {
@@ -719,19 +774,18 @@ html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dim
   font-weight: 600;
 }
 
+/* The five remedy names are the taxonomy's top level and stay at full strength
+   in both grounds: on paper the wavelengths sit at 5.6:1, and 0.85 of that was
+   3.66 — under the floor. Weight already separates a band heading from its
+   kinds, so it does not need dimming as well. */
 .band-label {
   font-size: 12px;
   font-weight: 600;
-  opacity: 0.85;
 }
 
 .band-note {
   fill: var(--ink-3);
   font-size: 11px;
-}
-
-.band.near .band-label {
-  opacity: 1;
 }
 
 .band.near .band-note {
@@ -750,18 +804,24 @@ html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dim
 /* The signature move: the beam re-traces itself whenever the verdict changes.
    A ray being drawn is the one motion this world already contains. */
 @media (prefers-reduced-motion: no-preference) {
+  /* The lines carry pathLength="1", so a dash of 1 is exactly one line however
+     long it really is. The old hard-coded 1400 was nearly four times the real
+     372-unit beam: the stroke sat entirely offscreen for the first 73% of the
+     420ms and then snapped in, which read as a stutter rather than a trace. */
   .beam line {
-    stroke-dasharray: 1400;
-    animation: trace 420ms cubic-bezier(0.22, 0.8, 0.3, 1) both;
+    stroke-dasharray: 1;
+    animation: trace 230ms cubic-bezier(0.22, 0.8, 0.3, 1) both;
   }
 
+  /* The dot lands just as the trace arrives. At the old 420ms against a 230ms
+     draw it appeared long after the beam had stopped moving. */
   .beam circle {
-    animation: land 420ms ease-out both;
+    animation: land 300ms ease-out both;
   }
 
   @keyframes trace {
     from {
-      stroke-dashoffset: 1400;
+      stroke-dashoffset: 1;
     }
     to {
       stroke-dashoffset: 0;

@@ -166,8 +166,18 @@ export default function OpticalBench() {
             role="group"
             aria-label="Optical bench: seven provider failures entering, thirteen named exits leaving"
           >
-            {/* The optical axis. Dash-dot, as every layout plot draws it. */}
-            <line className="ax" x1="0" y1={AXIS_Y} x2={W} y2={AXIS_Y} strokeDasharray="14 5 2 5" />
+            {/* The optical axis. Dash-dot, and it ends where the beam leaves:
+                an axis belongs to the optical system, not to the index beside
+                it. Run to W and it strikes straight through the exit ladder's
+                labels, which is what a centreline must never do. */}
+            <line
+              className="ax"
+              x1="0"
+              y1={AXIS_Y}
+              x2={EXIT_X}
+              y2={AXIS_Y}
+              strokeDasharray="14 5 2 5"
+            />
 
             {/* Rays first, and never interactive: a diagonal line's bounding box
                 is a huge swath of the plate, and seven of them overlap. The
@@ -319,6 +329,9 @@ export default function OpticalBench() {
               style={{ color: `var(--ray-${verdict.family})` }}
             >
               {[-2.6, 0, 2.6].map((d) => (
+                /* pathLength normalises the trace: the draw animation works in
+                   fractions of the line rather than a hard-coded unit length
+                   that has to be kept in sync with the geometry by hand. */
                 <line
                   key={d}
                   x1={LENS_X}
@@ -326,6 +339,7 @@ export default function OpticalBench() {
                   x2={EXIT_X}
                   y2={laneY + d}
                   strokeWidth="1"
+                  pathLength="1"
                 />
               ))}
               <circle cx={EXIT_X} cy={laneY} r="3.5" />
