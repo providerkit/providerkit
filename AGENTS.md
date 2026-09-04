@@ -170,7 +170,7 @@ un-learned.
 
 ## Next
 
-`0.3.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
+`0.4.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
 came out smaller:
 
 | Migration                           | Runtime                                   |    Net |
@@ -193,9 +193,19 @@ all landed here, so what remains is mechanical and needs only a free tree.
 Every migration is tracked in `ROADMAP.local.md`, deliberately not in this repo because it is a
 map of codebases that are not open.
 
-**Blocking the fleet:** two adopters are on a local `link:`/`file:` dependency and one is still
-on `^0.2.0`, so none of them has the last two rounds of fixes as a published version. `0.4.0`
-needs to go out, then all four flip to it.
+**The fleet is on `^0.4.0` from the registry** — every adopter, including the one whose migration
+was backed out but whose newest module was already written against the package. No `link:`, no
+`file:`, nothing that resolves only on one machine. Each flip was verified against the adopter's
+own gates, not just installed. The two that were on a `bun link` were already running this exact
+code — the published `dist/` is byte-identical to what the link served — so for them it was a
+resolution change and nothing more; the two on `^0.1.0`/`^0.2.0` gained the round that inverted
+invariant 2 (`classify` re-deriving a `ProviderError` it had already classified, landing on
+`unknown`, so the watchdog's own idle timeout was never retried).
+
+A `file:` dependency is worse than a stale pin, and that is the lesson to keep: `@falai/agent` is
+a **published** package, so `file:../../providerkit/core` would have resolved for its own users
+nowhere. It also dragged this package's devDependencies — vitest, rolldown, every platform
+binding — into the adopter's lockfile, 141 lines of them.
 
 Two open chores: point the providerkit.dev DNS at the Pages project, and set the org avatar
 (`brand/providerkit-avatar-1024.png` — GitHub has no API for it).
