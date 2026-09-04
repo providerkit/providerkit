@@ -450,8 +450,11 @@ describe("effortParams", () => {
     }
   });
 
-  it("floors OpenRouter's `none` at `low` and names its own top tier, xhigh", () => {
-    expect(effortParams("openrouter", "none")).toEqual({ reasoning: { effort: "low" } });
+  it("says `none` to OpenRouter, and names its own top tier, xhigh", () => {
+    // `none` is a member of its effort enum. The 400 that once looked like
+    // "OpenRouter cannot be told not to think" was `reasoning.enabled: false`,
+    // a different field — which the test above pins as never sent.
+    expect(effortParams("openrouter", "none")).toEqual({ reasoning: { effort: "none" } });
     // `high` is 0.8 of the thinking budget there and `xhigh` is 0.95, so
     // clamping `max` to `high` spent the top tier the caller asked for. The
     // other dialects have nothing above `high`; this one does.
@@ -504,7 +507,7 @@ describe("effortParams", () => {
       );
       return calls[0]!.body;
     };
-    expect(await seen("openrouter", "none")).toMatchObject({ reasoning: { effort: "low" } });
+    expect(await seen("openrouter", "none")).toMatchObject({ reasoning: { effort: "none" } });
     expect(await seen("deepseek", "none")).toMatchObject({ thinking: { type: "disabled" } });
     expect(await seen("kimi", "high")).toMatchObject({ reasoning_effort: "high" });
   });

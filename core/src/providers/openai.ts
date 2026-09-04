@@ -63,13 +63,16 @@ export type EffortDialect = "openai" | "openrouter" | "deepseek" | "off";
  *
  * One knob, three incompatible spellings, and the differences are not cosmetic:
  *
- * - **OpenRouter has no off switch.** `reasoning.enabled: false` is refused by
- *   models that always think — GLM 5.3 Flash answers `400 "Reasoning is
- *   mandatory for this endpoint and cannot be disabled."` — so `none` is
- *   floored at `low` rather than sent. Named rather than omitted, because
- *   letting the endpoint pick leaves cost and latency unpinned on exactly the
- *   tasks that asked for neither. Measured against the live endpoint, and it
- *   cost one app its onboarding read before it was.
+ * - **OpenRouter's off switch is the effort, never the `enabled` flag.**
+ *   `reasoning.enabled: false` IS refused by models that always think — GLM 5.3
+ *   Flash answers `400 "Reasoning is mandatory for this endpoint and cannot be
+ *   disabled."`, which cost one app its onboarding read. That measurement is
+ *   still why nothing here ever emits that field. But it was read as "OpenRouter
+ *   has no off switch" and `none` was floored to `low` on the strength of it,
+ *   which is a different field: `none` is a member of OpenRouter's own effort
+ *   enum, an unsupported level is mapped to the nearest rather than refused, and
+ *   an app has been sending it in production throughout. The floor was buying a
+ *   thinking pass on every turn that asked for none.
  * - **DeepSeek V4 defaults thinking ON**, so `none` has to be an explicit
  *   refusal. That is the case proving OpenRouter's floor is a constraint and
  *   not a preference for always thinking.
@@ -108,7 +111,7 @@ export function effortParams(
       // 0.95 of the budget against 0.8. Naming it is safe even where a model
       // cannot do it: OpenRouter maps an unsupported level to its nearest rather
       // than refusing the request.
-      return { reasoning: { effort: effort === "max" ? "xhigh" : (level ?? "low") } };
+      return { reasoning: { effort: effort === "max" ? "xhigh" : (level ?? "none") } };
     case "openai":
       return { reasoning_effort: level ?? "none" };
     case "off":
