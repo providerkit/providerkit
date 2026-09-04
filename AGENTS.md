@@ -91,12 +91,10 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
   are tracked once and `.gitignore`d inside `core/`).
 
 - **Site deploys to Cloudflare Pages** on push to `main`, project `providerkit`. Needs
-  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repo secrets.
+  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repo secrets. providerkit.dev is
+  pointed at it and serving.
 - **The repo must be public.** A free npm org can only host public packages, and a free
   GitHub org only gets unlimited Actions minutes on public repos. It is MIT anyway.
-
-**Not yet done:** point the providerkit.dev DNS at the Pages project. `0.3.0` is on npm; `0.4.0` is
-ready and waiting on a release.
 
 ## State
 
@@ -206,9 +204,6 @@ A `file:` dependency is worse than a stale pin, and that is the lesson to keep: 
 a **published** package, so `file:../../providerkit/core` would have resolved for its own users
 nowhere. It also dragged this package's devDependencies — vitest, rolldown, every platform
 binding — into the adopter's lockfile, 141 lines of them.
-
-Two open chores: point the providerkit.dev DNS at the Pages project, and set the org avatar
-(`brand/providerkit-avatar-1024.png` — GitHub has no API for it).
 
 **Every migration must be net-negative in lines.** If an adopting repo grows, the cut line was
 drawn in the wrong place and the fix belongs here, not in the adopter.
