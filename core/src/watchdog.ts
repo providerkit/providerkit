@@ -214,10 +214,11 @@ export function withWatchdog(provider: Provider, opts: WatchdogOptions = {}): Pr
       // Armed on first read, not here: a stream built now and iterated later
       // must not spend its deadline sitting in a variable.
       async function* watched(): AsyncGenerator<ProviderChunk> {
+        // idleMs and signal both default inside streamWatch.
         const watch = streamWatch({
           provider: provider.id,
-          ...(opts.idleMs !== undefined ? { idleMs: opts.idleMs } : {}),
-          ...(streamOpts.signal ? { signal: streamOpts.signal } : {}),
+          idleMs: opts.idleMs,
+          signal: streamOpts.signal,
         });
         const source = provider.createStream(messages, tools, {
           ...streamOpts,
