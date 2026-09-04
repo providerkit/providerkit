@@ -471,9 +471,12 @@ describe("effortParams", () => {
     expect(effortParams("deepseek", "max")).toEqual({ thinking: { type: "enabled" } });
   });
 
-  it("sends OpenAI reasoning_effort, and nothing for none", () => {
+  it("names OpenAI's own off switch — `none` is a value, not an omission", () => {
     expect(effortParams("openai", "high")).toEqual({ reasoning_effort: "high" });
-    expect(effortParams("openai", "none")).toEqual({});
+    // Sending nothing is not "do not think": GPT-5.1 defaults to `none`, but
+    // gpt-5 and everything before it defaults to `medium`, and those tokens
+    // come out of the answer's budget.
+    expect(effortParams("openai", "none")).toEqual({ reasoning_effort: "none" });
     expect(effortParams("off", "high")).toEqual({});
   });
 

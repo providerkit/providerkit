@@ -165,6 +165,16 @@ un-learned.
     so a throttle landing after them arrives as a body payload. Unread, the turn ends as a
     successful zero-token completion: nothing retries, nothing logs, no key rotates. One
     `streamError` for all four shapes.
+12. **A value the caller set must not produce the request they'd get by saying nothing.**
+    `effort: "none"` was a no-op on the OpenAI dialect and on Responses: both emitted the field
+    only for graded levels, so "do not think" and "I never asked" were the same bytes — and the
+    model's own default is `medium` on everything older than GPT-5.1. The caller then caps
+    `maxTokens`, the turn spends its whole allowance on invisible reasoning, and it comes back
+    empty with a length finish that reads as a model failure. This is the sibling of the lesson
+    below about an adapter ignoring an option, and the harder one to see: nothing is ignored,
+    the mapping is just silently lossy. `golden.test.ts` now asks all four shapes to refuse
+    thinking and checks that silence does NOT refuse it — except on Anthropic, where extended
+    thinking is opt-in and the default already is off.
 
 ## Next
 

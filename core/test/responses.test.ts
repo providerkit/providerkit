@@ -452,9 +452,18 @@ describe("responses request", () => {
     await collect(provider({ fetchImpl: on.fetchImpl, effort: "high" }).createStream(hi, []));
     expect(on.seen[0]!.body.reasoning).toEqual({ effort: "high", summary: "auto" });
 
+    // `none` still rides — it is one of this shape's values, and omitting it
+    // means the model's own default, which is `medium` on everything older
+    // than GPT-5.1. No summary, though: there is nothing to summarise.
     const off = recorder(TEXT_TURN);
     await collect(provider({ fetchImpl: off.fetchImpl, effort: "none" }).createStream(hi, []));
-    expect(off.seen[0]!.body.reasoning).toBeUndefined();
+    expect(off.seen[0]!.body.reasoning).toEqual({ effort: "none" });
+
+    // Absent is the one case that sends nothing: a knob the caller never
+    // touched stays the provider's.
+    const absent = recorder(TEXT_TURN);
+    await collect(provider({ fetchImpl: absent.fetchImpl }).createStream(hi, []));
+    expect(absent.seen[0]!.body.reasoning).toBeUndefined();
   });
 
   it("sends tools flat, plus tool_choice, max_output_tokens and a json schema", async () => {
@@ -501,7 +510,10 @@ describe("responses request", () => {
       }),
     );
     expect(seen[0]!.body.model).toBe("gpt-5.6-mini");
-    expect(seen[0]!.body.reasoning).toEqual({ effort: "max", summary: "auto" });
+    // `max` is this package's word; OpenAI's enum stops at `high`. Every other
+    // shape clamps it, and this one used to send it through — a 400 on the top
+    // setting alone, which is the setting an agent reaches for when it matters.
+    expect(seen[0]!.body.reasoning).toEqual({ effort: "high", summary: "auto" });
   });
 });
 

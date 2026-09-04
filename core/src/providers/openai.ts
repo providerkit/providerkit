@@ -73,10 +73,17 @@ export type EffortDialect = "openai" | "openrouter" | "deepseek" | "off";
  * - **DeepSeek V4 defaults thinking ON**, so `none` has to be an explicit
  *   refusal. That is the case proving OpenRouter's floor is a constraint and
  *   not a preference for always thinking.
- * - **OpenAI** takes `reasoning_effort` and nothing at all for `none`.
+ * - **OpenAI** takes `reasoning_effort`, and `none` is one of its values — not
+ *   the absence of the field. GPT-5.1 both accepted `none` and made it the
+ *   default; everything from GPT-5 back still defaults to `medium`. So sending
+ *   nothing is NOT a way to say "do not think": on every model released before
+ *   5.1 it means medium, and thinking tokens come out of the same budget as the
+ *   answer. A capped turn then spends its whole allowance thinking and returns
+ *   empty with `finish_reason: "length"`.
  *
  * An absent effort sends nothing on every dialect: the seam's rule is that a
- * knob the caller never touched is a knob the provider still owns.
+ * knob the caller never touched is a knob the provider still owns. `none` is
+ * the caller touching it, and the two must not produce the same request.
  */
 export function effortParams(
   dialect: EffortDialect,
@@ -98,7 +105,7 @@ export function effortParams(
     case "openrouter":
       return { reasoning: { effort: level ?? "low" } };
     case "openai":
-      return level === null ? {} : { reasoning_effort: level };
+      return { reasoning_effort: level ?? "none" };
     case "off":
       return {};
   }

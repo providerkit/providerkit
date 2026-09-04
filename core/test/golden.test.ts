@@ -20,7 +20,7 @@ import { createAnthropicProvider } from "../src/providers/anthropic.ts";
 import { createGeminiProvider } from "../src/providers/gemini.ts";
 import { createOpenAIProvider } from "../src/providers/openai.ts";
 import { createResponsesProvider } from "../src/providers/responses.ts";
-import type { FinishReason, Provider, ProviderChunk } from "../src/types.ts";
+import type { FinishReason, Provider, ProviderChunk, StreamOptions } from "../src/types.ts";
 import { streamWatch, watchChunks } from "../src/watchdog.ts";
 
 const encoder = new TextEncoder();
@@ -196,6 +196,17 @@ const RESPONSES_THROTTLED = wire(
   'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for this model"}}}',
 );
 
+/** Walks a request body without asserting its shape — each wire nests its
+ *  thinking dial somewhere different. */
+function at(body: unknown, ...path: string[]): unknown {
+  let node: unknown = body;
+  for (const key of path) {
+    if (typeof node !== "object" || node === null || !(key in node)) return undefined;
+    node = Reflect.get(node, key);
+  }
+  return node;
+}
+
 interface Vendor {
   name: string;
   create(fetchImpl: typeof fetch): Provider;
@@ -203,6 +214,13 @@ interface Vendor {
   throttled: string;
   /** What that backend says when it throttles, in its own words. */
   throttleSays: string;
+  /** How this wire says "do not think", read off the request that went out. */
+  refusesThinking(body: Record<string, unknown>): boolean;
+  /** Whether saying NOTHING also says it. Anthropic is the only one where it
+   *  does — extended thinking is opt-in there, so a request with no `thinking`
+   *  block already asks for none. On the other three, silence is the model's
+   *  own default, which is emphatically not none. */
+  silenceAlsoRefuses: boolean;
 }
 
 const VENDORS: Vendor[] = [
@@ -212,6 +230,8 @@ const VENDORS: Vendor[] = [
     turn: OPENAI_TURN,
     throttled: OPENAI_THROTTLED,
     throttleSays: "rate limit exceeded",
+    refusesThinking: (body) => at(body, "reasoning_effort") === "none",
+    silenceAlsoRefuses: false,
   },
   {
     name: "anthropic",
@@ -220,6 +240,8 @@ const VENDORS: Vendor[] = [
     turn: ANTHROPIC_TURN,
     throttled: ANTHROPIC_THROTTLED,
     throttleSays: "exceeded your rate limit",
+    refusesThinking: (body) => at(body, "thinking") === undefined,
+    silenceAlsoRefuses: true,
   },
   {
     name: "gemini",
@@ -228,6 +250,9 @@ const VENDORS: Vendor[] = [
     turn: GEMINI_TURN,
     throttled: GEMINI_THROTTLED,
     throttleSays: "RESOURCE_EXHAUSTED",
+    refusesThinking: (body) =>
+      at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL",
+    silenceAlsoRefuses: false,
   },
   {
     name: "responses",
@@ -235,6 +260,8 @@ const VENDORS: Vendor[] = [
     turn: RESPONSES_TURN,
     throttled: RESPONSES_THROTTLED,
     throttleSays: "Rate limit reached",
+    refusesThinking: (body) => at(body, "reasoning", "effort") === "none",
+    silenceAlsoRefuses: false,
   },
 ];
 
@@ -315,13 +342,48 @@ const thrownBy = async (stream: AsyncIterable<ProviderChunk>): Promise<unknown> 
   throw new Error("the stream was expected to fail and did not");
 };
 
-const ask = (provider: Provider) =>
+const ask = (provider: Provider, opts?: StreamOptions) =>
   provider.createStream(
     [{ role: "user", content: "hi" }],
     [{ name: "search", description: "search", inputSchema: { type: "object" } }],
+    opts,
   );
 
+/** Serves the turn and keeps the request body, for the claims that are about
+ *  what went OUT rather than what came back. */
+function recording(body: string) {
+  const sent: Record<string, unknown>[] = [];
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    sent.push(JSON.parse(init.body as string));
+    return new Response(socketBody(body), { status: 200 });
+  }) as unknown as typeof fetch;
+  return { sent, fetchImpl };
+}
+
 describe.each(VENDORS)("$name", (vendor) => {
+  it("says 'do not think' out loud — `none` is never the same request as silence", async () => {
+    // The request-side half of the same promise: one seam value, four wires,
+    // and the answer has to mean the same thing on each. `none` is the value
+    // an agent reaches for when it caps `maxTokens`, because thinking tokens
+    // come out of the answer's budget — a turn that spends the whole allowance
+    // thinking returns empty with a length finish, which reads as a model
+    // failure and is really a request nobody sent.
+    //
+    // Two shapes expressed it by sending NOTHING, which is not "do not think":
+    // it is the model's own default, and that is `medium` on everything older
+    // than GPT-5.1. Asserted as a difference rather than a spelling, so each
+    // adapter stays free to say it in its own dialect.
+    const none = recording(vendor.turn);
+    await assemble(ask(vendor.create(none.fetchImpl), { effort: "none" }));
+    expect(vendor.refusesThinking(none.sent[0]!)).toBe(true);
+
+    // And the other half of the same rule: a knob the caller never touched is
+    // the provider's. Only Anthropic's default already IS off.
+    const silence = recording(vendor.turn);
+    await assemble(ask(vendor.create(silence.fetchImpl)));
+    expect(vendor.refusesThinking(silence.sent[0]!)).toBe(vendor.silenceAlsoRefuses);
+  });
+
   it("normalizes its own dialect into the one turn every vendor must produce", async () => {
     expect(await assemble(ask(vendor.create(serving(vendor.turn))))).toEqual({
       text: "Hello there",

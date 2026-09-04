@@ -254,12 +254,19 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       if (opts.topP !== undefined) request.top_p = opts.topP;
       // No stop sequences on this shape — it has no equivalent field, and
       // inventing one would 400 the request rather than shorten the answer.
-      if (effort && effort !== "none") {
+      if (effort) {
+        // `max` is this package's word, not OpenAI's: the enum here is
+        // none/low/medium/high. Every other shape clamps it — this one sent it
+        // through and earned a 400 on the top setting alone.
+        const level = effort === "max" ? "high" : effort;
         // `summary` is what switches the reasoning stream ON. Without it this
         // shape emits no reasoning_summary_text events at all, and a caller
         // rendering a thinking pane silently gets nothing while the tokens are
-        // billed either way.
-        request.reasoning = { effort, summary: "auto" };
+        // billed either way. At `none` there is nothing to summarise, and the
+        // field must still ride: omitting it is the model's own default, which
+        // is `medium` on everything older than GPT-5.1.
+        request.reasoning =
+          level === "none" ? { effort: "none" } : { effort: level, summary: "auto" };
       }
       if (tools.length > 0) {
         // Flat here — no nested `function` envelope, unlike chat/completions.
