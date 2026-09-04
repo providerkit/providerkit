@@ -162,6 +162,30 @@ describe("anthropic adapter", () => {
     expect(bearer.seen[0]!.headers.get("authorization")).toBe("Bearer tok");
   });
 
+  it("serves any endpoint speaking the dialect — a base url, a Bearer and gateway headers", async () => {
+    // This adapter is not "the Anthropic one". Most 2026 vendors publish an
+    // Anthropic-dialect endpoint beside their OpenAI-dialect one, and the
+    // dialect is the only thing that decides which adapter to use. What varies
+    // between them is exactly three fields, so all three are pinned together:
+    // the host, where the credential rides (these gateways read Bearer, not
+    // x-api-key), and whatever header the gateway wants for itself.
+    const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+    await collect(
+      createAnthropicProvider({
+        apiKey: "sk-or-1",
+        model: "glm-5",
+        baseUrl: "https://openrouter.ai/api",
+        bearer: true,
+        headers: { "http-referer": "https://example.test" },
+        fetchImpl,
+      }).createStream([{ role: "user", content: "hi" }], []),
+    );
+    expect(seen[0]!.url).toBe("https://openrouter.ai/api/v1/messages");
+    expect(seen[0]!.headers.get("authorization")).toBe("Bearer sk-or-1");
+    expect(seen[0]!.headers.get("x-api-key")).toBeNull();
+    expect(seen[0]!.headers.get("http-referer")).toBe("https://example.test");
+  });
+
   it("keeps the thinking budget below max_tokens — they share the ceiling", async () => {
     // A budget at or above the ceiling leaves no room to answer, and the turn
     // ends mid-thought.
@@ -254,6 +278,25 @@ describe("openai-shape adapter", () => {
     const chunks = await collect(provider.createStream([{ role: "user", content: "hi" }], []));
     expect(chunks.filter((c) => c.content).map((c) => c.content)).toEqual(["Hel", "lo"]);
     expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("stop");
+  });
+
+  it("serves any endpoint speaking the dialect — a base url and gateway headers", async () => {
+    // The sibling of the Anthropic-shape test above. Same package, same two
+    // fields, and a trailing slash on the base url must not double the one
+    // `apiUrl` adds — a `//v1/chat/completions` is a 404 on most gateways.
+    const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+    await collect(
+      createOpenAIProvider({
+        apiKey: "sk-or-1",
+        model: "glm-5",
+        baseUrl: "https://openrouter.ai/api/",
+        headers: { "http-referer": "https://example.test" },
+        fetchImpl,
+      }).createStream([{ role: "user", content: "hi" }], []),
+    );
+    expect(seen[0]!.url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(seen[0]!.headers.get("authorization")).toBe("Bearer sk-or-1");
+    expect(seen[0]!.headers.get("http-referer")).toBe("https://example.test");
   });
 
   it("takes cached_tokens as a SUBSET — no reconciling on this shape", async () => {
