@@ -10,7 +10,7 @@ bun add @providerkit/core   # npm / pnpm / yarn all fine
 ```
 
 Zero runtime dependencies. `fetch` only — no vendor SDKs, no Node built-ins — so the same
-build runs in Bun, Node, Cloudflare Workers, Deno and a Chrome MV3 service worker.
+build runs in Node 22+, Bun, Deno, Cloudflare Workers and a Chrome MV3 service worker.
 
 ## What this is
 
@@ -93,6 +93,13 @@ worth a different model; one could rescue an answer from a tool call the model t
 The classifier here is the union of all five, and the suite is every failure any of them
 ever saw. That is the part worth having.
 
+## In production
+
+This is not a plan, it already happened. Four of the five codebases serve production traffic
+through this package today, and the migrations that put it there were net-negative every time —
+**−452, −1,621 and −197 lines** in the first three. The last one, `@falai/agent` v3, trades three
+vendor SDKs for this package (−5,033 more) and ships with the release that carries this section.
+
 ## Repo
 
 ```
@@ -106,15 +113,14 @@ the invariants worth not regressing, and what is left to build.
 
 ## Status
 
-Working and tested (380 tests): the seam, the error classifier, retry and backup-model
-fallback, the idle watchdog, cost math, the fetch/SSE transport, tool-argument salvage, the
-Anthropic, OpenAI-shape, Responses and Gemini adapters, the multi-key rotation pool,
-rate-limit reset windows, the tool kernel, schema clamping, and the compaction decisions.
+Working and tested (416 tests): the seam, the error classifier, retry and backup-model
+fallback, the idle watchdog and its wrapper, structured output on all four shapes, cost math,
+the fetch/SSE transport, tool-argument salvage, the Anthropic, OpenAI-shape, Responses and
+Gemini adapters, the multi-key rotation pool, rate-limit reset windows, the tool kernel, schema
+clamping, and the compaction decisions.
 
 That is the whole extraction, and the claim it rests on is that an adopting codebase gets
-**smaller**. The first migration — a Chrome MV3 extension, the hardest runtime of the five and
-the one with no Node, no bundler escape hatch and no zod — took **667 lines out and put 215
-back**, and kept every one of its six gates green. If a repo grows on adopting this, the
+**smaller**. Four migrations in, it has held every time. If a repo grows on adopting this, the
 boundary was drawn in the wrong place.
 
 ## License

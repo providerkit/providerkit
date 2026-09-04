@@ -44,6 +44,30 @@ The watchdog holds a timer. Without `dispose()` in a `finally`, a long-lived pro
 per stream.
 :::
 
+## The composition, wrapped
+
+Those three lines — build a watch, hand the provider the WATCH's signal, wrap the chunks — are
+easy to get subtly wrong, and the middle one fails silently in every test: pass the caller's
+signal instead and the watchdog still arms, still fires, and cancels nothing, because the request
+it was meant to abort was never told about it. The composition ships as a wrapper so the next
+caller does not have to get it right by reading carefully:
+
+```ts
+import { withWatchdog } from "@providerkit/core";
+
+const guarded = withWatchdog(provider, { idleMs: 60_000 });
+
+for await (const chunk of guarded.createStream(messages, tools, { signal: callerSignal })) {
+  handle(chunk);
+}
+```
+
+`guarded` is an ordinary `Provider`, so retry and backup-model walkers wrap it unchanged — and
+both failures it raises are transient, which is what makes that correct. The wrapper catches the
+other way a stream fails silently too: a turn that ends having said nothing throws as `overload`
+instead of succeeding with an empty answer. `requireContent: false` turns that off;
+`onFirstChunk` reports TTFT without the plumbing.
+
 ## Bridging the caller's signal
 
 `streamWatch` composes your signal with its own using `AbortSignal.any`, which is deliberate:
@@ -62,4 +86,5 @@ const ttft = watch.firstChunkMs(); // null until the first chunk arrives
 
 TTFT is the number users actually feel — total duration is dominated by answer length, but the
 wait before _anything_ appears is the perceived latency. It is also the first thing to move when
-a provider degrades, usually well before the error rate does.
+a provider degrades, usually well before the error rate does. Under `withWatchdog`, pass
+`onFirstChunk` and skip the plumbing.

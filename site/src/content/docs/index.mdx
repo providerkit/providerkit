@@ -149,7 +149,7 @@ rescue an answer from a tool call the model truncated.
     <span class="dim-label">failure kinds, by their fix</span>
   </div>
   <div class="dim">
-    <span class="dim-value">344</span>
+    <span class="dim-value">416</span>
     <span class="dim-rule" />
     <span class="dim-label">tests, every failure any of them saw</span>
   </div>
@@ -162,3 +162,7 @@ rescue an answer from a tool call the model truncated.
 
 The classifier on this page is the union of all five, and the test suite is every failure any of them
 ever saw. That is the part worth having.
+
+**Four of the five run their AI on it in production today.** The migrations that put it there were
+net-negative every time — −452, −1,621 and −197 lines — and the last one trades three vendor SDKs
+for this package.

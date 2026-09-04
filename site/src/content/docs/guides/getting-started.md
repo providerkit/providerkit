@@ -8,7 +8,7 @@ bun add @providerkit/core   # npm / pnpm / yarn all fine
 ```
 
 Zero runtime dependencies. `fetch` only — no vendor SDKs, no Node built-ins — so the same build
-runs in Bun, Node, Cloudflare Workers, Deno and a Chrome MV3 service worker.
+runs in Node 22+, Bun, Deno, Cloudflare Workers and a Chrome MV3 service worker.
 
 ## A first stream
 
@@ -37,6 +37,18 @@ If you only want the finished text, `drainStream` collects one:
 ```ts
 const { text, usage, finishReason } = await drainStream(stream, "claude-sonnet-5");
 ```
+
+Before this shape of code ships, wrap the provider once:
+
+```ts
+import { withWatchdog } from "@providerkit/core";
+
+const guarded = withWatchdog(provider); // same Provider, both silent failures handled
+```
+
+A stream that stops sending now fails as a retryable `timeout` instead of hanging forever, and a
+turn that completes having said nothing fails instead of showing an empty answer.
+[Streaming](/guides/streaming/) has the details.
 
 ## Swapping the vendor
 

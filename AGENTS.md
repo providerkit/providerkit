@@ -98,14 +98,14 @@ ready and waiting on a release.
 
 ## State
 
-**Built, tested, green** (410 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (416 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
 | `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`                |
 | `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them              |
 | `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker        |
-| `watchdog.ts`            | 60s idle deadline + TTFT                                                   |
+| `watchdog.ts`            | 60s idle deadline + TTFT; `withWatchdog`, the composition done right       |
 | `usage.ts`               | cost arithmetic (rates stay with the caller)                               |
 | `transport.ts`           | fetch + the error envelope, and `parseSseStream` on its own                |
 | `tool-args.ts`           | truncation salvage + double-escape healing                                 |

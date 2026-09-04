@@ -30,7 +30,13 @@ interface Provider {
 type ChatMessage =
   | { role: "system"; content: string }
   | { role: "user"; content: string | ContentPart[] }
-  | { role: "assistant"; content: string; reasoning?: string; toolCalls?: ToolCall[] }
+  | {
+      role: "assistant";
+      content: string;
+      reasoning?: string;
+      reasoningDetails?: unknown[]; // OpenRouter's opaque reasoning payload
+      toolCalls?: ToolCall[];
+    }
   | { role: "tool"; toolCallId: string; name: string; content: string; images?: ImagePart[] };
 ```
 
@@ -79,6 +85,12 @@ the call it just made — it re-plans, and often re-issues the tool call you alr
 Nothing else in the seam is opaque, so it is the one field a store must round-trip without
 understanding. If your history layer normalises tool calls, keep this field.
 
+`reasoningDetails` is OpenRouter's normalized version of the same idea — its reasoning payload,
+arriving on the stream and going back verbatim as `reasoning_details` on the next turn. Same
+contract: opaque, provider-owned. `drainStream` keeps it on the `Completion`; `stripReasoning`
+drops it along with `reasoning`, because a thinking-off turn must not carry either half of the
+record.
+
 ## Options
 
 ```ts
@@ -86,6 +98,9 @@ interface StreamOptions {
   model?: string; // override the bound model for this call
   effort?: Effort; // "none" | "low" | "medium" | "high" | "max"
   maxTokens?: number; // thinking and the answer SHARE this ceiling
+  temperature?: number;
+  topP?: number; // set this OR temperature, not both
+  stopSequences?: string[]; // no equivalent field on the Responses shape
   signal?: AbortSignal;
   toolChoice?: ToolChoice;
   json?: JsonOutput;
@@ -96,6 +111,18 @@ interface StreamOptions {
 Anthropic-shape it becomes a thinking budget in output tokens, always clamped below `maxTokens`,
 because a budget at or above the ceiling leaves no room to answer and the turn ends mid-thought.
 
+## Structured output
+
+`json` asks for a schema-constrained answer. On the OpenAI shapes it rides the native schema mode,
+and `isStrictSchema` decides whether OpenAI's strict mode is requested — strict demands every
+listed property be required and every object closed with `additionalProperties: false`, all the
+way down, so a schema with one optional field would otherwise 400 the request. Pass `json.strict`
+to overrule that guess. Anthropic has no schema mode, so the schema rides in the prompt as an
+extra system block, placed after the cached one. Gemini takes it via `responseJsonSchema`.
+
+Whatever the shape, the seam never guarantees the JSON — validate the answer regardless. `json`
+only decides whether the request is accepted.
+
 ## Adapters
 
 | Factory                   | Shape                   | Notes                                                                             |
@@ -104,6 +131,10 @@ because a budget at or above the ceiling leaves no room to answer and the turn e
 | `createOpenAIProvider`    | OpenAI Chat Completions | any compatible endpoint via `baseUrl`; `providerOrder` pins OpenRouter upstreams  |
 | `createResponsesProvider` | OpenAI Responses        | reasoning items replay across turns; also serves the ChatGPT subscription backend |
 | `createGeminiProvider`    | Gemini REST             | no SDK; thought signatures survive tool turns, and thoughts bill as output        |
+
+On the OpenAI-shape adapter, `effortDialect` names which spelling of _think this hard_ the endpoint
+accepts — `openai`, `openrouter`, `deepseek`, or `off` for one that rejects the field outright. It
+is inferred from the provider `id` where the name gives it away.
 
 `providerOrder` exists for cache warmth, not preference. OpenRouter's prompt cache lives on the
 upstream host's account, and default routing hops between hosts — every hop is a cold cache,
