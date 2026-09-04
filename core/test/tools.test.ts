@@ -251,3 +251,16 @@ describe("clampToSchema", () => {
     });
   });
 });
+
+describe("toJsonObjectSchema", () => {
+  it("drops the dialect URI zod puts at the root", async () => {
+    // A provider validating `parameters` against its own supported subset —
+    // OpenAI under strict, Gemini's parametersJsonSchema — rejects the whole
+    // tool over `$schema` and names neither zod nor the field.
+    const { toJsonObjectSchema } = await import("../src/zod.ts");
+    const { z } = await import("zod");
+    const json = toJsonObjectSchema(z.object({ q: z.string() }));
+    expect(json).not.toHaveProperty("$schema");
+    expect(json).toMatchObject({ type: "object", properties: { q: { type: "string" } } });
+  });
+});

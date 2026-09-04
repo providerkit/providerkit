@@ -87,8 +87,25 @@ function partsToAnthropic(content: string | ContentPart[]): unknown[] {
  * turns carrying `tool_result` blocks — not as a role of their own. Consecutive
  * tool results are merged into one user turn, which the API requires.
  */
+/**
+ * The system prompt as ONE cached block.
+ *
+ * Anthropic's prompt caching is opt-in PER BLOCK — a plain string system prompt
+ * is never cached, however many times it is re-sent. An agent loop re-sends this
+ * every single turn, and it is the largest stable prefix in the request, so
+ * without the breakpoint the whole thing bills at the full input rate on every
+ * round instead of a tenth of it on all but the first.
+ *
+ * Unconditional. Below the model's minimum cacheable length the field is
+ * ignored rather than rejected, and above it the one-time 1.25× write is repaid
+ * by the second turn — which, in the loop this package sits under, always comes.
+ */
+function systemBlocks(text: string): unknown[] | undefined {
+  return text ? [{ type: "text", text, cache_control: { type: "ephemeral" } }] : undefined;
+}
+
 export function toAnthropicMessages(messages: readonly ChatMessage[]): {
-  system?: string;
+  system?: unknown[];
   messages: unknown[];
 } {
   const system = messages
@@ -141,7 +158,8 @@ export function toAnthropicMessages(messages: readonly ChatMessage[]): {
     if (blocks.length > 0) pushBlocks("assistant", blocks);
   }
 
-  return { ...(system ? { system } : {}), messages: out };
+  const blocks = systemBlocks(system);
+  return { ...(blocks ? { system: blocks } : {}), messages: out };
 }
 
 interface AnthropicEvent {

@@ -22,9 +22,22 @@ export interface OpenAIConfig {
   model: string;
   /** Any OpenAI-compatible endpoint. Defaults to OpenAI itself. */
   baseUrl?: string;
-  /** Names the provider in errors and logs — "openrouter", "deepseek", … */
+  /** Names the provider in errors and logs — "openrouter", "deepseek", … It
+   *  also picks the effort dialect below, unless `effortDialect` overrides. */
   id?: string;
   effort?: Effort;
+  /**
+   * Which spelling of "think this hard" this endpoint accepts. Inferred from
+   * `id`; set it when the gateway is not named after its dialect, or to `off`
+   * for one that rejects the field outright.
+   */
+  effortDialect?: EffortDialect;
+  /**
+   * `schema` sends a `json_schema` response format, `object` plain JSON mode.
+   * Defaults to `schema` for OpenAI itself and `object` everywhere else, which
+   * is the only setting every gateway accepts.
+   */
+  jsonMode?: "schema" | "object";
   maxTokens?: number;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
@@ -39,6 +52,58 @@ export interface OpenAIConfig {
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
+
+/** The spellings of "think this hard" across the dialects that share this
+ *  adapter. `off` sends nothing and leaves the model on its own default. */
+export type EffortDialect = "openai" | "openrouter" | "deepseek" | "off";
+
+/**
+ * Effort → the request fields THIS endpoint accepts.
+ *
+ * One knob, three incompatible spellings, and the differences are not cosmetic:
+ *
+ * - **OpenRouter has no off switch.** `reasoning.enabled: false` is refused by
+ *   models that always think — GLM 5.3 Flash answers `400 "Reasoning is
+ *   mandatory for this endpoint and cannot be disabled."` — so `none` is
+ *   floored at `low` rather than sent. Named rather than omitted, because
+ *   letting the endpoint pick leaves cost and latency unpinned on exactly the
+ *   tasks that asked for neither. Measured against the live endpoint, and it
+ *   cost one app its onboarding read before it was.
+ * - **DeepSeek V4 defaults thinking ON**, so `none` has to be an explicit
+ *   refusal. That is the case proving OpenRouter's floor is a constraint and
+ *   not a preference for always thinking.
+ * - **OpenAI** takes `reasoning_effort` and nothing at all for `none`.
+ *
+ * An absent effort sends nothing on every dialect: the seam's rule is that a
+ * knob the caller never touched is a knob the provider still owns.
+ */
+export function effortParams(
+  dialect: EffortDialect,
+  effort: Effort | undefined,
+): Record<string, unknown> {
+  if (!effort) return {};
+  const level = effort === "max" ? "high" : effort === "none" ? null : effort;
+  switch (dialect) {
+    case "deepseek":
+      return level === null
+        ? { thinking: { type: "disabled" } }
+        : { thinking: { type: "enabled" }, reasoning_effort: level };
+    case "openrouter":
+      return { reasoning: { effort: level ?? "low" } };
+    case "openai":
+      return level === null ? {} : { reasoning_effort: level };
+    case "off":
+      return {};
+  }
+}
+
+/** Gateways named after their dialect get it for free; everything else keeps
+ *  the dialect this adapter is named for. */
+function dialectFor(id: string): EffortDialect {
+  if (id === "openrouter") return "openrouter";
+  if (id === "deepseek") return "deepseek";
+  return "openai";
+}
 
 function mapFinishReason(reason: string | null | undefined): FinishReason | undefined {
   switch (reason) {
@@ -72,33 +137,56 @@ function partsToOpenAI(content: string | ContentPart[]): unknown {
  * first (`stripReasoning`); the two cannot be mixed.
  */
 export function toOpenAIMessages(messages: readonly ChatMessage[]): unknown[] {
-  return messages.map((message) => {
+  const out: unknown[] = [];
+  for (const message of messages) {
     switch (message.role) {
       case "system":
-        return { role: "system", content: message.content };
+        out.push({ role: "system", content: message.content });
+        break;
+
       case "user":
-        return { role: "user", content: partsToOpenAI(message.content) };
+        out.push({ role: "user", content: partsToOpenAI(message.content) });
+        break;
+
       case "tool":
-        return { role: "tool", tool_call_id: message.toolCallId, content: message.content };
+        out.push({ role: "tool", tool_call_id: message.toolCallId, content: message.content });
+        // This dialect has no image slot on a tool message — a `tool` role takes
+        // text and nothing else. A screenshot a tool hands back therefore
+        // follows as its own user message, which is the only way the model ever
+        // sees it. Dropped instead, the turn reads as a tool that returned
+        // words about a picture nobody was shown.
+        if (message.images?.length) {
+          out.push({
+            role: "user",
+            content: message.images.map((image) => ({
+              type: "image_url",
+              image_url: { url: toDataUri(image) },
+            })),
+          });
+        }
+        break;
+
       case "assistant": {
-        const out: Record<string, unknown> = {
+        const assistant: Record<string, unknown> = {
           role: "assistant",
           // Nullable content beside tool_calls is what this shape expects, but
           // several gateways reject a bare null — "" satisfies both.
           content: message.content || "",
         };
-        if (message.reasoning) out.reasoning_content = message.reasoning;
+        if (message.reasoning) assistant.reasoning_content = message.reasoning;
         if (message.toolCalls?.length) {
-          out.tool_calls = message.toolCalls.map((call) => ({
+          assistant.tool_calls = message.toolCalls.map((call) => ({
             id: call.id,
             type: "function",
             function: { name: call.name, arguments: call.arguments },
           }));
         }
-        return out;
+        out.push(assistant);
+        break;
       }
     }
-  });
+  }
+  return out;
 }
 
 interface OpenAIChunk {
@@ -119,6 +207,9 @@ interface OpenAIChunk {
     prompt_tokens?: number;
     completion_tokens?: number;
     prompt_tokens_details?: { cached_tokens?: number };
+    /** DeepSeek's native API reports the cache-hit count here instead of in
+     *  `prompt_tokens_details`, and it is absent from every OpenAI SDK type. */
+    prompt_cache_hit_tokens?: number;
   } | null;
   /** Present only on the in-band failure below — never beside a choice.
    *  `code` is the numeric HTTP status on the gateways, a slug on OpenAI. */
@@ -151,7 +242,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) request.max_tokens = maxTokens;
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
-      if (effort && effort !== "none") request.reasoning_effort = effort;
+      Object.assign(request, effortParams(config.effortDialect ?? dialectFor(id), effort));
       if (tools.length > 0) {
         request.tools = tools.map((tool) => ({
           type: "function",
@@ -169,10 +260,19 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             : { type: "function", function: { name: opts.toolChoice.name } };
       }
       if (opts.json) {
-        request.response_format = {
-          type: "json_schema",
-          json_schema: { name: opts.json.name, schema: opts.json.schema, strict: true },
-        };
+        request.response_format =
+          (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema"
+            ? {
+                type: "json_schema",
+                json_schema: { name: opts.json.name, schema: opts.json.schema, strict: true },
+              }
+            : // Everything else gets plain JSON mode. Schema ENFORCEMENT is
+              // OpenAI's; the gateways and the vendors behind them offer JSON
+              // mode at best, and several answer a flat 400 to a `json_schema`
+              // block. The seam's rule makes this safe either way: a provider's
+              // "guaranteed" JSON is not one, so the caller validates
+              // regardless — this only decides whether the request is accepted.
+              { type: "json_object" };
       }
       if (config.providerOrder?.length) {
         request.provider = { order: config.providerOrder, allow_fallbacks: true };
@@ -204,7 +304,14 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         // A usage-only frame carries no choices — this shape sends it last.
         if (chunk.usage) {
           const input = chunk.usage.prompt_tokens ?? 0;
-          const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+          // Two spellings for the same subset. DeepSeek's native endpoint uses
+          // its own field, and reading only the standard one bills every cached
+          // token at the full input rate — on an agent loop, where the re-sent
+          // prefix is overwhelmingly hits, that overstates a run by up to 10×.
+          const cached =
+            chunk.usage.prompt_tokens_details?.cached_tokens ??
+            chunk.usage.prompt_cache_hit_tokens ??
+            0;
           yield {
             type: "usage",
             usage: {

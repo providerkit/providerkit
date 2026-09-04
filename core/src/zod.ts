@@ -8,9 +8,19 @@ import { defineTool, type Tool, type ToolContext } from "./tools.ts";
 import { clampToSchema } from "./schema.ts";
 import type { JsonObjectSchema } from "./types.ts";
 
-/** A zod schema as the JSON Schema every provider's tool contract wants. */
+/**
+ * A zod schema as the JSON Schema every provider's tool contract wants.
+ *
+ * `$schema` is dropped. zod emits the dialect URI at the root, and a provider
+ * validating a tool's `parameters` against its own supported subset — OpenAI
+ * under `strict: true`, Gemini's `parametersJsonSchema` — rejects the whole
+ * tool over that one key, with a message that names neither zod nor the field.
+ */
 export function toJsonObjectSchema(schema: z.ZodType, label = "schema"): JsonObjectSchema {
-  const json = z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown>;
+  const { $schema: _dialect, ...json } = z.toJSONSchema(schema, { io: "input" }) as Record<
+    string,
+    unknown
+  >;
   if (json.type !== "object") {
     // Every provider requires an object at the top level of a tool's
     // parameters; a bare string or array is rejected at the wire, far from

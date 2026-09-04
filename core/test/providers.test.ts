@@ -2,9 +2,9 @@
 // asserting the normalized chunks they must produce.
 import { describe, expect, it } from "vitest";
 import { createAnthropicProvider, toAnthropicMessages } from "../src/providers/anthropic.ts";
-import { createOpenAIProvider, toOpenAIMessages } from "../src/providers/openai.ts";
+import { createOpenAIProvider, effortParams, toOpenAIMessages } from "../src/providers/openai.ts";
 import { ProviderError } from "../src/errors.ts";
-import type { ChatMessage, ProviderChunk } from "../src/types.ts";
+import { EFFORTS, type ChatMessage, type Effort, type ProviderChunk } from "../src/types.ts";
 
 /** Records the request and replays a canned SSE transcript. */
 function recorder(frames: string[], status = 200) {
@@ -204,7 +204,13 @@ describe("toAnthropicMessages", () => {
     ];
     const { system, messages: out } = toAnthropicMessages(messages);
 
-    expect(system).toBe("be brief");
+    // One cached block, not a bare string: Anthropic's caching is opt-in per
+    // block, and this is the largest stable prefix an agent loop re-sends every
+    // turn. A plain string here bills the whole system prompt at the full input
+    // rate on every round, forever, and nothing fails to say so.
+    expect(system).toEqual([
+      { type: "text", text: "be brief", cache_control: { type: "ephemeral" } },
+    ]);
     // The API requires the two results in a single user turn.
     const roles = (out as { role: string }[]).map((m) => m.role);
     expect(roles).toEqual(["user", "assistant", "user"]);
@@ -323,6 +329,25 @@ describe("openai-shape adapter", () => {
     expect(plain.seen[0]!.body.provider).toBeUndefined();
   });
 
+  it("sends NO routing block without a pin — never an empty order array", async () => {
+    // An empty `order` on the wire is not "no preference", it is a preference
+    // for nothing, and nothing above the adapter can see the difference: one
+    // reads as default routing and the other as wrong routing.
+    for (const providerOrder of [undefined, []]) {
+      const { seen, fetchImpl } = recorder([j({ choices: [] })]);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "k",
+          model: "m",
+          id: "openrouter",
+          fetchImpl,
+          ...(providerOrder ? { providerOrder } : {}),
+        }).createStream([{ role: "user", content: "hi" }], []),
+      );
+      expect(seen[0]!.body).not.toHaveProperty("provider");
+    }
+  });
+
   it("surfaces a non-2xx through the shared classifier", async () => {
     const { fetchImpl } = recorder([], 429);
     const provider = createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl });
@@ -360,5 +385,143 @@ describe("toOpenAIMessages", () => {
     ]) as Record<string, unknown>[];
     const parts = message!.content as { type: string; image_url?: { url: string } }[];
     expect(parts[1]!.image_url!.url).toBe("data:image/png;base64,AAA");
+  });
+});
+
+describe("effortParams", () => {
+  // One knob, three incompatible spellings. The contract behind a silent
+  // production failure: GLM 5.3 Flash through OpenRouter answers
+  // 400 "Reasoning is mandatory for this endpoint and cannot be disabled."
+  // `none` is a legal effort everywhere else, so nothing above the wire can
+  // see it — these are that check.
+  it("never asks OpenRouter to switch reasoning off", () => {
+    for (const effort of EFFORTS) {
+      expect(JSON.stringify(effortParams("openrouter", effort))).not.toContain("disabled");
+      expect(effortParams("openrouter", effort)).not.toHaveProperty("reasoning.enabled");
+    }
+  });
+
+  it("floors OpenRouter's `none` at `low` and clamps `max` to `high`", () => {
+    expect(effortParams("openrouter", "none")).toEqual({ reasoning: { effort: "low" } });
+    expect(effortParams("openrouter", "max")).toEqual({ reasoning: { effort: "high" } });
+  });
+
+  it("keeps the real off switch where a model has one — DeepSeek defaults ON", () => {
+    expect(effortParams("deepseek", "none")).toEqual({ thinking: { type: "disabled" } });
+    expect(effortParams("deepseek", "medium")).toEqual({
+      thinking: { type: "enabled" },
+      reasoning_effort: "medium",
+    });
+  });
+
+  it("sends OpenAI reasoning_effort, and nothing for none", () => {
+    expect(effortParams("openai", "high")).toEqual({ reasoning_effort: "high" });
+    expect(effortParams("openai", "none")).toEqual({});
+    expect(effortParams("off", "high")).toEqual({});
+  });
+
+  it("sends nothing at all when the caller never asked", () => {
+    // Absent is not `none`: a knob the caller never touched stays the
+    // provider's, which is why OpenRouter's floor does not fire here.
+    for (const dialect of ["openai", "openrouter", "deepseek", "off"] as const) {
+      expect(effortParams(dialect, undefined)).toEqual({});
+    }
+  });
+
+  it("picks the dialect from the provider id, over the wire", async () => {
+    const seen = async (id: string, effort: Effort) => {
+      const { seen: calls, fetchImpl } = recorder([j({ choices: [] })]);
+      await collect(
+        createOpenAIProvider({ apiKey: "k", model: "m", id, fetchImpl }).createStream(
+          [{ role: "user", content: "hi" }],
+          [],
+          { effort },
+        ),
+      );
+      return calls[0]!.body;
+    };
+    expect(await seen("openrouter", "none")).toMatchObject({ reasoning: { effort: "low" } });
+    expect(await seen("deepseek", "none")).toMatchObject({ thinking: { type: "disabled" } });
+    expect(await seen("kimi", "high")).toMatchObject({ reasoning_effort: "high" });
+  });
+});
+
+describe("cached-token spellings", () => {
+  it("reads DeepSeek's own field as well as the standard one", async () => {
+    // Absent from every OpenAI SDK usage type, so nothing catches it but this.
+    // Read only the standard name and a cached token bills at the full input
+    // rate — on an agent loop that is most of the prompt, every round.
+    const usage = async (record: Record<string, unknown>) => {
+      const { fetchImpl } = recorder([j({ choices: [], usage: record })]);
+      const chunks = await collect(
+        createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl }).createStream(
+          [{ role: "user", content: "hi" }],
+          [],
+        ),
+      );
+      return chunks.find((c) => c.type === "usage")?.usage;
+    };
+    expect(
+      await usage({ prompt_tokens: 1000, completion_tokens: 5, prompt_cache_hit_tokens: 900 }),
+    ).toMatchObject({ inputTokens: 1000, cachedInputTokens: 900 });
+    expect(
+      await usage({
+        prompt_tokens: 1000,
+        completion_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 700 },
+      }),
+    ).toMatchObject({ cachedInputTokens: 700 });
+    expect(await usage({ prompt_tokens: 10, completion_tokens: 5 })).toMatchObject({
+      cachedInputTokens: 0,
+    });
+  });
+});
+
+describe("what the OpenAI dialect cannot carry", () => {
+  it("follows a tool's images with a user message — the tool role has no image slot", async () => {
+    // Dropped instead, the turn reads as a tool that returned words about a
+    // picture nobody was shown, and nothing anywhere reports a loss.
+    const out = toOpenAIMessages([
+      {
+        role: "tool",
+        toolCallId: "call_1",
+        name: "screenshot",
+        content: "captured",
+        images: [{ type: "image", mimeType: "image/png", data: "AAAA" }],
+      },
+    ]);
+    expect(out).toEqual([
+      { role: "tool", tool_call_id: "call_1", content: "captured" },
+      {
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }],
+      },
+    ]);
+  });
+
+  it("asks for schema enforcement only where it exists, JSON mode everywhere else", async () => {
+    // Schema enforcement is OpenAI's; the gateways offer JSON mode at best and
+    // several answer a flat 400 to a `json_schema` block. The caller validates
+    // either way, so this only decides whether the request is accepted at all.
+    const format = async (id: string, jsonMode?: "schema" | "object") => {
+      const { seen, fetchImpl } = recorder([j({ choices: [] })]);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "k",
+          model: "m",
+          id,
+          fetchImpl,
+          ...(jsonMode ? { jsonMode } : {}),
+        }).createStream([{ role: "user", content: "hi" }], [], {
+          json: { name: "out", schema: { type: "object" } },
+        }),
+      );
+      return seen[0]!.body.response_format;
+    };
+    expect(await format("openai")).toMatchObject({ type: "json_schema" });
+    expect(await format("deepseek")).toEqual({ type: "json_object" });
+    expect(await format("openrouter")).toEqual({ type: "json_object" });
+    // The override, for a gateway that does enforce schemas.
+    expect(await format("my-gateway", "schema")).toMatchObject({ type: "json_schema" });
   });
 });
