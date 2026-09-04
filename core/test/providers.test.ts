@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { createAnthropicProvider, toAnthropicMessages } from "../src/providers/anthropic.ts";
 import { createOpenAIProvider, effortParams, toOpenAIMessages } from "../src/providers/openai.ts";
 import { ProviderError } from "../src/errors.ts";
-import { EFFORTS, type ChatMessage, type Effort, type ProviderChunk } from "../src/types.ts";
+import {
+  EFFORTS,
+  stripReasoning,
+  type ChatMessage,
+  type Effort,
+  type ProviderChunk,
+} from "../src/types.ts";
 
 /** Records the request and replays a canned SSE transcript. */
 function recorder(frames: string[], status = 200) {
@@ -414,6 +420,14 @@ describe("effortParams", () => {
     });
   });
 
+  it("never caps DeepSeek at the top — it auto-bumps the turns that need it", () => {
+    // A graded level rides only when it asks for LESS. DeepSeek pushes a complex
+    // agent or tool request past its own default, and naming the top tier caps
+    // exactly those turns. `max` clamps to `high` first, so both land here.
+    expect(effortParams("deepseek", "high")).toEqual({ thinking: { type: "enabled" } });
+    expect(effortParams("deepseek", "max")).toEqual({ thinking: { type: "enabled" } });
+  });
+
   it("sends OpenAI reasoning_effort, and nothing for none", () => {
     expect(effortParams("openai", "high")).toEqual({ reasoning_effort: "high" });
     expect(effortParams("openai", "none")).toEqual({});
@@ -523,5 +537,36 @@ describe("what the OpenAI dialect cannot carry", () => {
     expect(await format("openrouter")).toEqual({ type: "json_object" });
     // The override, for a gateway that does enforce schemas.
     expect(await format("my-gateway", "schema")).toMatchObject({ type: "json_schema" });
+  });
+});
+
+describe("reasoning that must ride back", () => {
+  it("carries OpenRouter's reasoning_details out of the stream and back in", async () => {
+    // Opaque on purpose — the same contract as Gemini's thoughtSignature. It is
+    // the provider's own record of how it reached the tool round it is being
+    // asked to continue; reshaped or dropped, that continuity is gone and
+    // nothing reports it.
+    const details = [{ type: "reasoning.text", text: "…", signature: "abc" }];
+    const { fetchImpl } = recorder([
+      j({ choices: [{ delta: { reasoning_details: details }, finish_reason: null }] }),
+    ]);
+    const chunks = await collect(
+      createOpenAIProvider({ apiKey: "k", model: "m", id: "openrouter", fetchImpl }).createStream(
+        [{ role: "user", content: "hi" }],
+        [],
+      ),
+    );
+    expect(chunks[0]?.reasoningDetails).toEqual(details);
+
+    expect(
+      toOpenAIMessages([{ role: "assistant", content: "ok", reasoningDetails: details }]),
+    ).toEqual([{ role: "assistant", content: "ok", reasoning_details: details }]);
+  });
+
+  it("strips it for a thinking-OFF turn, like the text half", () => {
+    const stripped = stripReasoning([
+      { role: "assistant", content: "ok", reasoning: "why", reasoningDetails: [{ a: 1 }] },
+    ]);
+    expect(stripped[0]).toEqual({ role: "assistant", content: "ok" });
   });
 });

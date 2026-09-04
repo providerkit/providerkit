@@ -71,6 +71,16 @@ export type ChatMessage =
        * unsupported. `stripReasoning` below is that rule, once.
        */
       reasoning?: string;
+      /**
+       * OpenRouter's normalized reasoning payload, arriving on the stream and
+       * riding back UNMODIFIED on the next turn's assistant message.
+       *
+       * Opaque on purpose — the same contract as Gemini's `thoughtSignature`,
+       * and for the same reason: it is the provider's own record of how it got
+       * here, and reading, reshaping or dropping it costs the model its
+       * continuity across a tool round. Absent on every other dialect.
+       */
+      reasoningDetails?: unknown[];
       toolCalls?: ToolCall[];
     }
   | {
@@ -131,6 +141,9 @@ export interface ProviderChunk {
   type: "delta" | "usage" | "finish";
   content?: string;
   reasoning?: string;
+  /** OpenRouter's normalized reasoning payload — hand it back on the next
+   *  turn's assistant message verbatim. See ChatMessage.reasoningDetails. */
+  reasoningDetails?: unknown[];
   toolCalls?: ToolCallDelta[];
   usage?: TokenUsage;
   finishReason?: FinishReason;
@@ -219,8 +232,12 @@ export async function drainStream(
  */
 export function stripReasoning(messages: readonly ChatMessage[]): ChatMessage[] {
   return messages.map((message) => {
-    if (message.role !== "assistant" || message.reasoning === undefined) return message;
-    const { reasoning: _dropped, ...rest } = message;
+    if (message.role !== "assistant") return message;
+    if (message.reasoning === undefined && message.reasoningDetails === undefined) return message;
+    // Both halves go. `reasoningDetails` is the same chain of thought in the
+    // provider's own words, so leaving it behind carries into a thinking-off
+    // turn exactly what stripping `reasoning` was meant to keep out.
+    const { reasoning: _text, reasoningDetails: _payload, ...rest } = message;
     return rest;
   });
 }

@@ -381,7 +381,9 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
   if (matches(CONTENT_PATTERNS, text)) return "content";
   // 529 is Anthropic's own "overloaded". 409 is how several gateways say
   // "the model is still loading" — both are worth another attempt.
-  if (code === 529 || code === 409) return "overload";
+  // 425 Too Early: the upstream is asking us to replay, not telling us we were
+  // wrong. Left as a plain 4xx it reads as `invalid` and is never retried.
+  if (code === 529 || code === 409 || code === 425) return "overload";
   if (code !== undefined && code >= 500) return "overload";
   if (matches(RATE_PATTERNS, text)) return "rate";
   if (matches(OVERLOAD_PATTERNS, text)) return "overload";

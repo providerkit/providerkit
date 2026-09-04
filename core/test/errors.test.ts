@@ -354,3 +354,12 @@ describe("classify() is total", () => {
     }
   });
 });
+
+describe("425 Too Early", () => {
+  it("is the upstream asking for a replay, not telling us we were wrong", () => {
+    // Left as a plain 4xx it reads as `invalid` and a run never retries what a
+    // single re-send would have cleared.
+    expect(classifyHttp(425, "")).toBe("overload");
+    expect(isTransient(classifyHttp(425, ""))).toBe(true);
+  });
+});

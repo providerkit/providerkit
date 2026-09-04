@@ -85,8 +85,14 @@ export function effortParams(
   const level = effort === "max" ? "high" : effort === "none" ? null : effort;
   switch (dialect) {
     case "deepseek":
-      return level === null
-        ? { thinking: { type: "disabled" } }
+      if (level === null) return { thinking: { type: "disabled" } };
+      // A graded level rides only when it asks for LESS. DeepSeek auto-bumps a
+      // complex agent or tool request past its own default, and naming the top
+      // tier here caps exactly the turns that most need the bump — so `high`
+      // and `max` say "on" and leave the ceiling where DeepSeek puts it, while
+      // `low` and `medium` mean what they say.
+      return level === "high"
+        ? { thinking: { type: "enabled" } }
         : { thinking: { type: "enabled" }, reasoning_effort: level };
     case "openrouter":
       return { reasoning: { effort: level ?? "low" } };
@@ -174,6 +180,12 @@ export function toOpenAIMessages(messages: readonly ChatMessage[]): unknown[] {
           content: message.content || "",
         };
         if (message.reasoning) assistant.reasoning_content = message.reasoning;
+        // Verbatim, under the name the gateway gave it. Reshaped or dropped, the
+        // model loses its own record of how it reached the tool round it is
+        // being asked to continue.
+        if (message.reasoningDetails?.length) {
+          assistant.reasoning_details = message.reasoningDetails;
+        }
         if (message.toolCalls?.length) {
           assistant.tool_calls = message.toolCalls.map((call) => ({
             id: call.id,
@@ -195,6 +207,8 @@ interface OpenAIChunk {
       content?: string | null;
       reasoning_content?: string | null;
       reasoning?: string | null;
+      /** OpenRouter's normalized reasoning payload, on the final delta. */
+      reasoning_details?: unknown[];
       tool_calls?: {
         index?: number;
         id?: string;
@@ -340,6 +354,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           const reasoning = delta.reasoning_content ?? delta.reasoning;
           if (reasoning) {
             out.reasoning = reasoning;
+            has = true;
+          }
+          if (delta.reasoning_details?.length) {
+            out.reasoningDetails = delta.reasoning_details;
             has = true;
           }
           if (delta.tool_calls?.length) {
