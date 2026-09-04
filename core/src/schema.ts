@@ -65,3 +65,44 @@ export function clampToSchema(value: unknown, node: unknown): unknown {
 
   return value;
 }
+
+/**
+ * Whether OpenAI's `strict` schema mode will accept this schema.
+ *
+ * Strict is the only JSON mode that actually guarantees the shape, so it is
+ * worth having — but it demands more than JSON Schema does: every property an
+ * object lists must ALSO be required, and every object must close itself with
+ * `additionalProperties: false`, all the way down. A schema with one optional
+ * field is not "mostly strict"; it is a flat 400 naming a nested path rather
+ * than the rule it broke.
+ *
+ * That trap is the reason this exists. An agent's response schema grows
+ * optional fields naturally — a `data` block only some flows fill, the fields
+ * one step collects — and a caller who adds one wants their answer, not a
+ * lecture about a mode they never asked for. So the OpenAI-shape adapters ask
+ * this and drop to plain (unenforced) schema mode instead of failing the turn.
+ *
+ * Anything it cannot verify — a `$ref`, a composed `allOf` — answers false:
+ * the cost of guessing wrong that way is unenforced output, and the cost of
+ * guessing wrong the other way is a request that cannot succeed at all.
+ */
+export function isStrictSchema(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  const schema = node as SchemaNode;
+
+  if (schema.$ref !== undefined || schema.allOf !== undefined) return false;
+
+  const union = schema.anyOf ?? schema.oneOf;
+  if (Array.isArray(union)) return union.every(isStrictSchema);
+
+  // A leaf (string, number, boolean, enum) carries no strict obligations.
+  if (schema.type === "array") return schema.items === undefined || isStrictSchema(schema.items);
+  if (schema.properties === undefined) return true;
+
+  if (schema.additionalProperties !== false) return false;
+  const properties = schema.properties as Record<string, unknown>;
+  const required = new Set(Array.isArray(schema.required) ? (schema.required as string[]) : []);
+  return Object.entries(properties).every(
+    ([key, value]) => required.has(key) && isStrictSchema(value),
+  );
+}

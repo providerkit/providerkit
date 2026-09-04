@@ -16,6 +16,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
+import { isStrictSchema } from "../schema.ts";
 
 export interface OpenAIConfig {
   apiKey: string;
@@ -256,6 +257,8 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) request.max_tokens = maxTokens;
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
+      if (opts.topP !== undefined) request.top_p = opts.topP;
+      if (opts.stopSequences?.length) request.stop = opts.stopSequences;
       Object.assign(request, effortParams(config.effortDialect ?? dialectFor(id), effort));
       if (tools.length > 0) {
         request.tools = tools.map((tool) => ({
@@ -278,7 +281,11 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema"
             ? {
                 type: "json_schema",
-                json_schema: { name: opts.json.name, schema: opts.json.schema, strict: true },
+                json_schema: {
+                  name: opts.json.name,
+                  schema: opts.json.schema,
+                  strict: opts.json.strict ?? isStrictSchema(opts.json.schema),
+                },
               }
             : // Everything else gets plain JSON mode. Schema ENFORCEMENT is
               // OpenAI's; the gateways and the vendors behind them offer JSON

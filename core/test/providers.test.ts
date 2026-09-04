@@ -570,3 +570,64 @@ describe("reasoning that must ride back", () => {
     expect(stripped[0]).toEqual({ role: "assistant", content: "ok" });
   });
 });
+
+// ── what the fifth migration found ────────────────────────────────────────
+describe("the schema reaches a provider with no schema mode", () => {
+  const schema = {
+    type: "object" as const,
+    properties: { message: { type: "string" } },
+    required: ["message"],
+    additionalProperties: false,
+  };
+
+  // It went out carrying nothing at all: the model answered in prose, the
+  // caller's JSON.parse threw, and the turn failed on the happy path.
+  it("puts the schema in Anthropic's system prompt", async () => {
+    const { seen, fetchImpl } = recorder([JSON.stringify({ type: "message_stop" })]);
+    const provider = createAnthropicProvider({ apiKey: "k", model: "claude", fetchImpl });
+    await collect(
+      provider.createStream([{ role: "system", content: "You are terse." }], [], {
+        json: { name: "out", schema },
+      }),
+    ).catch(() => undefined);
+
+    const system = seen[0].body.system as { type: string; text: string; cache_control?: unknown }[];
+    expect(system).toHaveLength(2);
+    expect(system[1].text).toContain('"required":["message"]');
+    // The cache breakpoint stays on the STABLE block. Folding a per-call schema
+    // into it would re-bill the whole system prompt every turn.
+    expect(system[0].cache_control).toBeDefined();
+    expect(system[1].cache_control).toBeUndefined();
+  });
+
+  it("enforces strict only when the schema can satisfy it", async () => {
+    const loose = { ...schema, properties: { ...schema.properties, data: { type: "object" } } };
+    for (const [candidate, expected] of [
+      [schema, true],
+      [loose, false],
+    ] as const) {
+      const { seen, fetchImpl } = recorder([]);
+      const provider = createOpenAIProvider({ apiKey: "k", model: "gpt", fetchImpl });
+      await collect(
+        provider.createStream([{ role: "user", content: "hi" }], [], {
+          json: { name: "out", schema: candidate },
+        }),
+      ).catch(() => undefined);
+      const format = seen[0].body.response_format as { json_schema: { strict: boolean } };
+      expect(format.json_schema.strict).toBe(expected);
+    }
+  });
+
+  it("carries the two sampling controls every shape has", async () => {
+    const { seen, fetchImpl } = recorder([]);
+    const provider = createOpenAIProvider({ apiKey: "k", model: "gpt", fetchImpl });
+    await collect(
+      provider.createStream([{ role: "user", content: "hi" }], [], {
+        topP: 0.1,
+        stopSequences: ["</answer>"],
+      }),
+    ).catch(() => undefined);
+    expect(seen[0].body.top_p).toBe(0.1);
+    expect(seen[0].body.stop).toEqual(["</answer>"]);
+  });
+});

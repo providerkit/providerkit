@@ -3,6 +3,7 @@ import { streamError } from "../errors.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
+  JsonOutput,
   ChatMessage,
   ContentPart,
   Effort,
@@ -102,6 +103,28 @@ function partsToAnthropic(content: string | ContentPart[]): unknown[] {
  */
 function systemBlocks(text: string): unknown[] | undefined {
   return text ? [{ type: "text", text, cache_control: { type: "ephemeral" } }] : undefined;
+}
+
+/**
+ * The schema, as an extra system block — Anthropic has no native schema mode,
+ * and the seam promises that a provider without one gets the schema in the
+ * prompt instead. Without this an `opts.json` request went out carrying
+ * nothing at all: the model answered in prose, the caller's `JSON.parse` threw,
+ * and the turn failed on the happy path where no retry looks.
+ *
+ * It rides AFTER the cached block, and that order is load-bearing. A cache
+ * breakpoint caches everything before it, so folding a per-call schema into the
+ * cached block would change the cached prefix on every turn whose schema
+ * differs and throw the whole system prompt's cache away — paying for the
+ * schema with the most expensive thing in an agent loop.
+ */
+function jsonBlock(json: JsonOutput): unknown {
+  return {
+    type: "text",
+    text:
+      "Respond with a single JSON object matching this schema. No prose, no code fence:\n" +
+      JSON.stringify(json.schema),
+  };
 }
 
 export function toAnthropicMessages(messages: readonly ChatMessage[]): {
@@ -209,8 +232,11 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         messages: body,
         stream: true,
       };
-      if (system) request.system = system;
+      const systemBody = opts.json ? [...(system ?? []), jsonBlock(opts.json)] : system;
+      if (systemBody?.length) request.system = systemBody;
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
+      if (opts.topP !== undefined) request.top_p = opts.topP;
+      if (opts.stopSequences?.length) request.stop_sequences = opts.stopSequences;
       if (tools.length > 0) {
         request.tools = tools.map((tool) => ({
           name: tool.name,
@@ -231,6 +257,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         request.thinking = { type: "enabled", budget_tokens: budget };
         // Thinking and sampling are mutually exclusive on this shape.
         delete request.temperature;
+        delete request.top_p;
       }
 
       // Anthropic reports cache reads and writes as fields of their OWN,

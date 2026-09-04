@@ -1,3 +1,6 @@
+// The two ways a stream fails without failing: it goes silent, or it ends
+// having said nothing at all.
+//
 // The stream-idle watchdog.
 //
 // A provider that stops sending bytes is indistinguishable from a long prefill
@@ -13,6 +16,7 @@
 // the other is ours, is transient, and fires while nothing has streamed yet,
 // so the retry is always safe.
 import { ProviderError } from "./errors.ts";
+import type { ProviderChunk } from "./types.ts";
 
 /** No byte at all for this long and the stream is considered wedged. */
 export const STREAM_IDLE_MS = 60_000;
@@ -56,7 +60,9 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
 
   // The bridge is structural rather than an event listener: AbortSignal.any
   // aborts synchronously when an input is ALREADY aborted, which is the race
-  // no listener can catch (the event fired before we subscribed).
+  // no listener can catch (the event fired before we subscribed). It is also
+  // the package's runtime floor — see `engines` — rather than a polyfilled
+  // nicety: every runtime this package targets has had it for years.
   const signal = callerSignal ? AbortSignal.any([callerSignal, timeout.signal]) : timeout.signal;
 
   const idleError = (cause?: unknown) =>
@@ -115,5 +121,49 @@ export async function* watchChunks<T>(
     throw watch.classify(err);
   } finally {
     watch.dispose();
+  }
+}
+
+/**
+ * Reject a turn that completed but produced nothing usable.
+ *
+ * A stream that ends with no text, no reasoning and no tool call is a failure
+ * wearing a success's clothes: `stop_reason: end_turn` with zero content
+ * blocks, which the vendors emit under load and after a thinking block eats
+ * the whole `max_tokens`. Nothing throws, so nothing retries — the caller
+ * simply shows a person an empty answer, and the only trace is a bill.
+ *
+ * Classified `overload` because that is both true and useful: it is theirs and
+ * temporary, so it is transient (the same model, retried, usually answers) and
+ * backup-eligible (a model that keeps doing it should be walked away from).
+ * The throw lands before any chunk is yielded downstream, so the retry rule
+ * that matters — retry only while nothing was emitted — still holds.
+ */
+export async function* requireContent<T extends ProviderChunk>(
+  provider: string,
+  chunks: AsyncIterable<T>,
+): AsyncGenerator<T> {
+  const held: T[] = [];
+  let usable = false;
+
+  for await (const chunk of chunks) {
+    if (!usable) {
+      usable = Boolean(chunk.content || chunk.reasoning || chunk.toolCalls?.length);
+      // Held rather than forwarded: once a chunk is out, the stream is
+      // committed and the retry this guard exists to trigger can no longer
+      // fire. Nothing content-bearing has arrived yet, so there is nothing to
+      // hold back but the empty frames.
+      if (!usable) {
+        held.push(chunk);
+        continue;
+      }
+      yield* held;
+      held.length = 0;
+    }
+    yield chunk;
+  }
+
+  if (!usable) {
+    throw new ProviderError(provider, "overload", `${provider}: completed with no content`);
   }
 }

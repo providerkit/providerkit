@@ -252,6 +252,8 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       const generationConfig: Record<string, unknown> = {};
       if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
       if (opts.temperature !== undefined) generationConfig.temperature = opts.temperature;
+      if (opts.topP !== undefined) generationConfig.topP = opts.topP;
+      if (opts.stopSequences?.length) generationConfig.stopSequences = opts.stopSequences;
       // No effort means the model's own dynamic thinking. Sending MINIMAL here
       // would switch that off for a caller who never asked, which is the whole
       // reason the seam treats an absent effort as "never sent".

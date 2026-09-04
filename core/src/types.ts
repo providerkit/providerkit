@@ -161,6 +161,13 @@ export type ToolChoice = "auto" | "none" | "required" | { name: string };
 export interface JsonOutput {
   name: string;
   schema: JsonObjectSchema;
+  /**
+   * Force OpenAI's strict schema mode on or off. Left unset, the adapters ask
+   * `isStrictSchema` and enforce whenever the schema actually qualifies —
+   * which is what keeps an optional field from turning a working call into a
+   * 400. Set it only to overrule that reading.
+   */
+  strict?: boolean;
 }
 
 export interface StreamOptions {
@@ -172,6 +179,20 @@ export interface StreamOptions {
    *  silently truncated mid-argument. */
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Nucleus sampling. Set this OR `temperature`, not both — the vendors all
+   * document them as alternatives and some reject the pair outright.
+   */
+  topP?: number;
+  /**
+   * Strings that end the turn when generated. The only four-shape sampling
+   * field beyond these two; `top_k`, `metadata` and the rest are one vendor's
+   * each and stay off the seam, where a caller reaching for them is asking for
+   * that vendor rather than for a provider.
+   *
+   * Not sent on the Responses shape, which has no equivalent.
+   */
+  stopSequences?: string[];
   signal?: AbortSignal;
   toolChoice?: ToolChoice;
   json?: JsonOutput;

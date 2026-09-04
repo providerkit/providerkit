@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { defineTool, ToolRegistry, ToolTimeoutError } from "../src/tools.ts";
 import { zodTool, toJsonObjectSchema } from "../src/zod.ts";
-import { clampToSchema } from "../src/schema.ts";
+import { clampToSchema, isStrictSchema } from "../src/schema.ts";
 import type { JsonObjectSchema } from "../src/types.ts";
 
 const schema: JsonObjectSchema = {
@@ -262,5 +262,55 @@ describe("toJsonObjectSchema", () => {
     const json = toJsonObjectSchema(z.object({ q: z.string() }));
     expect(json).not.toHaveProperty("$schema");
     expect(json).toMatchObject({ type: "object", properties: { q: { type: "string" } } });
+  });
+});
+
+describe("isStrictSchema", () => {
+  const strict = {
+    type: "object",
+    properties: { message: { type: "string" } },
+    required: ["message"],
+    additionalProperties: false,
+  };
+
+  it("accepts a schema that closes itself and requires everything", () => {
+    expect(isStrictSchema(strict)).toBe(true);
+  });
+
+  // The whole reason this exists: an agent's response schema grows an optional
+  // field (a flow's `data` block, a step's collected values) and the turn stops
+  // working. Enforcement is worth having, but never at the price of the answer.
+  it("rejects a property that is present but not required", () => {
+    expect(isStrictSchema({ ...strict, properties: { ...strict.properties, data: { type: "object" } } })).toBe(
+      false,
+    );
+  });
+
+  it("rejects an open object", () => {
+    expect(isStrictSchema({ ...strict, additionalProperties: undefined })).toBe(false);
+  });
+
+  it("reads all the way down, not just the root", () => {
+    const nested = {
+      ...strict,
+      properties: {
+        message: { type: "string" },
+        inner: { type: "object", properties: { a: { type: "string" } }, additionalProperties: false },
+      },
+      required: ["message", "inner"],
+    };
+    expect(isStrictSchema(nested)).toBe(false);
+  });
+
+  it("follows arrays into their items", () => {
+    const items = { ...strict, properties: { rows: { type: "array", items: strict } }, required: ["rows"] };
+    expect(isStrictSchema(items)).toBe(true);
+  });
+
+  // Unverifiable answers false: unenforced output still returns an answer,
+  // while a wrongly-strict request cannot succeed at all.
+  it("refuses what it cannot read", () => {
+    expect(isStrictSchema({ $ref: "#/$defs/Thing" })).toBe(false);
+    expect(isStrictSchema({})).toBe(true);
   });
 });

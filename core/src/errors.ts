@@ -325,7 +325,10 @@ const RATE_PATTERNS: readonly RegExp[] = [
 const OVERLOAD_PATTERNS: readonly RegExp[] = [
   /overloaded|overloaded_error/i,
   /\bunavailable\b|UNAVAILABLE/,
-  /internal error|INTERNAL/,
+  /internal error/i,
+  // Google's status enum, which is upper-case by contract — kept exact so it
+  // does not swallow the word in ordinary prose.
+  /\bINTERNAL\b/,
   /\bcapacity\b/i,
   /"code"\s*:\s*5\d\d/,
 ];
@@ -356,6 +359,15 @@ export function classifyHttp(status: number | undefined, body: string): ErrorKin
 }
 
 export function classify(err: unknown, status?: number, body?: string): ErrorKind {
+  // An error this package already classified knows its own kind, and nothing is
+  // learned by deriving it a second time from a status and a body it never had.
+  //
+  // This is not a shortcut, it is a correctness fix. The watchdog's own idle
+  // timeout is a ProviderError carrying kind "timeout" and no HTTP status, so
+  // re-deriving it landed on "unknown" — not transient, therefore never
+  // retried, which is the exact opposite of the reason the watchdog exists
+  // (invariant 2). A wedged stream aborted at 60s and then failed for good.
+  if (err instanceof ProviderError) return err.kind;
   if (isAbort(err)) return "aborted";
   if (isTransportFailure(err)) return "network";
 

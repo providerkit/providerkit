@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "../src/errors.ts";
-import { STREAM_IDLE_MS, streamWatch, watchChunks } from "../src/watchdog.ts";
+import { STREAM_IDLE_MS, requireContent, streamWatch, watchChunks } from "../src/watchdog.ts";
+import { withStreamRetry } from "../src/retry.ts";
+import { classify, isTransient } from "../src/errors.ts";
+import type { ProviderChunk } from "../src/types.ts";
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -123,5 +126,88 @@ describe("watchChunks", () => {
     }
     vi.advanceTimersByTime(10_000);
     expect(watch.signal.aborted).toBe(false);
+  });
+});
+
+describe("requireContent", () => {
+  async function* frames(...chunks: ProviderChunk[]) {
+    for (const chunk of chunks) yield chunk;
+  }
+  const collect = async (stream: AsyncIterable<ProviderChunk>) => {
+    const out: ProviderChunk[] = [];
+    for await (const chunk of stream) out.push(chunk);
+    return out;
+  };
+
+  it("passes a turn that said something through untouched", async () => {
+    const out = await collect(
+      requireContent("claude", frames({ type: "delta", content: "hi" }, { type: "finish" })),
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  it("counts reasoning and tool calls as content", async () => {
+    await expect(
+      collect(requireContent("claude", frames({ type: "delta", reasoning: "hmm" }))),
+    ).resolves.toHaveLength(1);
+    await expect(
+      collect(
+        requireContent("claude", frames({ type: "delta", toolCalls: [{ index: 0, name: "f" }] })),
+      ),
+    ).resolves.toHaveLength(1);
+  });
+
+  // The failure this exists for: stop_reason end_turn, zero content blocks. It
+  // used to resolve as a successful empty answer, so nothing retried.
+  it("rejects a turn that completed having said nothing", async () => {
+    await expect(
+      collect(requireContent("claude", frames({ type: "usage" }, { type: "finish" }))),
+    ).rejects.toThrow(ProviderError);
+  });
+
+  it("holds the empty frames back so the retry rule can still fire", async () => {
+    vi.useRealTimers();
+    let attempt = 0;
+    const out = await collect(
+      withStreamRetry<ProviderChunk>(
+        () => {
+          attempt += 1;
+          return requireContent(
+            "claude",
+            attempt === 1
+              ? frames({ type: "usage" }, { type: "finish" })
+              : frames({ type: "delta", content: "second time lucky" }),
+          );
+        },
+        { sleep: async () => undefined },
+      ),
+    );
+    expect(attempt).toBe(2);
+    // Nothing from the empty attempt reached the consumer, so the retry was
+    // legal: rule 2 only holds while nothing has been emitted.
+    expect(out).toEqual([{ type: "delta", content: "second time lucky" }]);
+  });
+});
+
+// Invariant 2 says the watchdog's timeout is ours, is transient, and is always
+// safe to retry. It was none of those to the retry layer: `classify` re-derived
+// the already-classified error from a status it never had, landed on "unknown",
+// and a wedged stream failed for good at the 60s mark instead of trying again.
+describe("an error this package classified stays classified", () => {
+  it("keeps the watchdog's own timeout retryable", () => {
+    const watch = streamWatch({ provider: "claude", idleMs: STREAM_IDLE_MS });
+    vi.advanceTimersByTime(STREAM_IDLE_MS);
+    const err = watch.classify(new Error("aborted"));
+    watch.dispose();
+
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(classify(err)).toBe("timeout");
+    expect(isTransient(classify(err))).toBe(true);
+  });
+
+  it("does not re-derive any kind it was given", () => {
+    for (const kind of ["timeout", "overload", "quota", "entitlement", "context"] as const) {
+      expect(classify(new ProviderError("p", kind, "no status, no body"))).toBe(kind);
+    }
   });
 });

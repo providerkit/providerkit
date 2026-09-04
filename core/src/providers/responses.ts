@@ -24,6 +24,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
+import { isStrictSchema } from "../schema.ts";
 
 export interface ResponsesConfig {
   apiKey: string;
@@ -250,6 +251,9 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) request.max_output_tokens = maxTokens;
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
+      if (opts.topP !== undefined) request.top_p = opts.topP;
+      // No stop sequences on this shape — it has no equivalent field, and
+      // inventing one would 400 the request rather than shorten the answer.
       if (effort && effort !== "none") {
         // `summary` is what switches the reasoning stream ON. Without it this
         // shape emits no reasoning_summary_text events at all, and a caller
@@ -279,7 +283,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             type: "json_schema",
             name: opts.json.name,
             schema: opts.json.schema,
-            strict: true,
+            strict: opts.json.strict ?? isStrictSchema(opts.json.schema),
           },
         };
       }
