@@ -450,9 +450,13 @@ describe("effortParams", () => {
     }
   });
 
-  it("floors OpenRouter's `none` at `low` and clamps `max` to `high`", () => {
+  it("floors OpenRouter's `none` at `low` and names its own top tier, xhigh", () => {
     expect(effortParams("openrouter", "none")).toEqual({ reasoning: { effort: "low" } });
-    expect(effortParams("openrouter", "max")).toEqual({ reasoning: { effort: "high" } });
+    // `high` is 0.8 of the thinking budget there and `xhigh` is 0.95, so
+    // clamping `max` to `high` spent the top tier the caller asked for. The
+    // other dialects have nothing above `high`; this one does.
+    expect(effortParams("openrouter", "max")).toEqual({ reasoning: { effort: "xhigh" } });
+    expect(effortParams("openrouter", "high")).toEqual({ reasoning: { effort: "high" } });
   });
 
   it("keeps the real off switch where a model has one — DeepSeek defaults ON", () => {

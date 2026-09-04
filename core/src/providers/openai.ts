@@ -103,7 +103,12 @@ export function effortParams(
         ? { thinking: { type: "enabled" } }
         : { thinking: { type: "enabled" }, reasoning_effort: level };
     case "openrouter":
-      return { reasoning: { effort: level ?? "low" } };
+      // Its own enum runs xhigh > high > medium > low > minimal > none, so `max`
+      // has a real tier here and clamping it to `high` throws the top one away —
+      // 0.95 of the budget against 0.8. Naming it is safe even where a model
+      // cannot do it: OpenRouter maps an unsupported level to its nearest rather
+      // than refusing the request.
+      return { reasoning: { effort: effort === "max" ? "xhigh" : (level ?? "low") } };
     case "openai":
       return { reasoning_effort: level ?? "none" };
     case "off":
