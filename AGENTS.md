@@ -59,7 +59,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 380 tests
+bun run test                 # vitest, 410 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -93,11 +93,12 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 - **The repo must be public.** A free npm org can only host public packages, and a free
   GitHub org only gets unlimited Actions minutes on public repos. It is MIT anyway.
 
-**Not yet done:** point the providerkit.dev DNS at the Pages project. `0.2.0` is on npm.
+**Not yet done:** point the providerkit.dev DNS at the Pages project. `0.3.0` is on npm; `0.4.0` is
+ready and waiting on a release.
 
 ## State
 
-**Built, tested, green** (380 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (410 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
@@ -167,10 +168,32 @@ un-learned.
 
 ## Next
 
-`0.2.0` is on npm and one codebase has migrated onto it — a Chrome MV3 extension, the hardest
-of the runtimes this package promises, **452 lines lighter** afterwards (667 out, 215 in). Four
-more private migrations follow; they are tracked in `ROADMAP.local.md`, which is deliberately not in this
-repo because it is a map of codebases that are not open.
+`0.3.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
+came out smaller:
+
+| Migration | Runtime | Net |
+| --- | --- | ---: |
+| 1 — Chrome MV3 extension | the hardest runtime this package promises | −452 |
+| 2 — server, provider-neutral seam | validated Gemini, key pool, tool kernel | −1,621 |
+| 3 — server, OpenAI-param seam | −357 in production code alone | −197 |
+| 5 — a published npm agent framework | dropped three vendor SDKs | −5,697 |
+
+The fifth is the one worth reading twice: a public package whose own users install it, where
+the layer this replaces was 3,521 lines across six provider classes. It is now 915, its three
+vendor SDK dependencies are gone, and its test suite lost eleven files — the wire transcripts
+and retry suites were testing what is now this package's job, and tested here against recorded
+bytes it is tested harder.
+
+The fourth is not done: its migration was started and **backed out**, because another agent had
+uncommitted work across the tree it touches. The audit it produced is complete and its findings
+all landed here, so what remains is mechanical and needs only a free tree.
+
+Every migration is tracked in `ROADMAP.local.md`, deliberately not in this repo because it is a
+map of codebases that are not open.
+
+**Blocking the fleet:** two adopters are on a local `link:`/`file:` dependency and one is still
+on `^0.2.0`, so none of them has the last two rounds of fixes as a published version. `0.4.0`
+needs to go out, then all four flip to it.
 
 Two open chores: point the providerkit.dev DNS at the Pages project, and set the org avatar
 (`brand/providerkit-avatar-1024.png` — GitHub has no API for it).
@@ -197,6 +220,27 @@ lands — that is the whole point, and it is how the other four repos get it.
 
 ### What the migrations taught
 
+- **The audit finds bugs in THIS package, not just gaps.** The fifth migration's best finding
+  was not something the donor knew and this did not — it was `classify` re-deriving errors it
+  had already classified itself. A `ProviderError` carries its kind and usually no HTTP status,
+  so re-deriving landed on `unknown`, which is not transient, so **the watchdog's own idle
+  timeout was never retried** — invariant 2 inverted, in every consumer, including what was on
+  npm. Nothing in the donor repo pointed at it. Reading one implementation against another is
+  what surfaced it, which is the argument for doing this even when the donor is the older code.
+- **An adapter that ignores an option is worse than one that lacks it.** The Anthropic adapter
+  never read `opts.json`. A caller asking for a schema got a request with nothing in it, the
+  model answered in prose, and the parse failed — on the happy path, where no retry looks and
+  no error is recorded. Every field the seam declares must be honoured by every adapter or
+  explicitly refused; silence is the one option that is never right.
+- **A vendor constraint has a shelf life.** The oldest codebase refused to send a response
+  schema alongside tools on Gemini, correctly, in 2024. A newer one runs that exact combination
+  in production today. When two donors disagree, the newer one is usually reporting the current
+  API and the older one is carrying a workaround nobody re-tested — check, then take the newer
+  behaviour and say so in the commit.
+- **Enforcement modes need a way to be declined.** `strict: true` was hardcoded on the two
+  OpenAI shapes. Strict demands more than JSON Schema does — every property required, every
+  object closed — and an agent's response schema grows an optional field the moment a flow has
+  a `data` block. Enforcement the caller cannot decline is a 400 they cannot fix.
 - **Split the envelope from the framing wherever both exist.** The adopter could take
   `streamSse`'s SSE reader but not its error envelope: its failure line is translated, and its
   log level splits on whether the kind is one its own UI already explains. That is not one app
