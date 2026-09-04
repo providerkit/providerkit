@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/core",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "The layer under your agent loop: one seam for every LLM provider, plus the failure handling you only learn in production.",
   "type": "module",
   "license": "MIT",
