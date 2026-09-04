@@ -281,9 +281,9 @@ describe("isStrictSchema", () => {
   // field (a flow's `data` block, a step's collected values) and the turn stops
   // working. Enforcement is worth having, but never at the price of the answer.
   it("rejects a property that is present but not required", () => {
-    expect(isStrictSchema({ ...strict, properties: { ...strict.properties, data: { type: "object" } } })).toBe(
-      false,
-    );
+    expect(
+      isStrictSchema({ ...strict, properties: { ...strict.properties, data: { type: "object" } } }),
+    ).toBe(false);
   });
 
   it("rejects an open object", () => {
@@ -295,7 +295,11 @@ describe("isStrictSchema", () => {
       ...strict,
       properties: {
         message: { type: "string" },
-        inner: { type: "object", properties: { a: { type: "string" } }, additionalProperties: false },
+        inner: {
+          type: "object",
+          properties: { a: { type: "string" } },
+          additionalProperties: false,
+        },
       },
       required: ["message", "inner"],
     };
@@ -303,7 +307,11 @@ describe("isStrictSchema", () => {
   });
 
   it("follows arrays into their items", () => {
-    const items = { ...strict, properties: { rows: { type: "array", items: strict } }, required: ["rows"] };
+    const items = {
+      ...strict,
+      properties: { rows: { type: "array", items: strict } },
+      required: ["rows"],
+    };
     expect(isStrictSchema(items)).toBe(true);
   });
 

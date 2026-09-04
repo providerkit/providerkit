@@ -171,12 +171,12 @@ un-learned.
 `0.3.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
 came out smaller:
 
-| Migration | Runtime | Net |
-| --- | --- | ---: |
-| 1 — Chrome MV3 extension | the hardest runtime this package promises | −452 |
-| 2 — server, provider-neutral seam | validated Gemini, key pool, tool kernel | −1,621 |
-| 3 — server, OpenAI-param seam | −357 in production code alone | −197 |
-| 5 — a published npm agent framework | dropped three vendor SDKs | −5,697 |
+| Migration                           | Runtime                                   |    Net |
+| ----------------------------------- | ----------------------------------------- | -----: |
+| 1 — Chrome MV3 extension            | the hardest runtime this package promises |   −452 |
+| 2 — server, provider-neutral seam   | validated Gemini, key pool, tool kernel   | −1,621 |
+| 3 — server, OpenAI-param seam       | −357 in production code alone             |   −197 |
+| 5 — a published npm agent framework | dropped three vendor SDKs                 | −5,697 |
 
 The fifth is the one worth reading twice: a public package whose own users install it, where
 the layer this replaces was 3,521 lines across six provider classes. It is now 915, its three
