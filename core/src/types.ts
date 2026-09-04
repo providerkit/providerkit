@@ -211,6 +211,8 @@ export interface Provider {
 export interface Completion {
   text: string;
   reasoning: string;
+  /** Present only where the provider sent one. See ChatMessage.reasoningDetails. */
+  reasoningDetails?: unknown[];
   usage: TokenUsage;
   finishReason: FinishReason | null;
   model: string;
@@ -224,19 +226,32 @@ export async function drainStream(
 ): Promise<Completion> {
   let text = "";
   let reasoning = "";
+  // Not concatenated: this half of the record is a payload the provider owns,
+  // and it arrives whole on one delta rather than in fragments. Dropped here,
+  // a drained turn replays only half its own reasoning on the next round —
+  // which is the failure `reasoningDetails` exists to prevent.
+  let reasoningDetails: unknown[] | undefined;
   let usage: TokenUsage = EMPTY_USAGE;
   let finishReason: FinishReason | null = null;
   for await (const chunk of stream) {
     if (chunk.type === "delta") {
       if (chunk.content) text += chunk.content;
       if (chunk.reasoning) reasoning += chunk.reasoning;
+      if (chunk.reasoningDetails?.length) reasoningDetails = chunk.reasoningDetails;
     } else if (chunk.type === "usage" && chunk.usage) {
       usage = chunk.usage;
     } else if (chunk.type === "finish" && chunk.finishReason) {
       finishReason = chunk.finishReason;
     }
   }
-  return { text, reasoning, usage, finishReason, model };
+  return {
+    text,
+    reasoning,
+    ...(reasoningDetails ? { reasoningDetails } : {}),
+    usage,
+    finishReason,
+    model,
+  };
 }
 
 /**

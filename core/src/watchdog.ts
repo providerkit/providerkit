@@ -16,7 +16,13 @@
 // the other is ours, is transient, and fires while nothing has streamed yet,
 // so the retry is always safe.
 import { ProviderError } from "./errors.ts";
-import type { ProviderChunk } from "./types.ts";
+import type {
+  ChatMessage,
+  Provider,
+  ProviderChunk,
+  StreamOptions,
+  ToolDefinition,
+} from "./types.ts";
 
 /** No byte at all for this long and the stream is considered wedged. */
 export const STREAM_IDLE_MS = 60_000;
@@ -166,4 +172,70 @@ export async function* requireContent<T extends ProviderChunk>(
   if (!usable) {
     throw new ProviderError(provider, "overload", `${provider}: completed with no content`);
   }
+}
+
+export interface WatchdogOptions {
+  /** Silence this long and the stream is wedged. Defaults to `STREAM_IDLE_MS`. */
+  idleMs?: number;
+  /**
+   * Reject a turn that ends having said nothing, as `requireContent` does. On
+   * by default: an empty completion is a failure in every loop, and the one
+   * shaped like a success is the one nobody catches.
+   */
+  requireContent?: boolean;
+  /** Time to first byte for this call, reported once the byte arrives. */
+  onFirstChunk?: (ms: number) => void;
+}
+
+/**
+ * A provider with both silent failures already handled.
+ *
+ * Every consumer of this package wrote the same three lines around every
+ * `createStream` — build a watch, hand the provider the WATCH's signal, wrap
+ * the chunks — and the middle one is the trap. Pass the caller's signal
+ * instead and everything still compiles, still streams, still passes the
+ * tests: the watchdog simply never aborts anything, because the request it was
+ * meant to cancel was never told about it. The failure has no symptom until
+ * production, where it is the exact hang the watchdog was added to end.
+ *
+ * So the composition belongs here rather than in a docs snippet each app
+ * copies. The result is still a `Provider`, so it composes unchanged with
+ * `withStreamRetry` and `streamWithBackupModels` — and both of the failures it
+ * catches are transient, which is what makes wrapping it in a retry correct.
+ */
+export function withWatchdog(provider: Provider, opts: WatchdogOptions = {}): Provider {
+  return {
+    ...provider,
+    createStream(
+      messages: ChatMessage[],
+      tools: ToolDefinition[],
+      streamOpts: StreamOptions = {},
+    ): AsyncIterable<ProviderChunk> {
+      // Armed on first read, not here: a stream built now and iterated later
+      // must not spend its deadline sitting in a variable.
+      async function* watched(): AsyncGenerator<ProviderChunk> {
+        const watch = streamWatch({
+          provider: provider.id,
+          ...(opts.idleMs !== undefined ? { idleMs: opts.idleMs } : {}),
+          ...(streamOpts.signal ? { signal: streamOpts.signal } : {}),
+        });
+        const source = provider.createStream(messages, tools, {
+          ...streamOpts,
+          signal: watch.signal,
+        });
+        let reported = false;
+        for await (const chunk of watchChunks(watch, source)) {
+          // Before `requireContent` holds anything back — TTFT is the first
+          // byte of any kind, not the first byte worth showing.
+          if (!reported) {
+            reported = true;
+            opts.onFirstChunk?.(watch.firstChunkMs() ?? 0);
+          }
+          yield chunk;
+        }
+      }
+
+      return opts.requireContent === false ? watched() : requireContent(provider.id, watched());
+    },
+  };
 }
