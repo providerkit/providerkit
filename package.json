@@ -16,7 +16,12 @@
     "dev:site": "bun run build && bun run --filter providerkit-site dev",
     "build:site": "bun run build && bun run --filter providerkit-site build",
     "brand:assets": "bun run brand/generate.ts",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "release": "bun run --filter @providerkit/core release",
+    "release:patch": "bun run --filter @providerkit/core release:patch",
+    "release:minor": "bun run --filter @providerkit/core release:minor",
+    "release:major": "bun run --filter @providerkit/core release:major",
+    "release:alpha": "bun run --filter @providerkit/core release:alpha"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
