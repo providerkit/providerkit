@@ -167,9 +167,9 @@ un-learned.
 
 ## Next
 
-`0.2.0` is on npm and one codebase has migrated onto it, deleting **634 lines** — a Chrome MV3
-extension, which is the hardest of the runtimes this package promises. Four more private
-migrations follow; they are tracked in `ROADMAP.local.md`, which is deliberately not in this
+`0.2.0` is on npm and one codebase has migrated onto it — a Chrome MV3 extension, the hardest
+of the runtimes this package promises, **452 lines lighter** afterwards (667 out, 215 in). Four
+more private migrations follow; they are tracked in `ROADMAP.local.md`, which is deliberately not in this
 repo because it is a map of codebases that are not open.
 
 Two open chores: point the providerkit.dev DNS at the Pages project, and set the org avatar

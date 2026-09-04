@@ -112,10 +112,10 @@ Anthropic, OpenAI-shape, Responses and Gemini adapters, the multi-key rotation p
 rate-limit reset windows, the tool kernel, schema clamping, and the compaction decisions.
 
 That is the whole extraction, and the claim it rests on is that an adopting codebase gets
-**smaller**. The first migration — a Chrome MV3 extension, the hardest runtime of the five
-and the one with no Node, no bundler escape hatch and no zod — **deleted 634 lines** and kept
-every one of its six gates green. If a repo grows on adopting this, the boundary was drawn in
-the wrong place.
+**smaller**. The first migration — a Chrome MV3 extension, the hardest runtime of the five and
+the one with no Node, no bundler escape hatch and no zod — took **667 lines out and put 215
+back**, and kept every one of its six gates green. If a repo grows on adopting this, the
+boundary was drawn in the wrong place.
 
 ## License
 
