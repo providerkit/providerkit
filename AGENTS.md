@@ -178,7 +178,24 @@ Two open chores: point the providerkit.dev DNS at the Pages project, and set the
 **Every migration must be net-negative in lines.** If an adopting repo grows, the cut line was
 drawn in the wrong place and the fix belongs here, not in the adopter.
 
-### What the first migration taught
+### How to migrate a repo — the check that is not optional
+
+**Read the code you are deleting against the code replacing it, function by
+function. Its tests are not enough.** Migrations two and three surfaced six
+things this package did not know. Three were named by a test in the donor repo
+and were easy. The other three had no test anywhere, broke nothing when
+deleted, and would have shipped: Anthropic's system prompt silently uncached
+(the largest stable prefix in an agent loop, re-billed in full every turn), a
+tool's images silently dropped on the OpenAI dialect, and `json_schema` sent to
+gateways that answer 400 to it.
+
+A green suite after a migration means the donor's tests still pass. It says
+nothing about the donor behaviour nobody wrote a test for, which is most of what
+an adapter does. So for every file being deleted: list what it does, and find
+each one here. What is missing comes UP into the package before the delete
+lands — that is the whole point, and it is how the other four repos get it.
+
+### What the migrations taught
 
 - **Split the envelope from the framing wherever both exist.** The adopter could take
   `streamSse`'s SSE reader but not its error envelope: its failure line is translated, and its
