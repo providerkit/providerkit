@@ -86,6 +86,27 @@ export function clampToSchema(value: unknown, node: unknown): unknown {
  * the cost of guessing wrong that way is unenforced output, and the cost of
  * guessing wrong the other way is a request that cannot succeed at all.
  */
+/**
+ * The schema as prompt text, for a shape that cannot enforce one.
+ *
+ * The seam's promise is that a provider without native enforcement gets the
+ * schema in the PROMPT instead. Skip it and an `opts.json` request goes out
+ * carrying nothing about the shape at all: the model answers in whatever form
+ * it likes, and the caller's `JSON.parse` throws on the happy path, where no
+ * retry looks and no error is recorded.
+ *
+ * Two shapes need it, which is why the wording lives here rather than in one of
+ * them. Anthropic has never had a schema mode. The OpenAI dialect falls back to
+ * plain JSON mode on every gateway — `json_object` asks for valid JSON and says
+ * nothing whatsoever about its shape.
+ */
+export function schemaPrompt(schema: unknown): string {
+  return (
+    "Respond with a single JSON object matching this schema. No prose, no code fence:\n" +
+    JSON.stringify(schema)
+  );
+}
+
 export function isStrictSchema(node: unknown): boolean {
   if (!node || typeof node !== "object") return false;
   const schema = node as SchemaNode;

@@ -591,6 +591,42 @@ describe("what the OpenAI dialect cannot carry", () => {
     // The override, for a gateway that does enforce schemas.
     expect(await format("my-gateway", "schema")).toMatchObject({ type: "json_schema" });
   });
+
+  it("puts the schema in the prompt wherever it cannot be enforced", async () => {
+    // `json_object` asks for valid JSON and says NOTHING about its shape, so on
+    // its own it honours half of `opts.json`: the model returns syntactically
+    // perfect JSON of a shape nobody asked for, and the caller's parse fails on
+    // the happy path where no retry looks and no error is recorded. The seam
+    // promises the schema reaches the model either way — the Anthropic adapter
+    // has always kept that promise; this dialect did not.
+    const body = async (id: string) => {
+      const { seen, fetchImpl } = recorder([j({ choices: [] })]);
+      await collect(
+        createOpenAIProvider({ apiKey: "k", model: "m", id, fetchImpl }).createStream(
+          [
+            { role: "system", content: "be brief" },
+            { role: "user", content: "hi" },
+          ],
+          [],
+          { json: { name: "out", schema: { type: "object", properties: { hrn: {} } } } },
+        ),
+      );
+      return seen[0]!.body.messages as { role: string; content: string }[];
+    };
+
+    const gateway = await body("deepseek");
+    expect(JSON.stringify(gateway)).toContain("hrn");
+    // Appended, never folded into the system prompt: the cache on this shape is
+    // a PREFIX cache, so a per-call schema up front would invalidate the whole
+    // conversation behind it every time the schema changed.
+    expect(gateway[0]).toEqual({ role: "system", content: "be brief" });
+    expect(gateway[gateway.length - 1]!.role).toBe("system");
+
+    // Where the schema IS enforced it rides in response_format alone — no
+    // second copy burning input tokens on every call.
+    const enforced = await body("openai");
+    expect(JSON.stringify(enforced)).not.toContain("hrn");
+  });
 });
 
 describe("reasoning that must ride back", () => {

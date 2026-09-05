@@ -16,7 +16,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
-import { isStrictSchema } from "../schema.ts";
+import { isStrictSchema, schemaPrompt } from "../schema.ts";
 
 export interface OpenAIConfig {
   apiKey: string;
@@ -261,9 +261,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
     ): AsyncIterable<ProviderChunk> {
       const effort = opts.effort ?? config.effort;
 
+      const body = toOpenAIMessages(messages);
       const request: Record<string, unknown> = {
         model: opts.model ?? config.model,
-        messages: toOpenAIMessages(messages),
+        messages: body,
         stream: true,
         // Without this the usage record never arrives and every call costs
         // zero — a silent, total loss of the ledger.
@@ -292,23 +293,37 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             : { type: "function", function: { name: opts.toolChoice.name } };
       }
       if (opts.json) {
-        request.response_format =
-          (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema"
-            ? {
-                type: "json_schema",
-                json_schema: {
-                  name: opts.json.name,
-                  schema: opts.json.schema,
-                  strict: opts.json.strict ?? isStrictSchema(opts.json.schema),
-                },
-              }
-            : // Everything else gets plain JSON mode. Schema ENFORCEMENT is
-              // OpenAI's; the gateways and the vendors behind them offer JSON
-              // mode at best, and several answer a flat 400 to a `json_schema`
-              // block. The seam's rule makes this safe either way: a provider's
-              // "guaranteed" JSON is not one, so the caller validates
-              // regardless — this only decides whether the request is accepted.
-              { type: "json_object" };
+        const enforced = (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema";
+        request.response_format = enforced
+          ? {
+              type: "json_schema",
+              json_schema: {
+                name: opts.json.name,
+                schema: opts.json.schema,
+                strict: opts.json.strict ?? isStrictSchema(opts.json.schema),
+              },
+            }
+          : // Everything else gets plain JSON mode. Schema ENFORCEMENT is
+            // OpenAI's; the gateways and the vendors behind them offer JSON
+            // mode at best, and several answer a flat 400 to a `json_schema`
+            // block. The seam's rule makes this safe either way: a provider's
+            // "guaranteed" JSON is not one, so the caller validates regardless —
+            // this only decides whether the request is accepted.
+            { type: "json_object" };
+        if (!enforced) {
+          // …but `json_object` asks for valid JSON and says NOTHING about its
+          // shape, so on its own it turns `opts.json` into half a request: the
+          // model returns syntactically perfect JSON of a shape nobody asked
+          // for, and the caller's parse fails on the happy path where no retry
+          // looks. The schema has to reach the model as prompt — the same
+          // promise the Anthropic adapter keeps, for the same reason.
+          //
+          // Appended rather than folded into the system prompt, because the
+          // cache on this shape is a PREFIX cache: a per-call schema placed up
+          // front would invalidate the whole conversation behind it every time
+          // the schema changed.
+          body.push({ role: "system", content: schemaPrompt(opts.json.schema) });
+        }
       }
       if (config.providerOrder?.length) {
         request.provider = { order: config.providerOrder, allow_fallbacks: true };

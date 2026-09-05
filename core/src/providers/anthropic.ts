@@ -1,5 +1,6 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
 import { streamError } from "../errors.ts";
+import { schemaPrompt } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
@@ -119,12 +120,7 @@ function systemBlocks(text: string): unknown[] | undefined {
  * schema with the most expensive thing in an agent loop.
  */
 function jsonBlock(json: JsonOutput): unknown {
-  return {
-    type: "text",
-    text:
-      "Respond with a single JSON object matching this schema. No prose, no code fence:\n" +
-      JSON.stringify(json.schema),
-  };
+  return { type: "text", text: schemaPrompt(json.schema) };
 }
 
 export function toAnthropicMessages(messages: readonly ChatMessage[]): {
