@@ -299,6 +299,42 @@ describe("gemini adapter", () => {
     });
   });
 
+  it("moves the schema into the system instruction on tool calls when asked", async () => {
+    // A pinned decoder cannot emit a functionCall, and the models that hit it
+    // narrate the call instead of making it — `gemini-3.8-flash` managed 3/10
+    // (2026-09-07). Only the calls that carry tools change.
+    const schema = { type: "object" as const, properties: { hrn: { type: "string" } } };
+    const sent = async (tools: { name: string; description: string; inputSchema: object }[]) => {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await collect(
+        provider(fetchImpl, { jsonWithTools: "prompt" }).createStream(
+          [{ role: "system", content: "be brief" }, ...HI],
+          tools,
+          { json: { name: "answer", schema } },
+        ),
+      );
+      return seen[0]!.body as {
+        generationConfig: Record<string, unknown>;
+        systemInstruction?: { parts: { text: string }[] };
+      };
+    };
+
+    const withTools = await sent([
+      { name: "look_up", description: "look it up", inputSchema: { type: "object" } },
+    ]);
+    expect(withTools.generationConfig.responseMimeType).toBeUndefined();
+    expect(withTools.generationConfig.responseJsonSchema).toBeUndefined();
+    // The schema still reaches the model, after the caller's own text so the
+    // prefix cache in front of it survives.
+    expect(withTools.systemInstruction!.parts[0]).toEqual({ text: "be brief" });
+    expect(withTools.systemInstruction!.parts[1]!.text).toContain("hrn");
+
+    // No tools, no bet to lose: the enforced schema rides as it always did.
+    const noTools = await sent([]);
+    expect(noTools.generationConfig.responseJsonSchema).toEqual(schema);
+    expect(noTools.systemInstruction).toEqual({ parts: [{ text: "be brief" }] });
+  });
+
   it("surfaces a non-2xx through the shared classifier", async () => {
     const { fetchImpl } = recorder([], 429);
     await expect(collect(provider(fetchImpl).createStream(HI, []))).rejects.toMatchObject({

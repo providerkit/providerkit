@@ -6,12 +6,14 @@
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
 import { streamError } from "../errors.ts";
+import { schemaPrompt } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
   Effort,
   FinishReason,
+  JsonWithTools,
   Provider,
   ProviderChunk,
   StreamOptions,
@@ -34,6 +36,15 @@ export interface GeminiConfig {
   id?: string;
   /** Bound default; a per-call `effort` overrides it. */
   effort?: Effort;
+  /**
+   * How the schema rides on a call that also carries tools. See
+   * {@link JsonWithTools} — and note that it is the MODEL's answer, not the
+   * endpoint's: measured 2026-09-07, `gemini-3.5-flash` and
+   * `gemini-3.5-flash-lite` called their tool under `responseJsonSchema` every
+   * time, while `gemini-3.8-flash` managed 3/10. `probeJsonWithTools` asks the
+   * one you actually serve. Overridable per call.
+   */
+  jsonWithTools?: JsonWithTools;
   maxTokens?: number;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
@@ -258,7 +269,13 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // would switch that off for a caller who never asked, which is the whole
       // reason the seam treats an absent effort as "never sent".
       if (effort) generationConfig.thinkingConfig = { thinkingLevel: THINKING_LEVEL[effort] };
-      if (opts.json) {
+      // A schema that shares its call with tools pins the decoder, and a pinned
+      // decoder cannot emit a functionCall — the model narrates the call it
+      // could not make and the turn ends, with nothing logged. See
+      // `jsonWithTools` for what that costs and which models it costs it on.
+      const promptCarried =
+        tools.length > 0 && (opts.jsonWithTools ?? config.jsonWithTools) === "prompt";
+      if (opts.json && !promptCarried) {
         generationConfig.responseMimeType = "application/json";
         // `responseJsonSchema` takes JSON Schema as written; `responseSchema`
         // is Gemini's own trimmed dialect and rejects most of what a real
@@ -268,7 +285,14 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
 
       const request: Record<string, unknown> = { contents, generationConfig };
       // A Content, not the bare string the SDK accepts — REST rejects a string.
-      if (system) request.systemInstruction = { parts: [{ text: system }] };
+      // The prompt-carried schema rides as a second part, after the caller's
+      // own text: this shape's cache is a prefix too, so a per-call schema in
+      // front of the conversation would cold-start it on every change.
+      const systemParts = [
+        ...(system ? [{ text: system }] : []),
+        ...(opts.json && promptCarried ? [{ text: schemaPrompt(opts.json.schema) }] : []),
+      ];
+      if (systemParts.length > 0) request.systemInstruction = { parts: systemParts };
       if (tools.length > 0) {
         request.tools = [
           {

@@ -170,6 +170,21 @@ export interface JsonOutput {
   strict?: boolean;
 }
 
+/**
+ * How the schema rides on a call that ALSO carries tools.
+ *
+ * `"response_format"` sends both — what the shapes document, what most models
+ * honour. `"prompt"` leaves the format off that call and sends the schema as
+ * prompt instead, which is what the Anthropic shape has always done.
+ *
+ * It is a setting because a model that cannot serve both never says so: its
+ * decoder is pinned to the schema, the tool call has nowhere to go, and it
+ * writes the announcement instead — "let me look that up" — and stops. Nothing
+ * is logged, because nothing failed. `probeJsonWithTools` answers it in one
+ * call; there is no default that is right for every model.
+ */
+export type JsonWithTools = "response_format" | "prompt";
+
 export interface StreamOptions {
   /** Override the provider's bound model for this call. */
   model?: string;
@@ -196,6 +211,11 @@ export interface StreamOptions {
   signal?: AbortSignal;
   toolChoice?: ToolChoice;
   json?: JsonOutput;
+  /**
+   * Overrides the provider's own setting for this call — how `probeJsonWithTools`
+   * asks the same model both ways. See {@link JsonWithTools}.
+   */
+  jsonWithTools?: JsonWithTools;
 }
 
 export interface Provider {

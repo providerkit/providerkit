@@ -10,6 +10,7 @@ export * from "./tool-args.ts";
 export * from "./tools.ts";
 export * from "./schema.ts";
 export * from "./context.ts";
+export * from "./capability.ts";
 export * from "./providers/anthropic.ts";
 export * from "./providers/openai.ts";
 export * from "./providers/responses.ts";

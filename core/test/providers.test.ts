@@ -627,6 +627,44 @@ describe("what the OpenAI dialect cannot carry", () => {
     const enforced = await body("openai");
     expect(JSON.stringify(enforced)).not.toContain("hrn");
   });
+
+  it("clears the response format off tool calls when the caller asks for it", async () => {
+    // A pinned decoder cannot emit a tool call, and the models it happens to do
+    // not report it — they narrate the call ("let me look that up") and the turn
+    // ends. Measured 2026-09-07: z-ai/glm-5.3-flash 0/10 tool calls under a
+    // response format, 8/8 without one. It stays a setting because the opposite
+    // is just as real: qwen3.8-flash went 6/6 → 1/6 the same way.
+    const tool = { name: "search", description: "look it up", inputSchema: { type: "object" } };
+    const sent = async (jsonWithTools?: "response_format" | "prompt", withTools = true) => {
+      const { seen, fetchImpl } = recorder([j({ choices: [] })]);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "k",
+          model: "m",
+          id: "openrouter",
+          fetchImpl,
+          ...(jsonWithTools ? { jsonWithTools } : {}),
+        }).createStream([{ role: "user", content: "hi" }], withTools ? [tool] : [], {
+          json: { name: "out", schema: { type: "object", properties: { hrn: {} } } },
+        }),
+      );
+      const body = seen[0]!.body as { response_format?: unknown; messages: { role: string }[] };
+      return { format: body.response_format, messages: body.messages };
+    };
+
+    const carried = await sent("prompt");
+    expect(carried.format).toBeUndefined();
+    // The schema still reaches the model — the one way nothing can suppress.
+    expect(JSON.stringify(carried.messages)).toContain("hrn");
+    expect(carried.messages[carried.messages.length - 1]!.role).toBe("system");
+
+    // Only the calls that carry tools change. A call without them has no bet to
+    // lose, and the format is strictly better than the prompt.
+    expect((await sent("prompt", false)).format).toEqual({ type: "json_object" });
+
+    // Unset is the shape every caller had before, tools or not.
+    expect((await sent(undefined)).format).toEqual({ type: "json_object" });
+  });
 });
 
 describe("reasoning that must ride back", () => {

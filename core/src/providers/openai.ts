@@ -10,6 +10,7 @@ import type {
   ContentPart,
   Effort,
   FinishReason,
+  JsonWithTools,
   Provider,
   ProviderChunk,
   StreamOptions,
@@ -39,6 +40,33 @@ export interface OpenAIConfig {
    * is the only setting every gateway accepts.
    */
   jsonMode?: "schema" | "object";
+  /**
+   * How a json request rides when the SAME call also carries tools.
+   *
+   * `response_format` — the default — sends both, which is what the shape
+   * documents and what most models honour. `prompt` drops the response format
+   * from those calls only and sends the schema as prompt instead: the shape the
+   * Anthropic adapter has always used, and the reason this failure cannot
+   * happen there.
+   *
+   * It needs a knob because a model that cannot serve both does not say so. Its
+   * decoder is pinned to the schema, the tool call has nowhere to go, and the
+   * model writes the announcement instead — "let me look that up for you" — and
+   * the turn ends looking like a model with no initiative rather than a request
+   * that made the call impossible. Nothing is logged, because nothing failed.
+   *
+   * Measured 2026-09-07, one request, sampled: `z-ai/glm-5.3-flash` called its
+   * tool 0/10 under a response format and 8/8 without one, `z-ai/glm-5.3` 0/5,
+   * `deepseek-v4-flash-0731` 0/5, `gemini-3.8-flash` 3/10, while
+   * `gemini-3.5-flash-lite`, `gpt-5.6-luna` and `qwen3.8-flash` were 10/10.
+   *
+   * No default is right for everyone, which is why this stays a setting rather
+   * than becoming a rule: the same run put `qwen3.8-flash` at 1/6 with the
+   * schema in the prompt against 6/6 with the response format. Don't guess it
+   * from the model card — `probeJsonWithTools` asks the model itself, in one
+   * call. `StreamOptions.jsonWithTools` overrides this per call.
+   */
+  jsonWithTools?: JsonWithTools;
   maxTokens?: number;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
@@ -293,30 +321,47 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             : { type: "function", function: { name: opts.toolChoice.name } };
       }
       if (opts.json) {
-        const enforced = (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema";
-        request.response_format = enforced
-          ? {
-              type: "json_schema",
-              json_schema: {
-                name: opts.json.name,
-                schema: opts.json.schema,
-                strict: opts.json.strict ?? isStrictSchema(opts.json.schema),
-              },
-            }
-          : // Everything else gets plain JSON mode. Schema ENFORCEMENT is
-            // OpenAI's; the gateways and the vendors behind them offer JSON
-            // mode at best, and several answer a flat 400 to a `json_schema`
-            // block. The seam's rule makes this safe either way: a provider's
-            // "guaranteed" JSON is not one, so the caller validates regardless —
-            // this only decides whether the request is accepted.
-            { type: "json_object" };
+        // A json request sharing its call with tools is a bet that the model
+        // serves both at once, and on several models it silently loses — see
+        // `jsonWithTools` on OpenAIConfig for what that costs and what it was
+        // measured at. A caller that has measured its own model says so there;
+        // here the only job is to leave the response format off those calls, so
+        // the schema reaches the model the one way nothing can suppress.
+        const promptCarried =
+          tools.length > 0 && (opts.jsonWithTools ?? config.jsonWithTools) === "prompt";
+        const enforced =
+          !promptCarried &&
+          (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema";
+        // Nothing at all on a prompt-carried call: `json_object` pins the
+        // decoder every bit as hard as `json_schema` does — 0/8 tool calls on
+        // the same model — so half-dropping the format would buy nothing.
+        if (!promptCarried) {
+          request.response_format = enforced
+            ? {
+                type: "json_schema",
+                json_schema: {
+                  name: opts.json.name,
+                  schema: opts.json.schema,
+                  strict: opts.json.strict ?? isStrictSchema(opts.json.schema),
+                },
+              }
+            : // Everything else gets plain JSON mode. Schema ENFORCEMENT is
+              // OpenAI's; the gateways and the vendors behind them offer JSON
+              // mode at best, and several answer a flat 400 to a `json_schema`
+              // block. The seam's rule makes this safe either way: a provider's
+              // "guaranteed" JSON is not one, so the caller validates regardless —
+              // this only decides whether the request is accepted.
+              { type: "json_object" };
+        }
         if (!enforced) {
-          // …but `json_object` asks for valid JSON and says NOTHING about its
-          // shape, so on its own it turns `opts.json` into half a request: the
-          // model returns syntactically perfect JSON of a shape nobody asked
-          // for, and the caller's parse fails on the happy path where no retry
-          // looks. The schema has to reach the model as prompt — the same
-          // promise the Anthropic adapter keeps, for the same reason.
+          // …but nothing left standing carries the shape. `json_object` asks
+          // for valid JSON and says NOTHING about what is in it, and a
+          // prompt-carried call sends no format at all — either way `opts.json`
+          // is half a request: the model returns syntactically perfect JSON of
+          // a shape nobody asked for, and the caller's parse fails on the happy
+          // path where no retry looks. The schema has to reach the model as
+          // prompt — the same promise the Anthropic adapter keeps, for the same
+          // reason.
           //
           // Appended rather than folded into the system prompt, because the
           // cache on this shape is a PREFIX cache: a per-call schema placed up

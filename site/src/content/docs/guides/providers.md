@@ -123,6 +123,47 @@ extra system block, placed after the cached one. Gemini takes it via `responseJs
 Whatever the shape, the seam never guarantees the JSON — validate the answer regardless. `json`
 only decides whether the request is accepted.
 
+### When the same call also carries tools
+
+A model that cannot serve a schema and a tool call at once does not tell you. Its decoder is pinned
+to the schema, so the tool call has nowhere to go and the model writes the announcement instead —
+_"let me look that up for you"_ — and the turn ends. Nothing is logged, because nothing failed. It
+reads as a model with no initiative, and no amount of prompting fixes it.
+
+Measured 2026-09-07, one request, sampled:
+
+| model                    | response format | schema in the prompt |
+| ------------------------ | --------------- | -------------------- |
+| `z-ai/glm-5.3-flash`     | 0/10            | 8/8                  |
+| `z-ai/glm-5.3`           | 0/5             | —                    |
+| `deepseek-v4-flash-0731` | 0/5             | —                    |
+| `gemini-3.8-flash`       | 3/10            | —                    |
+| `gemini-3.5-flash-lite`  | 10/10           | 6/6                  |
+| `gpt-5.6-luna`           | 10/10           | 6/6                  |
+| `qwen3.8-flash`          | 10/10           | 1/6                  |
+
+`jsonWithTools: "prompt"` drops the response format from the calls that carry tools and sends the
+schema as prompt instead — what the Anthropic adapter has always done, which is why this cannot
+happen there. Calls without tools keep the format, where it is strictly better. It works the same
+way on the Gemini adapter, and `StreamOptions.jsonWithTools` overrides it per call.
+
+No default is right for everyone, and the qwen row is the whole argument: it is as broken by the
+prompt as GLM is by the format. So don't read it off a model card — ask the model:
+
+```ts
+const probe = await probeJsonWithTools(provider);
+// { use: "prompt", calls: { response_format: 0, prompt: 3 }, samples: 3 }
+if (!probe.use) throw new Error(`${model} cannot use tools with a schema at all`);
+```
+
+Six short calls, once, at whatever moment you choose to ask — boot is the usual one. Log `calls`
+rather than just `use`: `0/3 and 3/3` is what makes the next model swap's regression obvious.
+
+It catches the structural failure — the model that _cannot_ emit the call, on the easiest question
+there is. A model that is merely unreliable passes: `gemini-3.8-flash` answers the probe 3/3 and a
+real turn 3/10. That is the right line. A harder probe would start failing good models for being
+terse, and "sometimes forgets its tools" is a prompt problem, not a wire shape one.
+
 ## Adapters
 
 | Factory                   | Shape                   | Notes                                                                                  |
