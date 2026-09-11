@@ -102,7 +102,13 @@ export function clampToSchema(value: unknown, node: unknown): unknown {
  */
 export function schemaPrompt(schema: unknown): string {
   return (
-    "Respond with a single JSON object matching this schema. No prose, no code fence:\n" +
+    "Respond with a single JSON object matching this schema. No prose, no code fence.\n" +
+    // Nothing pins the decoder when the schema rides in the prompt, so the model
+    // is free to pretty-print its reply — and it does, putting a real line break
+    // inside a string value, which is invalid JSON and costs the whole response.
+    // Saying so is not a guarantee (the caller still has to survive a violation)
+    // but this is the only place the model is told at all.
+    "Write a line break inside a string value as \\n. A real line break there is invalid JSON.\n" +
     JSON.stringify(schema)
   );
 }
