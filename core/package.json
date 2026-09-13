@@ -1,10 +1,10 @@
 {
   "name": "@providerkit/core",
-  "version": "0.5.1",
+  "version": "0.7.0",
   "description": "The layer under your agent loop: one seam for every LLM provider, plus the failure handling you only learn in production.",
   "type": "module",
   "license": "MIT",
-  "author": "Gustavo Salomé",
+  "author": "Gustavo Salom\u00e9",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
