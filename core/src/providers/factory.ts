@@ -14,7 +14,12 @@ import { createAnthropicProvider } from "./anthropic.ts";
 import { createGeminiProvider } from "./gemini.ts";
 import { createOpenAIProvider } from "./openai.ts";
 import { createResponsesProvider } from "./responses.ts";
-import { PRESET_IDS, PROVIDER_PRESETS, type ProviderPreset, type ProviderPresetId } from "../presets.ts";
+import {
+  PRESET_IDS,
+  PROVIDER_PRESETS,
+  type ProviderPreset,
+  type ProviderPresetId,
+} from "../presets.ts";
 import type { Effort, Provider } from "../types.ts";
 
 export interface PresetProviderConfig {
@@ -30,6 +35,11 @@ export interface PresetProviderConfig {
   /** Per-request headers (request ids, `ChatGPT-Account-Id`) on top of the
    *  preset's static protocol headers. */
   headers?: Record<string, string>;
+  /** OpenRouter-only: preferred upstream hosts, in order. OpenRouter's cache
+   *  lives on the upstream host's account and default routing hops hosts
+   *  between rounds — pinning keeps a conversation's rounds (and their cache)
+   *  on one host. Empty/absent = default routing. */
+  providerOrder?: string[];
   fetchImpl?: typeof fetch;
 }
 
@@ -75,6 +85,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         maxTokens: config.maxTokens,
         baseUrl: preset.baseUrl,
         headers,
+        ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
         fetchImpl: config.fetchImpl,
       });
     case "responses":
