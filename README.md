@@ -60,6 +60,21 @@ try {
 }
 ```
 
+### Z.ai Coding Plan
+
+`createZaiCodingProvider` uses the Coding Plan endpoint with Bearer authentication.
+Pass your plan's key and a model it supports:
+
+```ts
+import { createZaiCodingProvider } from "@providerkit/core";
+
+const provider = createZaiCodingProvider({ apiKey, model: "glm-5.2" });
+```
+
+It returns the same provider interface as the adapters above. The API root is
+`https://api.z.ai/api/anthropic`; the adapter adds `/v1/messages`.
+Usage reports tokens consumed, not the price of your subscription.
+
 **Full documentation lives at [providerkit.dev](https://providerkit.dev)** — it is the single
 source of truth for usage, and this README deliberately stays a front door so the two cannot
 drift.

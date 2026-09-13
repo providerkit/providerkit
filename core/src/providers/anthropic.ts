@@ -37,6 +37,15 @@ export interface AnthropicConfig {
   /** Send the key as a Bearer instead of `x-api-key` — what a subscription
    *  access token needs. */
   bearer?: boolean;
+  /** Say "no thinking" with an explicit `thinking: { type: "disabled" }` when
+   *  effort resolves to none, instead of omitting the field. For endpoints
+   *  where an absent field means the MODEL's default, not off — Z.ai's coding
+   *  endpoint reads silence as thinking ON for reasoning-mandatory models like
+   *  GLM 5.3 Flash (measured 2026-09-13: omit → thinking block; disabled →
+   *  none), and it accepts the marker natively. Native Anthropic has no such
+   *  marker and defaults to off when the field is absent, so leave this unset
+   *  there. */
+  explicitNone?: boolean;
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -181,15 +190,17 @@ export function toAnthropicMessages(messages: readonly ChatMessage[]): {
   return { ...(blocks ? { system: blocks } : {}), messages: out };
 }
 
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
 interface AnthropicEvent {
   type?: string;
   message?: {
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      cache_read_input_tokens?: number;
-      cache_creation_input_tokens?: number;
-    };
+    usage?: AnthropicUsage;
   };
   content_block?: { type?: string; id?: string; name?: string };
   delta?: {
@@ -199,7 +210,7 @@ interface AnthropicEvent {
     partial_json?: string;
     stop_reason?: string;
   };
-  usage?: { output_tokens?: number };
+  usage?: AnthropicUsage;
   index?: number;
   error?: { message?: string; type?: string };
 }
@@ -254,13 +265,17 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         // Thinking and sampling are mutually exclusive on this shape.
         delete request.temperature;
         delete request.top_p;
+      } else if (config.explicitNone) {
+        // The one dialect where silence means the model default — which is ON
+        // for a reasoning-mandatory model — so "none" has to be said out loud.
+        request.thinking = { type: "disabled" };
       }
 
       // Anthropic reports cache reads and writes as fields of their OWN,
       // EXCLUDED from `input_tokens` — where the OpenAI shapes report a cached
       // subset already inside the prompt count. Reconciling here is what keeps
       // one usage record meaningful across both, and a cost figure honest.
-      let inputTokens = 0;
+      let freshInputTokens = 0;
       let cachedInputTokens = 0;
       let cacheWriteTokens = 0;
       let outputTokens = 0;
@@ -300,7 +315,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             const usage = event.message?.usage;
             cachedInputTokens = usage?.cache_read_input_tokens ?? 0;
             cacheWriteTokens = usage?.cache_creation_input_tokens ?? 0;
-            inputTokens = (usage?.input_tokens ?? 0) + cachedInputTokens + cacheWriteTokens;
+            freshInputTokens = usage?.input_tokens ?? 0;
             break;
           }
 
@@ -340,6 +355,12 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             break;
 
           case "message_delta": {
+            // Z.ai starts with zero input usage and reports the real totals here.
+            // These are cumulative counters, not increments. Native Anthropic
+            // usually sends only output_tokens here, so absent fields retain theirs.
+            freshInputTokens = event.usage?.input_tokens ?? freshInputTokens;
+            cachedInputTokens = event.usage?.cache_read_input_tokens ?? cachedInputTokens;
+            cacheWriteTokens = event.usage?.cache_creation_input_tokens ?? cacheWriteTokens;
             outputTokens = event.usage?.output_tokens ?? outputTokens;
             const finishReason = mapStopReason(event.delta?.stop_reason);
             if (finishReason) yield { type: "finish", finishReason };
@@ -349,7 +370,12 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           case "message_stop":
             yield {
               type: "usage",
-              usage: { inputTokens, cachedInputTokens, cacheWriteTokens, outputTokens },
+              usage: {
+                inputTokens: freshInputTokens + cachedInputTokens + cacheWriteTokens,
+                cachedInputTokens,
+                cacheWriteTokens,
+                outputTokens,
+              },
             };
             break;
         }

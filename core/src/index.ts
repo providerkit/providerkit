@@ -15,3 +15,4 @@ export * from "./providers/anthropic.ts";
 export * from "./providers/openai.ts";
 export * from "./providers/responses.ts";
 export * from "./providers/gemini.ts";
+export * from "./providers/zai.ts";

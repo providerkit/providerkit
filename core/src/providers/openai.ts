@@ -24,6 +24,10 @@ export interface OpenAIConfig {
   model: string;
   /** Any OpenAI-compatible endpoint. Defaults to OpenAI itself. */
   baseUrl?: string;
+  /** Path appended to baseUrl. Defaults to /v1/chat/completions. Set
+   *  /chat/completions when the base already includes the API version, such as
+   *  a gateway using /v4 rather than /v1. */
+  path?: string;
   /** Names the provider in errors and logs — "openrouter", "deepseek", … It
    *  also picks the effort dialect below, unless `effortDialect` overrides. */
   id?: string;
@@ -398,7 +402,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       }
 
       for await (const data of streamSse({
-        url: apiUrl(baseUrl, "/v1/chat/completions"),
+        url: apiUrl(baseUrl, config.path ?? "/v1/chat/completions"),
         headers: { authorization: `Bearer ${config.apiKey}`, ...config.headers },
         body: request,
         provider: id,
