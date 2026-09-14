@@ -142,23 +142,20 @@ export type EffortDialect = "openai" | "openrouter" | "deepseek" | "off";
  *
  * One knob, three incompatible spellings, and the differences are not cosmetic:
  *
- * - **On OpenRouter, a model that must think refuses BOTH off switches.**
- *   `reasoning.enabled: false` is refused by GLM 5.3 Flash with
- *   `400 "Reasoning is mandatory for this endpoint and cannot be disabled."`,
- *   which cost one app its onboarding read, and is why nothing here ever emits
- *   that field. That was then read as "OpenRouter has no off switch" and `none`
- *   was floored to `low` on the strength of it — wrong, because `none` is a
- *   member of OpenRouter's own effort enum and the floor bought a thinking pass
- *   on every turn that asked for none. But the correction over-reached: `none`
- *   is NOT universally safe either. Re-measured 2026-09-09, the same model
- *   answers the same 400 to `effort: "none"`. An unsupported level is mapped to
- *   the nearest only where the model CAN vary its effort; where thinking is
- *   mandatory, `none` is refused outright and the whole call is lost.
- *   The honest way to ask for the least thinking on this dialect is to pass no
- *   effort at all — see `effortParams`, where the numbers live.
+ * - **On OpenRouter, GLM's off switch is the ABSENT field.** Not setting
+ *   `reasoning` at all disables thinking for GLM 5.3 Flash (measured live
+ *   2026-09-14). Naming a level raises it — the accepted values are
+ *   `low`, `high` and `max` (`medium` and `xhigh` are accepted too, but our
+ *   vocabulary has no use for them). `none` is NOT sendable there: the model
+ *   answers
+ *   `400 "Reasoning is mandatory for this endpoint and cannot be disabled."`
+ *   to `reasoning.effort: "none"` exactly as it does to
+ *   `reasoning.enabled: false` — so "do not think" on this dialect is said by
+ *   omitting the field, never by naming a level. See `effortParams`, where the
+ *   numbers live.
  * - **DeepSeek V4 defaults thinking ON**, so `none` has to be an explicit
- *   refusal. That is the case proving OpenRouter's floor is a constraint and
- *   not a preference for always thinking.
+ *   refusal. That is the case proving OpenRouter's absent-field off switch is
+ *   a real dialect fact and not a preference for always thinking.
  * - **OpenAI** takes `reasoning_effort`, and `none` is one of its values — not
  *   the absence of the field. GPT-5.1 both accepted `none` and made it the
  *   default; everything from GPT-5 back still defaults to `medium`. So sending
@@ -168,8 +165,10 @@ export type EffortDialect = "openai" | "openrouter" | "deepseek" | "off";
  *   empty with `finish_reason: "length"`.
  *
  * An absent effort sends nothing on every dialect: the seam's rule is that a
- * knob the caller never touched is a knob the provider still owns. `none` is
- * the caller touching it, and the two must not produce the same request.
+ * knob the caller never touched is a knob the provider still owns. On
+ * OpenRouter that makes `none` and "never asked" the same request — on this
+ * dialect, not thinking IS the default state, so there is no third spelling
+ * to invent.
  */
 export function effortParams(
   dialect: EffortDialect,
@@ -189,31 +188,19 @@ export function effortParams(
         ? { thinking: { type: "enabled" } }
         : { thinking: { type: "enabled" }, reasoning_effort: level };
     case "openrouter":
-      // Its own enum runs xhigh > high > medium > low > minimal > none, so `max`
-      // has a real tier here and clamping it to `high` throws the top one away —
-      // 0.95 of the budget against 0.8.
+      // GLM's off switch here is the ABSENT field (measured live 2026-09-14:
+      // omit `reasoning` → thinking disabled for glm-5.3-flash), so `none`
+      // sends nothing — the same request as a caller who never asked, which on
+      // this dialect is the same state. Naming a level RAISES it: the accepted
+      // values are low, high and max (`medium` and `xhigh` exist on the wire
+      // The refusal that once looked like "OpenRouter cannot be told not to
+      // think" was `reasoning.enabled: false` — a different field, never sent
+      // (pinned by the test below).
       //
-      // CAUTION, measured 2026-09-09 against z-ai/glm-5.3-flash: the claim that
-      // "OpenRouter maps an unsupported level to its nearest rather than
-      // refusing" does NOT hold for `none`. That model answers
-      // `400 "Reasoning is mandatory for this endpoint and cannot be disabled."`
-      // to `reasoning.effort: "none"` exactly as it does to
-      // `reasoning.enabled: false` — so on a model that must think, `none` is a
-      // refusal and not a floor. Callers that mean "as little as possible"
-      // should pass no effort at all rather than `none`, which is why the
-      // absent-effort branch above stays load-bearing.
-      //
-      // Same measurement, same model, one structured-output call three ways:
-      //
-      //   no reasoning field    4,1s   ·    1 reasoning token
-      //   effort "minimal"     46,6s   ·  474 reasoning tokens
-      //   max_tokens 2000      30,3s   ·  484 reasoning tokens
-      //
-      // Its default sat below every level on offer, so naming one RAISED the
-      // thinking — an effort is a request, never a cap. Nearly all of the extra
-      // time was spent before the first token arrived, so it does not show up as
-      // slow streaming; it shows up as a call that looks hung.
-      return { reasoning: { effort: effort === "max" ? "xhigh" : (level ?? "none") } };
+      // `max` rides verbatim here — the enum clamp below is DeepSeek/OpenAI's
+      // shape (DeepSeek auto-bumps past its own top, OpenAI's top IS high);
+      // OpenRouter takes `max` as named (measured live 2026-09-14).
+      return effort === "none" ? {} : { reasoning: { effort } };
     case "openai":
       return { reasoning_effort: level ?? "none" };
     case "off":

@@ -466,16 +466,20 @@ describe("effortParams", () => {
     }
   });
 
-  it("says `none` to OpenRouter, and names its own top tier, xhigh", () => {
-    // `none` is a member of its effort enum. The 400 that once looked like
-    // "OpenRouter cannot be told not to think" was `reasoning.enabled: false`,
-    // a different field — which the test above pins as never sent.
-    expect(effortParams("openrouter", "none")).toEqual({ reasoning: { effort: "none" } });
-    // `high` is 0.8 of the thinking budget there and `xhigh` is 0.95, so
-    // clamping `max` to `high` spent the top tier the caller asked for. The
-    // other dialects have nothing above `high`; this one does.
-    expect(effortParams("openrouter", "max")).toEqual({ reasoning: { effort: "xhigh" } });
+  it("sends nothing for none — the absent field IS GLM's off switch — and names low/high/max verbatim", () => {
+    // Not setting `reasoning` at all disables thinking for GLM 5.3 Flash
+    // (measured live 2026-09-14), so `none` omits the field rather than naming
+    // a level: the model answers 400 "Reasoning is mandatory" to
+    // `reasoning.effort: "none"` exactly as to `reasoning.enabled: false`.
+    // The 400 that once looked like "OpenRouter cannot be told not to think"
+    // was `reasoning.enabled: false`, a different field — which the test above
+    // pins as never sent.
+    expect(effortParams("openrouter", "none")).toEqual({});
+    // Naming a level raises it; low/high/max ride as asked (`max` verbatim —
+    // measured accepted on the live endpoint).
+    expect(effortParams("openrouter", "max")).toEqual({ reasoning: { effort: "max" } });
     expect(effortParams("openrouter", "high")).toEqual({ reasoning: { effort: "high" } });
+    expect(effortParams("openrouter", "low")).toEqual({ reasoning: { effort: "low" } });
   });
 
   it("keeps the real off switch where a model has one — DeepSeek defaults ON", () => {
@@ -504,8 +508,8 @@ describe("effortParams", () => {
   });
 
   it("sends nothing at all when the caller never asked", () => {
-    // Absent is not `none`: a knob the caller never touched stays the
-    // provider's, which is why OpenRouter's floor does not fire here.
+    // Absent is not `none` — except on OpenRouter, where GLM's off switch IS
+    // the absent field, so the two are the same request by design there.
     for (const dialect of ["openai", "openrouter", "deepseek", "off"] as const) {
       expect(effortParams(dialect, undefined)).toEqual({});
     }
@@ -523,7 +527,8 @@ describe("effortParams", () => {
       );
       return calls[0]!.body;
     };
-    expect(await seen("openrouter", "none")).toMatchObject({ reasoning: { effort: "none" } });
+    expect(await seen("openrouter", "none")).not.toHaveProperty("reasoning");
+    expect(await seen("openrouter", "low")).toMatchObject({ reasoning: { effort: "low" } });
     expect(await seen("deepseek", "none")).toMatchObject({ thinking: { type: "disabled" } });
     expect(await seen("kimi", "high")).toMatchObject({ reasoning_effort: "high" });
   });
