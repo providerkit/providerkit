@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { FallbackPool, NoAvailableProviderError, withFallbackProviders } from "../src/fallback.ts";
+import {
+  FallbackPool,
+  NoAvailableProviderError,
+  withConfiguredFallbacks,
+  withFallbackProviders,
+} from "../src/fallback.ts";
 import { ProviderError, parseRetryAfterMs, streamError } from "../src/errors.ts";
 import { drainStream, type Provider, type ProviderChunk } from "../src/types.ts";
 import { postJson } from "../src/transport.ts";
@@ -187,6 +192,47 @@ describe("provider composition", () => {
     expect(completion.text).toBe("fallback-answer");
     expect(completion.model).toBe("z-ai/glm-5.3-flash");
     expect(completion.provider).toBe("openrouter");
+  });
+
+  it("resolves preset-id fallback specs — no baseUrl, no quirks at the call site", async () => {
+    // The failing primary: a stub that answers 429 with a reset, like a spent
+    // coding plan. The fallback is DECLARED, not built: preset id + key + model.
+    const failing: Provider = {
+      id: "zai",
+      model: "glm-5.3-flash",
+      async *createStream() {
+        yield* [];
+        throw new ProviderError("zai", "quota", "weekly limit", {
+          retryAfterMs: 60_000,
+          resetAtMs: Date.now() + 3 * DAY,
+          window: "weekly",
+        });
+      },
+    };
+
+    // A scripted SSE body in the OpenAI chat-completions shape — what the
+    // deepseek preset's adapter consumes once resolved from the table.
+    const sse = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          const enc = new TextEncoder();
+          controller.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'));
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    const fetchImpl: typeof fetch = async () => sse;
+
+    const provider = withConfiguredFallbacks(failing, {
+      fallbacks: [{ preset: "deepseek", apiKey: "k", model: "deepseek-v4.1-flash", fetchImpl }],
+    });
+
+    const completion = await drainStream(provider.createStream([], []), provider.model);
+    expect(completion.text).toBe("ok");
+    expect(completion.provider).toBe("deepseek");
+    expect(completion.model).toBe("deepseek-v4.1-flash");
   });
 });
 

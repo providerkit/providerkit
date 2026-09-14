@@ -1,6 +1,8 @@
 import { classify, parseRetryAfterMs, ProviderError, type ErrorKind } from "./errors.ts";
 import type { RateLimitWindow } from "./rate-limit.ts";
+import type { ProviderPresetId } from "./presets.ts";
 import type { Provider, ProviderChunk } from "./types.ts";
+import { createPresetProvider, type PresetProviderConfig } from "./providers/factory.ts";
 
 /** Retry intervals when the server supplies no deadline, not estimates of when
  *  it will recover. A server deadline always wins over these defaults. */
@@ -30,10 +32,31 @@ export interface FallbackOptions<T> {
   now?: () => number;
 }
 
+/**
+ * A fallback named by PRESET id rather than hand-built: the endpoint, auth
+ * style, effort dialect and every measured quirk come from the presets table,
+ * so a consumer writes neither a baseUrl nor a model-spelling rule. A
+ * hand-built `Provider` is still accepted wherever a spec is.
+ */
+export interface FallbackSpec extends PresetProviderConfig {
+  preset: ProviderPresetId;
+}
+
+export type FallbackCandidate = Provider | FallbackSpec;
+
+function resolveFallback(candidate: FallbackCandidate): Provider {
+  if (typeof candidate === "object" && candidate !== null && "createStream" in candidate) {
+    return candidate;
+  }
+  const { preset, ...config } = candidate;
+  return createPresetProvider(preset, config);
+}
+
 /** Standard options that any provider config can accept to configure fallbacks inline. */
 export interface ProviderFallbackConfig {
-  /** Secondary and tertiary providers to try if this provider fails/exhausts. */
-  fallbacks?: readonly Provider[];
+  /** Secondary and tertiary providers to try if this provider fails/exhausts:
+   *  hand-built `Provider`s, preset-id `FallbackSpec`s, or both. */
+  fallbacks?: readonly FallbackCandidate[];
   /** Custom cooldown or telemetry options for the fallback pool. */
   fallbackOptions?: FallbackOptions<Provider>;
 }
@@ -47,7 +70,10 @@ export function withConfiguredFallbacks(
   config?: ProviderFallbackConfig,
 ): Provider {
   if (!config?.fallbacks || config.fallbacks.length === 0) return primary;
-  return withFallbackProviders([primary, ...config.fallbacks], config.fallbackOptions);
+  return withFallbackProviders(
+    [primary, ...config.fallbacks.map(resolveFallback)],
+    config.fallbackOptions,
+  );
 }
 
 interface Cooldown {
