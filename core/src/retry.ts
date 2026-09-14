@@ -13,12 +13,14 @@
 //
 //  3. Honour the provider's own number. When it says `Retry-After: 30`, a
 //     one-second backoff is three wasted attempts before the same wait.
-import { classify, isBackupEligible, isTransient, parseRetryAfterMs } from "./errors.ts";
+import { classify, isBackupEligible, isTransient, parseRetryAfterMs, ProviderError } from "./errors.ts";
 
 export interface RetryOptions {
   /** Total attempts including the first. Default 3. */
   maxAttempts?: number;
   baseDelayMs?: number;
+  /** Maximum acceptable wait. A longer server deadline ends retry so an outer
+   *  fallback can switch provider; it is never shortened to retry too early. */
   maxDelayMs?: number;
   /** Aborts the wait as well as the work, so Stop lands promptly. */
   signal?: AbortSignal;
@@ -67,12 +69,17 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** The delay before the next attempt: the provider's own figure when it gave
- *  one, capped, else full-jitter backoff. */
-function delayFor(err: unknown, attempt: number, opts: RetryOptions): number {
+/** null means the server deadline exceeds this call's wait budget. */
+function delayFor(err: unknown, attempt: number, opts: RetryOptions): number | null {
   const asked = parseRetryAfterMs(err);
   const cap = opts.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
-  if (asked !== undefined) return Math.min(asked, cap);
+  const resetWait = err instanceof ProviderError && err.resetAtMs !== undefined
+    ? Math.max(0, err.resetAtMs - Date.now())
+    : undefined;
+  if (asked !== undefined || resetWait !== undefined) {
+    const wait = Math.max(asked ?? 0, resetWait ?? 0);
+    return wait > cap ? null : wait;
+  }
   return backoffMs(attempt, opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS, cap);
 }
 
@@ -101,6 +108,7 @@ export async function withRetry<T>(
       if (opts.signal?.aborted) throw err;
       if (attempt >= maxAttempts || !shouldRetry(err, attempt)) throw err;
       const delayMs = delayFor(err, attempt, opts);
+      if (delayMs === null) throw err;
       opts.onRetry?.({ error: err, attempt, delayMs });
       await nap(delayMs, opts.signal);
     }
@@ -149,6 +157,7 @@ export async function* withStreamRetry<T>(
       // Rule 2: past the first chunk there is no going back.
       if (emitted || attempt >= maxAttempts || !shouldRetry(err, attempt)) throw err;
       const delayMs = delayFor(err, attempt, opts);
+      if (delayMs === null) throw err;
       opts.onRetry?.({ error: err, attempt, delayMs });
       await nap(delayMs, opts.signal);
     } finally {

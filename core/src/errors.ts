@@ -10,6 +10,8 @@
 // read before the status — status alone gives the wrong advice ("retry" for an
 // empty balance, "check your key" for a plan that never included the API).
 
+import { parseUsageLimitBody, type RateLimitWindow } from "./rate-limit.ts";
+
 /** What kind of failure this is, named by what actually fixes it. */
 export type ErrorKind =
   /** Our own cancel — the caller pressed Stop. Never retried. */
@@ -67,6 +69,9 @@ export class ProviderError extends Error {
   /** Honoured when the provider said how long to wait (Retry-After, or
    *  Gemini's RetryInfo.retryDelay). */
   readonly retryAfterMs?: number;
+  /** Absolute reset of the binding limit. Can be days beyond Retry-After. */
+  readonly resetAtMs?: number;
+  readonly window?: RateLimitWindow;
   /** The provider's own response body, truncated — the actual reason, which is
    *  otherwise lost behind "400 status code (no body)". */
   readonly body?: string;
@@ -79,6 +84,8 @@ export class ProviderError extends Error {
       status?: number;
       code?: string;
       retryAfterMs?: number;
+      resetAtMs?: number;
+      window?: RateLimitWindow;
       body?: string;
       cause?: unknown;
     } = {},
@@ -90,6 +97,8 @@ export class ProviderError extends Error {
     this.status = opts.status;
     this.code = opts.code;
     this.retryAfterMs = opts.retryAfterMs;
+    this.resetAtMs = opts.resetAtMs;
+    this.window = opts.window;
     this.body = opts.body;
   }
 
@@ -113,6 +122,7 @@ export class ProviderError extends Error {
       status,
       code,
       retryAfterMs: parseRetryAfterMs(err, body),
+      ...parseUsageLimitBody(body),
       body: body.slice(0, 2_000) || undefined,
       cause: err,
     });
@@ -411,7 +421,13 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
  * backoff shorter than the window just burns an attempt.
  */
 export function parseRetryAfterMs(err: unknown, body?: string): number | undefined {
+  // Adapters already normalized the response headers. Re-parsing only the body
+  // discarded this property and made retries ignore their own Retry-After.
+  const normalized = readNumber(err, "retryAfterMs");
+  if (normalized !== undefined && Number.isFinite(normalized) && normalized >= 0) return normalized;
   const text = body ?? bodyTextOf(err);
+  const usageLimit = parseUsageLimitBody(text);
+  if (usageLimit.retryAfterMs !== undefined) return usageLimit.retryAfterMs;
   const delay = text.match(/"?retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)s"?/i);
   if (delay?.[1]) return Math.round(parseFloat(delay[1]) * 1000);
 
@@ -467,6 +483,7 @@ export function streamError(provider: string, error: unknown): ProviderError {
       ...(status !== undefined ? { status } : {}),
       ...(code ? { code } : {}),
       retryAfterMs: parseRetryAfterMs(error, body),
+      ...parseUsageLimitBody(body),
       body: body.slice(0, 2_000),
     },
   );
@@ -482,6 +499,8 @@ export function describeProviderError(err: unknown): Record<string, unknown> {
       status: err.status,
       code: err.code,
       retryAfterMs: err.retryAfterMs,
+      resetAtMs: err.resetAtMs,
+      window: err.window,
       error: err.message,
       body: err.body,
     };

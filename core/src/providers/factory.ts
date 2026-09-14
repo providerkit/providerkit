@@ -21,8 +21,9 @@ import {
   type ProviderPresetId,
 } from "../presets.ts";
 import type { Effort, Provider } from "../types.ts";
+import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
-export interface PresetProviderConfig {
+export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** The credential: an API key for `key`/`bearer` presets, an ACCESS TOKEN
    *  for `oauth` ones. Acquiring the token is the caller's job. */
   apiKey: string;
@@ -58,11 +59,15 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
   }
   const headers = { ...preset.headers, ...config.headers };
 
+  const { fallbacks: _fallbacks, fallbackOptions: _fallbackOptions, ...baseConfig } = config;
+
+  let provider: Provider;
   switch (preset.shape) {
     case "anthropic":
       // `key` rides Anthropic's native x-api-key; coding plans and OAuth
       // tokens read Bearer (measured across the family's coding endpoints).
-      return createAnthropicProvider({
+      provider = createAnthropicProvider({
+        ...baseConfig,
         apiKey: config.apiKey,
         model,
         effort: config.effort,
@@ -76,8 +81,10 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         ...(preset.explicitNone ? { explicitNone: true } : {}),
         fetchImpl: config.fetchImpl,
       });
+      break;
     case "openai":
-      return createOpenAIProvider({
+      provider = createOpenAIProvider({
+        ...baseConfig,
         id,
         apiKey: config.apiKey,
         model,
@@ -88,8 +95,10 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
         fetchImpl: config.fetchImpl,
       });
+      break;
     case "responses":
-      return createResponsesProvider({
+      provider = createResponsesProvider({
+        ...baseConfig,
         apiKey: config.apiKey,
         model,
         effort: config.effort,
@@ -99,8 +108,10 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         headers,
         fetchImpl: config.fetchImpl,
       });
+      break;
     case "gemini":
-      return createGeminiProvider({
+      provider = createGeminiProvider({
+        ...baseConfig,
         apiKey: config.apiKey,
         model,
         effort: config.effort,
@@ -109,5 +120,8 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         headers,
         fetchImpl: config.fetchImpl,
       });
+      break;
   }
+
+  return withConfiguredFallbacks(provider, config);
 }

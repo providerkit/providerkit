@@ -107,17 +107,18 @@ describe("withRetry", () => {
     expect(nap.delays).toEqual([7_000]);
   });
 
-  it("caps an absurd Retry-After at maxDelayMs", async () => {
+  it("hands a long Retry-After to fallback instead of retrying before the deadline", async () => {
     const nap = fakeSleep();
     let calls = 0;
-    await withRetry(
+    await expect(withRetry(
       async () => {
         if (++calls < 2) throw apiError(429, { retryDelay: "9000s" });
         return "ok";
       },
       { maxDelayMs: 30_000, sleep: nap.fn },
-    );
-    expect(nap.delays).toEqual([30_000]);
+    )).rejects.toThrow();
+    expect(calls).toBe(1);
+    expect(nap.delays).toEqual([]);
   });
 
   it("a caller Stop ends it immediately, however transient the error looks", async () => {

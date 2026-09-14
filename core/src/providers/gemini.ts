@@ -9,6 +9,7 @@ import { streamError } from "../errors.ts";
 import { schemaPrompt } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
+import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   ChatMessage,
   Effort,
@@ -22,7 +23,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 
-export interface GeminiConfig {
+export interface GeminiConfig extends ProviderFallbackConfig {
   apiKey: string;
   model: string;
   /** Any endpoint speaking the Generative Language REST dialect — a proxy or
@@ -247,7 +248,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "gemini";
 
-  return {
+  const provider: Provider = {
     id,
     model: config.model,
 
@@ -409,4 +410,6 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       }
     },
   };
+
+  return withConfiguredFallbacks(provider, config);
 }

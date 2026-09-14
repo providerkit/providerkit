@@ -4,7 +4,8 @@
 //
 // Adapters keep only their per-event mapping; everything about being an HTTP
 // client lives here once.
-import { classifyHttp, isTransportFailure, ProviderError } from "./errors.ts";
+import { classifyHttp, isTransportFailure, parseRetryAfterMs, ProviderError } from "./errors.ts";
+import { parseRateLimitResponse } from "./rate-limit.ts";
 
 export interface RequestInit_ {
   url: string;
@@ -63,12 +64,14 @@ export function retryAfterFromHeaders(headers: Headers, now = Date.now()): numbe
 async function errorFor(provider: string, res: Response): Promise<ProviderError> {
   const text = await res.text().catch(() => "");
   const kind = classifyHttp(res.status, text);
+  const reset = parseRateLimitResponse(res.headers, text);
   const message = text
     ? `${provider} ${res.status}: ${text.slice(0, 500)}`
     : `${provider} ${res.status} ${res.statusText}`;
   return new ProviderError(provider, kind, message, {
     status: res.status,
-    retryAfterMs: retryAfterFromHeaders(res.headers),
+    ...reset,
+    retryAfterMs: retryAfterFromHeaders(res.headers) ?? parseRetryAfterMs({}, text),
     body: text.slice(0, 2_000) || undefined,
   });
 }

@@ -139,6 +139,9 @@ export const EMPTY_USAGE: TokenUsage = {
 /** Normalized streaming chunk — every provider's shape collapses into this. */
 export interface ProviderChunk {
   type: "delta" | "usage" | "finish";
+  /** The selected endpoint and model when a fallback provider emits this chunk.
+   *  Per-call metadata, never shared mutable state on the provider object. */
+  source?: { provider: string; model: string };
   content?: string;
   reasoning?: string;
   /** OpenRouter's normalized reasoning payload — hand it back on the next
@@ -230,6 +233,8 @@ export interface Provider {
 
 export interface Completion {
   text: string;
+  /** Present when the stream identifies the endpoint that answered. */
+  provider?: string;
   reasoning: string;
   /** Present only where the provider sent one. See ChatMessage.reasoningDetails. */
   reasoningDetails?: unknown[];
@@ -253,7 +258,9 @@ export async function drainStream(
   let reasoningDetails: unknown[] | undefined;
   let usage: TokenUsage = EMPTY_USAGE;
   let finishReason: FinishReason | null = null;
+  let source: ProviderChunk["source"];
   for await (const chunk of stream) {
+    if (chunk.source) source = chunk.source;
     if (chunk.type === "delta") {
       if (chunk.content) text += chunk.content;
       if (chunk.reasoning) reasoning += chunk.reasoning;
@@ -270,7 +277,8 @@ export async function drainStream(
     ...(reasoningDetails ? { reasoningDetails } : {}),
     usage,
     finishReason,
-    model,
+    model: source?.model ?? model,
+    ...(source ? { provider: source.provider } : {}),
   };
 }
 

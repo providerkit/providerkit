@@ -215,3 +215,25 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
   }
   return result;
 }
+
+/** Read both places an endpoint can report its reset. A short Retry-After is
+ *  not evidence that a longer subscription window has lifted. */
+export function parseRateLimitResponse(
+  headers: Headers,
+  bodyText: string,
+  now = Date.now(),
+): RateLimitReset {
+  const header = parseRateLimitReset(headers, now);
+  const body = parseUsageLimitBody(bodyText, now);
+  const resetAtMs = Math.max(header.resetAtMs ?? 0, body.resetAtMs ?? 0);
+  const retryAfterMs = header.retryAfterMs ?? body.retryAfterMs;
+  const window =
+    body.resetAtMs !== undefined && body.resetAtMs > (header.resetAtMs ?? 0)
+      ? body.window
+      : (header.window ?? body.window);
+  return {
+    ...(resetAtMs > 0 ? { resetAtMs } : {}),
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    ...(window ? { window } : {}),
+  };
+}

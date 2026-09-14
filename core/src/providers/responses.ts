@@ -25,8 +25,9 @@ import type {
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
 import { isStrictSchema } from "../schema.ts";
+import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
-export interface ResponsesConfig {
+export interface ResponsesConfig extends ProviderFallbackConfig {
   apiKey: string;
   model: string;
   /** Any endpoint speaking the Responses format. Defaults to OpenAI itself. */
@@ -226,7 +227,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "openai-responses";
 
-  return {
+  const provider: Provider = {
     id,
     model: config.model,
 
@@ -463,4 +464,6 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       // included, was already yielded as it arrived.
     },
   };
+
+  return withConfiguredFallbacks(provider, config);
 }

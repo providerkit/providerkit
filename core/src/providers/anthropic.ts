@@ -3,6 +3,7 @@ import { streamError } from "../errors.ts";
 import { schemaPrompt } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
+import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   JsonOutput,
   ChatMessage,
@@ -15,7 +16,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 
-export interface AnthropicConfig {
+export interface AnthropicConfig extends ProviderFallbackConfig {
   apiKey: string;
   model: string;
   /** Any endpoint speaking the Anthropic Messages dialect — a proxy or gateway.
@@ -219,7 +220,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "anthropic";
 
-  return {
+  const provider: Provider = {
     id,
     model: config.model,
 
@@ -382,4 +383,5 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       }
     },
   };
+  return withConfiguredFallbacks(provider, config);
 }

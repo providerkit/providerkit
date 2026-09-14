@@ -1,6 +1,7 @@
 export * from "./types.ts";
 export * from "./errors.ts";
 export * from "./retry.ts";
+export * from "./fallback.ts";
 export * from "./key-pool.ts";
 export * from "./watchdog.ts";
 export * from "./usage.ts";

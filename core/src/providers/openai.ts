@@ -18,8 +18,9 @@ import type {
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
 import { isStrictSchema, schemaPrompt } from "../schema.ts";
+import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
-export interface OpenAIConfig {
+export interface OpenAIConfig extends ProviderFallbackConfig {
   apiKey: string;
   model: string;
   /** Any OpenAI-compatible endpoint. Defaults to OpenAI itself. */
@@ -305,7 +306,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "openai";
 
-  return {
+  const provider: Provider = {
     id,
     model: config.model,
 
@@ -489,4 +490,6 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       }
     },
   };
+
+  return withConfiguredFallbacks(provider, config);
 }
