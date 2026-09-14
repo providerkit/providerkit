@@ -9,6 +9,7 @@ import {
   classify,
   describeProviderError,
   isBackupEligible,
+  isRetryable,
   isTransient,
   isTransportFailure,
   messageOf,
@@ -232,6 +233,44 @@ describe("classifyHttp — the response-shaped entry point", () => {
     expect(classify(new Error("request cancelled by client"))).toBe("aborted");
   });
 
+  it("reads Anthropic input length and max_tokens context overflow", () => {
+    expect(
+      classifyHttp(
+        400,
+        "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000",
+      ),
+    ).toBe("context");
+    expect(classifyHttp(400, "Request exceeded context limit: please reduce input length")).toBe("context");
+  });
+
+  it("reads Anthropic OAuth revocation and org restrictions", () => {
+    expect(classifyHttp(403, "OAuth token has been revoked")).toBe("auth");
+    expect(
+      classifyHttp(
+        403,
+        "OAuth authentication is currently not allowed for this organization",
+      ),
+    ).toBe("entitlement");
+  });
+
+  it("reads PDF page limits and image dimension limits as content errors", () => {
+    expect(classifyHttp(400, "Exceeded maximum of 100 PDF pages")).toBe("content");
+    expect(classifyHttp(400, "The PDF specified is password protected")).toBe("content");
+    expect(classifyHttp(400, "image dimensions exceed maximum allowed size")).toBe("content");
+  });
+
+  it("honors server x-should-retry directive on ProviderError", () => {
+    const forcedNonTransient = new ProviderError("p", "rate", "rate limited", {
+      shouldRetry: false,
+    });
+    expect(forcedNonTransient.isTransient).toBe(false);
+
+    const forcedTransient = new ProviderError("p", "invalid", "bad parameter", {
+      shouldRetry: true,
+    });
+    expect(forcedTransient.isTransient).toBe(true);
+  });
+
   it("sanitizes Cloudflare HTML error pages into the title string", () => {
     const html = `<!DOCTYPE html><html><head><title>504 Gateway Time-out</title></head><body><h1>Gateway Timeout</h1></body></html>`;
     expect(messageOf(new Error(html))).toBe("504 Gateway Time-out");
@@ -451,5 +490,46 @@ describe("425 Too Early", () => {
     // single re-send would have cleared.
     expect(classifyHttp(425, "")).toBe("overload");
     expect(isTransient(classifyHttp(425, ""))).toBe(true);
+  });
+});
+
+describe("isRetryable", () => {
+  it("retries transient provider errors", () => {
+    expect(isRetryable(new ProviderError("p", "overload", "server overloaded"))).toBe(true);
+    expect(isRetryable(new ProviderError("p", "network", "socket hung up"))).toBe(true);
+    expect(isRetryable(new ProviderError("p", "rate", "rate limited"))).toBe(true);
+    expect(isRetryable(new ProviderError("p", "timeout", "timed out"))).toBe(true);
+  });
+
+  it("never retries non-transient kinds", () => {
+    expect(isRetryable(new ProviderError("p", "quota", "out of credits"))).toBe(false);
+    expect(isRetryable(new ProviderError("p", "context", "context overflow"))).toBe(false);
+    expect(isRetryable(new ProviderError("p", "model", "unknown model"))).toBe(false);
+    expect(isRetryable(new ProviderError("p", "entitlement", "plan does not support"))).toBe(false);
+    expect(isRetryable(new ProviderError("p", "content", "content filter"))).toBe(false);
+    expect(isRetryable(new ProviderError("p", "invalid", "bad request"))).toBe(false);
+    expect(isRetryable(new ProviderError("p", "aborted", "cancelled"))).toBe(false);
+  });
+
+  it("does not retry rate limits whose retry-after exceeds maxWaitMs", () => {
+    const shortWait = new ProviderError("p", "rate", "rate limited", { retryAfterMs: 30_000 });
+    expect(isRetryable(shortWait, 60_000)).toBe(true);
+
+    const longWait = new ProviderError("p", "rate", "rate limited", { retryAfterMs: 120_000 });
+    expect(isRetryable(longWait, 60_000)).toBe(false);
+  });
+
+  it("retries unwrapped transport failures", () => {
+    expect(isRetryable(new TypeError("Failed to fetch"))).toBe(true);
+    expect(isRetryable(new TypeError("The network connection was lost."))).toBe(true);
+    expect(isRetryable(new TypeError("driver.click is not a function"))).toBe(false);
+  });
+
+  it("honors server shouldRetry directives over everything else", () => {
+    const forcedYes = new ProviderError("p", "invalid", "bad", { shouldRetry: true });
+    expect(isRetryable(forcedYes)).toBe(true);
+
+    const forcedNo = new ProviderError("p", "overload", "busy", { shouldRetry: false });
+    expect(isRetryable(forcedNo)).toBe(false);
   });
 });

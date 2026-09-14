@@ -13,7 +13,13 @@
 //
 //  3. Honour the provider's own number. When it says `Retry-After: 30`, a
 //     one-second backoff is three wasted attempts before the same wait.
-import { classify, isBackupEligible, isTransient, parseRetryAfterMs, ProviderError } from "./errors.ts";
+import {
+  classify,
+  isBackupEligible,
+  isRetryable,
+  parseRetryAfterMs,
+  ProviderError,
+} from "./errors.ts";
 
 export interface RetryOptions {
   /** Total attempts including the first. Default 3. */
@@ -83,7 +89,7 @@ function delayFor(err: unknown, attempt: number, opts: RetryOptions): number | n
   return backoffMs(attempt, opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS, cap);
 }
 
-const defaultShouldRetry = (err: unknown): boolean => isTransient(classify(err));
+const defaultShouldRetry = (err: unknown, _attempt: number): boolean => isRetryable(err);
 
 /**
  * Run `fn`, retrying transient failures with backoff. For one-shot calls —

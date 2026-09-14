@@ -53,12 +53,52 @@ const TRANSIENT: ReadonlySet<ErrorKind> = new Set<ErrorKind>([
  *  overload are per-model-endpoint; nothing else on this list is. */
 const BACKUP_ELIGIBLE: ReadonlySet<ErrorKind> = new Set<ErrorKind>(["overload", "rate"]);
 
+/** Kinds that a retry on the same endpoint can never resolve. */
+const NON_RETRYABLE_KINDS: ReadonlySet<ErrorKind> = new Set<ErrorKind>([
+  "quota",
+  "context",
+  "model",
+  "entitlement",
+  "content",
+  "invalid",
+  "aborted",
+]);
+
 export function isTransient(kind: ErrorKind): boolean {
   return TRANSIENT.has(kind);
 }
 
 export function isBackupEligible(kind: ErrorKind): boolean {
   return BACKUP_ELIGIBLE.has(kind);
+}
+
+/**
+ * Decides whether any failure (ProviderError, thrown Error, TypeError, HTTP response)
+ * is worth a retry.
+ *
+ * Checks in order:
+ * 1. Caller aborts are never retryable.
+ * 2. An explicit `shouldRetry` directive on ProviderError (e.g. from server `x-should-retry`)
+ * 3. Non-retryable kinds (quota, context, model, entitlement, content, invalid) return false.
+ * 4. Excessive retry-after waits (exceeding `maxWaitMs`) return false — long waits belong to fallbacks.
+ * 5. Transient kinds (rate, overload, network, timeout) return true.
+ * 6. Transport-level network faults (fetch failed, connection lost, SSL blips) return true.
+ */
+export function isRetryable(err: unknown, maxWaitMs = 60_000): boolean {
+  if (isAbort(err)) return false;
+
+  if (err instanceof ProviderError) {
+    if (err.shouldRetry !== undefined) return err.shouldRetry;
+    if (NON_RETRYABLE_KINDS.has(err.kind)) return false;
+    if (err.retryAfterMs !== undefined && err.retryAfterMs > maxWaitMs) return false;
+    return err.isTransient;
+  }
+
+  if (isTransportFailure(err)) return true;
+
+  const kind = classify(err);
+  if (NON_RETRYABLE_KINDS.has(kind)) return false;
+  return isTransient(kind);
 }
 
 export class ProviderError extends Error {
@@ -72,6 +112,8 @@ export class ProviderError extends Error {
   /** Absolute reset of the binding limit. Can be days beyond Retry-After. */
   readonly resetAtMs?: number;
   readonly window?: RateLimitWindow;
+  /** Explicit server directive (`x-should-retry`), overriding default classification. */
+  readonly shouldRetry?: boolean;
   /** The provider's own response body, truncated — the actual reason, which is
    *  otherwise lost behind "400 status code (no body)". */
   readonly body?: string;
@@ -86,6 +128,7 @@ export class ProviderError extends Error {
       retryAfterMs?: number;
       resetAtMs?: number;
       window?: RateLimitWindow;
+      shouldRetry?: boolean;
       body?: string;
       cause?: unknown;
     } = {},
@@ -99,10 +142,12 @@ export class ProviderError extends Error {
     this.retryAfterMs = opts.retryAfterMs;
     this.resetAtMs = opts.resetAtMs;
     this.window = opts.window;
+    this.shouldRetry = opts.shouldRetry;
     this.body = opts.body;
   }
 
   get isTransient(): boolean {
+    if (this.shouldRetry !== undefined) return this.shouldRetry;
     return isTransient(this.kind);
   }
 
@@ -293,6 +338,10 @@ const CONTEXT_PATTERNS: readonly RegExp[] = [
   /input is too long/i,
   /too many (?:input )?tokens/i,
   /reduce the length of the (?:messages|prompt|input)/i,
+  // Anthropic's exact wording when input + max_tokens overflows context limit:
+  // "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
+  /input length and `?max_tokens`? exceed context limit/i,
+  /exceed(?:s|ed)? (?:the )?context limit/i,
   // Scoped to the thing that overflowed: a bare "exceeds the maximum" also
   // covers image counts and per-minute token rates, which compaction can't fix.
   /exceeds? the (?:model'?s? )?maximum (?:input |prompt |context )?(?:tokens?|length|context)/i,
@@ -310,6 +359,7 @@ const ENTITLEMENT_PATTERNS: readonly RegExp[] = [
   /subscription[_\s]?required/i,
   /upgrade for access/i,
   /no api access/i,
+  /OAuth authentication is currently not allowed for this organization/i,
   // The ChatGPT backend's error code, which arrives with no prose at all.
   /usage_not_included/i,
   /usage not included/i,
@@ -356,6 +406,7 @@ const AUTH_PATTERNS: readonly RegExp[] = [
   /account (?:disabled|suspended|deactivated|banned)/i,
   /unrecognizedclient|unauthorizedexception|accessdeniedexception/i,
   /expired[_\s]?token/i,
+  /OAuth token has been revoked/i,
 ];
 
 const CONTENT_PATTERNS: readonly RegExp[] = [
@@ -363,6 +414,11 @@ const CONTENT_PATTERNS: readonly RegExp[] = [
   /content policy/i,
   /cyber[_\s]policy/i,
   /safety|PROHIBITED_CONTENT|blocked|refusal|policy violation|misalignment/i,
+  // Document and media boundary violations
+  /maximum of \d+ PDF pages/i,
+  /PDF specified is password protected/i,
+  /image(?:s)? exceed(?:s)? .* maximum/i,
+  /image dimensions exceed/i,
 ];
 
 /**

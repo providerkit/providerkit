@@ -68,9 +68,13 @@ async function errorFor(provider: string, res: Response): Promise<ProviderError>
   const message = text
     ? `${provider} ${res.status}: ${text.slice(0, 500)}`
     : `${provider} ${res.status} ${res.statusText}`;
+  const shouldRetryHeader = res.headers.get("x-should-retry");
+  const shouldRetry =
+    shouldRetryHeader === "false" ? false : shouldRetryHeader === "true" ? true : undefined;
   return new ProviderError(provider, kind, message, {
     status: res.status,
     ...reset,
+    shouldRetry,
     retryAfterMs: retryAfterFromHeaders(res.headers) ?? parseRetryAfterMs({}, text),
     body: text.slice(0, 2_000) || undefined,
   });
