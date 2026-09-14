@@ -42,6 +42,41 @@ try {
 `isTransient` covers `timeout`, `network`, `overload` and `rate`. `isBackupEligible` covers
 `overload` and `rate` — the two where a _different model_ is a real fix.
 
+## Centralized retry predicate: `isRetryable`
+
+Rather than checking status codes and error kinds manually across loops, `isRetryable` evaluates
+any caught error or response:
+
+```ts
+import { isRetryable } from "@providerkit/core";
+
+if (isRetryable(err)) {
+  // Safe to retry on the same endpoint
+}
+```
+
+Order of decision:
+
+1. Caller aborts (`AbortSignal`) are never retryable.
+2. An explicit `shouldRetry` directive on `ProviderError` (honoring the server's `x-should-retry` header) wins over default classification.
+3. Non-retryable kinds (`quota`, `context`, `model`, `entitlement`, `content`, `invalid`) return `false`.
+4. Excessive waits (`retryAfterMs > maxWaitMs`, default 60s) return `false` — long cooldowns belong to outer fallbacks, not backoff loops.
+5. Transient kinds and transport failures (`fetch failed`, socket drops, TLS glitches) return `true`.
+
+## Parsing context overflows: `parseContextOverflow`
+
+When a prompt or `max_tokens` exceeds the model's window, Anthropic and gateways report the exact numbers:
+
+```ts
+import { parseContextOverflow } from "@providerkit/core";
+
+const overflow = parseContextOverflow(err);
+// { inputTokens: 188059, maxTokens: 20000, contextLimit: 200000, excessTokens: 8059 }
+if (overflow) {
+  // Dynamically lower maxTokens or compact history by the excess margin before retrying
+}
+```
+
 ## Why the status code is not enough
 
 Running out of credit arrives as **429** from OpenAI (`insufficient_quota`), **402** from some

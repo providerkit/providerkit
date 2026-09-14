@@ -38,6 +38,15 @@ The flags are metadata your loop reads — the kernel does not enforce policy:
 | `isConcurrencySafe` | May run in parallel with other tools.        |
 | `isTerminal`        | Ends the turn — a submit or a final answer.  |
 
+## Wire repairs and schema sanitization
+
+Gateways, streaming cutoffs, and vendor quirks corrupt tool calls in ways that standard SDKs drop as 400 errors:
+
+- **Concatenated JSON (`findLastValidJsonObject`)**: When a gateway emits `{}{"query":"foo"}`, `parseToolArgs` extracts the valid object from the tail rather than failing.
+- **Tool ID synthesis and bounding (`normalizeToolId`)**: Synthesizes a deterministic ID when upstreams emit blank/empty strings, and bounds IDs to 64 characters so ChatGPT Responses API does not reject turns.
+- **Gemini schema sanitization (`toGeminiToolSchema`)**: Converts nullable unions (`anyOf` with null) to `nullable: true`, numeric enums to string enums, and strips unsupported keywords (`$schema`, `additionalProperties: true`).
+- **Anthropic schema sanitization (`toAnthropicToolSchema`)**: Unwraps root `anyOf` / `oneOf` unions into a unified object schema to prevent Anthropic's root-object rejection.
+
 ## Invoking
 
 ```ts

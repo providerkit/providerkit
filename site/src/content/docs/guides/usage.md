@@ -58,3 +58,14 @@ something that needs releasing every time a vendor moves a number. Bring your ow
 `cacheSavingsUsd` is the number worth putting on a dashboard: it is the difference between what
 the cached tokens cost and what they would have cost at the full input rate — the direct measure
 of whether your caching strategy is earning anything.
+
+## Rollbacks and speculative turns
+
+When rolling back an optimistic turn or speculative stream, use `subtractUsage` or `tracker.subtract`:
+
+```ts
+import { subtractUsage } from "@providerkit/core";
+
+// Clamps every bucket at zero so the ledger cannot drift negative
+tracker.subtract(rolledBackUsage, rate);
+```

@@ -169,17 +169,61 @@ terse, and "sometimes forgets its tools" is a prompt problem, not a wire shape o
 | Factory                   | Shape                   | Notes                                                                                  |
 | ------------------------- | ----------------------- | -------------------------------------------------------------------------------------- |
 | `createAnthropicProvider` | Anthropic Messages      | any compatible endpoint via `baseUrl`; `bearer: true` moves the key to `Authorization` |
-| `createOpenAIProvider`    | OpenAI Chat Completions | any compatible endpoint via `baseUrl`; `providerOrder` pins OpenRouter upstreams       |
+| `createOpenAIProvider`    | OpenAI Chat Completions | any compatible endpoint via `baseUrl`; `providerOrder` and `pinHost` route pins        |
 | `createResponsesProvider` | OpenAI Responses        | reasoning items replay across turns; also serves the ChatGPT subscription backend      |
-| `createGeminiProvider`    | Gemini REST             | no SDK; thought signatures survive tool turns, and thoughts bill as output             |
+| `createGeminiProvider`    | Gemini REST             | no SDK; thought signatures survive tool turns, thoughts bill as output, Gemini 3 dials |
 
 On the OpenAI-shape adapter, `effortDialect` names which spelling of _think this hard_ the endpoint
 accepts — `openai`, `openrouter`, `deepseek`, or `off` for one that rejects the field outright. It
 is inferred from the provider `id` where the name gives it away.
 
-`providerOrder` exists for cache warmth, not preference. OpenRouter's prompt cache lives on the
-upstream host's account, and default routing hops between hosts — every hop is a cold cache,
-which costs both latency and input tokens. Fallbacks stay enabled; it is a preference, not a lock.
+### OpenRouter sticky routing
+
+OpenRouter's prompt cache lives on the upstream host's account. Default routing hops between hosts
+on every request, which drops the cache and inflates latency and token costs.
+
+By default, the OpenAI adapter automatically pins the model's first-party vendor host (`pinHost: true`,
+`allow_fallbacks: true`) via `openRouterHostFor`. If you want to supply your own preference order:
+
+```ts
+createOpenAIProvider({
+  apiKey: process.env.OPENROUTER_API_KEY!,
+  model: "z-ai/glm-5.3-flash",
+  baseUrl: "https://openrouter.ai/api",
+  providerOrder: ["z-ai", "deepinfra"], // explicit upstream pin
+});
+```
+
+### Curated presets and `createPresetProvider`
+
+Instead of hand-crafting `baseUrl`, header styles, and dialect quirks per vendor, you can instantiate
+any of the 45 curated presets directly:
+
+```ts
+import { createPresetProvider } from "@providerkit/core";
+
+// One line — wire headers, auth mode and endpoints resolve from the table
+const zai = createPresetProvider("zai", { apiKey: process.env.ZAI_API_KEY! });
+const qwen = createPresetProvider("qwen", { apiKey: process.env.DASHSCOPE_API_KEY! });
+const deepseek = createPresetProvider("deepseek", { apiKey: process.env.DEEPSEEK_API_KEY! });
+```
+
+Endpoints supporting both Anthropic (`/v1/messages`) and OpenAI (`/v1/chat/completions`) wires are
+explicitly distinguished (e.g. `zai` vs `zai-openai`, `qwen` token plan vs `qwen-token-plan-openai`).
+
+### Declaring cross-provider fallbacks by preset ID
+
+When building resilience pools, fallbacks can be declared by preset ID using `FallbackSpec`:
+
+```ts
+createPresetProvider("zai", {
+  apiKey: process.env.ZAI_API_KEY!,
+  fallbacks: [
+    { preset: "openrouter", apiKey: process.env.OPENROUTER_API_KEY!, model: "z-ai/glm-5.3-flash" },
+    { preset: "deepseek", apiKey: process.env.DEEPSEEK_API_KEY!, model: "deepseek-flash" },
+  ],
+});
+```
 
 ### Four dialects, not four companies
 
