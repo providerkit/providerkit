@@ -29,6 +29,12 @@ const ID_MAP: Record<string, string> = {
   fireworks: "fireworks-ai",
   claude: "anthropic",
   chatgpt: "openai",
+  "minimax-openai": "minimax",
+  "zai-openai": "zhipuai",
+  "kimi-openai": "moonshotai",
+  "qwen-token-plan-openai": "alibaba-token-plan",
+  alibaba: "alibaba",
+  "qwen-api": "alibaba",
 };
 
 async function main() {

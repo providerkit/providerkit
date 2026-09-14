@@ -177,6 +177,13 @@ export const PROVIDER_PRESETS = {
     defaultModel: "MiniMax-M3",
     models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5"],
   },
+  "minimax-openai": {
+    shape: "openai",
+    baseUrl: "https://api.minimax.io/v1",
+    auth: "key",
+    defaultModel: "MiniMax-M3",
+    models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5"],
+  },
 
   // ── Popular gateways & cloud providers ──────────────────────────────────
   nvidia: {
@@ -284,12 +291,27 @@ export const PROVIDER_PRESETS = {
     // (`z-ai/glm-5.3-flash`) answers 400 [1211] Unknown Model.
     explicitNone: true,
   },
+  "zai-openai": {
+    shape: "openai",
+    baseUrl: "https://api.z.ai/api/paas/v4",
+    path: "/chat/completions",
+    auth: "key",
+    defaultModel: "glm-5.3-flash",
+    models: ["glm-5.3-flash", "glm-5.3", "glm-5.2"],
+  },
   kimi: {
     shape: "anthropic",
     baseUrl: "https://api.kimi.ai/coding",
     auth: "bearer",
     defaultModel: "kimi-for-coding",
     models: ["kimi-for-coding", "kimi-for-coding-highspeed", "k3", "k3-256k"],
+  },
+  "kimi-openai": {
+    shape: "openai",
+    baseUrl: "https://api.moonshot.ai/v1",
+    auth: "key",
+    defaultModel: "kimi-k2.7-code",
+    models: ["kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k3"],
   },
   /** Alibaba's dashscope coding plan — OpenAI-compatible per its registry. */
   "alibaba-coding-plan": {
@@ -306,6 +328,30 @@ export const PROVIDER_PRESETS = {
     auth: "bearer",
     defaultModel: "qwen3.8-max",
     models: ["qwen3.8-max", "qwen3.8-flash", "qwen3.6-flash"],
+  },
+  /** QwenCloud's token plan — OpenAI-compatible endpoint. */
+  "qwen-token-plan-openai": {
+    shape: "openai",
+    baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    auth: "bearer",
+    defaultModel: "qwen3.8-max",
+    models: ["qwen3.8-max", "qwen3.8-flash", "qwen3.6-flash"],
+  },
+  /** Alibaba DashScope Platform API — standard pay-as-you-go API key. */
+  alibaba: {
+    shape: "openai",
+    baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    auth: "bearer",
+    defaultModel: "qwen-max",
+    models: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen-flash"],
+  },
+  /** Alias for alibaba (DashScope platform API). */
+  "qwen-api": {
+    shape: "openai",
+    baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    auth: "bearer",
+    defaultModel: "qwen-max",
+    models: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen-flash"],
   },
 
   // ── Local runtimes ──────────────────────────────────────────────────────
