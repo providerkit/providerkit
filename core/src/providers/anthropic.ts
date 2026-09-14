@@ -1,6 +1,6 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
 import { streamError } from "../errors.ts";
-import { schemaPrompt } from "../schema.ts";
+import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
@@ -249,7 +249,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         request.tools = tools.map((tool) => ({
           name: tool.name,
           description: tool.description,
-          input_schema: tool.inputSchema,
+          input_schema: toAnthropicToolSchema(tool.inputSchema),
         }));
       }
       if (opts.toolChoice && opts.toolChoice !== "auto") {

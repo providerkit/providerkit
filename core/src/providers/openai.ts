@@ -83,9 +83,55 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    * not a lock.
    */
   providerOrder?: string[];
+  /**
+   * Automatically pin OpenRouter calls to the first-party model vendor's host
+   * when hitting openrouter.ai and providerOrder is not passed. Defaults to true.
+   */
+  pinHost?: boolean;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
+
+/**
+ * Known first-party host slugs on OpenRouter for route pinning.
+ * Pinning keeps consecutive turns on the vendor's own endpoint, preserving
+ * the server-side KV prompt cache across rounds.
+ */
+const OPENROUTER_HOSTS: Record<string, string> = {
+  anthropic: "anthropic",
+  "arcee-ai": "arcee-ai",
+  cohere: "cohere",
+  deepseek: "deepseek",
+  google: "google-ai-studio",
+  meta: "meta",
+  minimax: "minimax",
+  mistralai: "mistral",
+  moonshotai: "moonshotai",
+  morph: "morph",
+  openai: "openai",
+  perplexity: "perplexity",
+  qwen: "alibaba",
+  stepfun: "stepfun",
+  tencent: "tencent",
+  upstage: "upstage",
+  "x-ai": "xai",
+  "z-ai": "z-ai",
+  zai: "z-ai",
+};
+
+export function openRouterHostFor(baseUrl: string, model: string): string | undefined {
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname;
+  } catch {
+    return undefined;
+  }
+  if (!host.includes("openrouter.ai")) return undefined;
+  const slash = model.indexOf("/");
+  if (slash <= 0) return undefined;
+  const vendor = model.slice(0, slash).toLowerCase();
+  return OPENROUTER_HOSTS[vendor];
+}
 
 /** The spellings of "think this hard" across the dialects that share this
  *  adapter. `off` sends nothing and leaves the model on its own default. */
@@ -316,10 +362,11 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
       const effort = opts.effort ?? config.effort;
+      const model = opts.model ?? config.model;
 
       const body = toOpenAIMessages(messages);
       const request: Record<string, unknown> = {
-        model: opts.model ?? config.model,
+        model,
         messages: body,
         stream: true,
         // Without this the usage record never arrives and every call costs
@@ -398,8 +445,17 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           body.push({ role: "system", content: schemaPrompt(opts.json.schema) });
         }
       }
-      if (config.providerOrder?.length) {
-        request.provider = { order: config.providerOrder, allow_fallbacks: true };
+      const pinOrder = config.providerOrder?.length
+        ? config.providerOrder
+        : config.pinHost !== false
+          ? (() => {
+              const pinned = openRouterHostFor(baseUrl, model);
+              return pinned ? [pinned] : undefined;
+            })()
+          : undefined;
+
+      if (pinOrder?.length) {
+        request.provider = { order: pinOrder, allow_fallbacks: true };
       }
 
       const defaultPath = /\/v\d+[^/]*$/i.test(baseUrl.replace(/\/+$/, ""))

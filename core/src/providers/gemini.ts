@@ -6,7 +6,7 @@
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
 import { streamError } from "../errors.ts";
-import { schemaPrompt } from "../schema.ts";
+import { schemaPrompt, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
@@ -67,6 +67,19 @@ const THINKING_LEVEL: Record<Effort, string> = {
   medium: "MEDIUM",
   high: "HIGH",
   max: "HIGH",
+};
+
+/**
+ * Gemini 2.x thinking budget dial (tokens).
+ * Gemini 2.5 uses `thinkingBudget` (0 disables thinking), while Gemini 3+ uses
+ * `thinkingLevel` (MINIMAL, LOW, MEDIUM, HIGH).
+ */
+const GEMINI_2_THINKING_BUDGET: Record<Effort, number> = {
+  none: 0,
+  low: 1024,
+  medium: 4096,
+  high: 8192,
+  max: 16384,
 };
 
 /** A turn in Gemini's history. `model` is its word for the assistant. */
@@ -261,15 +274,27 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       const { system, contents } = toGeminiContents(messages);
 
+      // A model id copied out of Gemini's docs is often already `models/…`, and
+      // the doubled segment 404s as "model not found" — a confusing way to
+      // learn about a prefix.
+      const model = (opts.model ?? config.model).replace(/^models\//, "");
+      const isGemini3 = /gemini-3/i.test(model);
+
       const generationConfig: Record<string, unknown> = {};
       if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
       if (opts.temperature !== undefined) generationConfig.temperature = opts.temperature;
       if (opts.topP !== undefined) generationConfig.topP = opts.topP;
       if (opts.stopSequences?.length) generationConfig.stopSequences = opts.stopSequences;
-      // No effort means the model's own dynamic thinking. Sending MINIMAL here
+      // No effort means the model's own dynamic thinking. Sending MINIMAL / 0 here
       // would switch that off for a caller who never asked, which is the whole
       // reason the seam treats an absent effort as "never sent".
-      if (effort) generationConfig.thinkingConfig = { thinkingLevel: THINKING_LEVEL[effort] };
+      // Gemini 3 uses thinkingLevel (MINIMAL..HIGH), while Gemini 2.5 uses
+      // thinkingBudget (0 tokens disables thinking, positive numbers set budget).
+      if (effort) {
+        generationConfig.thinkingConfig = isGemini3
+          ? { thinkingLevel: THINKING_LEVEL[effort] }
+          : { thinkingBudget: GEMINI_2_THINKING_BUDGET[effort] };
+      }
       // A schema that shares its call with tools pins the decoder, and a pinned
       // decoder cannot emit a functionCall — the model narrates the call it
       // could not make and the turn ends, with nothing logged. See
@@ -281,7 +306,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         // `responseJsonSchema` takes JSON Schema as written; `responseSchema`
         // is Gemini's own trimmed dialect and rejects most of what a real
         // schema carries.
-        generationConfig.responseJsonSchema = opts.json.schema;
+        generationConfig.responseJsonSchema = toGeminiToolSchema(opts.json.schema);
       }
 
       const request: Record<string, unknown> = { contents, generationConfig };
@@ -302,7 +327,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
               description: tool.description,
               // Same rule as the response schema: `parameters` is the trimmed
               // dialect, `parametersJsonSchema` is the schema we actually wrote.
-              parametersJsonSchema: tool.inputSchema,
+              parametersJsonSchema: toGeminiToolSchema(tool.inputSchema),
             })),
           },
         ];
@@ -311,11 +336,6 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         const toolConfig = toToolConfig(opts.toolChoice);
         if (toolConfig) request.toolConfig = toolConfig;
       }
-
-      // A model id copied out of Gemini's docs is often already `models/…`, and
-      // the doubled segment 404s as "model not found" — a confusing way to
-      // learn about a prefix.
-      const model = (opts.model ?? config.model).replace(/^models\//, "");
 
       // Gemini reports the finish reason on a candidate that can arrive AFTER
       // the chunk carrying the function calls, so a turn's tool use has to be

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isCompleteJson, parseToolArgs } from "../src/tool-args.ts";
+import {
+  findLastValidJsonObject,
+  isCompleteJson,
+  normalizeToolId,
+  parseToolArgs,
+} from "../src/tool-args.ts";
 
 describe("parseToolArgs — the intact case", () => {
   it("parses ordinary arguments", () => {
@@ -90,5 +95,44 @@ describe("isCompleteJson", () => {
     expect(isCompleteJson('{"a":1}')).toBe(true);
     expect(isCompleteJson('{"a":')).toBe(false);
     expect(isCompleteJson("")).toBe(false);
+  });
+});
+
+describe("findLastValidJsonObject — concatenated JSON", () => {
+  it("recovers the valid payload when prepended with empty object or garbage", () => {
+    const raw = '{}{"query":"hello world","limit":10}';
+    expect(findLastValidJsonObject(raw)).toEqual({ query: "hello world", limit: 10 });
+    expect(parseToolArgs(raw)).toEqual({ query: "hello world", limit: 10 });
+  });
+
+  it("recovers from multiple concatenated objects", () => {
+    const raw = '{"skip":1}{"keep":"yes"}';
+    expect(findLastValidJsonObject(raw)).toEqual({ keep: "yes" });
+    expect(parseToolArgs(raw)).toEqual({ keep: "yes" });
+  });
+});
+
+describe("normalizeToolId", () => {
+  it("synthesizes a non-empty fallback id when given empty or whitespace id", () => {
+    const id1 = normalizeToolId("");
+    expect(id1).toMatch(/^call_pk_[a-z0-9]+/);
+
+    const id2 = normalizeToolId("   ");
+    expect(id2).toMatch(/^call_pk_[a-z0-9]+/);
+
+    const id3 = normalizeToolId(undefined);
+    expect(id3).toMatch(/^call_pk_[a-z0-9]+/);
+  });
+
+  it("preserves valid tool ids under 64 chars", () => {
+    expect(normalizeToolId("call_123456789")).toBe("call_123456789");
+    expect(normalizeToolId("toolu_01Abc")).toBe("toolu_01Abc");
+  });
+
+  it("clamps and hashes tool ids exceeding 64 chars for ChatGPT Responses compatibility", () => {
+    const longId = "call_" + "a".repeat(70);
+    const normalized = normalizeToolId(longId);
+    expect(normalized.length).toBeLessThanOrEqual(64);
+    expect(normalized).toContain("_");
   });
 });

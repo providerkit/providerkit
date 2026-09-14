@@ -86,8 +86,53 @@ function salvageStringFields(raw: string): Record<string, unknown> {
 }
 
 /**
+ * Attempt to recover the last valid JSON object from concatenated or prepended JSON
+ * (e.g. `{}{"query":"hello"}` or `{"a":1}{"b":2}`).
+ */
+export function findLastValidJsonObject(raw: string): Record<string, unknown> | null {
+  const trimmed = raw.trim();
+  if (!trimmed.includes("{")) return null;
+
+  let startIdx = trimmed.lastIndexOf("{");
+  while (startIdx >= 0) {
+    const candidate = trimmed.slice(startIdx);
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      // Keep searching earlier '{'
+    }
+    if (startIdx === 0) break;
+    startIdx = trimmed.lastIndexOf("{", startIdx - 1);
+  }
+  return null;
+}
+
+/**
+ * Normalizes tool call IDs:
+ * 1. Synthesizes a fallback if empty/whitespace.
+ * 2. Clamps oversized IDs (> 64 chars) to avoid ChatGPT Responses 400 errors.
+ */
+export function normalizeToolId(id: string | undefined | null, prefix = "call_pk_"): string {
+  const clean = id?.trim();
+  if (!clean) {
+    return `${prefix}${Math.random().toString(36).slice(2, 10)}`;
+  }
+  if (clean.length > 64) {
+    let hash = 0;
+    for (let i = 0; i < clean.length; i++) {
+      hash = (Math.imul(31, hash) + clean.charCodeAt(i)) | 0;
+    }
+    const hashHex = (hash >>> 0).toString(16).padStart(8, "0");
+    return `${clean.slice(0, 48)}_${hashHex}`;
+  }
+  return clean;
+}
+
+/**
  * Parse a tool call's raw argument string into an object, salvaging what a
- * truncated stream left behind and healing double-escaped text either way.
+ * truncated stream left behind, resolving concatenated JSON, and healing
+ * double-escaped text either way.
  *
  * Never throws: a tool call the model malformed is data the caller decides
  * about, not an exception in the transport.
@@ -98,6 +143,8 @@ export function parseToolArgs(raw: string): Record<string, unknown> {
   try {
     parsed = JSON.parse(raw);
   } catch {
+    const lastObj = findLastValidJsonObject(raw);
+    if (lastObj !== null) return healArgs(lastObj);
     return healArgs(salvageStringFields(raw));
   }
   // A non-object payload is a protocol violation, not a value to pass on.

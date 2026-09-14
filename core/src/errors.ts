@@ -567,6 +567,53 @@ export function parseRetryAfterMs(err: unknown, body?: string): number | undefin
   return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }
 
+export interface ContextOverflowInfo {
+  inputTokens?: number;
+  maxTokens?: number;
+  contextLimit: number;
+  excessTokens: number;
+}
+
+/**
+ * Extracts context overflow details from provider error messages.
+ *
+ * Covers:
+ * - Anthropic / Bedrock: `input length and \`max_tokens\` exceed context limit: 188059 + 20000 > 200000`
+ * - Standard / Gateway: `prompt is too long: 137500 tokens > 135000 maximum`
+ */
+export function parseContextOverflow(err: unknown, body?: string): ContextOverflowInfo | undefined {
+  const text = body ?? bodyTextOf(err) ?? messageOf(err);
+  if (!text) return undefined;
+
+  // Anthropic / Bedrock: "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
+  const m1 = /(?:input length and [`']?max_tokens[`']? exceed context limit|exceeds context limit):\s*(\d+)\s*\+\s*(\d+)\s*>\s*(\d+)/i.exec(text);
+  if (m1) {
+    const input = parseInt(m1[1]!, 10);
+    const max = parseInt(m1[2]!, 10);
+    const limit = parseInt(m1[3]!, 10);
+    return {
+      inputTokens: input,
+      maxTokens: max,
+      contextLimit: limit,
+      excessTokens: input + max - limit,
+    };
+  }
+
+  // "prompt is too long: 137500 tokens > 135000 maximum"
+  const m2 = /(?:prompt is too long|context length exceeded|maximum context length is \d+ tokens?)[^:]*:\s*(\d+)\s*(?:tokens)?\s*>\s*(\d+)/i.exec(text);
+  if (m2) {
+    const actual = parseInt(m2[1]!, 10);
+    const limit = parseInt(m2[2]!, 10);
+    return {
+      inputTokens: actual,
+      contextLimit: limit,
+      excessTokens: actual - limit,
+    };
+  }
+
+  return undefined;
+}
+
 /**
  * A failure the backend reports INSIDE an already-200 stream.
  *

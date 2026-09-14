@@ -13,6 +13,7 @@ import {
   isTransient,
   isTransportFailure,
   messageOf,
+  parseContextOverflow,
   parseRetryAfterMs,
   ProviderError,
   type ErrorKind,
@@ -531,5 +532,33 @@ describe("isRetryable", () => {
 
     const forcedNo = new ProviderError("p", "overload", "busy", { shouldRetry: false });
     expect(isRetryable(forcedNo)).toBe(false);
+  });
+});
+
+describe("parseContextOverflow", () => {
+  it("parses Anthropic input length + max_tokens context overflows", () => {
+    const err = new Error(
+      "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000",
+    );
+    const parsed = parseContextOverflow(err);
+    expect(parsed).toBeDefined();
+    expect(parsed?.inputTokens).toBe(188059);
+    expect(parsed?.maxTokens).toBe(20000);
+    expect(parsed?.contextLimit).toBe(200000);
+    expect(parsed?.excessTokens).toBe(8059);
+  });
+
+  it("parses generic prompt-too-long overflows", () => {
+    const err = new Error("prompt is too long: 137500 tokens > 135000 maximum");
+    const parsed = parseContextOverflow(err);
+    expect(parsed).toBeDefined();
+    expect(parsed?.inputTokens).toBe(137500);
+    expect(parsed?.contextLimit).toBe(135000);
+    expect(parsed?.excessTokens).toBe(2500);
+  });
+
+  it("returns undefined for non-overflow errors", () => {
+    expect(parseContextOverflow(new Error("Rate limit exceeded"))).toBeUndefined();
+    expect(parseContextOverflow(new Error("Invalid API key"))).toBeUndefined();
   });
 });

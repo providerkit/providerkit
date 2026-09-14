@@ -48,6 +48,7 @@
     "lint": "eslint src test",
     "format": "prettier --write .",
     "check:presets": "bun run scripts/refresh-presets.ts",
+    "probe:model": "bun run scripts/probe-model.ts",
     "sync:docs": "cp ../README.md ../LICENSE .",
     "prepublishOnly": "bun run lint && bun run typecheck && bun run test && bun run build && bun run sync:docs",
     "release": "bun publish --access public",

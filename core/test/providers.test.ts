@@ -378,6 +378,22 @@ describe("openai-shape adapter", () => {
     expect(plain.seen[0]!.body.provider).toBeUndefined();
   });
 
+  it("auto-pins OpenRouter calls to the first-party vendor host for prompt caching", async () => {
+    const autoPinned = recorder(OPENAI_TEXT_TURN);
+    await collect(
+      createOpenAIProvider({
+        apiKey: "k",
+        model: "z-ai/glm-5.3-flash",
+        baseUrl: "https://openrouter.ai/api/v1",
+        fetchImpl: autoPinned.fetchImpl,
+      }).createStream([{ role: "user", content: "hi" }], []),
+    );
+    expect(autoPinned.seen[0]!.body.provider).toEqual({
+      order: ["z-ai"],
+      allow_fallbacks: true,
+    });
+  });
+
   it("sends NO routing block without a pin — never an empty order array", async () => {
     // An empty `order` on the wire is not "no preference", it is a preference
     // for nothing, and nothing above the adapter can see the difference: one

@@ -133,3 +133,130 @@ export function isStrictSchema(node: unknown): boolean {
     ([key, value]) => required.has(key) && isStrictSchema(value),
   );
 }
+
+/**
+ * Sanitize a JSON Schema for Google Gemini's REST API.
+ *
+ * Gemini's functionDeclarations schema parser only accepts a strict OpenAPI 3.0 subset.
+ * It rejects:
+ * - Nullable type arrays (`type: ["string", "null"]`), requiring `{ type: "string", nullable: true }`.
+ * - Union types with null (`anyOf: [{ type: "string" }, { type: "null" }]`), requiring `{ type: "string", nullable: true }`.
+ * - Numeric enums (`enum: [1, 2, 3]`), requiring string enums.
+ * - `const: "val"`, requiring `enum: ["val"]`.
+ * - Arrays without `items`, requiring an explicit items schema.
+ * - Unsupported keywords ($schema, definitions, $defs, patternProperties, additionalProperties: true).
+ */
+export function toGeminiToolSchema(node: unknown): Record<string, unknown> {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return { type: "object", properties: {} };
+  }
+  const schema = { ...(node as Record<string, unknown>) };
+
+  delete schema.$schema;
+  delete schema.$id;
+  delete schema.$ref;
+  delete schema.definitions;
+  delete schema.$defs;
+  delete schema.patternProperties;
+
+  if (schema.additionalProperties === true) {
+    delete schema.additionalProperties;
+  }
+
+  if ("const" in schema && !("enum" in schema)) {
+    schema.enum = [String(schema.const)];
+    delete schema.const;
+  }
+
+  const union = schema.anyOf ?? schema.oneOf;
+  if (Array.isArray(union)) {
+    const nonNullBranches = union.filter(
+      (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>).type !== "null",
+    );
+    const hasNull = union.some(
+      (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>).type === "null",
+    );
+    if (nonNullBranches.length === 1 && typeof nonNullBranches[0] === "object") {
+      const merged = toGeminiToolSchema(nonNullBranches[0]);
+      if (hasNull) merged.nullable = true;
+      return merged;
+    }
+  }
+
+  if (Array.isArray(schema.type)) {
+    const types = schema.type as string[];
+    const hasNull = types.includes("null");
+    const nonNull = types.filter((t) => t !== "null");
+    schema.type = nonNull[0] ?? "string";
+    if (hasNull) schema.nullable = true;
+  }
+
+  if (Array.isArray(schema.enum)) {
+    schema.enum = schema.enum.map((val) => String(val));
+  }
+
+  if (schema.type === "array" && !schema.items) {
+    schema.items = { type: "string" };
+  } else if (schema.items && typeof schema.items === "object") {
+    schema.items = toGeminiToolSchema(schema.items);
+  }
+
+  if (schema.properties && typeof schema.properties === "object") {
+    const props = schema.properties as Record<string, unknown>;
+    const sanitizedProps: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(props)) {
+      sanitizedProps[key] = toGeminiToolSchema(val);
+    }
+    schema.properties = sanitizedProps;
+  }
+
+  return schema;
+}
+
+/**
+ * Sanitize a tool's JSON Schema for Anthropic's Messages API.
+ *
+ * Anthropic rejects schemas where the root is an `anyOf` / `oneOf` / `allOf` union,
+ * requiring a root object schema (`{ type: "object", properties: ... }`).
+ */
+export function toAnthropicToolSchema(node: unknown): Record<string, unknown> {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return { type: "object", properties: {} };
+  }
+  const schema = { ...(node as Record<string, unknown>) };
+
+  delete schema.$schema;
+  delete schema.$id;
+
+  const union = schema.anyOf ?? schema.oneOf;
+  if (Array.isArray(union)) {
+    const mergedProperties: Record<string, unknown> = {};
+    const mergedRequired = new Set<string>();
+    for (const branch of union) {
+      if (typeof branch === "object" && branch !== null) {
+        const b = branch as Record<string, unknown>;
+        if (b.properties && typeof b.properties === "object") {
+          Object.assign(mergedProperties, b.properties);
+        }
+        if (Array.isArray(b.required)) {
+          for (const req of b.required) {
+            if (typeof req === "string") mergedRequired.add(req);
+          }
+        }
+      }
+    }
+    delete schema.anyOf;
+    delete schema.oneOf;
+    schema.type = "object";
+    schema.properties = mergedProperties;
+    if (mergedRequired.size > 0 && !schema.required) {
+      schema.required = Array.from(mergedRequired);
+    }
+  }
+
+  if (!schema.type) {
+    schema.type = "object";
+  }
+
+  return schema;
+}

@@ -246,12 +246,13 @@ const VENDORS: Vendor[] = [
   {
     name: "gemini",
     create: (fetchImpl) =>
-      createGeminiProvider({ apiKey: "k", model: "gemini-2.5-pro", fetchImpl }),
+      createGeminiProvider({ apiKey: "k", model: "gemini-3.5-pro", fetchImpl }),
     turn: GEMINI_TURN,
     throttled: GEMINI_THROTTLED,
     throttleSays: "RESOURCE_EXHAUSTED",
     refusesThinking: (body) =>
-      at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL",
+      at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL" ||
+      at(body, "generationConfig", "thinkingConfig", "thinkingBudget") === 0,
     silenceAlsoRefuses: false,
   },
   {
