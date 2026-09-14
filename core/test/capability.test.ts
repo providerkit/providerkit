@@ -163,7 +163,9 @@ describe("resolveModelCapabilities", () => {
   });
 
   it("returns undefined without throwing for unknown models or failures", async () => {
-    const unknown = await resolveModelCapabilities("completely-unknown-model", { catalog: mockCatalog });
+    const unknown = await resolveModelCapabilities("completely-unknown-model", {
+      catalog: mockCatalog,
+    });
     expect(unknown).toBeUndefined();
 
     const failingFetch: typeof fetch = async () => new Response("down", { status: 500 });

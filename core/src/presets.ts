@@ -111,7 +111,12 @@ export const PROVIDER_PRESETS = {
     baseUrl: "https://openrouter.ai/api",
     auth: "key",
     defaultModel: "deepseek/deepseek-v4.1-flash",
-    models: ["deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash", "x-ai/grok-4.6", "openai/gpt-5.6-luna-pro"],
+    models: [
+      "deepseek/deepseek-v4.1-flash",
+      "z-ai/glm-5.3-flash",
+      "x-ai/grok-4.6",
+      "openai/gpt-5.6-luna-pro",
+    ],
   },
   groq: {
     shape: "openai",
@@ -146,7 +151,10 @@ export const PROVIDER_PRESETS = {
     baseUrl: "https://api.fireworks.ai/inference/v1",
     auth: "key",
     defaultModel: "accounts/fireworks/models/deepseek-v4p1-flash",
-    models: ["accounts/fireworks/models/deepseek-v4p1-flash", "accounts/fireworks/models/glm-5p3-flash"],
+    models: [
+      "accounts/fireworks/models/deepseek-v4p1-flash",
+      "accounts/fireworks/models/glm-5p3-flash",
+    ],
   },
   cerebras: {
     shape: "openai",

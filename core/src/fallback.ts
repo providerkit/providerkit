@@ -6,16 +6,17 @@ import { createPresetProvider, type PresetProviderConfig } from "./providers/fac
 
 /** Retry intervals when the server supplies no deadline, not estimates of when
  *  it will recover. A server deadline always wins over these defaults. */
-export const DEFAULT_FALLBACK_COOLDOWNS: Readonly<Partial<Record<ErrorKind, number>>> = Object.freeze({
-  rate: 60_000,
-  quota: 3_600_000,
-  timeout: 30_000,
-  network: 30_000,
-  overload: 30_000,
-  auth: 3_600_000,
-  entitlement: 3_600_000,
-  model: 3_600_000,
-});
+export const DEFAULT_FALLBACK_COOLDOWNS: Readonly<Partial<Record<ErrorKind, number>>> =
+  Object.freeze({
+    rate: 60_000,
+    quota: 3_600_000,
+    timeout: 30_000,
+    network: 30_000,
+    overload: 30_000,
+    auth: 3_600_000,
+    entitlement: 3_600_000,
+    model: 3_600_000,
+  });
 
 export interface FallbackOptions<T> {
   /** Per-kind intervals in ms; null stops fallback for that kind. Adding a kind
@@ -89,10 +90,15 @@ export class NoAvailableProviderError extends ProviderError {
   readonly retryAtMs: number;
 
   constructor(retryAtMs: number, now: number) {
-    super("fallback", "rate", "All configured providers are unavailable. Retry after the cooldown.", {
-      resetAtMs: retryAtMs,
-      retryAfterMs: Math.max(0, retryAtMs - now),
-    });
+    super(
+      "fallback",
+      "rate",
+      "All configured providers are unavailable. Retry after the cooldown.",
+      {
+        resetAtMs: retryAtMs,
+        retryAfterMs: Math.max(0, retryAtMs - now),
+      },
+    );
     this.name = "NoAvailableProviderError";
     this.retryAtMs = retryAtMs;
   }
@@ -107,14 +113,20 @@ export class FallbackPool<T> {
   private readonly cooldowns = new Map<T, Cooldown>();
   private readonly now: () => number;
 
-  constructor(candidates: readonly T[], private readonly options: FallbackOptions<T> = {}) {
-    if (candidates.length === 0) throw new Error("providerkit: supply a primary before its backups");
+  constructor(
+    candidates: readonly T[],
+    private readonly options: FallbackOptions<T> = {},
+  ) {
+    if (candidates.length === 0)
+      throw new Error("providerkit: supply a primary before its backups");
     if (new Set(candidates).size !== candidates.length) {
       throw new Error("providerkit: each fallback candidate must appear only once");
     }
     for (const value of Object.values(options.cooldownMs ?? {})) {
       if (value !== null && value !== undefined && (!Number.isFinite(value) || value < 0)) {
-        throw new Error("providerkit: fallback cooldowns must be finite, non-negative milliseconds");
+        throw new Error(
+          "providerkit: fallback cooldowns must be finite, non-negative milliseconds",
+        );
       }
     }
     this.candidates = [...candidates];
@@ -128,7 +140,13 @@ export class FallbackPool<T> {
     else this.cooldowns.delete(selection[0]);
   }
 
-  status(): Array<{ candidate: T; retryAtMs: number; probing: boolean; kind?: ErrorKind; window?: RateLimitWindow }> {
+  status(): Array<{
+    candidate: T;
+    retryAtMs: number;
+    probing: boolean;
+    kind?: ErrorKind;
+    window?: RateLimitWindow;
+  }> {
     return this.candidates.map((candidate) => ({
       candidate,
       retryAtMs: 0,
@@ -138,10 +156,14 @@ export class FallbackPool<T> {
   }
 
   /** Buffered calls only: do not wrap an agent turn that has run side effects. */
-  async with<R>(attempt: (candidate: T, signal: AbortSignal) => Promise<R>, signal?: AbortSignal): Promise<R> {
+  async with<R>(
+    attempt: (candidate: T, signal: AbortSignal) => Promise<R>,
+    signal?: AbortSignal,
+  ): Promise<R> {
     for await (const result of this.stream(async function* (candidate, inner) {
       yield await attempt(candidate, inner);
-    }, signal)) return result;
+    }, signal))
+      return result;
     throw new Error("providerkit: fallback attempt ended without a result");
   }
 
@@ -218,7 +240,9 @@ export class FallbackPool<T> {
     if (hasFailed) throw lastError;
     // If all expired candidates are already being probed, the next opportunity
     // is now. Other callers need not wait for those probes or start duplicates.
-    const retryAtMs = Math.min(...this.status().map((entry) => Math.max(this.now(), entry.retryAtMs)));
+    const retryAtMs = Math.min(
+      ...this.status().map((entry) => Math.max(this.now(), entry.retryAtMs)),
+    );
     throw new NoAvailableProviderError(retryAtMs, this.now());
   }
 }
@@ -245,7 +269,11 @@ export function withFallbackProviders(
       return fallbacks.stream(async function* (provider, signal): AsyncGenerator<ProviderChunk> {
         const { model: override, ...rest } = opts;
         const model = provider === primary ? (override ?? provider.model) : provider.model;
-        for await (const chunk of provider.createStream(messages, tools, { ...rest, model, signal })) {
+        for await (const chunk of provider.createStream(messages, tools, {
+          ...rest,
+          model,
+          signal,
+        })) {
           yield { ...chunk, source: chunk.source ?? { provider: provider.id, model } };
         }
       }, opts.signal);

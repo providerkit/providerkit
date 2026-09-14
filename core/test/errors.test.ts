@@ -159,7 +159,10 @@ describe("classifyHttp — the response-shaped entry point", () => {
 
   it("reads OpenAI's try-your-request-again overload wording", () => {
     expect(
-      classifyHttp(200, "The server had an error while processing your request. Please try your request again."),
+      classifyHttp(
+        200,
+        "The server had an error while processing your request. Please try your request again.",
+      ),
     ).toBe("overload");
   });
 
@@ -171,7 +174,9 @@ describe("classifyHttp — the response-shaped entry point", () => {
   });
 
   it("reads AWS Bedrock ThrottlingException and bare throttling", () => {
-    expect(classifyHttp(400, '{"__type":"ThrottlingException","message":"Rate exceeded"}')).toBe("rate");
+    expect(classifyHttp(400, '{"__type":"ThrottlingException","message":"Rate exceeded"}')).toBe(
+      "rate",
+    );
     expect(classifyHttp(200, "Request throttled by upstream gateway")).toBe("rate");
   });
 
@@ -185,7 +190,9 @@ describe("classifyHttp — the response-shaped entry point", () => {
   });
 
   it("reads the billing_error type field and arrears as quota", () => {
-    expect(classifyHttp(400, '{"error":{"type":"billing_error","message":"Payment required"}}')).toBe("quota");
+    expect(
+      classifyHttp(400, '{"error":{"type":"billing_error","message":"Payment required"}}'),
+    ).toBe("quota");
     expect(classifyHttp(400, "Account in arrears: please settle your balance")).toBe("quota");
   });
 
@@ -241,16 +248,15 @@ describe("classifyHttp — the response-shaped entry point", () => {
         "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000",
       ),
     ).toBe("context");
-    expect(classifyHttp(400, "Request exceeded context limit: please reduce input length")).toBe("context");
+    expect(classifyHttp(400, "Request exceeded context limit: please reduce input length")).toBe(
+      "context",
+    );
   });
 
   it("reads Anthropic OAuth revocation and org restrictions", () => {
     expect(classifyHttp(403, "OAuth token has been revoked")).toBe("auth");
     expect(
-      classifyHttp(
-        403,
-        "OAuth authentication is currently not allowed for this organization",
-      ),
+      classifyHttp(403, "OAuth authentication is currently not allowed for this organization"),
     ).toBe("entitlement");
   });
 

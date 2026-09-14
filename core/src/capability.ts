@@ -295,4 +295,3 @@ function extractCapabilities(
     supportsReasoning: bestMatch.reasoning === true,
   };
 }
-

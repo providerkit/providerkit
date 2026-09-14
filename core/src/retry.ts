@@ -79,9 +79,10 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 function delayFor(err: unknown, attempt: number, opts: RetryOptions): number | null {
   const asked = parseRetryAfterMs(err);
   const cap = opts.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
-  const resetWait = err instanceof ProviderError && err.resetAtMs !== undefined
-    ? Math.max(0, err.resetAtMs - Date.now())
-    : undefined;
+  const resetWait =
+    err instanceof ProviderError && err.resetAtMs !== undefined
+      ? Math.max(0, err.resetAtMs - Date.now())
+      : undefined;
   if (asked !== undefined || resetWait !== undefined) {
     const wait = Math.max(asked ?? 0, resetWait ?? 0);
     return wait > cap ? null : wait;

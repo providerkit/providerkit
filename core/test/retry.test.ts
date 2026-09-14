@@ -110,13 +110,15 @@ describe("withRetry", () => {
   it("hands a long Retry-After to fallback instead of retrying before the deadline", async () => {
     const nap = fakeSleep();
     let calls = 0;
-    await expect(withRetry(
-      async () => {
-        if (++calls < 2) throw apiError(429, { retryDelay: "9000s" });
-        return "ok";
-      },
-      { maxDelayMs: 30_000, sleep: nap.fn },
-    )).rejects.toThrow();
+    await expect(
+      withRetry(
+        async () => {
+          if (++calls < 2) throw apiError(429, { retryDelay: "9000s" });
+          return "ok";
+        },
+        { maxDelayMs: 30_000, sleep: nap.fn },
+      ),
+    ).rejects.toThrow();
     expect(calls).toBe(1);
     expect(nap.delays).toEqual([]);
   });

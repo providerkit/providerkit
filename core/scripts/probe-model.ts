@@ -203,7 +203,9 @@ async function runDiagnostics() {
       `OK (${basic.totalMs}ms total, TTFT ${basic.ttftMs}ms) → "${basic.text.trim()}" [finish=${basic.finishReason}]`,
     );
     if (basic.reasoning) {
-      console.log(`      ↳ reasoning tokens generated despite effort="none" (model enforces thinking)`);
+      console.log(
+        `      ↳ reasoning tokens generated despite effort="none" (model enforces thinking)`,
+      );
     }
   }
 
@@ -298,8 +300,12 @@ async function runDiagnostics() {
   const promptSuccess = toolWithJsonPrompt.toolCalls.length > 0;
   const responseSuccess = toolWithJsonResponse.toolCalls.length > 0;
 
-  console.log(`\n      - with prompt injection:   ${promptSuccess ? "✓ called tool" : "✗ narrated in prose"}`);
-  console.log(`      - with response_format:    ${responseSuccess ? "✓ called tool" : "✗ narrated in prose"}`);
+  console.log(
+    `\n      - with prompt injection:   ${promptSuccess ? "✓ called tool" : "✗ narrated in prose"}`,
+  );
+  console.log(
+    `      - with response_format:    ${responseSuccess ? "✓ called tool" : "✗ narrated in prose"}`,
+  );
 
   if (promptSuccess && !responseSuccess) {
     console.log(`      ↳ Recommendation for ${model}: jsonWithTools="prompt"`);
@@ -308,7 +314,9 @@ async function runDiagnostics() {
   } else if (promptSuccess && responseSuccess) {
     console.log(`      ↳ Model supports BOTH shapes cleanly.`);
   } else {
-    console.log(`      ↳ Warning: Model fails to call tools when schema is present in either shape.`);
+    console.log(
+      `      ↳ Warning: Model fails to call tools when schema is present in either shape.`,
+    );
   }
 
   console.log("\nProbe complete.\n");

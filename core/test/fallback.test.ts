@@ -26,7 +26,9 @@ describe("fallback cooldowns", () => {
     const call = vi.fn(async (id: string) => {
       if (id === "plan" && now < NOW + 3 * DAY) {
         throw new ProviderError(id, "quota", "weekly limit", {
-          retryAfterMs: 60_000, resetAtMs: NOW + 3 * DAY, window: "weekly",
+          retryAfterMs: 60_000,
+          resetAtMs: NOW + 3 * DAY,
+          window: "weekly",
         });
       }
       return id;
@@ -43,36 +45,59 @@ describe("fallback cooldowns", () => {
 
   it("walks three endpoints, skips all cooled candidates and reports the earliest retry", async () => {
     const pool = new FallbackPool(["a", "b", "c"], { now: () => NOW });
-    const call = vi.fn(async (id: string) => { throw failure("rate", id === "b" ? 10_000 : DAY); });
+    const call = vi.fn(async (id: string) => {
+      throw failure("rate", id === "b" ? 10_000 : DAY);
+    });
     await expect(pool.with(call)).rejects.toBeInstanceOf(ProviderError);
     await expect(pool.with(call)).rejects.toMatchObject({ retryAtMs: NOW + 10_000 });
     expect(call).toHaveBeenCalledTimes(3);
   });
 
   it.each([
-    ["rate", 60_000], ["quota", 3_600_000], ["overload", 30_000],
-    ["network", 30_000], ["timeout", 30_000], ["auth", 3_600_000],
-    ["entitlement", 3_600_000], ["model", 3_600_000],
+    ["rate", 60_000],
+    ["quota", 3_600_000],
+    ["overload", 30_000],
+    ["network", 30_000],
+    ["timeout", 30_000],
+    ["auth", 3_600_000],
+    ["entitlement", 3_600_000],
+    ["model", 3_600_000],
   ] as const)("cools %s for %i ms when the endpoint gives no deadline", async (kind, wait) => {
     const pool = new FallbackPool(["a", "b"], { now: () => NOW });
-    await pool.with(async (id) => { if (id === "a") throw failure(kind); return id; });
+    await pool.with(async (id) => {
+      if (id === "a") throw failure(kind);
+      return id;
+    });
     expect(pool.status()[0]?.retryAtMs).toBe(NOW + wait);
   });
 
-  it.each(["invalid", "context", "content", "unknown", "aborted"] as const)("does not switch on %s", async (kind) => {
-    const pool = new FallbackPool(["a", "b"]);
-    const call = vi.fn(async () => { throw failure(kind); });
-    await expect(pool.with(call)).rejects.toMatchObject({ kind });
-    expect(call).toHaveBeenCalledTimes(1);
-    expect(pool.status().every((entry) => entry.retryAtMs === 0)).toBe(true);
-  });
+  it.each(["invalid", "context", "content", "unknown", "aborted"] as const)(
+    "does not switch on %s",
+    async (kind) => {
+      const pool = new FallbackPool(["a", "b"]);
+      const call = vi.fn(async () => {
+        throw failure(kind);
+      });
+      await expect(pool.with(call)).rejects.toMatchObject({ kind });
+      expect(call).toHaveBeenCalledTimes(1);
+      expect(pool.status().every((entry) => entry.retryAtMs === 0)).toBe(true);
+    },
+  );
 
   it("allows shorter defaults and disabling fallback, but never shortens a server deadline", async () => {
-    const pool = new FallbackPool(["a", "b"], { now: () => NOW, cooldownMs: { rate: 5, auth: null } });
-    await pool.with(async (id) => { if (id === "a") throw failure("rate", DAY); return id; });
+    const pool = new FallbackPool(["a", "b"], {
+      now: () => NOW,
+      cooldownMs: { rate: 5, auth: null },
+    });
+    await pool.with(async (id) => {
+      if (id === "a") throw failure("rate", DAY);
+      return id;
+    });
     expect(pool.status()[0]?.retryAtMs).toBe(NOW + DAY);
     pool.reset("a");
-    const call = vi.fn(async () => { throw failure("auth"); });
+    const call = vi.fn(async () => {
+      throw failure("auth");
+    });
     await expect(pool.with(call)).rejects.toMatchObject({ kind: "auth" });
     expect(call).toHaveBeenCalledTimes(1);
   });
@@ -80,10 +105,13 @@ describe("fallback cooldowns", () => {
   it("lets only one request probe a recovered primary while other requests use the backup", async () => {
     let now = NOW;
     const pool = new FallbackPool(["a", "b"], { now: () => now });
-    await pool.with(async (id) => { if (id === "a") throw failure("rate", 100); return id; });
+    await pool.with(async (id) => {
+      if (id === "a") throw failure("rate", 100);
+      return id;
+    });
     now += 100;
     const recovery = Promise.withResolvers<string>();
-    const call = vi.fn((id: string) => id === "a" ? recovery.promise : Promise.resolve(id));
+    const call = vi.fn((id: string) => (id === "a" ? recovery.promise : Promise.resolve(id)));
     const probing = pool.with(call);
     expect(await pool.with(call)).toBe("b");
     expect(call.mock.calls.map(([id]) => id)).toEqual(["a", "b"]);
@@ -96,7 +124,10 @@ describe("fallback cooldowns", () => {
     const pool = new FallbackPool(["a", "b"], { now: () => NOW });
     const old = Promise.withResolvers<string>();
     const pending = pool.with(() => old.promise);
-    await pool.with(async (id) => { if (id === "a") throw failure("quota", DAY); return id; });
+    await pool.with(async (id) => {
+      if (id === "a") throw failure("quota", DAY);
+      return id;
+    });
     old.resolve("a");
     await pending;
     expect(await pool.with(async (id) => id)).toBe("b");
@@ -105,12 +136,15 @@ describe("fallback cooldowns", () => {
   it("cools a mid-stream failure for future calls without replaying this answer", async () => {
     const pool = new FallbackPool(["a", "b"], { now: () => NOW });
     const seen: string[] = [];
-    await expect((async () => {
-      for await (const value of pool.stream(async function* (id) {
-        yield `${id}:partial`;
-        throw failure("rate", DAY);
-      })) seen.push(value);
-    })()).rejects.toMatchObject({ kind: "rate" });
+    await expect(
+      (async () => {
+        for await (const value of pool.stream(async function* (id) {
+          yield `${id}:partial`;
+          throw failure("rate", DAY);
+        }))
+          seen.push(value);
+      })(),
+    ).rejects.toMatchObject({ kind: "rate" });
     expect(seen).toEqual(["a:partial"]);
     expect(await pool.with(async (id) => id)).toBe("b");
   });
@@ -119,7 +153,10 @@ describe("fallback cooldowns", () => {
     const pool = new FallbackPool(["a", "b"]);
     const controller = new AbortController();
     const reason = failure("rate");
-    const call = vi.fn(async () => { controller.abort(reason); throw reason; });
+    const call = vi.fn(async () => {
+      controller.abort(reason);
+      throw reason;
+    });
     await expect(pool.with(call, controller.signal)).rejects.toBe(reason);
     expect(call).toHaveBeenCalledTimes(1);
     expect(pool.status().every((entry) => entry.retryAtMs === 0)).toBe(true);
@@ -134,7 +171,8 @@ describe("fallback cooldowns", () => {
       if (id === "a") throw failure("overload");
       yield id;
       yield id;
-    })) break;
+    }))
+      break;
     expect(signals).toHaveLength(2);
     expect(signals.every((signal) => signal.aborted)).toBe(true);
   });
@@ -150,18 +188,29 @@ describe("provider composition", () => {
   it("forwards cancellation, keeps each endpoint's model and reports the actual source", async () => {
     const seen: string[] = [];
     let signal: AbortSignal | undefined;
-    const primary: Provider = { id: "zai", model: "glm", async *createStream(_messages, _tools, opts) {
-      seen.push(opts?.model ?? "");
-      yield* [];
-      throw failure("quota", DAY);
-    } };
-    const backup: Provider = { id: "openrouter", model: "z-ai/glm", async *createStream(_messages, _tools, opts) {
-      signal = opts?.signal;
-      seen.push(opts?.model ?? "");
-      yield { type: "delta", content: "answer" };
-    } };
+    const primary: Provider = {
+      id: "zai",
+      model: "glm",
+      async *createStream(_messages, _tools, opts) {
+        seen.push(opts?.model ?? "");
+        yield* [];
+        throw failure("quota", DAY);
+      },
+    };
+    const backup: Provider = {
+      id: "openrouter",
+      model: "z-ai/glm",
+      async *createStream(_messages, _tools, opts) {
+        signal = opts?.signal;
+        seen.push(opts?.model ?? "");
+        yield { type: "delta", content: "answer" };
+      },
+    };
     const provider = withFallbackProviders([primary, backup]);
-    const result = await drainStream(provider.createStream([], [], { model: "primary-override" }), provider.model);
+    const result = await drainStream(
+      provider.createStream([], [], { model: "primary-override" }),
+      provider.model,
+    );
     expect(result).toMatchObject({ text: "answer", model: "z-ai/glm", provider: "openrouter" });
     expect(seen).toEqual(["primary-override", "z-ai/glm"]);
     expect(signal?.aborted).toBe(true);
@@ -239,15 +288,21 @@ describe("provider composition", () => {
 describe("reset hints survive the wire", () => {
   it("keeps the weekly reset beside a short Retry-After", async () => {
     const resetAtMs = Date.now() + 3 * DAY;
-    const fetchImpl: typeof fetch = async () => new Response("weekly usage limit reached", {
-      status: 429,
-      headers: {
-        "retry-after": "60",
-        "anthropic-ratelimit-unified-7d-utilization": "100",
-        "anthropic-ratelimit-unified-7d-reset": String(Math.ceil(resetAtMs / 1000)),
-      },
-    });
-    const err = await postJson({ url: "https://example.com", provider: "plan", body: {}, fetchImpl }).catch((error: unknown) => error);
+    const fetchImpl: typeof fetch = async () =>
+      new Response("weekly usage limit reached", {
+        status: 429,
+        headers: {
+          "retry-after": "60",
+          "anthropic-ratelimit-unified-7d-utilization": "100",
+          "anthropic-ratelimit-unified-7d-reset": String(Math.ceil(resetAtMs / 1000)),
+        },
+      });
+    const err = await postJson({
+      url: "https://example.com",
+      provider: "plan",
+      body: {},
+      fetchImpl,
+    }).catch((error: unknown) => error);
     expect(err).toMatchObject({ kind: "quota", retryAfterMs: 60_000, window: "weekly" });
     expect(err).toBeInstanceOf(ProviderError);
     if (!(err instanceof ProviderError)) throw new Error("missing provider error");
@@ -256,7 +311,10 @@ describe("reset hints survive the wire", () => {
   });
 
   it("keeps a body-only usage reset inside a 200 stream", () => {
-    const err = streamError("chatgpt", { type: "usage_limit_reached", resets_in_seconds: 3 * DAY / 1000 });
+    const err = streamError("chatgpt", {
+      type: "usage_limit_reached",
+      resets_in_seconds: (3 * DAY) / 1000,
+    });
     expect(err.retryAfterMs).toBe(3 * DAY);
     expect(err.window).toBe("weekly");
     expect(err.resetAtMs).toBeGreaterThanOrEqual(Date.now() + 3 * DAY - 100);

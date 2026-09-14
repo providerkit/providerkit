@@ -586,7 +586,10 @@ export function parseContextOverflow(err: unknown, body?: string): ContextOverfl
   if (!text) return undefined;
 
   // Anthropic / Bedrock: "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
-  const m1 = /(?:input length and [`']?max_tokens[`']? exceed context limit|exceeds context limit):\s*(\d+)\s*\+\s*(\d+)\s*>\s*(\d+)/i.exec(text);
+  const m1 =
+    /(?:input length and [`']?max_tokens[`']? exceed context limit|exceeds context limit):\s*(\d+)\s*\+\s*(\d+)\s*>\s*(\d+)/i.exec(
+      text,
+    );
   if (m1) {
     const input = parseInt(m1[1]!, 10);
     const max = parseInt(m1[2]!, 10);
@@ -600,7 +603,10 @@ export function parseContextOverflow(err: unknown, body?: string): ContextOverfl
   }
 
   // "prompt is too long: 137500 tokens > 135000 maximum"
-  const m2 = /(?:prompt is too long|context length exceeded|maximum context length is \d+ tokens?)[^:]*:\s*(\d+)\s*(?:tokens)?\s*>\s*(\d+)/i.exec(text);
+  const m2 =
+    /(?:prompt is too long|context length exceeded|maximum context length is \d+ tokens?)[^:]*:\s*(\d+)\s*(?:tokens)?\s*>\s*(\d+)/i.exec(
+      text,
+    );
   if (m2) {
     const actual = parseInt(m2[1]!, 10);
     const limit = parseInt(m2[2]!, 10);
