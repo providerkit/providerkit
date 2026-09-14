@@ -34,7 +34,7 @@ describe("provider presets — every row joins to one request, correctly", () =>
       // The URL starts at the preset's root and carries NO doubled version —
       // the /api/v1/v1 class of bug, caught per row.
       expect(sentUrl.startsWith(preset.baseUrl)).toBe(true);
-      expect(sentUrl.includes("//v") && sentUrl.includes("/v1/v1")).toBe(false);
+      expect(sentUrl.includes("//v") || sentUrl.includes("/v1/v1")).toBe(false);
 
       // Auth lands in the header the endpoint actually reads — and the
       // natives differ: Anthropic reads x-api-key, Gemini x-goog-api-key,
@@ -81,7 +81,7 @@ describe("provider presets — every row joins to one request, correctly", () =>
   });
 
   it("refuses a modelless preset asked to send nothing", () => {
-    expect(() => createPresetProvider("fireworks", { apiKey: "k" })).toThrow(/defaultModel/);
+    expect(() => createPresetProvider("ollama", { apiKey: "k" })).toThrow(/defaultModel/);
   });
 
   it("applies zai's thinking dialect through the factory", async () => {

@@ -18,6 +18,27 @@ describe("parseRateLimitReset", () => {
     expect(result).toEqual({ retryAfterMs: 30_000, resetAtMs: NOW + 30_000 });
   });
 
+  it("reads retry-after with Go-style duration suffixes like 60s", () => {
+    const result = parseRateLimitReset(new Headers({ "retry-after": "60s" }), NOW);
+    expect(result).toEqual({ retryAfterMs: 60_000, resetAtMs: NOW + 60_000 });
+  });
+
+  it("reads Go-style duration in x-ratelimit-reset-requests", () => {
+    // OpenAI sends durations like "2m59.56s" or "7.66s"
+    const headers = new Headers({ "x-ratelimit-reset-requests": "2m30s" });
+    expect(parseRateLimitReset(headers, NOW)).toEqual({ resetAtMs: NOW + 150_000 });
+  });
+
+  it("reads Anthropic's retry-after-ms spelling", () => {
+    const result = parseRateLimitReset(new Headers({ "retry-after-ms": "1500" }), NOW);
+    expect(result).toEqual({ retryAfterMs: 1_500, resetAtMs: NOW + 1_500 });
+  });
+
+  it("prefers retry-after-ms when both spellings ride the response", () => {
+    const headers = new Headers({ "retry-after": "30", "retry-after-ms": "1500" });
+    expect(parseRateLimitReset(headers, NOW).retryAfterMs).toBe(1_500);
+  });
+
   it("reads retry-after as an absolute HTTP-date", () => {
     const headers = new Headers({ "retry-after": new Date(NOW + 45_000).toUTCString() });
     expect(parseRateLimitReset(headers, NOW)).toEqual({
@@ -254,6 +275,23 @@ describe("parseUsageLimitBody", () => {
   it("names the monthly window past a week", () => {
     const text = body({ resets_in_seconds: (30 * DAY) / 1000 });
     expect(parseUsageLimitBody(text, NOW).window).toBe("monthly");
+  });
+
+  it("extracts in-message retry delays from prose countdowns", () => {
+    // When proxies or gateways strip Retry-After headers and report the delay in message text
+    expect(parseUsageLimitBody("Rate limit reached. Try again in 20s.", NOW)).toEqual({
+      retryAfterMs: 20_000,
+      resetAtMs: NOW + 20_000,
+    });
+    expect(parseUsageLimitBody("Rate limit exceeded. Please retry after 1.5s", NOW)).toEqual({
+      retryAfterMs: 1_500,
+      resetAtMs: NOW + 1_500,
+    });
+    expect(parseUsageLimitBody("Quota exhausted. Resets in 15m", NOW)).toEqual({
+      retryAfterMs: 900_000,
+      resetAtMs: NOW + 900_000,
+      window: "5h",
+    });
   });
 
   it("yields an empty result for malformed JSON", () => {

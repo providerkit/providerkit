@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/core",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "The layer under your agent loop: one seam for every LLM provider, plus the failure handling you only learn in production.",
   "type": "module",
   "license": "MIT",
@@ -47,6 +47,7 @@
     "test:watch": "vitest",
     "lint": "eslint src test",
     "format": "prettier --write .",
+    "check:presets": "bun run scripts/refresh-presets.ts",
     "sync:docs": "cp ../README.md ../LICENSE .",
     "prepublishOnly": "bun run lint && bun run typecheck && bun run test && bun run build && bun run sync:docs",
     "release": "bun publish --access public",

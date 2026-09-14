@@ -139,3 +139,160 @@ export async function probeJsonWithTools(
   // than the equal.
   return { use: SHAPES.find((shape) => calls[shape] === samples) ?? null, calls, samples };
 }
+
+// ── Model capability resolution ──────────────────────────────────────────
+
+export interface ModelCapabilities {
+  /** Canonical model identifier. */
+  id: string;
+  /** Human-readable model display name. */
+  name?: string;
+  /** Total context window in tokens. */
+  contextWindow?: number;
+  /** Maximum generation/output tokens. */
+  maxOutput?: number;
+  /** Whether the model natively supports tool / function calling. */
+  supportsTools?: boolean;
+  /** Whether the model natively supports JSON schema / structured output. */
+  supportsStructuredOutput?: boolean;
+  /** Whether the model can receive image inputs. */
+  supportsVision?: boolean;
+  /** Whether the model has extended thinking / reasoning capability. */
+  supportsReasoning?: boolean;
+}
+
+export interface ResolveModelOptions {
+  /** Custom catalog URL. Defaults to https://models.dev/api.json */
+  catalogUrl?: string;
+  /** Pre-loaded catalog object (useful for tests or offline execution). */
+  catalog?: Record<string, unknown>;
+  /** Custom fetch implementation (for proxies, custom headers, or tests). */
+  fetchImpl?: typeof fetch;
+  /** Max cache age in ms. Defaults to 24 hours (86_400_000 ms). */
+  maxAgeMs?: number;
+}
+
+interface RawModelEntry {
+  id?: string;
+  name?: string;
+  tool_call?: boolean;
+  structured_output?: boolean;
+  reasoning?: boolean;
+  attachment?: boolean;
+  modalities?: {
+    input?: string[];
+    output?: string[];
+  };
+  limit?: {
+    context?: number;
+    output?: number;
+  };
+}
+
+interface RawProviderEntry {
+  models?: Record<string, RawModelEntry>;
+}
+
+const DEFAULT_CATALOG_URL = "https://models.dev/api.json";
+const DEFAULT_MAX_AGE_MS = 86_400_000; // 24 hours
+
+let cachedCatalog: { timestamp: number; data: Record<string, RawProviderEntry> } | null = null;
+
+function normalizeId(id: string): string {
+  // Strip gateway prefixes (z-ai/, deepseek/, openai/, accounts/fireworks/models/, etc.)
+  const bare = id.replace(/^(?:accounts\/[^/]+\/models\/|[^/]+\/)/, "");
+  // Normalize punctuation variations like 5p3 -> 5.3 or v4p1 -> v4.1
+  return bare.replace(/([a-z0-9])p([0-9])/gi, "$1.$2").toLowerCase();
+}
+
+/**
+ * Resolve model capabilities (context window, tool calling, vision, reasoning)
+ * by looking up the model in a live or cached models.dev catalog.
+ *
+ * Normalizes model identifiers across gateway spellings:
+ * - `z-ai/glm-5.3-flash` matches `glm-5.3-flash`
+ * - `deepseek/deepseek-v4.1-flash` matches `deepseek-v4.1-flash`
+ * - `accounts/fireworks/models/glm-5p3-flash` matches `glm-5.3-flash`
+ *
+ * Never throws — if the catalog cannot be retrieved or the model is unknown,
+ * returns `undefined` so capability lookups never break caller execution.
+ */
+export async function resolveModelCapabilities(
+  modelId: string,
+  options: ResolveModelOptions = {},
+): Promise<ModelCapabilities | undefined> {
+  if (!modelId) return undefined;
+
+  let catalogData: Record<string, RawProviderEntry>;
+
+  if (options.catalog) {
+    catalogData = options.catalog as Record<string, RawProviderEntry>;
+  } else {
+    const maxAge = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
+    const now = Date.now();
+
+    if (cachedCatalog && now - cachedCatalog.timestamp < maxAge) {
+      catalogData = cachedCatalog.data;
+    } else {
+      try {
+        const fetcher = options.fetchImpl ?? fetch;
+        const res = await fetcher(options.catalogUrl ?? DEFAULT_CATALOG_URL);
+        if (!res.ok) return undefined;
+        catalogData = (await res.json()) as Record<string, RawProviderEntry>;
+        cachedCatalog = { timestamp: now, data: catalogData };
+      } catch {
+        // Degrade gracefully if offline or request failed
+        if (cachedCatalog) return extractCapabilities(modelId, cachedCatalog.data);
+        return undefined;
+      }
+    }
+  }
+
+  return extractCapabilities(modelId, catalogData);
+}
+
+function extractCapabilities(
+  modelId: string,
+  catalog: Record<string, RawProviderEntry>,
+): ModelCapabilities | undefined {
+  const targetNorm = normalizeId(modelId);
+  let bestMatch: RawModelEntry | undefined;
+
+  // Pass 1: exact match
+  for (const provider of Object.values(catalog)) {
+    if (!provider?.models) continue;
+    if (provider.models[modelId]) {
+      bestMatch = provider.models[modelId];
+      break;
+    }
+  }
+
+  // Pass 2: normalized match across vendor prefixes and punctuation
+  if (!bestMatch) {
+    for (const provider of Object.values(catalog)) {
+      if (!provider?.models) continue;
+      for (const [key, entry] of Object.entries(provider.models)) {
+        if (normalizeId(key) === targetNorm) {
+          bestMatch = entry;
+          break;
+        }
+      }
+      if (bestMatch) break;
+    }
+  }
+
+  if (!bestMatch) return undefined;
+
+  const inputs = bestMatch.modalities?.input ?? [];
+  return {
+    id: bestMatch.id ?? modelId,
+    name: bestMatch.name,
+    contextWindow: bestMatch.limit?.context,
+    maxOutput: bestMatch.limit?.output,
+    supportsTools: bestMatch.tool_call === true,
+    supportsStructuredOutput: bestMatch.structured_output === true,
+    supportsVision: inputs.includes("image") || bestMatch.attachment === true,
+    supportsReasoning: bestMatch.reasoning === true,
+  };
+}
+

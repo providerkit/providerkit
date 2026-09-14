@@ -39,6 +39,7 @@ export interface RateLimitReset {
 }
 
 const RETRY_AFTER = "retry-after";
+const RETRY_AFTER_MS = "retry-after-ms";
 const UNIFIED_5H = "anthropic-ratelimit-unified-5h-";
 const UNIFIED_7D = "anthropic-ratelimit-unified-7d-";
 
@@ -74,27 +75,50 @@ function unixSecondsToMs(value: string | null): number | undefined {
   return n === undefined ? undefined : n * 1000;
 }
 
+/** Matches Go-style duration strings like "2m59.56s", "7.66s", "500ms", "1h30m". */
+const DURATION_PATTERN =
+  /^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?!s))?(?:(\d+(?:\.\d+)?)m?s)?$/i;
+
+function parseDurationMs(text: string): number | undefined {
+  const match = DURATION_PATTERN.exec(text.trim());
+  if (!match || !match.slice(1).some(Boolean)) return undefined;
+  const hours = Number(match[1]) || 0;
+  const minutes = Number(match[2]) || 0;
+  const seconds = Number(match[3]) || 0;
+  const isMs = text.toLowerCase().endsWith("ms");
+  const secMs = isMs ? seconds : seconds * 1000;
+  const total = Math.round(hours * 3_600_000 + minutes * 60_000 + secMs);
+  return total >= 0 ? total : undefined;
+}
+
 /** Absolute reset time from a header that spells it either way: epoch seconds
- *  (the unified reset, most gateways) or an RFC 3339 / HTTP-date string (the
- *  API-key reset headers). The digit test runs first because `Date.parse("120")`
- *  is not a rejection — it is the year 120, two millennia in the past. */
+ *  (the unified reset, most gateways), Go-style duration ("2m59s" from OpenAI),
+ *  or an RFC 3339 / HTTP-date string (the API-key reset headers). */
 function resetHeaderMs(value: string | null, now: number): number | undefined {
   if (!value) return undefined;
-  if (/^\d+$/.test(value)) {
-    const seconds = Number(value);
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed);
     return seconds > EPOCH_SECONDS_FLOOR ? seconds * 1000 : now + seconds * 1000;
   }
-  const at = Date.parse(value);
+  const duration = parseDurationMs(trimmed);
+  if (duration !== undefined) {
+    return now + duration;
+  }
+  const at = Date.parse(trimmed);
   return Number.isNaN(at) ? undefined : at;
 }
 
-/** `retry-after` is delay-seconds, but RFC 9110 also allows an absolute date,
- *  and both forms occur across the providers this package speaks to. */
+/** `retry-after` is delay-seconds, Go-style duration ("60s"), or an absolute
+ *  HTTP date, and all three occur across providers this package speaks to. */
 function parseRetryAfter(value: string | null, now: number): number | undefined {
   if (!value) return undefined;
-  const n = Number(value);
+  const trimmed = value.trim();
+  const n = Number(trimmed);
   if (Number.isFinite(n) && n >= 0) return n * 1000;
-  const at = Date.parse(value);
+  const duration = parseDurationMs(trimmed);
+  if (duration !== undefined) return duration;
+  const at = Date.parse(trimmed);
   return Number.isNaN(at) ? undefined : Math.max(0, at - now);
 }
 
@@ -110,7 +134,10 @@ function parseRetryAfter(value: string | null, now: number): number | undefined 
 export function parseRateLimitReset(headers: Headers, now = Date.now()): RateLimitReset {
   const result: RateLimitReset = {};
 
-  const after = parseRetryAfter(headers.get(RETRY_AFTER), now);
+  // `retry-after-ms` is Anthropic's millisecond spelling of the same header;
+  // when both ride a response the coarser one is the same deadline rounded.
+  const afterMs = numeric(headers.get(RETRY_AFTER_MS));
+  const after = afterMs ?? parseRetryAfter(headers.get(RETRY_AFTER), now);
   if (after !== undefined) {
     result.retryAfterMs = after;
     result.resetAtMs = now + after;
@@ -176,9 +203,31 @@ function jsonSeconds(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+const PROSE_RETRY_PATTERNS = [
+  /try again in (\d+(?:\.\d+)?)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:(?:ou)?rs?)?)/i,
+  /retry after (\d+(?:\.\d+)?)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:(?:ou)?rs?)?)/i,
+  /resets? (?:in|after) (\d+(?:\.\d+)?)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:(?:ou)?rs?)?)/i,
+  /retry[- ]after[:\s]+(\d+(?:\.\d+)?)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:(?:ou)?rs?)?)?/i,
+];
+
+function parseProseRetryMs(text: string): number | undefined {
+  for (const pattern of PROSE_RETRY_PATTERNS) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const val = Number.parseFloat(match[1]);
+    if (!Number.isFinite(val) || val <= 0) continue;
+    const unit = (match[2] ?? "s").toLowerCase();
+    const multiplier = unit.startsWith("h") ? 3_600_000 : unit.startsWith("m") ? 60_000 : 1_000;
+    return Math.ceil(val * multiplier);
+  }
+  return undefined;
+}
+
 /**
  * ChatGPT's codex backend puts the reset IN THE 429 BODY, not the headers:
  * `{"error":{"type":"usage_limit_reached","resets_at":1788801754,"resets_in_seconds":2501465}}`.
+ * Other providers and gateways (LiteLLM, Cloudflare, Ollama) report countdowns in prose:
+ * `Rate limit exceeded. Try again in 20s.`
  * The window name is inferred from the wait itself, and only past the floor
  * above — a sub-minute retry is a throttle, not a subscription window.
  */
@@ -187,33 +236,46 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
   try {
     body = JSON.parse(bodyText);
   } catch {
-    return {};
+    body = undefined;
   }
-  if (typeof body !== "object" || body === null) return {};
-  // The fields sit under `error` on the documented shape and at the top level
-  // on some gateway relays of it. Both are read rather than guessed between.
-  const source = (body as Record<string, unknown>).error;
-  const error =
-    typeof source === "object" && source !== null
-      ? (source as Record<string, unknown>)
-      : (body as Record<string, unknown>);
 
-  const inSeconds = jsonSeconds(error.resets_in_seconds);
-  const atSeconds = jsonSeconds(error.resets_at);
-  const waitMs =
-    inSeconds !== undefined && inSeconds >= 0
-      ? inSeconds * 1000
-      : atSeconds !== undefined && atSeconds > 0
-        ? Math.max(0, atSeconds * 1000 - now)
-        : undefined;
-  if (waitMs === undefined) return {};
+  if (typeof body === "object" && body !== null) {
+    const source = (body as Record<string, unknown>).error;
+    const error =
+      typeof source === "object" && source !== null
+        ? (source as Record<string, unknown>)
+        : (body as Record<string, unknown>);
 
-  const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
-  if (waitMs > WINDOW_FLOOR_MS) {
-    result.window =
-      waitMs <= FIVE_HOUR_MAX_MS ? "5h" : waitMs <= WEEKLY_MAX_MS ? "weekly" : "monthly";
+    const inSeconds = jsonSeconds(error.resets_in_seconds);
+    const atSeconds = jsonSeconds(error.resets_at);
+    const waitMs =
+      inSeconds !== undefined && inSeconds >= 0
+        ? inSeconds * 1000
+        : atSeconds !== undefined && atSeconds > 0
+          ? Math.max(0, atSeconds * 1000 - now)
+          : undefined;
+    if (waitMs !== undefined) {
+      const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
+      if (waitMs > WINDOW_FLOOR_MS) {
+        result.window =
+          waitMs <= FIVE_HOUR_MAX_MS ? "5h" : waitMs <= WEEKLY_MAX_MS ? "weekly" : "monthly";
+      }
+      return result;
+    }
   }
-  return result;
+
+  // If structured JSON did not yield a reset, check prose wording
+  const waitMs = parseProseRetryMs(bodyText);
+  if (waitMs !== undefined) {
+    const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
+    if (waitMs > WINDOW_FLOOR_MS) {
+      result.window =
+        waitMs <= FIVE_HOUR_MAX_MS ? "5h" : waitMs <= WEEKLY_MAX_MS ? "weekly" : "monthly";
+    }
+    return result;
+  }
+
+  return {};
 }
 
 /** Read both places an endpoint can report its reset. A short Retry-After is

@@ -91,6 +91,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         effort: config.effort,
         maxTokens: config.maxTokens,
         baseUrl: preset.baseUrl,
+        ...(preset.path ? { path: preset.path } : {}),
         headers,
         ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
         fetchImpl: config.fetchImpl,

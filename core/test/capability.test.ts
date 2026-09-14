@@ -2,7 +2,7 @@
 // is that it never guesses: a shape passes only when EVERY sample called the
 // tool, and a model that fails both is reported as such rather than defaulted.
 import { describe, expect, it } from "vitest";
-import { probeJsonWithTools } from "../src/capability.ts";
+import { probeJsonWithTools, resolveModelCapabilities } from "../src/capability.ts";
 import type { JsonWithTools, Provider, ProviderChunk, StreamOptions } from "../src/types.ts";
 
 /** A provider whose tool-calling depends on the shape it is asked in — the
@@ -99,5 +99,78 @@ describe("probeJsonWithTools", () => {
       },
     };
     await expect(probeJsonWithTools(provider)).rejects.toThrow("401");
+  });
+});
+
+describe("resolveModelCapabilities", () => {
+  const mockCatalog = {
+    anthropic: {
+      models: {
+        "claude-sonnet-5": {
+          id: "claude-sonnet-5",
+          name: "Claude Sonnet 5",
+          tool_call: true,
+          structured_output: true,
+          reasoning: true,
+          attachment: true,
+          modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+          limit: { context: 1_000_000, output: 128_000 },
+        },
+      },
+    },
+    zai: {
+      models: {
+        "glm-5.3-flash": {
+          id: "glm-5.3-flash",
+          name: "GLM 5.3 Flash",
+          tool_call: true,
+          structured_output: true,
+          reasoning: true,
+          modalities: { input: ["text"], output: ["text"] },
+          limit: { context: 200_000, output: 8_192 },
+        },
+      },
+    },
+  };
+
+  it("resolves capabilities by exact model id", async () => {
+    const info = await resolveModelCapabilities("claude-sonnet-5", { catalog: mockCatalog });
+    expect(info).toBeDefined();
+    expect(info?.name).toBe("Claude Sonnet 5");
+    expect(info?.contextWindow).toBe(1_000_000);
+    expect(info?.maxOutput).toBe(128_000);
+    expect(info?.supportsTools).toBe(true);
+    expect(info?.supportsVision).toBe(true);
+    expect(info?.supportsReasoning).toBe(true);
+  });
+
+  it("normalizes gateway prefixes to resolve models", async () => {
+    // OpenRouter style: z-ai/glm-5.3-flash
+    const info = await resolveModelCapabilities("z-ai/glm-5.3-flash", { catalog: mockCatalog });
+    expect(info).toBeDefined();
+    expect(info?.id).toBe("glm-5.3-flash");
+    expect(info?.contextWindow).toBe(200_000);
+    expect(info?.supportsVision).toBe(false);
+  });
+
+  it("normalizes punctuation variants across gateways", async () => {
+    // Fireworks style: accounts/fireworks/models/glm-5p3-flash
+    const info = await resolveModelCapabilities("accounts/fireworks/models/glm-5p3-flash", {
+      catalog: mockCatalog,
+    });
+    expect(info).toBeDefined();
+    expect(info?.id).toBe("glm-5.3-flash");
+  });
+
+  it("returns undefined without throwing for unknown models or failures", async () => {
+    const unknown = await resolveModelCapabilities("completely-unknown-model", { catalog: mockCatalog });
+    expect(unknown).toBeUndefined();
+
+    const failingFetch: typeof fetch = async () => new Response("down", { status: 500 });
+    const offline = await resolveModelCapabilities("claude-sonnet-5", {
+      catalogUrl: "https://invalid.example/api.json",
+      fetchImpl: failingFetch,
+    });
+    expect(offline).toBeUndefined();
   });
 });

@@ -143,15 +143,23 @@ function readString(err: unknown, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function sanitizeHtmlError(text: string): string {
+  if (/^\s*<!doctype|^\s*<html/i.test(text) || text.includes("<title>")) {
+    const match = text.match(/<title>([^<]+)<\/title>/i);
+    if (match?.[1]) return match[1].trim();
+  }
+  return text;
+}
+
 export function messageOf(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === "string") return err;
+  if (err instanceof Error) return sanitizeHtmlError(err.message);
+  if (typeof err === "string") return sanitizeHtmlError(err);
   const message = readString(err, "message");
-  if (message !== undefined) return message;
+  if (message !== undefined) return sanitizeHtmlError(message);
   try {
-    return JSON.stringify(err) ?? String(err);
+    return sanitizeHtmlError(JSON.stringify(err) ?? String(err));
   } catch {
-    return String(err);
+    return sanitizeHtmlError(String(err));
   }
 }
 
@@ -190,15 +198,28 @@ const TRANSPORT_CODES: ReadonlySet<string> = new Set([
   "EHOSTUNREACH",
   "EAI_AGAIN",
   "ERR_STREAM_PREMATURE_CLOSE",
+  // SSL/TLS connection codes (Node, Bun, corporate proxies/firewalls)
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "CERT_SIGNATURE_FAILURE",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "HOSTNAME_MISMATCH",
+  "ERR_SSL_WRONG_VERSION_NUMBER",
 ]);
 
 /**
  * The same faults when only a message survives. Engine wordings differ:
  * Chromium says "Failed to fetch", Firefox "NetworkError when attempting to
- * fetch resource", Safari "Load failed", Node/Bun "fetch failed".
+ * fetch resource", Safari "Load failed", Node/Bun "fetch failed", WebKit/macOS
+ * "The network connection was lost".
  */
 const TRANSPORT_MESSAGES =
-  /failed to fetch|fetch failed|network\s?error|load failed|unable to connect|socket hang up|socket (?:connection )?(?:was )?closed|connection (?:error|closed|refused|reset)|premature close|stream (?:ended|closed) unexpectedly|und_err/i;
+  /failed to fetch|fetch failed|network\s?error|network connection (?:was )?lost|load failed|unable to connect|socket hang up|socket (?:connection )?(?:was )?closed|connection (?:error|closed|refused|reset|lost)|premature close|stream (?:ended|closed) unexpectedly|und_err/i;
 
 /** How far up the `cause` chain to look before giving up. */
 const CAUSE_DEPTH = 5;
@@ -206,7 +227,20 @@ const CAUSE_DEPTH = 5;
 function isAbort(err: unknown): boolean {
   const name = readString(err, "name");
   const code = readString(err, "code");
-  return name === "AbortError" || name === "APIUserAbortError" || code === "ABORT_ERR";
+  if (name === "AbortError" || name === "APIUserAbortError" || code === "ABORT_ERR") return true;
+  const msg = readString(err, "message")?.toLowerCase();
+  if (msg) {
+    if (
+      msg.includes("client closed request") ||
+      msg.includes("client cancelled request") ||
+      msg.includes("client canceled request") ||
+      msg.includes("request canceled by client") ||
+      msg.includes("request cancelled by client")
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -271,7 +305,14 @@ const ENTITLEMENT_PATTERNS: readonly RegExp[] = [
   /plan does(?:n't| not) (?:include|support)/i,
   /not included (?:in|with) your .{0,40}plan/i,
   /upgrade to [\w ]{1,30}(?:or higher|plan)/i,
+  /requires? (?:the |a |an )?[\w\s]{1,30}plan/i,
+  /requires? (?:a )?subscription/i,
+  /subscription[_\s]?required/i,
+  /upgrade for access/i,
   /no api access/i,
+  // The ChatGPT backend's error code, which arrives with no prose at all.
+  /usage_not_included/i,
+  /usage not included/i,
 ];
 
 // Balance or usage window used up. Chinese-market providers report it in
@@ -281,7 +322,8 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   /exceeded your current quota/i,
   /insufficient (?:balance|credits?)/i,
   /credit balance is too low/i,
-  /(?:no|out of) credits/i,
+  /(?:no|any|out of) credits/i,
+  /(?:credits?|balance) depleted/i,
   // Both word orders occur in the wild.
   /usage limits? (?:reached|exceeded|hit)/i,
   /reached your (?:usage|weekly|monthly|daily) limit/i,
@@ -290,6 +332,11 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   /upgrade your plan/i,
   /quota\b[^.]{0,40}\b(?:exhausted|exceeded|will be refreshed)/i,
   /balance (?:is )?(?:too low|not enough|insufficient)/i,
+  // The OpenAI-shape `type` field for billing failures, serialized into the
+  // scanned text — a quota signal with no prose wording at all (codex-router).
+  /billing_error/i,
+  // Alibaba intl's English spelling of 欠费.
+  /\barrears?\b/i,
   /余额不足/,
   /欠费/,
   /额度(?:不足|已用完)/,
@@ -302,17 +349,20 @@ const MODEL_PATTERNS: readonly RegExp[] = [
 ];
 
 const AUTH_PATTERNS: readonly RegExp[] = [
-  /invalid (?:x-api-key|api[ _-]?key|token|credentials?)/i,
+  /invalid[_\s]?(?:x-api-key|api[ _-]?key|token|credentials?)/i,
   /api[ _-]?key (?:is )?(?:not valid|invalid|incorrect)/i,
   /unauthorized|UNAUTHENTICATED|PERMISSION_DENIED/i,
   /authentication[_\s](?:failed|invalid|error)/i,
   /account (?:disabled|suspended|deactivated|banned)/i,
+  /unrecognizedclient|unauthorizedexception|accessdeniedexception/i,
+  /expired[_\s]?token/i,
 ];
 
 const CONTENT_PATTERNS: readonly RegExp[] = [
   /content[_\s]filter/i,
   /content policy/i,
-  /safety|PROHIBITED_CONTENT|blocked|refusal/i,
+  /cyber[_\s]policy/i,
+  /safety|PROHIBITED_CONTENT|blocked|refusal|policy violation|misalignment/i,
 ];
 
 /**
@@ -326,8 +376,19 @@ const CONTENT_PATTERNS: readonly RegExp[] = [
  */
 const RATE_PATTERNS: readonly RegExp[] = [
   /rate[_\s-]?limit/i,
-  /too many requests/i,
-  /RESOURCE_EXHAUSTED/,
+  // Spaces, snake and kebab all occur in the wild — opencode's list carries
+  // the snake form for providers that forward Google/gRPC error codes raw.
+  /too[_\s-]?many[_\s-]?requests/i,
+  // Google's quota code, upper-case in the status enum and snake_case in the
+  // type field (codex-router reads the latter) — a per-minute quota is a
+  // throttle, so it lands on rate, not quota.
+  /resource[_\s]?exhausted/i,
+  // AWS Bedrock throttles by exception name (ThrottlingException); the bare
+  // word also arrives alone.
+  /throttl(?:e|ed|ing)/i,
+  // A per-minute window named without the word "rate" — Anthropic's TPM prose
+  // ("Limit 30000 tokens per min") and gateway RPM counters.
+  /(?:requests?|tokens?) per (?:second|sec|minute|min)\b/i,
 ];
 
 /** Theirs and temporary, said in words rather than a status. Gemini reports
@@ -340,7 +401,11 @@ const OVERLOAD_PATTERNS: readonly RegExp[] = [
   // does not swallow the word in ordinary prose.
   /\bINTERNAL\b/,
   /\bcapacity\b/i,
+  /server is busy/i,
+  /high demand/i,
   /"code"\s*:\s*5\d\d/,
+  // OpenAI's 5xx wording, often forwarded by gateways with the status lost.
+  /(?:try|retry) your request again/i,
 ];
 
 const matches = (patterns: readonly RegExp[], text: string): boolean =>

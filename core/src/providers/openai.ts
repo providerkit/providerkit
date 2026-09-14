@@ -402,8 +402,12 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         request.provider = { order: config.providerOrder, allow_fallbacks: true };
       }
 
+      const defaultPath = /\/v\d+[^/]*$/i.test(baseUrl.replace(/\/+$/, ""))
+        ? "/chat/completions"
+        : "/v1/chat/completions";
+
       for await (const data of streamSse({
-        url: apiUrl(baseUrl, config.path ?? "/v1/chat/completions"),
+        url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: { authorization: `Bearer ${config.apiKey}`, ...config.headers },
         body: request,
         provider: id,

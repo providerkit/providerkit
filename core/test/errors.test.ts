@@ -11,6 +11,7 @@ import {
   isBackupEligible,
   isTransient,
   isTransportFailure,
+  messageOf,
   parseRetryAfterMs,
   ProviderError,
   type ErrorKind,
@@ -145,6 +146,95 @@ describe("classifyHttp — the response-shaped entry point", () => {
     // No status either — a body-only failure, which is how the Responses
     // adapter reports a mid-stream error envelope.
     expect(classifyHttp(undefined, '{"error":{"message":"API key not valid"}}')).toBe("auth");
+  });
+
+  it("reads the snake and kebab spellings of too-many-requests", () => {
+    // Providers that forward Google/gRPC error codes raw send the snake form
+    // with no spaces — found in opencode's retryable list, absent from ours.
+    expect(classifyHttp(400, '{"error":{"code":"too_many_requests"}}')).toBe("rate");
+    expect(classifyHttp(400, "too-many-requests")).toBe("rate");
+  });
+
+  it("reads OpenAI's try-your-request-again overload wording", () => {
+    expect(
+      classifyHttp(200, "The server had an error while processing your request. Please try your request again."),
+    ).toBe("overload");
+  });
+
+  it("reads the ChatGPT backend's usage_not_included code", () => {
+    // Arrives with no prose at all — just the code — so the pattern must match
+    // the literal, and it must land on entitlement, not quota: the fix is a
+    // different plan, not a top-up.
+    expect(classifyHttp(403, '{"error":{"code":"usage_not_included"}}')).toBe("entitlement");
+  });
+
+  it("reads AWS Bedrock ThrottlingException and bare throttling", () => {
+    expect(classifyHttp(400, '{"__type":"ThrottlingException","message":"Rate exceeded"}')).toBe("rate");
+    expect(classifyHttp(200, "Request throttled by upstream gateway")).toBe("rate");
+  });
+
+  it("reads Google resource_exhausted in snake_case type fields", () => {
+    expect(classifyHttp(200, '{"error":{"status":"resource_exhausted"}}')).toBe("rate");
+  });
+
+  it("reads per-minute window phrasing without the word rate", () => {
+    expect(classifyHttp(200, "Limit 30000 tokens per min exceeded")).toBe("rate");
+    expect(classifyHttp(200, "Limit 60 requests per second exceeded")).toBe("rate");
+  });
+
+  it("reads the billing_error type field and arrears as quota", () => {
+    expect(classifyHttp(400, '{"error":{"type":"billing_error","message":"Payment required"}}')).toBe("quota");
+    expect(classifyHttp(400, "Account in arrears: please settle your balance")).toBe("quota");
+  });
+
+  it("reads requires-plan as entitlement", () => {
+    expect(classifyHttp(400, "This model requires the Pro plan")).toBe("entitlement");
+    expect(classifyHttp(400, "Requires an Enterprise plan to access")).toBe("entitlement");
+  });
+
+  it("reads subscription-required and upgrade-for-access as entitlement", () => {
+    expect(classifyHttp(400, "Requires a subscription to access this model")).toBe("entitlement");
+    expect(classifyHttp(400, '{"error":"subscription_required"}')).toBe("entitlement");
+    expect(classifyHttp(400, "Upgrade for access to frontier models")).toBe("entitlement");
+  });
+
+  it("reads expired token and unrecognized client as auth", () => {
+    expect(classifyHttp(400, "token has expired: expired_token")).toBe("auth");
+    expect(classifyHttp(400, '{"__type":"UnrecognizedClientException"}')).toBe("auth");
+    expect(classifyHttp(400, '{"error":"invalid_token"}')).toBe("auth");
+  });
+
+  it("reads cyber policy and misalignment as content refusal", () => {
+    expect(classifyHttp(400, "Request blocked by cyber_policy")).toBe("content");
+    expect(classifyHttp(400, "Misalignment policy violation detected")).toBe("content");
+  });
+
+  it("reads credits depleted as quota", () => {
+    expect(classifyHttp(400, "Your workspace is out of credits")).toBe("quota");
+    expect(classifyHttp(400, "Account credits depleted: add funds to resume")).toBe("quota");
+  });
+
+  it("reads server is busy and high demand as overload", () => {
+    expect(classifyHttp(200, "Upstream server is busy, please try again")).toBe("overload");
+    expect(classifyHttp(200, "We're currently experiencing high demand")).toBe("overload");
+  });
+
+  it("classifies macOS WebKit connection lost and SSL errors as transport network failure", () => {
+    expect(classify(new TypeError("The network connection was lost."))).toBe("network");
+    expect(classify(new TypeError("Network connection lost."))).toBe("network");
+    const sslErr = new Error("certificate verify failed");
+    (sslErr as { code?: string }).code = "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+    expect(classify(sslErr)).toBe("network");
+  });
+
+  it("recognizes client abort messages as aborted", () => {
+    expect(classify(new Error("client closed request during web-search"))).toBe("aborted");
+    expect(classify(new Error("request cancelled by client"))).toBe("aborted");
+  });
+
+  it("sanitizes Cloudflare HTML error pages into the title string", () => {
+    const html = `<!DOCTYPE html><html><head><title>504 Gateway Time-out</title></head><body><h1>Gateway Timeout</h1></body></html>`;
+    expect(messageOf(new Error(html))).toBe("504 Gateway Time-out");
   });
 });
 
