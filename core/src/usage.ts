@@ -37,6 +37,19 @@ export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
 }
 
 /**
+ * Subtract usage `b` from `a`, clamping each field at zero.
+ * Used when an optimistic turn or speculative stream is rolled back.
+ */
+export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    inputTokens: Math.max(0, a.inputTokens - b.inputTokens),
+    cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
+    cacheWriteTokens: Math.max(0, (a.cacheWriteTokens ?? 0) - (b.cacheWriteTokens ?? 0)),
+    outputTokens: Math.max(0, a.outputTokens - b.outputTokens),
+  };
+}
+
+/**
  * USD for one call.
  *
  * Cached tokens are a SUBSET of input, not an addition to it: the miss part
@@ -77,6 +90,14 @@ export class UsageTracker {
     this.cost += costUsd(usage, rate);
     const cached = Math.min(Math.max(0, usage.cachedInputTokens), Math.max(0, usage.inputTokens));
     this.saved += (cached * (rate.input - rate.cacheRead)) / 1_000_000;
+  }
+
+  subtract(usage: TokenUsage, rate?: ModelRate): void {
+    this.usage = subtractUsage(this.usage, usage);
+    if (!rate) return;
+    this.cost = Math.max(0, this.cost - costUsd(usage, rate));
+    const cached = Math.min(Math.max(0, usage.cachedInputTokens), Math.max(0, usage.inputTokens));
+    this.saved = Math.max(0, this.saved - (cached * (rate.input - rate.cacheRead)) / 1_000_000);
   }
 
   get totals(): TokenUsage {

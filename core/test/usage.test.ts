@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addUsage, costUsd, UsageTracker, type ModelRate } from "../src/usage.ts";
+import { addUsage, costUsd, subtractUsage, UsageTracker, type ModelRate } from "../src/usage.ts";
 import type { TokenUsage } from "../src/types.ts";
 
 /** Anthropic-shaped rates: cache reads at 0.1x, writes at 1.25x. */
@@ -105,5 +105,40 @@ describe("UsageTracker", () => {
     tracker.reset();
     expect(tracker.costUsd).toBe(0);
     expect(tracker.totals.inputTokens).toBe(0);
+  });
+
+  it("subtracts rolled back or optimistic turns without going negative", () => {
+    const tracker = new UsageTracker();
+    tracker.add(usage({ inputTokens: 1_000, outputTokens: 200 }), CLAUDE);
+    tracker.subtract(usage({ inputTokens: 400, outputTokens: 50 }), CLAUDE);
+    expect(tracker.totals.inputTokens).toBe(600);
+    expect(tracker.totals.outputTokens).toBe(150);
+
+    // Over-subtraction clamps to 0
+    tracker.subtract(usage({ inputTokens: 10_000, outputTokens: 10_000 }), CLAUDE);
+    expect(tracker.totals.inputTokens).toBe(0);
+    expect(tracker.totals.outputTokens).toBe(0);
+    expect(tracker.costUsd).toBe(0);
+  });
+});
+
+describe("subtractUsage", () => {
+  it("subtracts usage fields and clamps each at zero", () => {
+    const a = usage({ inputTokens: 100, cachedInputTokens: 50, outputTokens: 20 });
+    const b = usage({ inputTokens: 30, cachedInputTokens: 20, outputTokens: 10 });
+    expect(subtractUsage(a, b)).toEqual({
+      inputTokens: 70,
+      cachedInputTokens: 30,
+      cacheWriteTokens: 0,
+      outputTokens: 10,
+    });
+
+    const c = usage({ inputTokens: 200, cachedInputTokens: 200, outputTokens: 200 });
+    expect(subtractUsage(a, c)).toEqual({
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 0,
+    });
   });
 });
