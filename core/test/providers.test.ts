@@ -299,6 +299,88 @@ describe("openai-shape adapter", () => {
     expect(seen[0]!.headers.get("http-referer")).toBe("https://example.test");
   });
 
+  describe("app attribution (OpenRouter)", () => {
+    it("sends HTTP-Referer and X-Title from siteUrl/siteName on the OpenAI shape", async () => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "sk-or-1",
+          model: "glm-5",
+          baseUrl: "https://openrouter.ai/api",
+          siteUrl: "https://example.test",
+          siteName: "Example",
+          fetchImpl,
+        }).createStream([{ role: "user", content: "hi" }], []),
+      );
+      expect(seen[0]!.headers.get("http-referer")).toBe("https://example.test");
+      expect(seen[0]!.headers.get("x-title")).toBe("Example");
+    });
+
+    it("sends HTTP-Referer and X-Title from siteUrl/siteName on the Anthropic shape", async () => {
+      const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+      await collect(
+        createAnthropicProvider({
+          apiKey: "sk-or-1",
+          model: "glm-5",
+          baseUrl: "https://openrouter.ai/api",
+          bearer: true,
+          siteUrl: "https://example.test",
+          siteName: "Example",
+          fetchImpl,
+        }).createStream([{ role: "user", content: "hi" }], []),
+      );
+      expect(seen[0]!.headers.get("http-referer")).toBe("https://example.test");
+      expect(seen[0]!.headers.get("x-title")).toBe("Example");
+    });
+
+    it("sends nothing when no app is named", async () => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "sk-or-1",
+          model: "glm-5",
+          baseUrl: "https://openrouter.ai/api",
+          fetchImpl,
+        }).createStream([{ role: "user", content: "hi" }], []),
+      );
+      expect(seen[0]!.headers.get("http-referer")).toBeNull();
+      expect(seen[0]!.headers.get("x-title")).toBeNull();
+    });
+
+    it("an explicit headers entry wins over siteUrl/siteName, case-insensitively", async () => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "sk-or-1",
+          model: "glm-5",
+          baseUrl: "https://openrouter.ai/api",
+          siteUrl: "https://example.test",
+          siteName: "Example",
+          headers: { "http-referer": "https://override.test", "X-Title": "Override" },
+          fetchImpl,
+        }).createStream([{ role: "user", content: "hi" }], []),
+      );
+      expect(seen[0]!.headers.get("http-referer")).toBe("https://override.test");
+      expect(seen[0]!.headers.get("x-title")).toBe("Override");
+    });
+
+    it("an explicit X-OpenRouter-Title suppresses the default X-Title", async () => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "sk-or-1",
+          model: "glm-5",
+          baseUrl: "https://openrouter.ai/api",
+          siteName: "Example",
+          headers: { "X-OpenRouter-Title": "Alias" },
+          fetchImpl,
+        }).createStream([{ role: "user", content: "hi" }], []),
+      );
+      expect(seen[0]!.headers.get("x-title")).toBeNull();
+      expect(seen[0]!.headers.get("x-openrouter-title")).toBe("Alias");
+    });
+  });
+
   it("takes cached_tokens as a SUBSET — no reconciling on this shape", async () => {
     const { fetchImpl } = recorder(OPENAI_TEXT_TURN);
     const provider = createOpenAIProvider({ apiKey: "k", model: "gpt-5.6", fetchImpl });

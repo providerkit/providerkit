@@ -36,6 +36,16 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** Per-request headers (request ids, `ChatGPT-Account-Id`) on top of the
    *  preset's static protocol headers. */
   headers?: Record<string, string>;
+  /**
+   * App attribution for OpenRouter's rankings — the site URL rides as
+   * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent
+   * whenever set; an explicit entry in `headers` always wins.
+   */
+  siteUrl?: string;
+  /**
+   * App name for OpenRouter's rankings, sent as `X-Title`. See `siteUrl`.
+   */
+  siteName?: string;
   /** OpenRouter-only: preferred upstream hosts, in order. OpenRouter's cache
    *  lives on the upstream host's account and default routing hops hosts
    *  between rounds — pinning keeps a conversation's rounds (and their cache)

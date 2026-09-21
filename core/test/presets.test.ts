@@ -84,8 +84,22 @@ describe("provider presets — every row joins to one request, correctly", () =>
     expect(() => createPresetProvider("ollama", { apiKey: "k" })).toThrow(/defaultModel/);
   });
 
-  it("applies zai's thinking dialect through the factory", async () => {
+  it("carries siteUrl/siteName through the factory to OpenRouter", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
+    const provider = createPresetProvider("openrouter", {
+      apiKey: "k",
+      model: "z-ai/glm-5.3-flash",
+      siteUrl: "https://example.test",
+      siteName: "Example",
+      fetchImpl,
+    });
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+    const headers = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("http-referer")).toBe("https://example.test");
+    expect(headers.get("x-title")).toBe("Example");
+  });
+
+  it("applies zai's thinking dialect through the factory", async () => {    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
     const provider = createPresetProvider("zai", {
       apiKey: "k",
       model: "glm-5.3-flash",

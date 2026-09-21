@@ -3,6 +3,7 @@ import { streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
+import { attributionHeaders } from "../attribution.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   JsonOutput,
@@ -35,6 +36,17 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
   /** Merged into every request. The subscription backend needs its own beta
    *  headers, and a gateway in front usually wants one of its own. */
   headers?: Record<string, string>;
+  /**
+   * App attribution for OpenRouter's rankings — the site URL rides as
+   * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent
+   * whenever set (other vendors ignore unknown headers); an explicit entry
+   * in `headers` always wins. Covers OpenRouter's Anthropic-dialect endpoint.
+   */
+  siteUrl?: string;
+  /**
+   * App name for OpenRouter's rankings, sent as `X-Title`. See `siteUrl`.
+   */
+  siteName?: string;
   /** Send the key as a Bearer instead of `x-api-key` — what a subscription
    *  access token needs. */
   bearer?: boolean;
@@ -290,6 +302,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           ...(config.bearer
             ? { authorization: `Bearer ${config.apiKey}` }
             : { "x-api-key": config.apiKey }),
+          ...attributionHeaders(config, config.headers),
           ...config.headers,
         },
         body: request,

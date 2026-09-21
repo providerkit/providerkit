@@ -5,6 +5,7 @@
 // Their divergences are small and named where they appear.
 import { streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
+import { attributionHeaders } from "../attribution.ts";
 import type {
   ChatMessage,
   ContentPart,
@@ -75,6 +76,17 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   maxTokens?: number;
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
+  /**
+   * App attribution for OpenRouter's rankings — the site URL rides as
+   * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent
+   * whenever set (other vendors ignore unknown headers); an explicit entry
+   * in `headers` always wins.
+   */
+  siteUrl?: string;
+  /**
+   * App name for OpenRouter's rankings, sent as `X-Title`. See `siteUrl`.
+   */
+  siteName?: string;
   /**
    * Pin OpenRouter to preferred upstream hosts so the PROMPT CACHE stays warm
    * across rounds. The cache lives on the upstream host's account and default
@@ -451,7 +463,11 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
-        headers: { authorization: `Bearer ${config.apiKey}`, ...config.headers },
+        headers: {
+          authorization: `Bearer ${config.apiKey}`,
+          ...attributionHeaders(config, config.headers),
+          ...config.headers,
+        },
         body: request,
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),

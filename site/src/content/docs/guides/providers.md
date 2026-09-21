@@ -240,9 +240,14 @@ createAnthropicProvider({
   model: "z-ai/glm-5",
   baseUrl: "https://openrouter.ai/api", // + /v1/messages
   bearer: true, // these read Authorization, not x-api-key
-  headers: { "http-referer": "https://your.app" },
+  siteUrl: "https://your.app", // -> HTTP-Referer, for OpenRouter's rankings
+  siteName: "Your App", // -> X-Title
 });
 ```
+
+`siteUrl` / `siteName` work on the OpenAI shape, the Anthropic shape and
+`createPresetProvider` alike, and ride every request whenever they are set. A
+raw entry in `headers` always wins over them.
 
 Three fields cover the difference between one host and another — `baseUrl`, `headers`, and on the
 Anthropic shape `bearer`. There is no base class to extend and no vendor list to be absent from;
