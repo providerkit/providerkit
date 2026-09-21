@@ -2,6 +2,18 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.11.1] - 2026-09-21
+
+### Fixed
+
+- **Gemini 2 cannot take a response schema beside tools.** The adapter sent both whenever `jsonWithTools` was not `"prompt"`, and Gemini 2.x answers that with `400 "Function calling with a response mime type: 'application/json' is unsupported"` — so every tool-carrying call to a 2.x model failed outright. On that generation the model id decides and `jsonWithTools` is ignored: the schema travels in the prompt, the one way it can. Gemini 3 serves both and keeps the enforced schema.
+
+## [0.11.0] - 2026-09-21
+
+### Added
+
+- **OpenRouter app attribution (`siteUrl`, `siteName`).** Sent as `HTTP-Referer` and `X-Title` so a deployment shows up in OpenRouter's rankings under its own name.
+
 ## [0.10.0] - 2026-09-14
 
 ### Added
