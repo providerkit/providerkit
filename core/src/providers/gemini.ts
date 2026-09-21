@@ -299,8 +299,14 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // decoder cannot emit a functionCall — the model narrates the call it
       // could not make and the turn ends, with nothing logged. See
       // `jsonWithTools` for what that costs and which models it costs it on.
+      //
+      // On Gemini 2.x it is not a bet at all: the API refuses the combination
+      // outright with `400 "Function calling with a response mime type:
+      // 'application/json' is unsupported"`, so the prompt is the only way a
+      // schema travels beside tools there. Gemini 3 serves both, and there the
+      // setting is the caller's measured preference.
       const promptCarried =
-        tools.length > 0 && (opts.jsonWithTools ?? config.jsonWithTools) === "prompt";
+        tools.length > 0 && ((opts.jsonWithTools ?? config.jsonWithTools) === "prompt" || !isGemini3);
       if (opts.json && !promptCarried) {
         generationConfig.responseMimeType = "application/json";
         // `responseJsonSchema` takes JSON Schema as written; `responseSchema`

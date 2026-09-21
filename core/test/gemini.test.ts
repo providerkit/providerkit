@@ -335,6 +335,39 @@ describe("gemini adapter", () => {
     expect(noTools.systemInstruction).toEqual({ parts: [{ text: "be brief" }] });
   });
 
+  it("keeps the schema out of a Gemini 2 tool call, asked or not", async () => {
+    // Not a preference on this generation: the API answers `400 "Function
+    // calling with a response mime type: 'application/json' is unsupported"`.
+    // Honouring `response_format` here would only buy the caller that 400.
+    const schema = { type: "object" as const, properties: { hrn: { type: "string" } } };
+    const sent = async (model: string, jsonWithTools?: string) => {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await collect(
+        provider(fetchImpl, { model, ...(jsonWithTools ? { jsonWithTools } : {}) }).createStream(
+          HI,
+          [{ name: "look_up", description: "look it up", inputSchema: { type: "object" } }],
+          { json: { name: "answer", schema } },
+        ),
+      );
+      return seen[0]!.body as {
+        generationConfig: Record<string, unknown>;
+        systemInstruction?: { parts: { text: string }[] };
+      };
+    };
+
+    const two = await sent("gemini-2.5-flash");
+    expect(two.generationConfig.responseMimeType).toBeUndefined();
+    expect(two.systemInstruction!.parts[0]!.text).toContain("hrn");
+
+    const asked = await sent("gemini-2.5-flash", "response_format");
+    expect(asked.generationConfig.responseMimeType).toBeUndefined();
+
+    // Gemini 3 serves both, so the default stays the enforced schema.
+    const three = await sent("gemini-3-pro");
+    expect(three.generationConfig.responseJsonSchema).toEqual(schema);
+    expect(three.systemInstruction).toBeUndefined();
+  });
+
   it("surfaces a non-2xx through the shared classifier", async () => {
     const { fetchImpl } = recorder([], 429);
     await expect(collect(provider(fetchImpl).createStream(HI, []))).rejects.toMatchObject({
