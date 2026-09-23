@@ -2,7 +2,7 @@
   "name": "providerkit-workspace",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.3.8",
+  "packageManager": "bun@1.4.2",
   "workspaces": [
     "core",
     "site"
