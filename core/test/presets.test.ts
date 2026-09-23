@@ -99,7 +99,8 @@ describe("provider presets — every row joins to one request, correctly", () =>
     expect(headers.get("x-title")).toBe("Example");
   });
 
-  it("applies zai's thinking dialect through the factory", async () => {    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
+  it("applies zai's thinking dialect through the factory", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
     const provider = createPresetProvider("zai", {
       apiKey: "k",
       model: "glm-5.3-flash",

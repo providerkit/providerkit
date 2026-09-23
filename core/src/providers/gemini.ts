@@ -306,7 +306,8 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // schema travels beside tools there. Gemini 3 serves both, and there the
       // setting is the caller's measured preference.
       const promptCarried =
-        tools.length > 0 && ((opts.jsonWithTools ?? config.jsonWithTools) === "prompt" || !isGemini3);
+        tools.length > 0 &&
+        ((opts.jsonWithTools ?? config.jsonWithTools) === "prompt" || !isGemini3);
       if (opts.json && !promptCarried) {
         generationConfig.responseMimeType = "application/json";
         // `responseJsonSchema` takes JSON Schema as written; `responseSchema`
