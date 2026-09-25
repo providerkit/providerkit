@@ -107,6 +107,12 @@ async function callsTool(
  * about one model on one endpoint, and a chain answers with whichever member
  * is up.
  *
+ * Only the `openai` wire and Gemini 3 read `jsonWithTools`. The `anthropic`
+ * wire (Anthropic, and coding plans like `zai` and `kimi`) always puts the
+ * schema in the prompt, `responses` always sends it as the response format,
+ * and Gemini 2.x always uses the prompt. There both shapes are one request and
+ * the probe measures it twice, so skip it.
+ *
  * Errors propagate. A probe that swallowed a bad key or a dead endpoint would
  * report "this model cannot call tools", which is a much worse thing to
  * believe than "the call failed".

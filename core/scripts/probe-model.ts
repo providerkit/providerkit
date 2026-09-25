@@ -18,6 +18,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { probeJsonWithTools } from "../src/capability.ts";
 import { createPresetProvider } from "../src/providers/factory.ts";
 import { PROVIDER_PRESETS, type ProviderPresetId } from "../src/presets.ts";
 import type { ChatMessage, Provider, ProviderChunk, ToolDefinition } from "../src/types.ts";
@@ -274,49 +275,31 @@ async function runDiagnostics() {
   }
 
   // ----------------------------------------------------
-  // Test 4: jsonWithTools Compatibility Probe
+  // Test 4: jsonWithTools — the library's own probe, so this script and a
+  // boot-time probe can never disagree about a model.
   // ----------------------------------------------------
   process.stdout.write("[4/4] Probing jsonWithTools (tools + structured output coexistence)... ");
-  const toolWithJsonPrompt = await collectStream(
-    provider,
-    [{ role: "user", content: "Look up customer CUST-9900 and output status." }],
-    [testTool],
-    {
-      json: { name: "status", schema },
-      jsonWithTools: "prompt",
-    },
-  );
-
-  const toolWithJsonResponse = await collectStream(
-    provider,
-    [{ role: "user", content: "Look up customer CUST-9900 and output status." }],
-    [testTool],
-    {
-      json: { name: "status", schema },
-      jsonWithTools: "response_format",
-    },
-  );
-
-  const promptSuccess = toolWithJsonPrompt.toolCalls.length > 0;
-  const responseSuccess = toolWithJsonResponse.toolCalls.length > 0;
-
-  console.log(
-    `\n      - with prompt injection:   ${promptSuccess ? "✓ called tool" : "✗ narrated in prose"}`,
-  );
-  console.log(
-    `      - with response_format:    ${responseSuccess ? "✓ called tool" : "✗ narrated in prose"}`,
-  );
-
-  if (promptSuccess && !responseSuccess) {
-    console.log(`      ↳ Recommendation for ${model}: jsonWithTools="prompt"`);
-  } else if (!promptSuccess && responseSuccess) {
-    console.log(`      ↳ Recommendation for ${model}: jsonWithTools="response_format"`);
-  } else if (promptSuccess && responseSuccess) {
-    console.log(`      ↳ Model supports BOTH shapes cleanly.`);
-  } else {
+  if (preset.shape === "anthropic" || preset.shape === "responses") {
     console.log(
-      `      ↳ Warning: Model fails to call tools when schema is present in either shape.`,
+      `SKIPPED: the ${preset.shape} wire sends the schema the same way whatever jsonWithTools says, so there is nothing to choose.`,
     );
+  } else {
+    try {
+      const probe = await probeJsonWithTools(provider);
+      console.log(
+        `\n      - with response_format:    ${probe.calls.response_format}/${probe.samples} called the tool`,
+      );
+      console.log(
+        `      - with prompt injection:   ${probe.calls.prompt}/${probe.samples} called the tool`,
+      );
+      console.log(
+        probe.use
+          ? `      ↳ Recommendation for ${model}: jsonWithTools="${probe.use}"`
+          : `      ↳ Warning: neither shape called the tool on every sample. Use another model for tools with a schema.`,
+      );
+    } catch (err: unknown) {
+      console.log(`FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   console.log("\nProbe complete.\n");
