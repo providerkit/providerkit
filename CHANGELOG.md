@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.11.2] - 2026-09-25
+
+### Fixed
+
+- **`probeJsonWithTools` makes its calls one at a time.** It used to fire all `samples × 2` at once. A flat-rate plan caps concurrent requests, and six at once on a Z.ai Coding Plan key came back with some 429s. Behind a fallback chain, the next model answered those calls, and the table scored that model's answer as this one's. The same app logged `1/3, 3/3`, `3/3, 2/3` and `1/3, 1/3` on four boots of one unchanged model. Probe each provider on its own, not a fallback chain.
+
 ## [0.11.1] - 2026-09-21
 
 ### Fixed

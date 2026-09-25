@@ -89,6 +89,29 @@ describe("probeJsonWithTools", () => {
     expect(requests[0]!.maxTokens).toBeUndefined();
   });
 
+  it("asks one call at a time, so a rate-limited plan is not scored as a model", async () => {
+    let inFlight = 0;
+    let most = 0;
+    const provider: Provider = {
+      id: "fake",
+      model: "m",
+      async *createStream() {
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        inFlight -= 1;
+        yield {
+          type: "delta",
+          toolCalls: [{ index: 0, name: "get_current_time" }],
+        } as ProviderChunk;
+      },
+    };
+    const probe = await probeJsonWithTools(provider);
+
+    expect(most).toBe(1);
+    expect(probe.calls).toEqual({ response_format: 3, prompt: 3 });
+  });
+
   it("lets a failed call through rather than calling it a missing capability", async () => {
     const provider: Provider = {
       id: "fake",

@@ -99,8 +99,13 @@ async function callsTool(
  *
  * Both shapes are always tried, because a result you can read beats a result
  * you have to trust: `calls` is the table to log, and "0/3 and 3/3" is what
- * makes a later regression obvious. It costs `samples × 2` short calls, once,
- * at whatever moment the app decides to ask — boot is the usual one.
+ * makes a later regression obvious. It costs `samples × 2` short calls, made
+ * one after another, once, at whatever moment the app decides to ask — boot is
+ * the usual one.
+ *
+ * Probe each provider on its own, never a fallback chain: the shape is a fact
+ * about one model on one endpoint, and a chain answers with whichever member
+ * is up.
  *
  * Errors propagate. A probe that swallowed a bad key or a dead endpoint would
  * report "this model cannot call tools", which is a much worse thing to
@@ -124,16 +129,17 @@ export async function probeJsonWithTools(
 ): Promise<JsonWithToolsProbe> {
   const samples = Math.max(1, opts.samples ?? 3);
 
-  const counted = await Promise.all(
-    SHAPES.map(async (shape) => {
-      const runs = await Promise.all(
-        Array.from({ length: samples }, () => callsTool(provider, shape, opts)),
-      );
-      return [shape, runs.filter(Boolean).length] as const;
-    }),
-  );
-
-  const calls = Object.fromEntries(counted) as Record<JsonWithTools, number>;
+  // One call at a time. A flat-rate plan caps concurrent requests: six at once
+  // on a Z.ai Coding Plan key came back with some 429s (measured 2026-09-25),
+  // and behind a fallback chain those calls were answered by the NEXT model —
+  // which the table then scored as this one. A slower probe that measures one
+  // model beats a fast one that measures a mix.
+  const calls: Record<JsonWithTools, number> = { response_format: 0, prompt: 0 };
+  for (const shape of SHAPES) {
+    for (let i = 0; i < samples; i++) {
+      if (await callsTool(provider, shape, opts)) calls[shape] += 1;
+    }
+  }
   // `response_format` first when both are clean: it is the only one of the two
   // the endpoint actually enforces, so the prompt shape is the fallback rather
   // than the equal.
