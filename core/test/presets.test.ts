@@ -113,6 +113,23 @@ describe("provider presets — every row joins to one request, correctly", () =>
       type: "disabled",
     });
   });
+
+  it("gives zai room to reason and still answer, unless the caller sets a ceiling", async () => {
+    const sent = async (maxTokens?: number) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
+      const provider = createPresetProvider("zai", {
+        apiKey: "k",
+        effort: "high",
+        ...(maxTokens ? { maxTokens } : {}),
+        fetchImpl,
+      });
+      await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+      return JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body)).max_tokens;
+    };
+    // The adapter's own default is 8,192, which GLM fills with reasoning alone.
+    expect(await sent()).toBe(65_536);
+    expect(await sent(4_000)).toBe(4_000);
+  });
 });
 
 async function drain(stream: AsyncIterable<unknown>): Promise<void> {

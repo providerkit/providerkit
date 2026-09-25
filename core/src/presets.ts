@@ -59,6 +59,10 @@ export interface ProviderPreset {
    *  omit → thinking block; disabled → none). Native Anthropic defaults to
    *  off when the field is absent and must stay unset. */
   explicitNone?: boolean;
+  /** Output ceiling when the caller sets none. Thinking and the answer share
+   *  it, so a model that reasons past the adapter's default ends the turn with
+   *  neither text nor a tool call. */
+  maxTokens?: number;
 }
 
 export const PROVIDER_PRESETS = {
@@ -298,6 +302,11 @@ export const PROVIDER_PRESETS = {
     // Model ids are BARE here — the gateway-prefixed spelling
     // (`z-ai/glm-5.3-flash`) answers 400 [1211] Unknown Model.
     explicitNone: true,
+    // GLM reasons past the thinking budget we send. Under the Anthropic
+    // adapter's 8,192 default, GLM 5.3 Flash at effort "high" spent the whole
+    // turn reasoning (about 31k characters) and returned no text and no tool
+    // call. createZaiCodingProvider reads this number too.
+    maxTokens: 65_536,
   },
   "zai-openai": {
     shape: "openai",

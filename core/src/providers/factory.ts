@@ -70,6 +70,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
     throw new Error(`[providerkit] Preset "${id}" has no defaultModel — pass a model.`);
   }
   const headers = { ...preset.headers, ...config.headers };
+  const maxTokens = config.maxTokens ?? preset.maxTokens;
 
   const { fallbacks: _fallbacks, fallbackOptions: _fallbackOptions, ...baseConfig } = config;
 
@@ -83,7 +84,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         apiKey: config.apiKey,
         model,
         effort: config.effort,
-        maxTokens: config.maxTokens,
+        maxTokens,
         baseUrl: preset.baseUrl,
         id,
         headers,
@@ -101,7 +102,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         apiKey: config.apiKey,
         model,
         effort: config.effort,
-        maxTokens: config.maxTokens,
+        maxTokens,
         baseUrl: preset.baseUrl,
         ...(preset.path ? { path: preset.path } : {}),
         headers,
@@ -115,7 +116,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         apiKey: config.apiKey,
         model,
         effort: config.effort,
-        maxTokens: config.maxTokens,
+        maxTokens,
         baseUrl: preset.baseUrl,
         id,
         headers,

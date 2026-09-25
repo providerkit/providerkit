@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.11.3] - 2026-09-25
+
+### Fixed
+
+- **`createPresetProvider("zai")` left no room to answer.** It sent no `maxTokens`, so the Anthropic adapter's 8,192 default applied. GLM 5.3 Flash at effort `"high"` spent all of it reasoning and ended the turn with no text and no tool call. `createZaiCodingProvider` already defaulted to 65,536, so the same model worked through one factory and failed through the other. A preset row can now set `maxTokens`, `zai`'s is 65,536, and both factories read it. A `maxTokens` you pass still wins.
+
 ## [0.11.2] - 2026-09-25
 
 ### Fixed

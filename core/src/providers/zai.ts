@@ -1,4 +1,5 @@
 import { createAnthropicProvider, type AnthropicConfig } from "./anthropic.ts";
+import { PROVIDER_PRESETS } from "../presets.ts";
 import type { Provider } from "../types.ts";
 
 /** Z.ai Coding Plan's Anthropic-compatible API root, not its pay-per-token API. */
@@ -24,8 +25,7 @@ export function createZaiCodingProvider(config: ZaiCodingConfig): Provider {
     baseUrl: ZAI_CODING_BASE_URL,
     bearer: true,
     explicitNone: true,
-    // Coding gateways can allocate a 32K thinking budget themselves. Leave room
-    // for the answer; callers can still set a smaller cap for their model.
-    maxTokens: config.maxTokens ?? 65_536,
+    // The preset row owns the number, so both ways to this endpoint agree.
+    maxTokens: config.maxTokens ?? PROVIDER_PRESETS.zai.maxTokens,
   });
 }
