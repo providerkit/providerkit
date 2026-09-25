@@ -38,8 +38,10 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   headers?: Record<string, string>;
   /**
    * App attribution for OpenRouter's rankings — the site URL rides as
-   * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent
-   * whenever set; an explicit entry in `headers` always wins.
+   * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent on
+   * the OpenAI-compatible and Anthropic shapes (OpenRouter reads them for app
+   * attribution); the Gemini and Responses shapes ignore them. An explicit
+   * entry in `headers` always wins.
    */
   siteUrl?: string;
   /**

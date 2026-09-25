@@ -245,9 +245,9 @@ createAnthropicProvider({
 });
 ```
 
-`siteUrl` / `siteName` work on the OpenAI shape, the Anthropic shape and
-`createPresetProvider` alike, and ride every request whenever they are set. A
-raw entry in `headers` always wins over them.
+`siteUrl` / `siteName` work on the OpenAI shape and the Anthropic shape, directly or through
+`createPresetProvider`, and ride every request whenever they are set. The Gemini and Responses
+shapes ignore them. A raw entry in `headers` always wins over them.
 
 Three fields cover the difference between one host and another — `baseUrl`, `headers`, and on the
 Anthropic shape `bearer`. There is no base class to extend and no vendor list to be absent from;
