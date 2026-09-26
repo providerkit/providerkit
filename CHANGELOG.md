@@ -2,6 +2,16 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.12.0] - 2026-09-26
+
+### Added
+
+- **The price OpenRouter reports for each call.** OpenRouter serves one model id from many hosts, and they charge different prices, so a rate you pass can only describe one of them. The OpenAI-shape adapter now reads the `usage.cost` OpenRouter puts on the last frame of a stream into a new field, `TokenUsage.reportedCostUsd`. `costUsd` and `UsageTracker` bill it over your rate, and a tracker counts it even with no rate. A free call reads as `0`. A negative or non-number cost is dropped and your rate prices the call. With your own provider key (BYOK), `cost` is only OpenRouter's fee, so the adapter adds `cost_details.upstream_inference_cost` to report the whole bill. The adapter sends no `usage: { include: true }`: OpenRouter's docs say the cost now comes on every response and the flag does nothing. Other providers are unchanged.
+
+### Changed
+
+- **`costUsd` returns `usage.reportedCostUsd` when it is set**, whatever rate you pass. `addUsage` still returns only the token counts, so a sum is priced by the rate.
+
 ## [0.11.3] - 2026-09-25
 
 ### Fixed

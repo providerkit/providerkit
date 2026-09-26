@@ -6,6 +6,12 @@
 // is a wrong number in everyone's ledger. So the arithmetic lives here and the
 // numbers stay with the caller, who can verify them line by line against a
 // price sheet.
+//
+// One number beats any rate: what the provider says the call cost
+// (`TokenUsage.reportedCostUsd`). It is the bill itself, so there is no row to
+// go stale, and where one model id is served by several hosts at different
+// prices it is the only figure that names the host that answered. When it is
+// present it wins; the caller's rate prices everything else.
 import type { TokenUsage } from "./types.ts";
 import { EMPTY_USAGE } from "./types.ts";
 
@@ -26,7 +32,10 @@ export interface ModelRate {
   cacheWrite?: number;
 }
 
-/** Add two usage records. */
+/** Add two usage records. The sum carries no `reportedCostUsd`: a call
+ *  priced by its provider plus one priced by a rate is not one bill, and
+ *  `costUsd` would price the whole sum at the one figure. Accumulate cost in
+ *  a `UsageTracker`, which prices each call as it arrives. */
 export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return {
     inputTokens: a.inputTokens + b.inputTokens,
@@ -52,12 +61,16 @@ export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
 /**
  * USD for one call.
  *
+ * A cost the provider reported wins outright, including a reported 0: a free
+ * call priced at the rate would be billed for something nobody charged.
+ *
  * Cached tokens are a SUBSET of input, not an addition to it: the miss part
  * bills at the full rate and the hit part at the cache rate. `cached` is
  * clamped to `input` so an over-reporting provider can neither drive the miss
  * count negative nor bill for more prompt than it was sent.
  */
 export function costUsd(usage: TokenUsage, rate: ModelRate): number {
+  if (usage.reportedCostUsd !== undefined) return usage.reportedCostUsd;
   const input = Math.max(0, usage.inputTokens);
   const cached = Math.min(Math.max(0, usage.cachedInputTokens), input);
   const written = Math.max(0, usage.cacheWriteTokens ?? 0);
@@ -72,10 +85,17 @@ export function costUsd(usage: TokenUsage, rate: ModelRate): number {
   );
 }
 
+/** What one call adds to a run: its reported cost, else its rate, else
+ *  nothing — an unpriced call still counts its tokens. */
+function callCost(usage: TokenUsage, rate: ModelRate | undefined): number {
+  return rate ? costUsd(usage, rate) : (usage.reportedCostUsd ?? 0);
+}
+
 /**
  * Accumulates usage and cost across the calls of one run, pricing each with
  * the rate in effect for the model that served it — so a run that switches to
  * a backup model, or spans a time-of-day price boundary, still bills correctly.
+ * A call that carries a reported cost is billed that, with or without a rate.
  */
 export class UsageTracker {
   private usage: TokenUsage = { ...EMPTY_USAGE, cacheWriteTokens: 0 };
@@ -86,16 +106,16 @@ export class UsageTracker {
 
   add(usage: TokenUsage, rate?: ModelRate): void {
     this.usage = addUsage(this.usage, usage);
+    this.cost += callCost(usage, rate);
     if (!rate) return;
-    this.cost += costUsd(usage, rate);
     const cached = Math.min(Math.max(0, usage.cachedInputTokens), Math.max(0, usage.inputTokens));
     this.saved += (cached * (rate.input - rate.cacheRead)) / 1_000_000;
   }
 
   subtract(usage: TokenUsage, rate?: ModelRate): void {
     this.usage = subtractUsage(this.usage, usage);
+    this.cost = Math.max(0, this.cost - callCost(usage, rate));
     if (!rate) return;
-    this.cost = Math.max(0, this.cost - costUsd(usage, rate));
     const cached = Math.min(Math.max(0, usage.cachedInputTokens), Math.max(0, usage.inputTokens));
     this.saved = Math.max(0, this.saved - (cached * (rate.input - rate.cacheRead)) / 1_000_000);
   }

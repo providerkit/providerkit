@@ -11,6 +11,7 @@ interface TokenUsage {
   cachedInputTokens: number; // the cached slice OF that input
   cacheWriteTokens?: number;
   outputTokens: number;
+  reportedCostUsd?: number; // what the provider billed, when it says
 }
 ```
 
@@ -54,6 +55,24 @@ before charging, so a provider that reports more cached than total cannot produc
 Prices change weekly, a stale table is worse than no table, and a table would make this package
 something that needs releasing every time a vendor moves a number. Bring your own `ModelRate`.
 :::
+
+### When the provider says what it cost
+
+OpenRouter puts the price of each call in its response. The OpenAI-shape adapter reads it into
+`usage.reportedCostUsd`, in US dollars. `costUsd` and `UsageTracker` bill that number instead of
+your rate, and a tracker counts it even when you pass no rate at all.
+
+This matters because a rate can be right and still bill the wrong amount. OpenRouter serves one
+model id from many hosts, and they charge different prices. Only the response knows which host
+answered.
+
+- A free call reports `0`, and stays `0` even if you pass a rate.
+- If you bring your own provider key, OpenRouter's `cost` is only its fee. The adapter adds what
+  your provider billed for the call, so `reportedCostUsd` is the whole bill.
+- A value that is not a price (negative, or not a number) is dropped, and your rate prices the call.
+- Other providers report no cost, so your rate prices their calls, as before.
+- `addUsage` drops `reportedCostUsd`. The sum of two calls is not one bill, so keep a running total
+  in a `UsageTracker`.
 
 `cacheSavingsUsd` is the number worth putting on a dashboard: it is the difference between what
 the cached tokens cost and what they would have cost at the full input rate — the direct measure

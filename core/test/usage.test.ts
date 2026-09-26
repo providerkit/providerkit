@@ -50,6 +50,17 @@ describe("costUsd", () => {
     );
     expect(cost).toBe(0);
   });
+
+  it("bills what the provider reported over what the rate says", () => {
+    // The rate would say $3.00. The host that answered charged $1.20, and
+    // that is the bill.
+    const cost = costUsd(usage({ inputTokens: 1_000_000, reportedCostUsd: 1.2 }), CLAUDE);
+    expect(cost).toBe(1.2);
+  });
+
+  it("keeps a free call free", () => {
+    expect(costUsd(usage({ inputTokens: 1_000_000, reportedCostUsd: 0 }), CLAUDE)).toBe(0);
+  });
 });
 
 describe("addUsage", () => {
@@ -64,6 +75,16 @@ describe("addUsage", () => {
       cacheWriteTokens: 7,
       outputTokens: 5,
     });
+  });
+
+  it("carries no reported cost — a sum is not one invoice", () => {
+    // If one call reported a cost and the other did not, keeping the one
+    // figure would make `costUsd(total, rate)` bill the whole sum at it.
+    const total = addUsage(
+      usage({ inputTokens: 10, reportedCostUsd: 0.5 }),
+      usage({ inputTokens: 1_000_000 }),
+    );
+    expect(total).not.toHaveProperty("reportedCostUsd");
   });
 });
 
@@ -83,6 +104,20 @@ describe("UsageTracker", () => {
     tracker.add(usage({ inputTokens: 100, outputTokens: 20 }));
     expect(tracker.totals).toMatchObject({ inputTokens: 100, outputTokens: 20 });
     expect(tracker.costUsd).toBe(0);
+  });
+
+  it("counts a reported cost with no rate, and prefers it over one", () => {
+    // A run that falls back from a rate-priced host to one that reports its
+    // own bill: each call keeps the price that is true for it.
+    const tracker = new UsageTracker();
+    tracker.add(usage({ inputTokens: 1_000_000 }), FLASH);
+    tracker.add(usage({ inputTokens: 1_000_000, reportedCostUsd: 0.25 }));
+    tracker.add(usage({ inputTokens: 1_000_000, reportedCostUsd: 0.1 }), CLAUDE);
+    expect(tracker.costUsd).toBeCloseTo(0.5 + 0.25 + 0.1, 10);
+    expect(tracker.isOverBudget(0.85)).toBe(true);
+
+    tracker.subtract(usage({ inputTokens: 1_000_000, reportedCostUsd: 0.25 }));
+    expect(tracker.costUsd).toBeCloseTo(0.6, 10);
   });
 
   it("reports what the cache saved, without billing it", () => {

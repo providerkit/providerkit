@@ -128,6 +128,15 @@ export interface TokenUsage {
    *  the OpenAI-shape auto-cachers bill them at it. 0 when not reported. */
   cacheWriteTokens?: number;
   outputTokens: number;
+  /**
+   * What the provider says this call cost, in USD: its bill, not our
+   * arithmetic. Only OpenRouter sends one today. It is the one number a rate
+   * cannot give, because OpenRouter serves one model id from many hosts at
+   * different prices, and only the response knows which host answered.
+   * Absent when the provider sent none, or sent one we could not trust.
+   * `costUsd` and `UsageTracker` bill it over any rate.
+   */
+  reportedCostUsd?: number;
 }
 
 export const EMPTY_USAGE: TokenUsage = {

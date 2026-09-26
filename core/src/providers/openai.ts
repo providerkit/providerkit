@@ -131,14 +131,16 @@ const OPENROUTER_HOSTS: Record<string, string> = {
   zai: "z-ai",
 };
 
-export function openRouterHostFor(baseUrl: string, model: string): string | undefined {
-  let host: string;
+function isOpenRouter(baseUrl: string): boolean {
   try {
-    host = new URL(baseUrl).hostname;
+    return new URL(baseUrl).hostname.includes("openrouter.ai");
   } catch {
-    return undefined;
+    return false;
   }
-  if (!host.includes("openrouter.ai")) return undefined;
+}
+
+export function openRouterHostFor(baseUrl: string, model: string): string | undefined {
+  if (!isOpenRouter(baseUrl)) return undefined;
   const slash = model.indexOf("/");
   if (slash <= 0) return undefined;
   const vendor = model.slice(0, slash).toLowerCase();
@@ -341,15 +343,54 @@ interface OpenAIChunk {
     /** DeepSeek's native API reports the cache-hit count here instead of in
      *  `prompt_tokens_details`, and it is absent from every OpenAI SDK type. */
     prompt_cache_hit_tokens?: number;
+    /** OpenRouter only, from here down: what the call cost, in its credits,
+     *  which are US dollars. */
+    cost?: unknown;
+    is_byok?: boolean;
+    cost_details?: { upstream_inference_cost?: unknown } | null;
   } | null;
   /** Present only on the in-band failure below — never beside a choice.
    *  `code` is the numeric HTTP status on the gateways, a slug on OpenAI. */
   error?: { message?: string; code?: string | number; type?: string };
 }
 
+/** A price off the wire, or undefined when it is not one. A negative or a
+ *  string falls back to the caller's rate rather than billing a nonsense
+ *  number. 0 is a real price: the one a free model charges. */
+function price(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * What an OpenRouter call cost, in USD, or undefined when it did not say.
+ *
+ * Nothing has to ask for it. OpenRouter's usage-accounting docs (read
+ * 2026-09-26) say every response now carries the full usage record, cost
+ * included, on the last frame of a stream, and that `usage: { include: true }`
+ * is deprecated and does nothing. Measured the same day: a streamed call and a
+ * plain one, neither sending the flag, both came back with `usage.cost`, the
+ * stream on its last frame. So the request does not send it.
+ *
+ * With the caller's own provider key (BYOK), `cost` is only OpenRouter's fee.
+ * The inference is billed to the caller's provider account and arrives as
+ * `cost_details.upstream_inference_cost`, so the call cost the two together.
+ * Without that second figure there is no whole bill to report, and the
+ * caller's rate prices the call instead.
+ */
+function openRouterCostUsd(usage: NonNullable<OpenAIChunk["usage"]>): number | undefined {
+  const cost = price(usage.cost);
+  if (cost === undefined || usage.is_byok !== true) return cost;
+  const upstream = price(usage.cost_details?.upstream_inference_cost);
+  return upstream === undefined ? undefined : cost + upstream;
+}
+
 export function createOpenAIProvider(config: OpenAIConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "openai";
+  // Keyed on the host, not the id: the host is who sends the bill, and
+  // `usage.cost` is its field in its unit. Another gateway that sends a
+  // `cost` has not said what it means.
+  const reportsCost = isOpenRouter(baseUrl);
 
   const provider: Provider = {
     id,
@@ -499,6 +540,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             chunk.usage.prompt_tokens_details?.cached_tokens ??
             chunk.usage.prompt_cache_hit_tokens ??
             0;
+          const reportedCostUsd = reportsCost ? openRouterCostUsd(chunk.usage) : undefined;
           yield {
             type: "usage",
             usage: {
@@ -507,6 +549,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
               // Anthropic's, which excludes them. No reconciling to do.
               cachedInputTokens: cached,
               outputTokens: chunk.usage.completion_tokens ?? 0,
+              ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
             },
           };
         }

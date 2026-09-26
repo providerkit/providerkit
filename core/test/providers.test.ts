@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { createAnthropicProvider, toAnthropicMessages } from "../src/providers/anthropic.ts";
 import { createOpenAIProvider, effortParams, toOpenAIMessages } from "../src/providers/openai.ts";
+import { createPresetProvider } from "../src/providers/factory.ts";
 import { ProviderError } from "../src/errors.ts";
 import {
   EFFORTS,
@@ -643,6 +644,132 @@ describe("cached-token spellings", () => {
     ).toMatchObject({ cachedInputTokens: 700 });
     expect(await usage({ prompt_tokens: 10, completion_tokens: 5 })).toMatchObject({
       cachedInputTokens: 0,
+    });
+  });
+});
+
+describe("provider-reported cost", () => {
+  // OpenRouter's usage record, shaped as its API reference prints it. `cost` is
+  // what the call was billed, in USD; one model id is served by many hosts at
+  // different rates, so this number is the only one that knows which answered.
+  const OPENROUTER_USAGE = {
+    prompt_tokens: 1_200,
+    completion_tokens: 40,
+    total_tokens: 1_240,
+    cost: 0.000196,
+    is_byok: false,
+    prompt_tokens_details: { cached_tokens: 1_000, audio_tokens: 0 },
+    cost_details: {
+      upstream_inference_cost: null,
+      upstream_inference_prompt_cost: 0.000176,
+      upstream_inference_completions_cost: 0.00002,
+    },
+    completion_tokens_details: { reasoning_tokens: 0 },
+  };
+
+  const usageFrom = async (
+    record: Record<string, unknown>,
+    baseUrl = "https://openrouter.ai/api",
+  ) => {
+    const { fetchImpl } = recorder([j({ choices: [], usage: record })]);
+    const chunks = await collect(
+      createOpenAIProvider({ apiKey: "k", model: "m", baseUrl, fetchImpl }).createStream(
+        [{ role: "user", content: "hi" }],
+        [],
+      ),
+    );
+    return chunks.find((c) => c.type === "usage")?.usage;
+  };
+
+  it("reads the cost off the last frame of a streamed OpenRouter turn", async () => {
+    // The wire as OpenRouter sends it: a keep-alive comment first, the usage
+    // record on the final frame beside an empty choice, then `[DONE]`, and
+    // reads that end mid-frame.
+    const frame = (o: unknown) => `data: ${j(o)}\n\n`;
+    const body = [
+      ": OPENROUTER PROCESSING\n\n",
+      frame({ choices: [{ index: 0, delta: { content: "Hi" }, finish_reason: null }] }),
+      frame({ choices: [{ index: 0, delta: { content: "" }, finish_reason: "stop" }] }),
+      frame({
+        choices: [{ index: 0, delta: { content: "" }, finish_reason: null }],
+        usage: OPENROUTER_USAGE,
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const bytes = new TextEncoder().encode(body);
+    const cuts = [0, 7, Math.floor(bytes.length / 2), bytes.length - 20, bytes.length];
+    const fetchImpl = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let i = 0; i < cuts.length - 1; i += 1) {
+              controller.enqueue(bytes.slice(cuts[i], cuts[i + 1]));
+            }
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+
+    const chunks = await collect(
+      createPresetProvider("openrouter", {
+        apiKey: "k",
+        model: "z-ai/glm-5.3-flash",
+        fetchImpl,
+      }).createStream([{ role: "user", content: "hi" }], []),
+    );
+    expect(chunks.filter((c) => c.content).map((c) => c.content)).toEqual(["Hi"]);
+    expect(chunks.filter((c) => c.type === "usage").map((c) => c.usage)).toEqual([
+      {
+        inputTokens: 1_200,
+        cachedInputTokens: 1_000,
+        outputTokens: 40,
+        reportedCostUsd: 0.000196,
+      },
+    ]);
+  });
+
+  it("reads a free call as 0, not as a missing cost", async () => {
+    // A `:free` model bills nothing. Read as "no cost reported", the caller's
+    // rate would price it as if it had been paid for.
+    expect(await usageFrom({ ...OPENROUTER_USAGE, cost: 0 })).toMatchObject({
+      reportedCostUsd: 0,
+    });
+  });
+
+  it("does not trust a cost it cannot read as money", async () => {
+    // A malformed field falls back to the caller's rate rather than billing
+    // a nonsense number.
+    for (const cost of [-0.01, "0.0002", null, undefined]) {
+      expect(await usageFrom({ ...OPENROUTER_USAGE, cost })).not.toHaveProperty("reportedCostUsd");
+    }
+  });
+
+  it("adds the upstream bill on a bring-your-own-key call", async () => {
+    // With the caller's own provider key, `cost` is only OpenRouter's fee and
+    // the inference itself is billed to that provider account. Taking `cost`
+    // alone would under-report the call many times over.
+    expect(
+      await usageFrom({
+        ...OPENROUTER_USAGE,
+        is_byok: true,
+        cost: 0.00001,
+        cost_details: { upstream_inference_cost: 0.0002 },
+      }),
+    ).toMatchObject({ reportedCostUsd: 0.00021 });
+    // No upstream figure means no full cost to report — the rate prices it.
+    expect(
+      await usageFrom({ ...OPENROUTER_USAGE, is_byok: true, cost_details: null }),
+    ).not.toHaveProperty("reportedCostUsd");
+  });
+
+  it("reads no cost from an endpoint that is not OpenRouter", async () => {
+    // `usage.cost` is OpenRouter's field, in OpenRouter's unit. Another
+    // gateway that happens to send one has not told us what it means.
+    expect(await usageFrom(OPENROUTER_USAGE, "https://api.deepseek.com")).toEqual({
+      inputTokens: 1_200,
+      cachedInputTokens: 1_000,
+      outputTokens: 40,
     });
   });
 });
