@@ -283,6 +283,49 @@ describe("provider composition", () => {
     expect(completion.provider).toBe("deepseek");
     expect(completion.model).toBe("deepseek-v4.1-flash");
   });
+
+  it("benches a backup that refuses its model id, rather than calling it every time", async () => {
+    // A real outage: the primary throttled, and the backup was set up with an
+    // id its API does not serve. While that 400 read as `invalid` it had no
+    // cooldown, so every call walked past the throttled primary and sent the
+    // backup the same request again.
+    const throttled: Provider = {
+      id: "zai",
+      model: "glm-5.3-flash",
+      async *createStream() {
+        yield* [];
+        throw new ProviderError("zai", "rate", "slow down");
+      },
+    };
+    let backupCalls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      backupCalls++;
+      return new Response(
+        JSON.stringify({
+          error: {
+            message:
+              "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-v4.1-flash.",
+            type: "invalid_request_error",
+            param: null,
+            code: "invalid_request_error",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    };
+    const provider = withConfiguredFallbacks(throttled, {
+      fallbacks: [{ preset: "deepseek", apiKey: "k", model: "deepseek-v4.1-flash", fetchImpl }],
+    });
+
+    await expect(drainStream(provider.createStream([], []), provider.model)).rejects.toMatchObject({
+      provider: "deepseek",
+      kind: "model",
+    });
+    await expect(drainStream(provider.createStream([], []), provider.model)).rejects.toBeInstanceOf(
+      NoAvailableProviderError,
+    );
+    expect(backupCalls).toBe(1);
+  });
 });
 
 describe("reset hints survive the wire", () => {

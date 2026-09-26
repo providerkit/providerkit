@@ -396,6 +396,16 @@ const MODEL_PATTERNS: readonly RegExp[] = [
   /(?:model|models\/)[^.{\n]{0,40}(?:not found|does not exist|unknown)/i,
   /no model named/i,
   /unsupported model/i,
+  // These three arrive as a 400, which on status alone is `invalid`: no
+  // fallback cooldown, so a pool sends the same doomed call on every attempt.
+  // Each is quoted from a real response.
+  // DeepSeek: "The supported API model names are deepseek-flash,
+  // deepseek-v4-pro, but you passed deepseek-v4.1-flash."
+  /supported API model names are/i,
+  // Z.ai, code 1211: "[1211][Unknown Model, please check the model code.]"
+  /unknown model/i,
+  // OpenRouter: "z-ai/glm-5.3-flash@novita is not a valid model ID"
+  /is not a valid model ID/i,
 ];
 
 const AUTH_PATTERNS: readonly RegExp[] = [

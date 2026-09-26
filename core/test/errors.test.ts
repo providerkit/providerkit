@@ -392,6 +392,44 @@ describe("the deterministic failures — fail fast, never burn the retry budget"
     expect(kindOf(apiError(400, { message: "The model `gpt-9` does not exist" }))).toBe("model");
   });
 
+  // Real 400 bodies. Read as `invalid`, a pool's backup that got one was sent
+  // the same request again on every call, because `invalid` has no cooldown.
+  it.each([
+    [
+      "DeepSeek",
+      '{"error":{"message":"The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek-v4.1-flash.","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}',
+    ],
+    [
+      "Z.ai",
+      '{"type":"error","error":{"type":"invalid_request_error","code":"1211","message":"[1211][Unknown Model, please check the model code.]"}}',
+    ],
+    [
+      "OpenRouter",
+      '{"error":{"message":"z-ai/glm-5.3-flash@novita is not a valid model ID","code":400}}',
+    ],
+  ])("%s's unknown-model 400 is `model`", (_vendor, body) => {
+    expect(classifyHttp(400, body)).toBe("model");
+  });
+
+  // The control: a 400 about what a KNOWN model accepts is still our request's
+  // fault, and must not be read as a missing model.
+  it.each([
+    [
+      "OpenRouter, reasoning",
+      '{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400}}',
+    ],
+    [
+      "Anthropic, prefill",
+      '{"type":"error","error":{"type":"invalid_request_error","message":"This model does not support assistant message prefill. The conversation must end with a user message."}}',
+    ],
+    [
+      "Anthropic, thinking",
+      '{"type":"error","error":{"type":"invalid_request_error","message":"\\"thinking.type.disabled\\" is not supported for this model."}}',
+    ],
+  ])("a 400 about what a known model accepts stays `invalid` (%s)", (_source, body) => {
+    expect(classifyHttp(400, body)).toBe("invalid");
+  });
+
   it("a content filter is not a bug in our request", () => {
     expect(kindOf(apiError(400, { message: "blocked by content policy" }))).toBe("content");
     expect(kindOf(apiError(400, { type: "content_filter" }))).toBe("content");

@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.12.1] - 2026-09-26
+
+### Fixed
+
+- **A model id the provider does not serve is now a `model` error, not `invalid`, for DeepSeek, Z.ai and OpenRouter.** All three answer it with a 400, and a 400 whose words the classifier does not know is `invalid`. `invalid` has no fallback cooldown, so a `FallbackPool` sent the same request to that provider on every call and got the same 400 back. As `model`, the provider rests for an hour after its first refusal, and the pool stops calling it. The new wordings are DeepSeek's "The supported API model names are …", Z.ai's code 1211 "Unknown Model", and OpenRouter's "… is not a valid model ID".
+
 ## [0.12.0] - 2026-09-26
 
 ### Added
