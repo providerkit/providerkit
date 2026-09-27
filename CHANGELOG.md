@@ -2,7 +2,7 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
-## [Unreleased]
+## [0.12.3] - 2026-09-27
 
 The Claude thinking changes come from Anthropic's documentation, read 2026-09-27: the per-model thinking table and the Thinking and Effort pages. None of it was measured against the live API.
 
