@@ -357,6 +357,12 @@ export interface StreamOptions {
    * asks the same model both ways. See {@link JsonWithTools}.
    */
   jsonWithTools?: JsonWithTools;
+  /**
+   * Stable id for the conversation or job this call belongs to. Sent only to
+   * endpoints whose preset names a `sessionHeader` (OpenCode Go routes and
+   * caches by it); every other endpoint ignores it.
+   */
+  sessionId?: string;
 }
 
 export interface Provider {

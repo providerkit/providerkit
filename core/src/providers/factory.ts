@@ -30,6 +30,10 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** Which model to run. Absent = the preset's `defaultModel`; a preset
    *  without either throws rather than sending a request nobody chose. */
   model?: string;
+  /** A model chain on this one endpoint and key: the first answers, the rest
+   *  take over in order when it fails (quota, rate, outage). Wins over `model`
+   *  and the preset's `rotation`; `fallbacks` still run after the chain. */
+  models?: readonly string[];
   effort?: Effort;
   /** Output ceiling. The Anthropic shape requires one; adapters default it. */
   maxTokens?: number;
@@ -65,14 +69,31 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
     );
   }
   const preset: ProviderPreset = PROVIDER_PRESETS[id];
-  const model = config.model ?? preset.defaultModel;
+  const chain = config.models?.length ? config.models : config.model ? undefined : preset.rotation;
+  if (chain && chain.length > 1) {
+    const { models: _models, fallbacks = [], ...single } = config;
+    return createPresetProvider(id, {
+      ...single,
+      model: chain[0],
+      fallbacks: [
+        ...chain.slice(1).map((model) => ({ ...single, preset: id, model })),
+        ...fallbacks,
+      ],
+    });
+  }
+  const model = chain?.[0] ?? config.model ?? preset.defaultModel;
   if (!model) {
     throw new Error(`[providerkit] Preset "${id}" has no defaultModel — pass a model.`);
   }
   const headers = { ...preset.headers, ...config.headers };
   const maxTokens = config.maxTokens ?? preset.maxTokens;
 
-  const { fallbacks: _fallbacks, fallbackOptions: _fallbackOptions, ...baseConfig } = config;
+  const {
+    fallbacks: _fallbacks,
+    fallbackOptions: _fallbackOptions,
+    models: _models,
+    ...baseConfig
+  } = config;
 
   let provider: Provider;
   switch (preset.shape) {
@@ -107,6 +128,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         ...(preset.path ? { path: preset.path } : {}),
         headers,
         ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
+        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         fetchImpl: config.fetchImpl,
       });
       break;

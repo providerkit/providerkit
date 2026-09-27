@@ -2,6 +2,14 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.14.0] - 2026-09-27
+
+### Added
+
+- **`opencode-go` preset.** OpenCode Go serves many open models on one key, and each model has its own monthly limit. By default the preset tries `mimo-v2.6-flash`, `mimo-v2.5`, `glm-5.3-flash`, `qwen3.8-flash` and `longcat-2.0`, in that order, and moves to the next when one fails. All five passed plain text, tool calls and json_schema on 2026-09-27. DeepSeek is left out because Go serves it only when the workspace allows Global regions.
+- **`models` on `createPresetProvider`.** A chain of models on one endpoint and key: the first answers, and the rest take over in order when it fails. It wins over `model` and the preset's `rotation`, and `fallbacks` still run after it.
+- **`StreamOptions.sessionId`.** The conversation or job id. It goes only to endpoints that ask for it (Go reads `x-opencode-session` and refuses a call without it). Everything else ignores it. A call without one uses the provider's own random id.
+
 ## [0.13.2] - 2026-09-27
 
 ### Fixed
