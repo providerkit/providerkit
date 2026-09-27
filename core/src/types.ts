@@ -248,13 +248,20 @@ export class JsonAnswerError extends Error {
 /** A fenced block, whose fences count only at the start of a line. A JSON
  *  string can't hold a raw newline, so no line of JSON starts with a fence, and
  *  a value carrying one (a code sample) never ends the block early. `[^\S\n]`
- *  is a space, a tab, or the `\r` of a CRLF line. */
-const FENCED_BLOCK = /^[^\S\n]*```[^\S\n]*([^\s`]*)[^\n]*\n([\s\S]*?)^[^\S\n]*```/gm;
+ *  is a space, a tab, or the `\r` of a CRLF line.
+ *
+ *  What follows the language on the fence line is kept: a model sometimes
+ *  starts the JSON there (```json {"a": 1}), so when it isn't blank it is the
+ *  body's first line. Dropping it left an empty body, or only the tail. Blank
+ *  means trim()'s blank, which is wider than JSON's: a no-break space there
+ *  would reach JSON.parse and fail it. */
+const FENCED_BLOCK = /^[^\S\n]*```[^\S\n]*([^\s`]*)([^\n]*)\n([\s\S]*?)^[^\S\n]*```/gm;
 
 function fencedJson(text: string): string | undefined {
-  for (const [, info = "", body = ""] of text.matchAll(FENCED_BLOCK)) {
+  for (const [, info = "", rest = "", body = ""] of text.matchAll(FENCED_BLOCK)) {
     const language = info.toLowerCase();
-    if (language === "" || language === "json") return body;
+    if (language !== "" && language !== "json") continue;
+    return rest.trim() === "" ? body : `${rest}\n${body}`;
   }
   return undefined;
 }
