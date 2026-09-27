@@ -35,7 +35,17 @@ describe("parseJsonAnswer", () => {
       { a: 1, b: 2 },
     ],
     ["JSON against the fence, with no language", `${FENCE}{"a": 1}\n${FENCE}`, { a: 1 }],
-    ["a no-break space after the language", `${FENCE}json\u00a0\n{"a": 1}\n${FENCE}`, { a: 1 }],
+    [
+      "a title after the language",
+      `${FENCE}json title="report.json"\n{"a": 1}\n${FENCE}`,
+      { a: 1 },
+    ],
+    ["words after the language", `${FENCE}json here you go\n{"a": 1}\n${FENCE}`, { a: 1 }],
+    [
+      "an attribute block after the language",
+      `${FENCE}json {.report}\n{"a": 1}\n${FENCE}`,
+      { a: 1 },
+    ],
     ["a bare number", " 42 ", 42],
   ])("reads %s", (_name, text, expected) => {
     expect(parseJsonAnswer(text)).toEqual(expected);
@@ -63,6 +73,25 @@ describe("parseJsonAnswer", () => {
     expect((error as JsonAnswerError).cause).toBeInstanceOf(SyntaxError);
   });
 
+  // Text after the language is either where the JSON starts or a label on the
+  // block. When nothing parses, the error names the JSON's fault, not the label's.
+  it("names the body's fault when a labelled block holds broken JSON", () => {
+    const text = `${FENCE}json title="report.json"\n{"a": 1,}\n${FENCE}`;
+    expect(causeOf(text)).toBe(parseErrorOf('{"a": 1,}\n'));
+  });
+
+  it("names the whole JSON's fault when it starts on the fence line", () => {
+    const text = `${FENCE}json {"a": 1,\n"b": 2,}\n${FENCE}`;
+    expect(causeOf(text)).toBe(parseErrorOf(' {"a": 1,\n"b": 2,}\n'));
+  });
+
+  // A blank fence line takes the one-reading path, so the error is exactly
+  // JSON.parse's for the body, with no newline joined on the front.
+  it("gives a blank fence line's block the body's own error", () => {
+    const text = `${FENCE}json\nSorry, I can't help with that.\n${FENCE}`;
+    expect(causeOf(text)).toBe(parseErrorOf("Sorry, I can't help with that.\n"));
+  });
+
   it("throws on an object cut off before it closes", () => {
     const text = `${FENCE}json\n{"items": [1, 2`;
     expect(thrownBy(() => parseJsonAnswer(text))).toMatchObject({ text });
@@ -84,4 +113,16 @@ function thrownBy(run: () => unknown): unknown {
     return error;
   }
   throw new Error("expected a throw, and nothing was thrown");
+}
+
+/** The SyntaxError message inside the JsonAnswerError this answer throws. */
+function causeOf(text: string): string {
+  const error = thrownBy(() => parseJsonAnswer(text));
+  expect(error).toMatchObject({ name: "JsonAnswerError", text });
+  return ((error as JsonAnswerError).cause as SyntaxError).message;
+}
+
+/** What JSON.parse says about this exact string, in the engine running the test. */
+function parseErrorOf(candidate: string): string {
+  return (thrownBy(() => JSON.parse(candidate)) as SyntaxError).message;
 }
