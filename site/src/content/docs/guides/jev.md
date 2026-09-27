@@ -126,6 +126,12 @@ const { usage } = await jev.ask(state, questions);
 costUsd(usage, { input: 0.042, output: 0, cacheRead: 0 }); // TypeSafe's list price
 ```
 
+You pay for the state once per call, however many questions you ask about it. An adopter
+measured this on 2026-09-27 with the same state of about 22,000 characters: one question cost
+6,601 input tokens, and three cost 6,681. So ask everything you need about a state in one
+call, and keep page data out of each question's options. Data repeated in every question is
+billed every time.
+
 ## Limits
 
 Jev reads text only. A request holds up to 64k tokens, and the state plus the longest question
