@@ -11,6 +11,7 @@
 // empty balance, "check your key" for a plan that never included the API).
 
 import { parseUsageLimitBody, type RateLimitWindow } from "./rate-limit.ts";
+import type { FilePart } from "./types.ts";
 
 /** What kind of failure this is, named by what actually fixes it. */
 export type ErrorKind =
@@ -690,4 +691,19 @@ export function describeProviderError(err: unknown): Record<string, unknown> {
     };
   }
   return { error: messageOf(err), kind: classify(err) };
+}
+
+/**
+ * A file part on a wire that cannot carry one. Refused, never dropped: a
+ * dropped attachment is a model answering about a file it never saw, on the
+ * happy path, where nothing retries and nothing logs. `adapter` names the
+ * wire, because `provider` is often a gateway's id rather than the shape's.
+ */
+export function fileRefused(provider: string, adapter: string, part: FilePart): ProviderError {
+  return new ProviderError(
+    provider,
+    "invalid",
+    `${provider}: the ${adapter} adapter can't send a file (${part.mimeType}). Only the Gemini ` +
+      "adapter takes files. Send this request to a Gemini model, or leave the file out.",
+  );
 }

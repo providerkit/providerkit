@@ -360,6 +360,20 @@ describe("toAnthropicMessages", () => {
     ]);
     expect(JSON.stringify(messages)).not.toContain("secret thoughts");
   });
+
+  it("sends an image as a base64 source block", () => {
+    const { messages } = toAnthropicMessages([
+      { role: "user", content: [{ type: "image", mimeType: "image/png", data: "AAA" }] },
+    ]);
+    expect(messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAA" } },
+        ],
+      },
+    ]);
+  });
 });
 
 // ── OpenAI shape ──────────────────────────────────────────────────────────

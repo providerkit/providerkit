@@ -3,7 +3,7 @@
 // This is the dialect most gateways speak, so one adapter serves OpenAI,
 // OpenRouter, DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio.
 // Their divergences are small and named where they appear.
-import { streamError } from "../errors.ts";
+import { fileRefused, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
@@ -265,13 +265,13 @@ function mapFinishReason(reason: string | null | undefined): FinishReason | unde
   }
 }
 
-function partsToOpenAI(content: string | ContentPart[]): unknown {
+function partsToOpenAI(content: string | ContentPart[], provider: string): unknown {
   if (typeof content === "string") return content;
-  return content.map((part) =>
-    part.type === "text"
-      ? { type: "text", text: part.text }
-      : { type: "image_url", image_url: { url: toDataUri(part) } },
-  );
+  return content.map((part) => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "file") throw fileRefused(provider, "OpenAI", part);
+    return { type: "image_url", image_url: { url: toDataUri(part) } };
+  });
 }
 
 /**
@@ -280,7 +280,7 @@ function partsToOpenAI(content: string | ContentPart[]): unknown {
  * made a tool call. A caller running a turn with thinking OFF must strip it
  * first (`stripReasoning`); the two cannot be mixed.
  */
-export function toOpenAIMessages(messages: readonly ChatMessage[]): unknown[] {
+export function toOpenAIMessages(messages: readonly ChatMessage[], provider = "openai"): unknown[] {
   const out: unknown[] = [];
   for (const message of messages) {
     switch (message.role) {
@@ -289,7 +289,7 @@ export function toOpenAIMessages(messages: readonly ChatMessage[]): unknown[] {
         break;
 
       case "user":
-        out.push({ role: "user", content: partsToOpenAI(message.content) });
+        out.push({ role: "user", content: partsToOpenAI(message.content, provider) });
         break;
 
       case "tool":
@@ -423,7 +423,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       const effort = opts.effort ?? config.effort;
       const model = opts.model ?? config.model;
 
-      const body = toOpenAIMessages(messages);
+      const body = toOpenAIMessages(messages, id);
       const request: Record<string, unknown> = {
         model,
         messages: body,

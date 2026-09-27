@@ -26,8 +26,8 @@ export function estimateTokens(text: string): number {
 
 function textOf(message: ChatMessage): string {
   if (message.role === "user" && typeof message.content !== "string") {
-    // Only the words are countable; an image's cost is the provider's own
-    // arithmetic and no character count approximates it.
+    // Only the words are countable; an image's or a file's cost is the
+    // provider's own arithmetic and no character count approximates it.
     return message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
   }
   return typeof message.content === "string" ? message.content : "";

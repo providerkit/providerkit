@@ -47,6 +47,20 @@ verbatim — DeepSeek returns a 400 on a tool-call turn that arrives without its
 The mirror of that rule: a turn with thinking **disabled** must not carry reasoning. Use
 `stripReasoning(messages)` before sending one.
 
+A user turn's parts are text, images and files. A file is a PDF, a recording or a video, sent as
+base64 bytes with its media type:
+
+```ts
+{ type: "file", mimeType: "application/pdf", data: pdfBase64 }
+```
+
+Only the Gemini adapter sends a file. Gemini takes up to 100 MB of inline data per request, and
+50 MB for a PDF (documented, Gemini API "File input methods", read 2026-09-27). The base64 text is a
+third larger than the file. The other adapters throw an `invalid` `ProviderError` that names the
+adapter and the media type, before any request goes out. They never drop the file, because the
+model would then answer about a file it never saw. A `FallbackPool` doesn't pass an `invalid` error
+on to the next provider, so send a request with a file to a Gemini provider directly.
+
 ## Chunks
 
 ```ts

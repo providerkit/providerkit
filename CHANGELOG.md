@@ -4,7 +4,11 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 ## [Unreleased]
 
-Everything below comes from Anthropic's documentation, read 2026-09-27: the per-model thinking table and the Thinking and Effort pages. None of it was measured against the live API.
+The Claude thinking changes come from Anthropic's documentation, read 2026-09-27: the per-model thinking table and the Thinking and Effort pages. None of it was measured against the live API.
+
+### Added
+
+- **A user turn can carry a file: a PDF, a recording, a video.** The new part is `{ type: "file", mimeType, data }`, base64 bytes like an image part. The Gemini adapter sends it as `inlineData`, the way it sends an image. Gemini takes up to 100 MB of inline data per request, and 50 MB for a PDF (documented, Gemini API "File input methods", read 2026-09-27); nothing here enforces that limit. The OpenAI, Anthropic and Responses adapters throw an `invalid` `ProviderError` before any request goes out, naming the adapter and the media type. The exported converters (`toOpenAIMessages`, `toAnthropicMessages`, `toResponsesInput`) refuse it too, and take the provider id to name as an optional second argument.
 
 ### Fixed
 

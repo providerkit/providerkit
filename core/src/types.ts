@@ -42,7 +42,31 @@ export interface ImagePart {
   data: string;
 }
 
-export type ContentPart = TextPart | ImagePart;
+/** A file's media type: anything but an image's, because an image is an
+ *  `ImagePart`, which every adapter can send. */
+export type FileMimeType =
+  `application/${string}` | `audio/${string}` | `video/${string}` | `text/${string}`;
+
+/**
+ * A file the model reads — a PDF, a recording, a video — as base64 bytes,
+ * never a URL. Only the Gemini adapter sends one, as `inlineData`, the way it
+ * sends an image. Every other adapter refuses it with an `invalid`
+ * ProviderError before any request goes out, rather than drop it: a dropped
+ * attachment is a model answering about a file it never saw.
+ *
+ * Gemini takes inline data up to 100 MB per request, 50 MB for a PDF (Gemini
+ * API "File input methods", read 2026-09-27). The request carries the base64
+ * text, which is a third larger than the file. Past that limit the documented
+ * route is Gemini's File API, which this package does not wrap. Nothing here
+ * enforces the limit; Gemini answers an oversized request itself.
+ */
+export interface FilePart {
+  type: "file";
+  mimeType: FileMimeType;
+  data: string;
+}
+
+export type ContentPart = TextPart | ImagePart | FilePart;
 
 /**
  * A tool the model asked to run. `arguments` is the RAW JSON string, not a

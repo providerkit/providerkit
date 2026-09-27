@@ -570,4 +570,39 @@ describe("toGeminiContents", () => {
     expect(contents[0]!.parts[1]).toEqual({ inlineData: { mimeType: "image/png", data: "AAA" } });
     expect(contents[1]!.parts[1]).toEqual({ inlineData: { mimeType: "image/jpeg", data: "BBB" } });
   });
+
+  it("sends a PDF, audio and video as inlineData, the way it sends an image", async () => {
+    // The one adapter that takes files. Without it, media is the reason an
+    // adopter keeps a vendor SDK beside this package.
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider(fetchImpl).createStream(
+        [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is in these" },
+              { type: "file", mimeType: "application/pdf", data: "JVBERi0" },
+              { type: "file", mimeType: "audio/mpeg", data: "SUQz" },
+              { type: "file", mimeType: "video/mp4", data: "AAAAIGZ0eXA" },
+              { type: "image", mimeType: "image/png", data: "iVBORw0K" },
+            ],
+          },
+        ],
+        [],
+      ),
+    );
+    expect(seen[0]!.body.contents).toEqual([
+      {
+        role: "user",
+        parts: [
+          { text: "what is in these" },
+          { inlineData: { mimeType: "application/pdf", data: "JVBERi0" } },
+          { inlineData: { mimeType: "audio/mpeg", data: "SUQz" } },
+          { inlineData: { mimeType: "video/mp4", data: "AAAAIGZ0eXA" } },
+          { inlineData: { mimeType: "image/png", data: "iVBORw0K" } },
+        ],
+      },
+    ]);
+  });
 });

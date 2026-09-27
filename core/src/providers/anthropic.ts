@@ -1,5 +1,5 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
-import { streamError } from "../errors.ts";
+import { fileRefused, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
@@ -177,16 +177,16 @@ function mapStopReason(reason: string | undefined): FinishReason | undefined {
   }
 }
 
-function partsToAnthropic(content: string | ContentPart[]): unknown[] {
+function partsToAnthropic(content: string | ContentPart[], provider: string): unknown[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
-  return content.map((part) =>
-    part.type === "text"
-      ? { type: "text", text: part.text }
-      : {
-          type: "image",
-          source: { type: "base64", media_type: part.mimeType, data: part.data },
-        },
-  );
+  return content.map((part) => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "file") throw fileRefused(provider, "Anthropic", part);
+    return {
+      type: "image",
+      source: { type: "base64", media_type: part.mimeType, data: part.data },
+    };
+  });
 }
 
 /**
@@ -228,7 +228,10 @@ function jsonBlock(json: JsonOutput): unknown {
   return { type: "text", text: schemaPrompt(json.schema) };
 }
 
-export function toAnthropicMessages(messages: readonly ChatMessage[]): {
+export function toAnthropicMessages(
+  messages: readonly ChatMessage[],
+  provider = "anthropic",
+): {
   system?: unknown[];
   messages: unknown[];
 } {
@@ -247,7 +250,7 @@ export function toAnthropicMessages(messages: readonly ChatMessage[]): {
   for (const message of messages) {
     if (message.role === "system") continue;
     if (message.role === "user") {
-      pushBlocks("user", partsToAnthropic(message.content));
+      pushBlocks("user", partsToAnthropic(message.content, provider));
       continue;
     }
     if (message.role === "tool") {
@@ -327,7 +330,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       const model = opts.model ?? config.model;
       const maxTokens = opts.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
       const effort = opts.effort ?? config.effort;
-      const { system, messages: body } = toAnthropicMessages(messages);
+      const { system, messages: body } = toAnthropicMessages(messages, id);
 
       const request: Record<string, unknown> = {
         model,

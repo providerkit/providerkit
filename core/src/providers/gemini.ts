@@ -147,6 +147,8 @@ export function toGeminiContents(messages: readonly ChatMessage[]): {
         break;
 
       case "user":
+        // An image and a file ride the same way, as bytes and their media
+        // type. This is the one wire that takes a file.
         contents.push({
           role: "user",
           parts:

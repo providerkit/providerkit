@@ -216,6 +216,9 @@ interface Vendor {
   throttleSays: string;
   /** How this wire says "do not think", read off the request that went out. */
   refusesThinking(body: Record<string, unknown>): boolean;
+  /** Whether this wire carries a file part (a PDF, audio, video). Only
+   *  Gemini's does; the other three must refuse one, never drop it. */
+  takesFiles: boolean;
 }
 
 const VENDORS: Vendor[] = [
@@ -226,6 +229,7 @@ const VENDORS: Vendor[] = [
     throttled: OPENAI_THROTTLED,
     throttleSays: "rate limit exceeded",
     refusesThinking: (body) => at(body, "reasoning_effort") === "none",
+    takesFiles: false,
   },
   {
     name: "anthropic",
@@ -238,6 +242,7 @@ const VENDORS: Vendor[] = [
     // (Anthropic per-model table, read 2026-09-27); other Claude models spell
     // none differently, and providers.test.ts pins each.
     refusesThinking: (body) => at(body, "thinking", "type") === "disabled",
+    takesFiles: false,
   },
   {
     name: "gemini",
@@ -249,6 +254,7 @@ const VENDORS: Vendor[] = [
     refusesThinking: (body) =>
       at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL" ||
       at(body, "generationConfig", "thinkingConfig", "thinkingBudget") === 0,
+    takesFiles: true,
   },
   {
     name: "responses",
@@ -257,6 +263,7 @@ const VENDORS: Vendor[] = [
     throttled: RESPONSES_THROTTLED,
     throttleSays: "Rate limit reached",
     refusesThinking: (body) => at(body, "reasoning", "effort") === "none",
+    takesFiles: false,
   },
 ];
 
@@ -379,6 +386,48 @@ describe.each(VENDORS)("$name", (vendor) => {
     const silence = recording(vendor.turn);
     await assemble(ask(vendor.create(silence.fetchImpl)));
     expect(vendor.refusesThinking(silence.sent[0]!)).toBe(false);
+  });
+
+  it("sends a file part or refuses it before any request, and never drops it", async () => {
+    // A dropped attachment is a model answering about a file it never saw, on
+    // the happy path, where nothing retries and nothing logs.
+    const pdf = recording(vendor.turn);
+    const provider = vendor.create(pdf.fetchImpl);
+    const stream = provider.createStream(
+      [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what is in it" },
+            { type: "file", mimeType: "application/pdf", data: "JVBERi0" },
+          ],
+        },
+      ],
+      [],
+    );
+    if (vendor.takesFiles) {
+      await assemble(stream);
+      expect(JSON.stringify(pdf.sent[0])).toContain("JVBERi0");
+    } else {
+      const error = await thrownBy(stream);
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(error).toMatchObject({ kind: "invalid", provider: provider.id });
+      expect(String(error)).toContain(`${provider.id}:`);
+      expect(String(error)).toContain("application/pdf");
+      expect(pdf.sent).toHaveLength(0);
+    }
+
+    // An image is still an image on every wire.
+    const png = recording(vendor.turn);
+    await assemble(
+      vendor
+        .create(png.fetchImpl)
+        .createStream(
+          [{ role: "user", content: [{ type: "image", mimeType: "image/png", data: "iVBORw0K" }] }],
+          [],
+        ),
+    );
+    expect(JSON.stringify(png.sent[0])).toContain("iVBORw0K");
   });
 
   it("normalizes its own dialect into the one turn every vendor must produce", async () => {

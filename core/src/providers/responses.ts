@@ -10,7 +10,7 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
-import { streamError } from "../errors.ts";
+import { fileRefused, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -76,13 +76,16 @@ type ResponsesInputItem =
   | { type: "function_call"; call_id: string; name: string; arguments: string }
   | { type: "function_call_output"; call_id: string; output: string | ResponsesContentPart[] };
 
-function partsToResponses(content: string | ContentPart[]): ResponsesContentPart[] {
+function partsToResponses(
+  content: string | ContentPart[],
+  provider: string,
+): ResponsesContentPart[] {
   if (typeof content === "string") return [{ type: "input_text", text: content }];
-  return content.map((part): ResponsesContentPart =>
-    part.type === "text"
-      ? { type: "input_text", text: part.text }
-      : { type: "input_image", image_url: toDataUri(part) },
-  );
+  return content.map((part): ResponsesContentPart => {
+    if (part.type === "text") return { type: "input_text", text: part.text };
+    if (part.type === "file") throw fileRefused(provider, "Responses", part);
+    return { type: "input_image", image_url: toDataUri(part) };
+  });
 }
 
 /** A tool result is a bare string unless it carried images — then the content-
@@ -106,7 +109,10 @@ function toolOutput(
  * become several items (its text, then one `function_call` per tool it asked
  * for), which is why a message maps to a list rather than to one item.
  */
-export function toResponsesInput(messages: readonly ChatMessage[]): {
+export function toResponsesInput(
+  messages: readonly ChatMessage[],
+  provider = "openai-responses",
+): {
   instructions?: string;
   input: unknown[];
 } {
@@ -122,7 +128,11 @@ export function toResponsesInput(messages: readonly ChatMessage[]): {
         break; // lifted into `instructions` above
 
       case "user":
-        input.push({ type: "message", role: "user", content: partsToResponses(message.content) });
+        input.push({
+          type: "message",
+          role: "user",
+          content: partsToResponses(message.content, provider),
+        });
         break;
 
       case "tool":
@@ -237,7 +247,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
       const effort = opts.effort ?? config.effort;
-      const { instructions, input } = toResponsesInput(messages);
+      const { instructions, input } = toResponsesInput(messages, id);
 
       const request: Record<string, unknown> = {
         model: opts.model ?? config.model,
