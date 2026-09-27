@@ -64,6 +64,13 @@ export interface ProviderPreset {
    *  it, so a model that reasons past the adapter's default ends the turn with
    *  neither text nor a tool call. */
   maxTokens?: number;
+  /** Header that carries `StreamOptions.sessionId`, for gateways that route
+   *  and cache per conversation — and refuse a call without it (OpenCode Go:
+   *  `MissingSessionID`, measured 2026-09-27). */
+  sessionHeader?: string;
+  /** Default model chain when the caller names neither `model` nor `models`:
+   *  the first answers, the rest take over (same key) when it fails. */
+  rotation?: readonly string[];
 }
 
 export const PROVIDER_PRESETS = {
@@ -316,6 +323,34 @@ export const PROVIDER_PRESETS = {
     auth: "key",
     defaultModel: "glm-5.3-flash",
     models: ["glm-5.3-flash", "glm-5.3", "glm-5.2"],
+  },
+  /**
+   * OpenCode Go — one $10/month key across many open models, each with its own
+   * monthly dollar limit (5h = 20%, week = 50%). Chain several models as
+   * `fallbacks` so a spent one hands over to the next.
+   *
+   * Measured 2026-09-27 on /chat/completions: a call without
+   * `x-opencode-session` is refused. `mimo-v2.6-flash` passes plain text,
+   * `reasoning_effort: "none"`, tool calls and json_schema; `glm-5.3-flash`
+   * 400s on a tool without a description and on a `thinking` field.
+   *
+   * This preset speaks chat completions only. Go serves GPT/Grok/Muse Spark on
+   * /responses and some Qwen/MiniMax ids on Anthropic /messages — those ids
+   * fail here.
+   */
+  "opencode-go": {
+    shape: "openai",
+    baseUrl: "https://opencode.ai/zen/go/v1",
+    auth: "bearer",
+    defaultModel: "mimo-v2.6-flash",
+    models: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
+    sessionHeader: "x-opencode-session",
+    // Cheapest first, each with its own monthly limit ($60, qwen3.8-flash $30).
+    // All five passed plain text, a described tool call and json_schema on
+    // 2026-09-27; longcat-2.0 ignores reasoning "none", so it goes last.
+    // DeepSeek is left out: on Go it needs the workspace's Global regions
+    // privacy setting, and answers 500 without it.
+    rotation: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
   },
   kimi: {
     shape: "anthropic",

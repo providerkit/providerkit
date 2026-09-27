@@ -100,6 +100,10 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    * when hitting openrouter.ai and providerOrder is not passed. Defaults to true.
    */
   pinHost?: boolean;
+  /** Header that carries `StreamOptions.sessionId`. When set and a call has
+   *  no sessionId, the provider's own per-instance id rides instead, so the
+   *  gateway never sees a call without one. */
+  sessionHeader?: string;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -445,6 +449,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
   // `usage.cost` is its field in its unit. Another gateway that sends a
   // `cost` has not said what it means.
   const reportsCost = isOpenRouter(baseUrl);
+  const instanceSessionId = config.sessionHeader ? crypto.randomUUID() : undefined;
 
   const provider: Provider = {
     id,
@@ -561,6 +566,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         headers: {
           authorization: `Bearer ${config.apiKey}`,
           ...attributionHeaders(config, config.headers),
+          ...(config.sessionHeader
+            ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
+            : {}),
           ...config.headers,
         },
         body: request,

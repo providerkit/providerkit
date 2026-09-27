@@ -75,6 +75,24 @@ It returns the same provider interface as the adapters above. The API root is
 `https://api.z.ai/api/anthropic`; the adapter adds `/v1/messages`.
 Usage reports tokens consumed, not the price of your subscription.
 
+### OpenCode Go
+
+One key, several models, and each model has its own monthly limit. The preset
+switches to the next model when one runs out:
+
+```ts
+import { createPresetProvider } from "@providerkit/core";
+
+const provider = createPresetProvider("opencode-go", { apiKey });
+```
+
+By default it tries `mimo-v2.6-flash`, then `mimo-v2.5`, `glm-5.3-flash`,
+`qwen3.8-flash` and `longcat-2.0`. Pass `models: [...]` to set your own order, and
+`fallbacks` to add another provider after the last model. Go refuses a call without a
+session id, so pass `sessionId` with each call (the conversation or job id). A call
+without one uses a random id the provider keeps for its whole life. Keep one provider
+alive across calls, so it remembers which models are spent.
+
 **Full documentation lives at [providerkit.dev](https://providerkit.dev)** — it is the single
 source of truth for usage, and this README deliberately stays a front door so the two cannot
 drift.

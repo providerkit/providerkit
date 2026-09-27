@@ -135,3 +135,82 @@ describe("provider presets — every row joins to one request, correctly", () =>
 async function drain(stream: AsyncIterable<unknown>): Promise<void> {
   for await (const _ of stream) void _;
 }
+
+describe("opencode-go — the session header", () => {
+  it("sends the call's sessionId, and its own stable id when the call has none", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("opencode-go", { apiKey: "k", fetchImpl });
+    const sent = (i: number) =>
+      new Headers(fetchImpl.mock.calls[i]?.[1]?.headers).get("x-opencode-session");
+
+    await drain(
+      provider.createStream([{ role: "user", content: "hi" }], [], { sessionId: "conv-1" }),
+    );
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+
+    expect(sent(0)).toBe("conv-1");
+    expect(sent(1)).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sent(2)).toBe(sent(1));
+  });
+
+  it("keeps the header off endpoints that don't ask for it", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("openrouter", { apiKey: "k", model: "m", fetchImpl });
+    await drain(
+      provider.createStream([{ role: "user", content: "hi" }], [], { sessionId: "conv-1" }),
+    );
+    expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).has("x-opencode-session")).toBe(
+      false,
+    );
+  });
+});
+
+describe("model chains — one endpoint, one key, several models", () => {
+  const modelOf = (init?: RequestInit) => JSON.parse(String(init?.body)).model as string;
+  const spent = () =>
+    new Response(JSON.stringify({ error: { message: "monthly usage limit reached" } }), {
+      status: 429,
+    });
+
+  it("opencode-go rotates through its own chain when a model's limit is spent", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (_url, init) =>
+        modelOf(init) === "mimo-v2.6-flash" ? spent() : ok(),
+      );
+    const provider = createPresetProvider("opencode-go", { apiKey: "k", fetchImpl });
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+    expect(fetchImpl.mock.calls.map(([, init]) => modelOf(init))).toEqual([
+      "mimo-v2.6-flash",
+      "mimo-v2.5",
+    ]);
+  });
+
+  it("`models` overrides the chain, and `fallbacks` still run after it", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (url) => (String(url).includes("openrouter") ? ok() : spent()));
+    const provider = createPresetProvider("opencode-go", {
+      apiKey: "k",
+      models: ["a", "b"],
+      fallbacks: [{ preset: "openrouter", apiKey: "or", model: "c", fetchImpl }],
+      fetchImpl,
+    });
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+    expect(fetchImpl.mock.calls.map(([, init]) => modelOf(init))).toEqual(["a", "b", "c"]);
+  });
+
+  it("a single `model` means no chain", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => spent());
+    const provider = createPresetProvider("opencode-go", {
+      apiKey: "k",
+      model: "glm-5.3-flash",
+      fetchImpl,
+    });
+    await expect(
+      drain(provider.createStream([{ role: "user", content: "hi" }], [])),
+    ).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
