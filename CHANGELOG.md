@@ -2,6 +2,17 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.13.0] - 2026-09-27
+
+### Added
+
+- **`@providerkit/core/jev` asks TypeSafe's Jev model typed questions, on any of the four hosts that serve it.** `createJevClient({ host, apiKey })` takes `typesafe`, `openrouter`, `cloudflare` (with `accountId`) or `vercel`, and `ask(state, questions)` returns one answer per question with its probabilities, plus the usage. Each answer is checked against the question that asked it, and one that fails comes back `null` without failing the others. A choice must name an offered option, carry the full distribution over exactly those options, add up to 1 within rounding drift, and be the most likely option. Failures retry and classify like chat calls, with a 15-second deadline per attempt. `checkKey()` asks one real question, about 40 input tokens. `readAnswer(question, raw)` runs the checks alone, for an app that sends its own request. No price ships: OpenRouter's reported cost lands in `reportedCostUsd`, and `costUsd` prices the rest. OpenRouter was checked live on 2026-09-27. The Cloudflare and Vercel reply shapes come from their docs and another open-source client, not from a live call.
+- **`openRouterCostUsd` is exported**, because Jev's OpenRouter bill has the same shape as chat's.
+
+### Fixed
+
+- **Cloudflare's 404 for an account ID that doesn't exist classified as `model`.** The caller went to fix a model ID that was fine. It classifies as `auth` now, on the chat path too.
+
 ## [0.12.3] - 2026-09-27
 
 The Claude thinking changes come from Anthropic's documentation, read 2026-09-27: the per-model thinking table and the Thinking and Effort pages. None of it was measured against the live API.

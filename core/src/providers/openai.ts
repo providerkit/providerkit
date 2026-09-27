@@ -424,8 +424,14 @@ function price(value: unknown): number | undefined {
  * `cost_details.upstream_inference_cost`, so the call cost the two together.
  * Without that second figure there is no whole bill to report, and the
  * caller's rate prices the call instead.
+ *
+ * Exported for the other OpenRouter wire that bills the same way: Jev's.
  */
-function openRouterCostUsd(usage: NonNullable<OpenAIChunk["usage"]>): number | undefined {
+export function openRouterCostUsd(usage: {
+  cost?: unknown;
+  is_byok?: boolean;
+  cost_details?: { upstream_inference_cost?: unknown } | null;
+}): number | undefined {
   const cost = price(usage.cost);
   if (cost === undefined || usage.is_byok !== true) return cost;
   const upstream = price(usage.cost_details?.upstream_inference_cost);

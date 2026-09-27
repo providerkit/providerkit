@@ -418,6 +418,10 @@ const AUTH_PATTERNS: readonly RegExp[] = [
   /unrecognizedclient|unauthorizedexception|accessdeniedexception/i,
   /expired[_\s]?token/i,
   /OAuth token has been revoked/i,
+  // Cloudflare's code 7003, for an account id that names no account. It
+  // arrives as a 404, which on status alone reads as a missing model — but
+  // the fix is the credentials, and a model swap would fail the same way.
+  /perhaps your object identifier is invalid/i,
 ];
 
 const CONTENT_PATTERNS: readonly RegExp[] = [
