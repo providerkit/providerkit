@@ -370,15 +370,21 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
               : { type: "tool", name: opts.toolChoice.name };
       }
       const claude = claudeThinking(model);
-      // Extended mode, which is all Claude 4.5 and older have, requires the
-      // final assistant turn of a thinking request to open with a thinking
-      // block, and this adapter sends none back (see toAnthropicMessages). So a
-      // request that continues a tool loop runs without thinking. Turning it off
-      // mid-turn is documented not to error, and the next user turn thinks
-      // again. Documented (Anthropic Thinking page, read 2026-09-27).
+      // Extended mode, which is all Claude 4.5 and older have, can't think on
+      // two kinds of request this adapter sends, so those run without thinking.
+      // Documented (Anthropic Thinking page, read 2026-09-27):
+      // - One that continues a tool loop. A thinking request's final assistant
+      //   turn must open with a thinking block, and this adapter sends none back
+      //   (see toAnthropicMessages). Turning thinking off mid-turn is documented
+      //   not to error, and the next user turn thinks again.
+      // - One whose tool choice forces a tool: `any` or `tool` "results in an
+      //   error because these options force tool use, which is incompatible with
+      //   manual extended thinking." The caller asked for the tool, so it wins.
       // ponytail: every loop step after the first goes unthought on these
       // models. The upgrade is replaying the signed thinking blocks.
-      const unthoughtStep = !claude && model.startsWith("claude-") && continuesToolLoop(messages);
+      const forcesTool = opts.toolChoice === "required" || typeof opts.toolChoice === "object";
+      const unthought =
+        !claude && model.startsWith("claude-") && (forcesTool || continuesToolLoop(messages));
       if (claude) {
         // An effort the caller never set sends nothing: the model keeps its own
         // default, which on most of these is thinking ON.
@@ -394,7 +400,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           delete request.temperature;
           delete request.top_p;
         }
-      } else if (effort && effort !== "none" && !unthoughtStep) {
+      } else if (effort && effort !== "none" && !unthought) {
         const budget = Math.min(THINKING_BUDGET[effort], Math.floor(maxTokens * 0.8));
         request.thinking = { type: "enabled", budget_tokens: budget };
         // Thinking and sampling are mutually exclusive on this shape.

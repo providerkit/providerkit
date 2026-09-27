@@ -6,6 +6,7 @@ import {
   ProviderError,
   type ChatMessage,
   type Effort,
+  type StreamOptions,
   type ToolDefinition,
 } from "../src/index.ts";
 
@@ -98,12 +99,44 @@ describe("Z.ai Coding Plan", () => {
     }
   });
 
+  // Claude 4.5 and older run without thinking on two kinds of request that
+  // extended mode can't serve here: one that continues a tool loop, and one
+  // whose tool choice forces a tool. Those rules are Claude's. GLM gets
+  // exactly the bodies it got before them, through both ways in.
+  const weather: ToolDefinition = {
+    name: "weather",
+    description: "Weather for a city",
+    inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+  };
+  const ask: ChatMessage = { role: "user", content: "Weather in Paris?" };
+  const bodies = async (messages: ChatMessage[], opts: StreamOptions) => {
+    const out: string[] = [];
+    for (const via of ["coding", "preset"] as const) {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("data: [DONE]\n\n"));
+      const config = { apiKey: "test-key", model: "glm-5.3-flash", fetchImpl };
+      const provider =
+        via === "coding" ? createZaiCodingProvider(config) : createPresetProvider("zai", config);
+      await drainStream(provider.createStream(messages, [weather], opts), provider.model);
+      out.push(String(fetchImpl.mock.calls[0]?.[1]?.body));
+    }
+    return out;
+  };
+  const head = {
+    model: "glm-5.3-flash",
+    max_tokens: 65_536,
+  };
+  const tail = {
+    stream: true,
+    tools: [
+      { name: "weather", description: "Weather for a city", input_schema: weather.inputSchema },
+    ],
+  };
+  const budget = { thinking: { type: "enabled", budget_tokens: 2_048 } };
+  const low = { effort: "low", temperature: 0.3 } as const;
+
   it("keeps thinking on through a tool loop, byte for byte", async () => {
-    // Claude 4.5 and older think only on the first request of a tool loop:
-    // extended mode wants a thinking block this adapter never sends back. That
-    // rule is Claude's. GLM gets exactly the body it got before the rule.
     const loop: ChatMessage[] = [
-      { role: "user", content: "Weather in Paris?" },
+      ask,
       {
         role: "assistant",
         content: "",
@@ -112,14 +145,8 @@ describe("Z.ai Coding Plan", () => {
       },
       { role: "tool", toolCallId: "call_1", name: "weather", content: "20°C, sunny" },
     ];
-    const weather: ToolDefinition = {
-      name: "weather",
-      description: "Weather for a city",
-      inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
-    };
     const expected = JSON.stringify({
-      model: "glm-5.3-flash",
-      max_tokens: 65_536,
+      ...head,
       messages: [
         { role: "user", content: [{ type: "text", text: "Weather in Paris?" }] },
         {
@@ -137,23 +164,28 @@ describe("Z.ai Coding Plan", () => {
           ],
         },
       ],
-      stream: true,
-      tools: [
-        { name: "weather", description: "Weather for a city", input_schema: weather.inputSchema },
-      ],
-      thinking: { type: "enabled", budget_tokens: 2_048 },
+      ...tail,
+      ...budget,
     });
-    for (const via of ["coding", "preset"] as const) {
-      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("data: [DONE]\n\n"));
-      const config = { apiKey: "test-key", model: "glm-5.3-flash", fetchImpl };
-      const provider =
-        via === "coding" ? createZaiCodingProvider(config) : createPresetProvider("zai", config);
-      await drainStream(
-        provider.createStream(loop, [weather], { effort: "low", temperature: 0.3 }),
-        provider.model,
-      );
-      expect(String(fetchImpl.mock.calls[0]?.[1]?.body)).toBe(expected);
-    }
+    expect(await bodies(loop, low)).toEqual([expected, expected]);
+  });
+
+  it("keeps thinking on beside a forced tool choice, byte for byte", async () => {
+    const expected = (tool_choice: unknown) =>
+      JSON.stringify({
+        ...head,
+        messages: [{ role: "user", content: [{ type: "text", text: "Weather in Paris?" }] }],
+        ...tail,
+        tool_choice,
+        ...budget,
+      });
+    const any = expected({ type: "any" });
+    const named = expected({ type: "tool", name: "weather" });
+    expect(await bodies([ask], { ...low, toolChoice: "required" })).toEqual([any, any]);
+    expect(await bodies([ask], { ...low, toolChoice: { name: "weather" } })).toEqual([
+      named,
+      named,
+    ]);
   });
 
   it("keeps caller output caps and names Z.ai on authentication failures", async () => {

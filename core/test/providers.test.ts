@@ -11,6 +11,7 @@ import {
   type ChatMessage,
   type Effort,
   type ProviderChunk,
+  type ToolChoice,
   type ToolDefinition,
 } from "../src/types.ts";
 
@@ -247,6 +248,11 @@ describe("anthropic thinking, per Claude model", () => {
     output_config: { effort },
   });
   const graded = ["low", "medium", "high", "max"] as const;
+  const weather: ToolDefinition = {
+    name: "weather",
+    description: "Weather for a city",
+    inputSchema: { type: "object", properties: { city: { type: "string" } } },
+  };
 
   it("has no off on an always-on model, so none is the lowest effort", async () => {
     // `enabled` and `disabled` are both 400s here. Silence runs the model's
@@ -310,11 +316,6 @@ describe("anthropic thinking, per Claude model", () => {
     // the final assistant turn of a thinking request must open with a thinking
     // block, and this adapter sends none back. A request that turns thinking
     // off mid-turn is documented not to error. Adaptive mode has no such rule.
-    const weather: ToolDefinition = {
-      name: "weather",
-      description: "Weather for a city",
-      inputSchema: { type: "object", properties: { city: { type: "string" } } },
-    };
     const ask: ChatMessage = { role: "user", content: "Weather in Paris?" };
     const call: ChatMessage = {
       role: "assistant",
@@ -354,6 +355,45 @@ describe("anthropic thinking, per Claude model", () => {
     const low = adaptive("low");
     expect(await loop("claude-sonnet-4-6")).toEqual([low, low, low]);
     expect(await loop("MiniMax-M3")).toEqual([budget, budget, budget]);
+  });
+
+  it("lets a forced tool choice win over the thinking budget on Claude 4.5", async () => {
+    // Documented (Anthropic Thinking page, read 2026-09-27), verbatim: "Using
+    // `tool_choice: {"type": "any"}` or `tool_choice: {"type": "tool", "name":
+    // "..."}` results in an error because these options force tool use, which
+    // is incompatible with manual extended thinking." The caller asked for the
+    // tool, so the request goes without thinking. `auto` and `none` still think.
+    const forced = async (model: string, toolChoice: ToolChoice) => {
+      const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+      await collect(
+        createAnthropicProvider({ apiKey: "k", model, fetchImpl }).createStream(
+          [{ role: "user", content: "Weather in Paris?" }],
+          [weather],
+          { effort: "low", temperature: 0.3, toolChoice },
+        ),
+      );
+      const body = seen[0]!.body;
+      return {
+        thinking: body.thinking,
+        output_config: body.output_config,
+        temperature: body.temperature,
+        tool_choice: body.tool_choice,
+      };
+    };
+    const budget = { thinking: { type: "enabled", budget_tokens: 2_048 } };
+    const any = { tool_choice: { type: "any" } };
+    const named = { tool_choice: { type: "tool", name: "weather" } };
+
+    for (const model of ["claude-haiku-4-5", "claude-opus-4-5-20251101"]) {
+      expect(await forced(model, "required")).toEqual({ ...any, temperature: 0.3 });
+      expect(await forced(model, { name: "weather" })).toEqual({ ...named, temperature: 0.3 });
+      expect(await forced(model, "auto")).toEqual(budget);
+      expect(await forced(model, "none")).toEqual({ ...budget, tool_choice: { type: "none" } });
+    }
+    // Adaptive thinking takes a forced tool on these, and no other vendor's
+    // dialect is this adapter's to change.
+    expect(await forced("claude-sonnet-4-6", "required")).toEqual({ ...adaptive("low"), ...any });
+    expect(await forced("MiniMax-M3", { name: "weather" })).toEqual({ ...budget, ...named });
   });
 
   it("treats a Claude id it does not know as always on", async () => {

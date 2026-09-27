@@ -135,6 +135,9 @@ Anthropic-shape it depends on the model id:
   tool results back run without thinking, and the next user turn thinks again. These models need
   a thinking request's last assistant turn to start with a thinking block, and the adapter doesn't
   send thinking blocks back (documented, Anthropic Thinking page, read 2026-09-27).
+- On Claude 4.5 and older, a request that forces a tool (`toolChoice: "required"` or `{ name }`)
+  also runs without thinking. On these models, forcing a tool with thinking on is an error, so the
+  tool you asked for wins (documented, same page).
 
 ## Structured output
 
