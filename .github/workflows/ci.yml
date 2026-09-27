@@ -2,6 +2,9 @@ name: CI
 
 on:
   pull_request:
+    # ready_for_review too: auto-merge only wakes when a CI run finishes, so a
+    # draft released with `gh pr ready` sat green and unmerged without it.
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   push:
     branches: [main]
