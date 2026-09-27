@@ -152,12 +152,46 @@ export function openRouterHostFor(baseUrl: string, model: string): string | unde
 export type EffortDialect = "openai" | "openrouter" | "deepseek" | "off";
 
 /**
- * OpenRouter model ids that refuse every explicit reasoning off and, on most
- * of the hosts that serve them, think when `reasoning` is omitted. `none` is
- * said to them as `low`. Add an id only after measuring both halves on it:
- * what omitting the field does, and what `low` does.
+ * How `none` is said on OpenRouter, per model id: the `reasoning.effort` that
+ * turns the model's thinking off, or the lowest measured one where every off
+ * is refused.
+ *
+ * An id that is not listed sends nothing, and that default is the point. An
+ * explicit off is a 400 on a model whose reasoning is mandatory: GLM 5.3 Flash
+ * and gpt-5-mini both answer "Reasoning is mandatory for this endpoint and
+ * cannot be disabled." So a universal off would break every call to one. An
+ * omitted field only costs reasoning tokens, and only on a model that thinks by
+ * default. So an id gets a row once it is measured both ways: with the field
+ * omitted, and with the spelling in its row.
+ *
+ * An adopter's matrix, 2026-09-27: one pinned host per model
+ * (`allow_fallbacks: false`), two runs per cell, reasoning tokens with the
+ * field omitted and with each of three offs (top-level `reasoning_effort:
+ * "none"`, `reasoning.effort: "none"`, `reasoning.enabled: false`).
+ *
+ * - GLM 5.3 Flash @Together: 516, and 2,000 (cut off at `max_tokens`), with
+ *   the field omitted. Every off was a 400. In the 2026-09-26 sweep (a
+ *   production classify body sent to each of 28 hosts alone), 18 hosts thought
+ *   with the field omitted (a 2026-09-14 reading, host unknown, saw no
+ *   thinking), and `low` gave 0 reasoning tokens on every host that answered
+ *   it but Sail Research (1) and Wafer (inverted: about 420 with `low`, 1
+ *   omitted).
+ * - gpt-5-mini @OpenAI: 320 and 320 with the field omitted, and every off was
+ *   a 400. A follow-up the same day, same host, two runs: `minimal` gave 0 and
+ *   0 (48 and 50 output tokens), `low` 64 and 64. So `minimal` is its floor.
+ *   Only this exact id: gpt-5 and gpt-5-nano were not measured.
+ * - MiMo v2.6 Flash @Xiaomi: 57 and 47 with the field omitted (103–151
+ *   @DeepInfra in the 2026-09-26 sweep), 0 with every off. Its row names
+ *   `none`, so the table varies one field.
+ * - Not listed, on purpose. DeepSeek V4 Flash @DeepInfra: 0 in every cell, and
+ *   the 2026-09-26 sweep saw it think at `low`. Gemini 2.5 Flash and Flash
+ *   Lite @AI Studio: 0 in every cell.
  */
-const OPENROUTER_REASONING_MANDATORY: ReadonlySet<string> = new Set(["z-ai/glm-5.3-flash"]);
+const OPENROUTER_NONE: ReadonlyMap<string, "low" | "minimal" | "none"> = new Map([
+  ["z-ai/glm-5.3-flash", "low"],
+  ["openai/gpt-5-mini", "minimal"],
+  ["xiaomi/mimo-v2.6-flash", "none"],
+]);
 
 /**
  * Effort → the request fields THIS endpoint accepts.
@@ -165,20 +199,14 @@ const OPENROUTER_REASONING_MANDATORY: ReadonlySet<string> = new Set(["z-ai/glm-5
  * One knob, three incompatible spellings, and the differences are not cosmetic:
  *
  * - **On OpenRouter, "do not think" has no spelling that works on every
- *   model.** GLM 5.3 Flash answers
- *   `400 "Reasoning is mandatory for this endpoint and cannot be disabled."`
- *   to `reasoning.effort: "none"` and to `reasoning.enabled: false` alike, and
- *   whether it thinks with the field omitted depends on the host. Sending a
- *   production classify body to each host alone on 2026-09-26, 18 of 28 hosts
- *   thought with the field omitted (a 2026-09-14 reading, host unknown, saw no
- *   thinking), while `reasoning.effort: "low"` gave 0 reasoning tokens on
- *   every host that answered it but Sail Research (1) and Wafer (inverted:
- *   about 420 with `low`, 1 omitted). So for the ids in
- *   `OPENROUTER_REASONING_MANDATORY`, `none` sends `low`. DeepSeek V4 Flash
- *   measured the reverse the same day (0 omitted, thinking at `low`), so every
- *   other model keeps the omitted field. Naming a level raises it — the
- *   accepted values are `low`, `high` and `max` (`medium` and `xhigh` are
- *   accepted too, but our vocabulary has no use for them).
+ *   model.** GLM 5.3 Flash and gpt-5-mini answer every explicit off with
+ *   `400 "Reasoning is mandatory for this endpoint and cannot be disabled."`,
+ *   MiMo v2.6 Flash takes one, and DeepSeek V4 Flash thinks at `low` and not
+ *   with the field omitted. So `none` is said per model, from
+ *   `OPENROUTER_NONE`, which also says why an unlisted model gets nothing.
+ *   Naming a level raises it — the accepted values are `low`, `high` and
+ *   `max` (`medium` and `xhigh` are accepted too, but our vocabulary has no
+ *   use for them).
  * - **DeepSeek V4 defaults thinking ON** on its own API, so `none` has to be an
  *   explicit refusal there. The same word is a different request on each
  *   dialect, and on OpenRouter on each model: the spelling belongs to the
@@ -194,8 +222,8 @@ const OPENROUTER_REASONING_MANDATORY: ReadonlySet<string> = new Set(["z-ai/glm-5
  * An absent effort sends nothing on every dialect and for every model: the
  * seam's rule is that a knob the caller never touched is a knob the provider
  * still owns. On OpenRouter that makes `none` and "never asked" the same
- * request for every model outside `OPENROUTER_REASONING_MANDATORY`, and a
- * different one for the models in it.
+ * request for every model outside `OPENROUTER_NONE`, and a different one for
+ * the models in it.
  *
  * `model` is the id the request names. Without it, `none` on OpenRouter sends
  * nothing, as it always has.
@@ -219,20 +247,21 @@ export function effortParams(
         ? { thinking: { type: "enabled" } }
         : { thinking: { type: "enabled" }, reasoning_effort: level };
     case "openrouter":
-      // `none` is said per model (see above): the cheapest named level for a
-      // model that thinks when the field is omitted and refuses every explicit
-      // off, nothing for the rest. Naming a level RAISES it: the accepted
-      // values are low, high and max (`medium` and `xhigh` exist on the wire
-      // too). The refusal that once looked like "OpenRouter cannot be told not
-      // to think" was `reasoning.enabled: false` — never sent (pinned by the
-      // test below).
+      // `none` is said per model (see OPENROUTER_NONE): an explicit off where
+      // one was measured to work, the lowest measured level where every off is
+      // a 400, and nothing for a model nobody measured. Naming a level RAISES
+      // it: the accepted values are low, high and max (`medium`, `xhigh` and
+      // `minimal` exist on the wire too; `minimal` rides only as a row's none).
+      // The refusal that once looked like "OpenRouter cannot be told not to
+      // think" was `reasoning.enabled: false` — never sent (pinned by the test
+      // below).
       //
       // `max` rides verbatim here — the enum clamp below is DeepSeek/OpenAI's
       // shape (DeepSeek auto-bumps past its own top, OpenAI's top IS high);
       // OpenRouter takes `max` as named (measured live 2026-09-14).
       if (effort !== "none") return { reasoning: { effort } };
-      return model !== undefined && OPENROUTER_REASONING_MANDATORY.has(model)
-        ? { reasoning: { effort: "low" } }
+      return model !== undefined && OPENROUTER_NONE.has(model)
+        ? { reasoning: { effort: OPENROUTER_NONE.get(model) } }
         : {};
     case "openai":
       return { reasoning_effort: level ?? "none" };

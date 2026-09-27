@@ -754,10 +754,18 @@ describe("effortParams", () => {
   // 400 "Reasoning is mandatory for this endpoint and cannot be disabled."
   // `none` is a legal effort everywhere else, so nothing above the wire can
   // see it — these are that check.
-  it("never asks OpenRouter to switch reasoning off", () => {
-    for (const effort of EFFORTS) {
-      expect(JSON.stringify(effortParams("openrouter", effort))).not.toContain("disabled");
-      expect(effortParams("openrouter", effort)).not.toHaveProperty("reasoning.enabled");
+  it("never sends OpenRouter's `reasoning.enabled` switch or a disabled marker", () => {
+    for (const model of [
+      undefined,
+      "z-ai/glm-5.3-flash",
+      "openai/gpt-5-mini",
+      "xiaomi/mimo-v2.6-flash",
+    ]) {
+      for (const effort of EFFORTS) {
+        const params = effortParams("openrouter", effort, model);
+        expect(JSON.stringify(params)).not.toContain("disabled");
+        expect(params).not.toHaveProperty("reasoning.enabled");
+      }
     }
   });
 
@@ -775,6 +783,21 @@ describe("effortParams", () => {
     expect(effortParams("openrouter", "none", "deepseek/deepseek-v4-flash")).toEqual({});
     // No model given: today's request, unchanged.
     expect(effortParams("openrouter", "none")).toEqual({});
+    // MiMo v2.6 Flash thinks with the field omitted and takes an explicit off
+    // (2026-09-27, one pinned host, two runs per cell). An id nobody measured
+    // sends nothing: an off would be a 400 on a mandatory-reasoning model.
+    expect(effortParams("openrouter", "none", "xiaomi/mimo-v2.6-flash")).toEqual({
+      reasoning: { effort: "none" },
+    });
+    // gpt-5-mini refuses every off like GLM, and `minimal` is its floor: 0
+    // reasoning tokens where `low` gave 64. The exact id only: gpt-5 and
+    // gpt-5-nano were not measured.
+    expect(effortParams("openrouter", "none", "openai/gpt-5-mini")).toEqual({
+      reasoning: { effort: "minimal" },
+    });
+    for (const model of ["openai/gpt-5", "openai/gpt-5-nano", "vendor/unmeasured-model"]) {
+      expect(effortParams("openrouter", "none", model)).toEqual({});
+    }
     // Naming a level raises it; low/high/max ride as asked (`max` verbatim —
     // measured accepted on the live endpoint), whatever the model.
     for (const model of [undefined, "z-ai/glm-5.3-flash"]) {
