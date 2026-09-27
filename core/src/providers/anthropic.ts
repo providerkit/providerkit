@@ -55,9 +55,9 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
    *  where an absent field means the MODEL's default, not off — Z.ai's coding
    *  endpoint reads silence as thinking ON for reasoning-mandatory models like
    *  GLM 5.3 Flash (measured 2026-09-13: omit → thinking block; disabled →
-   *  none), and it accepts the marker natively. Native Anthropic has no such
-   *  marker and defaults to off when the field is absent, so leave this unset
-   *  there. */
+   *  none), and it accepts the marker natively. Ignored for a Claude id: each
+   *  Claude model has its own spelling of none (see `CLAUDE_THINKING`), and
+   *  several reject this marker outright. */
   explicitNone?: boolean;
 }
 
@@ -67,9 +67,10 @@ const DEFAULT_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8_192;
 
 /**
- * Thinking budgets, in output tokens. Thinking and the answer SHARE
- * `max_tokens`, so a budget is always left below the ceiling — a budget at or
- * above it leaves no room to answer, and the turn ends mid-thought.
+ * Thinking budgets, in output tokens, for extended thinking — Claude 4.5 and
+ * older, and every non-Claude endpoint on this wire. Thinking and the answer
+ * SHARE `max_tokens`, so a budget is always left below the ceiling — a budget
+ * at or above it leaves no room to answer, and the turn ends mid-thought.
  */
 const THINKING_BUDGET: Record<Exclude<Effort, "none">, number> = {
   low: 2_048,
@@ -77,6 +78,88 @@ const THINKING_BUDGET: Record<Exclude<Effort, "none">, number> = {
   high: 16_384,
   max: 32_768,
 };
+
+/** How one Claude model that thinks adaptively takes `effort`. */
+interface ClaudeThinking {
+  /** How `effort: "none"` is said: nothing, an explicit off, or the lowest
+   *  effort where there is no off to ask for. */
+  none: "omit" | "disabled" | "low";
+  /** Whether a non-default temperature or top_p survives while thinking is off. */
+  sampling: boolean;
+}
+
+const ALWAYS_ON: ClaudeThinking = { none: "low", sampling: false };
+
+/**
+ * Claude models that take adaptive thinking, keyed by id. A graded effort is
+ * said the same way on all of them — `thinking: { type: "adaptive" }` plus
+ * `output_config.effort` — which every one accepts, and which the docs say to
+ * use wherever a model also takes `budget_tokens`. What differs is `none`,
+ * because what each model does when told nothing differs. Documented (Anthropic per-model table, read
+ * 2026-09-27: platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting);
+ * none of it was measured live.
+ *
+ * `sampling: false` marks the models where a non-default temperature, top_p or
+ * top_k is a 400 on every request, thinking or not. Documented on the same date
+ * (…/build-with-claude/thinking, "Sampling parameters").
+ */
+const CLAUDE_THINKING: ReadonlyMap<string, ClaudeThinking> = new Map([
+  // Always on: `enabled` and `disabled` are both 400s (Mythos Preview still
+  // takes `enabled`), so there is no off to ask for. `none` is the lowest
+  // effort rather than silence, because silence runs the model's own default —
+  // `high`, or `medium` on Opus 5.5 — which is the request `none` exists to
+  // refuse (invariant 12).
+  ["claude-fable-5-1", ALWAYS_ON],
+  ["claude-mythos-5-1", ALWAYS_ON],
+  ["claude-fable-5", ALWAYS_ON],
+  ["claude-mythos-5", ALWAYS_ON],
+  ["claude-mythos-preview", ALWAYS_ON],
+  ["claude-opus-5-5", ALWAYS_ON],
+  // On by default, and `disabled` is accepted at effort high or below. `none`
+  // still says `low`: with thinking disabled, Opus 5 occasionally writes a tool
+  // call into its visible text instead of a tool_use block, most often on
+  // tool-heavy work (documented, same page). That call never runs and nothing
+  // errors, so the turn reads as a clean answer — a failure on the happy path,
+  // in exactly the loop this package sits under. Anthropic's own advice is to
+  // keep thinking on and lower effort; at `low` the model can still skip
+  // thinking on a turn it judges simple.
+  ["claude-opus-5", ALWAYS_ON],
+  // On by default; `disabled` is accepted, with no such warning attached.
+  ["claude-sonnet-5", { none: "disabled", sampling: false }],
+  // Off by default, so saying nothing already is none.
+  ["claude-opus-4-8", { none: "omit", sampling: false }],
+  ["claude-opus-4-7", { none: "omit", sampling: false }],
+  // These still take `budget_tokens`, deprecated. Adaptive is the mode the docs
+  // say to use where both exist, and it drops extended mode's rule that the
+  // final assistant turn open with a thinking block — which this adapter,
+  // replaying no thinking, can never satisfy.
+  ["claude-opus-4-6", { none: "omit", sampling: true }],
+  ["claude-sonnet-4-6", { none: "omit", sampling: true }],
+]);
+
+/** Claude 4.5 and everything before it: extended thinking only (`adaptive` is
+ *  a 400), off by default. The budget dialect below was written for these. */
+const CLAUDE_EXTENDED_ONLY = /^claude-(3-|(opus|sonnet|haiku)-4(-[0-5])?$)/;
+
+/**
+ * The adaptive-thinking rule for a Claude id, or `undefined` for every id that
+ * keeps the budget dialect: Claude 4.5 and older, and every other vendor's
+ * model on this wire (their endpoints' dialects are their own).
+ *
+ * An id that starts with `claude-` but is in neither list is a Claude newer
+ * than this table, and it is treated as always on. Every Claude since Opus 4.7
+ * rejects `enabled`; the newest reject `disabled` too; and `output_config.effort`
+ * is accepted by every model that thinks adaptively. So an unknown id gets the
+ * one request none of them has refused, and no sampling fields, since every
+ * Claude since Opus 4.7 answers a non-default one with a 400. A model that
+ * turns out to differ will say so with a 400 of its own, and earn a row.
+ */
+function claudeThinking(model: string): ClaudeThinking | undefined {
+  if (!model.startsWith("claude-")) return undefined;
+  const family = model.replace(/-\d{8}$/, ""); // a dated snapshot is its family
+  if (CLAUDE_EXTENDED_ONLY.test(family)) return undefined;
+  return CLAUDE_THINKING.get(family) ?? ALWAYS_ON;
+}
 
 function mapStopReason(reason: string | undefined): FinishReason | undefined {
   switch (reason) {
@@ -243,7 +326,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
     ): AsyncIterable<ProviderChunk> {
       const model = opts.model ?? config.model;
       const maxTokens = opts.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
-      const effort = opts.effort ?? config.effort ?? "none";
+      const effort = opts.effort ?? config.effort;
       const { system, messages: body } = toAnthropicMessages(messages);
 
       const request: Record<string, unknown> = {
@@ -272,15 +355,32 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
               ? { type: "any" }
               : { type: "tool", name: opts.toolChoice.name };
       }
-      if (effort !== "none") {
+      const claude = claudeThinking(model);
+      if (claude) {
+        // An effort the caller never set sends nothing: the model keeps its own
+        // default, which on most of these is thinking ON.
+        if (effort === "none") {
+          if (claude.none === "disabled") request.thinking = { type: "disabled" };
+          if (claude.none === "low") request.output_config = { effort: "low" };
+        } else if (effort) {
+          request.thinking = { type: "adaptive" };
+          request.output_config = { effort };
+        }
+        const thinking = effort !== undefined && effort !== "none";
+        if (thinking || !claude.sampling) {
+          delete request.temperature;
+          delete request.top_p;
+        }
+      } else if (effort && effort !== "none") {
         const budget = Math.min(THINKING_BUDGET[effort], Math.floor(maxTokens * 0.8));
         request.thinking = { type: "enabled", budget_tokens: budget };
         // Thinking and sampling are mutually exclusive on this shape.
         delete request.temperature;
         delete request.top_p;
       } else if (config.explicitNone) {
-        // The one dialect where silence means the model default — which is ON
-        // for a reasoning-mandatory model — so "none" has to be said out loud.
+        // Z.ai's coding endpoint: silence means the model default — which is
+        // ON for a reasoning-mandatory model — so "none" has to be said out
+        // loud. An effort nobody set reads as none here, as it always has.
         request.thinking = { type: "disabled" };
       }
 

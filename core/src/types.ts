@@ -10,7 +10,10 @@
 /**
  * How hard the model thinks before answering. Absent = the provider's own
  * default (never sent). Passed through verbatim on OpenAI-shape
- * (`reasoning_effort`); mapped to thinking budgets on Anthropic-shape.
+ * (`reasoning_effort`). On Anthropic-shape, mapped to adaptive thinking and
+ * `output_config.effort` for current Claude models, where `none` is the lowest
+ * effort on a model that cannot stop thinking; and to thinking budgets for
+ * Claude 4.5 and older and for every other vendor on that wire.
  * Support varies per model — an unsupported level comes back as a clean 400.
  *
  * Ordered least → most; the type derives from the array so the runtime guard

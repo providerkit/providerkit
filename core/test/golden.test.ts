@@ -216,11 +216,6 @@ interface Vendor {
   throttleSays: string;
   /** How this wire says "do not think", read off the request that went out. */
   refusesThinking(body: Record<string, unknown>): boolean;
-  /** Whether saying NOTHING also says it. Anthropic is the only one where it
-   *  does — extended thinking is opt-in there, so a request with no `thinking`
-   *  block already asks for none. On the other three, silence is the model's
-   *  own default, which is emphatically not none. */
-  silenceAlsoRefuses: boolean;
 }
 
 const VENDORS: Vendor[] = [
@@ -231,7 +226,6 @@ const VENDORS: Vendor[] = [
     throttled: OPENAI_THROTTLED,
     throttleSays: "rate limit exceeded",
     refusesThinking: (body) => at(body, "reasoning_effort") === "none",
-    silenceAlsoRefuses: false,
   },
   {
     name: "anthropic",
@@ -240,8 +234,10 @@ const VENDORS: Vendor[] = [
     turn: ANTHROPIC_TURN,
     throttled: ANTHROPIC_THROTTLED,
     throttleSays: "exceeded your rate limit",
-    refusesThinking: (body) => at(body, "thinking") === undefined,
-    silenceAlsoRefuses: true,
+    // Sonnet 5 thinks by default and accepts an explicit off. Documented
+    // (Anthropic per-model table, read 2026-09-27); other Claude models spell
+    // none differently, and providers.test.ts pins each.
+    refusesThinking: (body) => at(body, "thinking", "type") === "disabled",
   },
   {
     name: "gemini",
@@ -253,7 +249,6 @@ const VENDORS: Vendor[] = [
     refusesThinking: (body) =>
       at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL" ||
       at(body, "generationConfig", "thinkingConfig", "thinkingBudget") === 0,
-    silenceAlsoRefuses: false,
   },
   {
     name: "responses",
@@ -262,7 +257,6 @@ const VENDORS: Vendor[] = [
     throttled: RESPONSES_THROTTLED,
     throttleSays: "Rate limit reached",
     refusesThinking: (body) => at(body, "reasoning", "effort") === "none",
-    silenceAlsoRefuses: false,
   },
 ];
 
@@ -379,10 +373,12 @@ describe.each(VENDORS)("$name", (vendor) => {
     expect(vendor.refusesThinking(none.sent[0]!)).toBe(true);
 
     // And the other half of the same rule: a knob the caller never touched is
-    // the provider's. Only Anthropic's default already IS off.
+    // the provider's, and on all four that default is not none. Anthropic
+    // was the exception while its models defaulted to off; Claude 5 thinks
+    // unless told not to.
     const silence = recording(vendor.turn);
     await assemble(ask(vendor.create(silence.fetchImpl)));
-    expect(vendor.refusesThinking(silence.sent[0]!)).toBe(vendor.silenceAlsoRefuses);
+    expect(vendor.refusesThinking(silence.sent[0]!)).toBe(false);
   });
 
   it("normalizes its own dialect into the one turn every vendor must produce", async () => {

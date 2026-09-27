@@ -56,8 +56,9 @@ export interface ProviderPreset {
    *  `thinking: { type: "disabled" }` marker when effort is none. For
    *  endpoints where an ABSENT field means the model's default — thinking ON
    *  for reasoning-mandatory models (measured on Z.ai's coding endpoint:
-   *  omit → thinking block; disabled → none). Native Anthropic defaults to
-   *  off when the field is absent and must stay unset. */
+   *  omit → thinking block; disabled → none). Leave it unset for native
+   *  Anthropic: the adapter spells none per Claude model and ignores this
+   *  flag for Claude ids. */
   explicitNone?: boolean;
   /** Output ceiling when the caller sets none. Thinking and the answer share
    *  it, so a model that reasons past the adapter's default ends the turn with

@@ -217,6 +217,112 @@ describe("anthropic adapter", () => {
   });
 });
 
+describe("anthropic thinking, per Claude model", () => {
+  // Documented (Anthropic per-model table, read 2026-09-27), never measured
+  // live: which `thinking.type` each model accepts, what it does with none,
+  // and where a non-default temperature is a 400 on every request.
+  const sent = async (model: string, effort?: Effort, perCallModel?: string) => {
+    const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+    await collect(
+      createAnthropicProvider({ apiKey: "k", model, fetchImpl }).createStream(
+        [{ role: "user", content: "hi" }],
+        [],
+        {
+          temperature: 0.3,
+          ...(effort ? { effort } : {}),
+          ...(perCallModel ? { model: perCallModel } : {}),
+        },
+      ),
+    );
+    const body = seen[0]!.body;
+    return {
+      thinking: body.thinking,
+      output_config: body.output_config,
+      temperature: body.temperature,
+    };
+  };
+  const adaptive = (effort: string) => ({
+    thinking: { type: "adaptive" },
+    output_config: { effort },
+  });
+  const graded = ["low", "medium", "high", "max"] as const;
+
+  it("has no off on an always-on model, so none is the lowest effort", async () => {
+    // `enabled` and `disabled` are both 400s here. Silence runs the model's
+    // default effort, which is exactly what `none` exists to refuse.
+    for (const model of ["claude-fable-5-1", "claude-opus-5-5", "claude-mythos-preview"]) {
+      expect(await sent(model)).toEqual({});
+      expect(await sent(model, "none")).toEqual({ output_config: { effort: "low" } });
+      for (const effort of graded) expect(await sent(model, effort)).toEqual(adaptive(effort));
+    }
+  });
+
+  it("turns Sonnet 5 off out loud, because it thinks by default", async () => {
+    expect(await sent("claude-sonnet-5")).toEqual({});
+    expect(await sent("claude-sonnet-5", "none")).toEqual({ thinking: { type: "disabled" } });
+    for (const effort of graded) {
+      expect(await sent("claude-sonnet-5", effort)).toEqual(adaptive(effort));
+    }
+  });
+
+  it("keeps Opus 5 thinking at low for none, not disabled", async () => {
+    // Opus 5 accepts `disabled`, but with it the model can write a tool call
+    // into its text instead of a tool_use block. That call never runs.
+    expect(await sent("claude-opus-5")).toEqual({});
+    expect(await sent("claude-opus-5", "none")).toEqual({ output_config: { effort: "low" } });
+    for (const effort of graded) {
+      expect(await sent("claude-opus-5", effort)).toEqual(adaptive(effort));
+    }
+  });
+
+  it("says nothing for none where thinking is off by default", async () => {
+    // Opus 4.7 and 4.8 reject a non-default temperature on every request; the
+    // 4.6 models still take one while thinking is off.
+    expect(await sent("claude-opus-4-8", "none")).toEqual({});
+    expect(await sent("claude-opus-4-8", "high")).toEqual(adaptive("high"));
+    for (const model of ["claude-opus-4-6", "claude-sonnet-4-6"]) {
+      expect(await sent(model)).toEqual({ temperature: 0.3 });
+      expect(await sent(model, "none")).toEqual({ temperature: 0.3 });
+      for (const effort of graded) expect(await sent(model, effort)).toEqual(adaptive(effort));
+    }
+  });
+
+  it("keeps a thinking budget where extended thinking is the only mode", async () => {
+    // Claude 4.5 and older reject `adaptive`. Every non-Claude id on this wire
+    // keeps the same bytes too: those endpoints' dialects are their own.
+    for (const model of [
+      "claude-haiku-4-5",
+      "claude-opus-4-5-20251101",
+      "claude-sonnet-4-20250514",
+      "MiniMax-M3",
+    ]) {
+      expect(await sent(model)).toEqual({ temperature: 0.3 });
+      expect(await sent(model, "none")).toEqual({ temperature: 0.3 });
+      expect(await sent(model, "low")).toEqual({
+        thinking: { type: "enabled", budget_tokens: 2_048 },
+      });
+    }
+  });
+
+  it("treats a Claude id it does not know as always on", async () => {
+    // Every Claude since Opus 4.7 rejects `enabled`, and the newest reject
+    // `disabled` too. Low effort is accepted by every model that thinks
+    // adaptively, so it is the one `none` a future model cannot refuse.
+    expect(await sent("claude-opus-7")).toEqual({});
+    expect(await sent("claude-opus-7", "none")).toEqual({ output_config: { effort: "low" } });
+    expect(await sent("claude-opus-7", "max")).toEqual(adaptive("max"));
+  });
+
+  it("follows the model the request names, not the one the provider was built with", async () => {
+    expect(await sent("MiniMax-M3", "none", "claude-sonnet-5")).toEqual({
+      thinking: { type: "disabled" },
+    });
+    expect(await sent("claude-sonnet-5", "low", "claude-haiku-4-5")).toEqual({
+      thinking: { type: "enabled", budget_tokens: 2_048 },
+    });
+  });
+});
+
 describe("toAnthropicMessages", () => {
   it("lifts system out and merges consecutive tool results into one user turn", () => {
     const messages: ChatMessage[] = [
