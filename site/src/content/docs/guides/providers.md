@@ -158,12 +158,12 @@ reads it out of all of those:
 parseJsonAnswer('Here you go:\n```json\n{"ok": true}\n```'); // { ok: true }
 ````
 
-It takes the first fenced block marked `json` or not marked at all, and the JSON may start on the
-fence line itself, right after the `json`. With no fence, it takes the text from the first `{` or
-`[` to the bracket that closes it. A fence counts only at the start of a
-line, so a JSON value that holds a code sample comes back whole. It returns `unknown`, because
-parsed is not validated. When there is no JSON to read, it throws a `JsonAnswerError`, whose `text`
-holds the first 2,000 characters of the answer.
+It takes the first fenced block marked `json` or not marked at all. The JSON may start on the fence
+line itself, right after the `json`; any other text there, like a title, is skipped. With no fence,
+it takes the text from the first `{` or `[` to the bracket that closes it. A fence counts only at
+the start of a line, so a JSON value that holds a code sample comes back whole. It returns
+`unknown`, because parsed is not validated. When there is no JSON to read, it throws a
+`JsonAnswerError`, whose `text` holds the first 2,000 characters of the answer.
 
 ### When the same call also carries tools
 

@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.13.2] - 2026-09-27
+
+### Fixed
+
+- **0.13.1 broke `parseJsonAnswer` on a fence line that carries a label.** 0.13.1 read everything after `json` on the fence line as the start of the JSON, so a block opened with `json title="report.json"`, `json {.report}` or `json here you go` threw a `JsonAnswerError`, where 0.12.3 had read it. Now that text is tried as the start of the JSON first, and when that doesn't parse, the block's body is read alone. When neither parses, the error names the body's fault if the body opens an object or array, and the whole JSON's fault if it began on the fence line. Skip 0.13.1.
+
 ## [0.13.1] - 2026-09-27
 
 ### Fixed

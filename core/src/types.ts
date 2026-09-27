@@ -212,10 +212,11 @@ export interface JsonOutput {
 /**
  * Read the JSON out of a model's answer. Models wrap it: a ```json fence, an
  * unmarked fence, a sentence before it, notes after it. This takes the first
- * fenced block marked `json` or not marked at all. With no such block, it
- * takes the text from the first `{` or `[` to the bracket that closes it, and
- * with no bracket either, the whole answer (a bare number, say). Then it
- * parses that.
+ * fenced block marked `json` or not marked at all. Text after the language on
+ * the fence line is read as the start of the JSON first, and as a label on the
+ * block when that doesn't parse. With no such block, it takes the text from the
+ * first `{` or `[` to the bracket that closes it, and with no bracket either,
+ * the whole answer (a bare number, say). Then it parses that.
  *
  * It returns `unknown` on purpose: parsed is not validated, and a model's JSON
  * has the schema's shape only once the caller has checked it.
@@ -224,7 +225,26 @@ export interface JsonOutput {
  * answer, so a log shows what the model actually said.
  */
 export function parseJsonAnswer(text: string): unknown {
-  const candidate = fencedJson(text) ?? bracketed(text);
+  const block = fencedBlock(text);
+  if (block === undefined) return parseAnswer(text, bracketed(text));
+  const { rest, body } = block;
+  if (rest.trim() === "") return parseAnswer(text, body);
+  try {
+    return JSON.parse(`${rest}\n${body}`);
+  } catch (joinedError) {
+    try {
+      return JSON.parse(body);
+    } catch (bodyError) {
+      // Neither reading parses, so name the fault of the one holding the JSON.
+      // A body that opens an object or array is the whole document, and the
+      // joined reading only trips on the label. A body that doesn't is the tail
+      // of JSON begun on the fence line, or empty, and alone says nothing useful.
+      throw new JsonAnswerError(text, /^\s*[[{]/.test(body) ? bodyError : joinedError);
+    }
+  }
+}
+
+function parseAnswer(text: string, candidate: string): unknown {
   try {
     return JSON.parse(candidate);
   } catch (error) {
@@ -250,18 +270,16 @@ export class JsonAnswerError extends Error {
  *  a value carrying one (a code sample) never ends the block early. `[^\S\n]`
  *  is a space, a tab, or the `\r` of a CRLF line.
  *
- *  What follows the language on the fence line is kept: a model sometimes
- *  starts the JSON there (```json {"a": 1}), so when it isn't blank it is the
- *  body's first line. Dropping it left an empty body, or only the tail. Blank
- *  means trim()'s blank, which is wider than JSON's: a no-break space there
- *  would reach JSON.parse and fail it. */
+ *  What follows the language on the fence line is kept as `rest`, because it
+ *  means one of two things. A model sometimes starts the JSON there
+ *  (```json {"a": 1}), and dropping it leaves an empty body or only the tail.
+ *  Or it is a label: a title, an attribute block, a few words. */
 const FENCED_BLOCK = /^[^\S\n]*```[^\S\n]*([^\s`]*)([^\n]*)\n([\s\S]*?)^[^\S\n]*```/gm;
 
-function fencedJson(text: string): string | undefined {
+function fencedBlock(text: string): { rest: string; body: string } | undefined {
   for (const [, info = "", rest = "", body = ""] of text.matchAll(FENCED_BLOCK)) {
     const language = info.toLowerCase();
-    if (language !== "" && language !== "json") continue;
-    return rest.trim() === "" ? body : `${rest}\n${body}`;
+    if (language === "" || language === "json") return { rest, body };
   }
   return undefined;
 }
