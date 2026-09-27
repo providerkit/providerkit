@@ -150,6 +150,15 @@ describe("classifyHttp — the response-shaped entry point", () => {
     expect(classifyHttp(undefined, '{"error":{"message":"API key not valid"}}')).toBe("auth");
   });
 
+  it("reads Cloudflare's unknown-account 404 as auth, not a missing model", () => {
+    // Recorded 2026-09-27 against /accounts/x/ai/run. On status alone it was
+    // `model`, and the caller went looking for a model id that was fine.
+    const body =
+      '{"result":null,"success":false,"errors":[{"code":7003,"message":"Could not route to ' +
+      '/client/v4/accounts/x/ai/run, perhaps your object identifier is invalid?"}],"messages":[]}';
+    expect(classifyHttp(404, body)).toBe("auth");
+  });
+
   it("reads the snake and kebab spellings of too-many-requests", () => {
     // Providers that forward Google/gRPC error codes raw send the snake form
     // with no spaces — found in opencode's retryable list, absent from ours.

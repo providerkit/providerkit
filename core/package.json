@@ -13,6 +13,10 @@
     "./zod": {
       "types": "./dist/zod.d.ts",
       "default": "./dist/zod.js"
+    },
+    "./jev": {
+      "types": "./dist/jev.d.ts",
+      "default": "./dist/jev.js"
     }
   },
   "types": "./dist/index.d.ts",
