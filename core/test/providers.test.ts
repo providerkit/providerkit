@@ -549,20 +549,27 @@ describe("effortParams", () => {
     }
   });
 
-  it("sends nothing for none — the absent field IS GLM's off switch — and names low/high/max verbatim", () => {
-    // Not setting `reasoning` at all disables thinking for GLM 5.3 Flash
-    // (measured live 2026-09-14), so `none` omits the field rather than naming
-    // a level: the model answers 400 "Reasoning is mandatory" to
-    // `reasoning.effort: "none"` exactly as to `reasoning.enabled: false`.
-    // The 400 that once looked like "OpenRouter cannot be told not to think"
-    // was `reasoning.enabled: false`, a different field — which the test above
-    // pins as never sent.
+  it("says none per model on OpenRouter, and names low/high/max verbatim", () => {
+    // GLM 5.3 Flash refuses both explicit offs with a 400, and with the field
+    // omitted 18 of 28 hosts thought (2026-09-26, a production classify body
+    // sent to each host alone); `low` gave 0 reasoning tokens on every host
+    // that answered it but Sail Research (1) and Wafer (inverted). So `none`
+    // names `low` for it.
+    expect(effortParams("openrouter", "none", "z-ai/glm-5.3-flash")).toEqual({
+      reasoning: { effort: "low" },
+    });
+    // DeepSeek V4 Flash measured the reverse the same day: 0 reasoning tokens
+    // with the field omitted, thinking at `low`. It keeps the omitted field.
+    expect(effortParams("openrouter", "none", "deepseek/deepseek-v4-flash")).toEqual({});
+    // No model given: today's request, unchanged.
     expect(effortParams("openrouter", "none")).toEqual({});
     // Naming a level raises it; low/high/max ride as asked (`max` verbatim —
-    // measured accepted on the live endpoint).
-    expect(effortParams("openrouter", "max")).toEqual({ reasoning: { effort: "max" } });
-    expect(effortParams("openrouter", "high")).toEqual({ reasoning: { effort: "high" } });
-    expect(effortParams("openrouter", "low")).toEqual({ reasoning: { effort: "low" } });
+    // measured accepted on the live endpoint), whatever the model.
+    for (const model of [undefined, "z-ai/glm-5.3-flash"]) {
+      expect(effortParams("openrouter", "max", model)).toEqual({ reasoning: { effort: "max" } });
+      expect(effortParams("openrouter", "high", model)).toEqual({ reasoning: { effort: "high" } });
+      expect(effortParams("openrouter", "low", model)).toEqual({ reasoning: { effort: "low" } });
+    }
   });
 
   it("keeps the real off switch where a model has one — DeepSeek defaults ON", () => {
@@ -591,10 +598,11 @@ describe("effortParams", () => {
   });
 
   it("sends nothing at all when the caller never asked", () => {
-    // Absent is not `none` — except on OpenRouter, where GLM's off switch IS
-    // the absent field, so the two are the same request by design there.
+    // Absent is not `none`: a knob the caller never touched stays the
+    // provider's, whatever the model — GLM included, where `none` names `low`.
     for (const dialect of ["openai", "openrouter", "deepseek", "off"] as const) {
       expect(effortParams(dialect, undefined)).toEqual({});
+      expect(effortParams(dialect, undefined, "z-ai/glm-5.3-flash")).toEqual({});
     }
   });
 
@@ -614,6 +622,25 @@ describe("effortParams", () => {
     expect(await seen("openrouter", "low")).toMatchObject({ reasoning: { effort: "low" } });
     expect(await seen("deepseek", "none")).toMatchObject({ thinking: { type: "disabled" } });
     expect(await seen("kimi", "high")).toMatchObject({ reasoning_effort: "high" });
+  });
+  it("says none to the model the request names, over the wire", async () => {
+    const body = async (model: string, perCall?: string) => {
+      const { seen: calls, fetchImpl } = recorder([j({ choices: [] })]);
+      await collect(
+        createOpenAIProvider({ apiKey: "k", model, id: "openrouter", fetchImpl }).createStream(
+          [{ role: "user", content: "hi" }],
+          [],
+          { effort: "none", ...(perCall ? { model: perCall } : {}) },
+        ),
+      );
+      return calls[0]!.body;
+    };
+    expect(await body("z-ai/glm-5.3-flash")).toMatchObject({ reasoning: { effort: "low" } });
+    expect(await body("deepseek/deepseek-v4-flash")).not.toHaveProperty("reasoning");
+    // A per-call model is the one the request names, so it is the one asked.
+    expect(await body("deepseek/deepseek-v4-flash", "z-ai/glm-5.3-flash")).toMatchObject({
+      reasoning: { effort: "low" },
+    });
   });
 });
 

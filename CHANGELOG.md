@@ -2,6 +2,16 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.12.2] - 2026-09-26
+
+### Fixed
+
+- **`effort: "none"` on OpenRouter no longer leaves GLM 5.3 Flash free to think.** The adapter said `"none"` by sending no `reasoning` field, because a 2026-09-14 reading found that this turned GLM's thinking off. It depends on the host. A production classify body, sent to each of 28 hosts alone, made 18 of them think with the field left out, and GLM answers both explicit offs (`effort: "none"`, `enabled: false`) with a 400. `reasoning: { effort: "low" }` gave 0 reasoning tokens on every host that answered it except Sail Research (1) and Wafer, which is inverted. So for `z-ai/glm-5.3-flash`, `"none"` now sends `{ reasoning: { effort: "low" } }`. Every other model still gets no field: DeepSeek V4 Flash measured the reverse, with 0 reasoning tokens when the field is left out and thinking at `"low"`.
+
+### Added
+
+- **`effortParams` takes the model id as an optional third argument.** The OpenAI-shape adapter passes the id each request names, including a per-call `model`. Called without it, `effortParams` returns what it did before.
+
 ## [0.12.1] - 2026-09-26
 
 ### Fixed
