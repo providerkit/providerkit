@@ -173,8 +173,10 @@ un-learned.
     empty with a length finish that reads as a model failure. This is the sibling of the lesson
     below about an adapter ignoring an option, and the harder one to see: nothing is ignored,
     the mapping is just silently lossy. `golden.test.ts` now asks all four shapes to refuse
-    thinking and checks that silence does NOT refuse it — except on Anthropic, where extended
-    thinking is opt-in and the default already is off.
+    thinking and checks that silence does NOT refuse it, on all four. Anthropic was the exception
+    while its models defaulted to off. From Claude 5 on they think unless told not to, and some
+    cannot be told at all, so the adapter spells `none` per model id (documented, Anthropic's
+    per-model table, read 2026-09-27) — `disabled`, nothing, or the lowest effort.
 
 ## Next
 

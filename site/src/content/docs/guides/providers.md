@@ -107,9 +107,16 @@ interface StreamOptions {
 }
 ```
 
-`effort` is mapped, not passed through. On OpenAI-shape it becomes `reasoning_effort`; on
-Anthropic-shape it becomes a thinking budget in output tokens, always clamped below `maxTokens`,
-because a budget at or above the ceiling leaves no room to answer and the turn ends mid-thought.
+`effort` is mapped, not passed through. On OpenAI-shape it becomes `reasoning_effort`. On
+Anthropic-shape it depends on the model id:
+
+- Current Claude models get adaptive thinking, with the level in `output_config.effort`. Some of
+  them can't stop thinking at all (Claude Fable 5.1 and Opus 5.5, for example), so there `"none"`
+  sends the lowest level, `low`. Adaptive thinking has no budget of its own and shares `maxTokens`
+  with the answer, so give it a large `maxTokens` at `high` and `max`.
+- Claude 4.5 and older, and other vendors' Anthropic-compatible endpoints, get a thinking budget
+  in output tokens. It always stays below `maxTokens`, because a budget at or above that ceiling
+  leaves no room to answer and the turn ends mid-thought.
 
 ## Structured output
 

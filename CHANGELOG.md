@@ -2,6 +2,21 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [Unreleased]
+
+Everything below comes from Anthropic's documentation, read 2026-09-27: the per-model thinking table and the Thinking and Effort pages. None of it was measured against the live API.
+
+### Fixed
+
+- **Any `effort` above `"none"` failed on current Claude models.** The Anthropic adapter asked for thinking with `thinking: { type: "enabled", budget_tokens }`. Every Claude from Opus 4.7 on answers that with a 400. From the 4.6 models on, a graded effort now sends `thinking: { type: "adaptive" }` and `output_config: { effort }`.
+- **`effort: "none"` let current Claude models think.** The adapter said `"none"` by sending no `thinking` field, which meant "off" up to Claude 4.5. Claude Sonnet 5 and Opus 5 think by default. Fable 5 and 5.1, Mythos 5 and 5.1, Mythos Preview and Opus 5.5 can't stop. Now `"none"` sends `thinking: { type: "disabled" }` to Sonnet 5, and `output_config: { effort: "low" }` to the models that have no off. Opus 5 gets `low` too, although it accepts `disabled`: with thinking off it can write a tool call into its text, and that call never runs. Opus 4.6 to 4.8 and Sonnet 4.6 don't think unless asked, so `"none"` still sends nothing there.
+- **A `temperature` or `topP` failed every request on the newest Claude models.** From Opus 4.7 on, a non-default value is a 400, whether or not the model thinks. The adapter now leaves both out for those models, as it already did whenever it asked for thinking.
+
+### Changed
+
+- **The adapter picks the thinking fields from the model id**, including a per-call `model`. A `claude-` id it doesn't know is treated like the newest models. Claude 4.5 and older keep the thinking budget, and so does every other vendor on the Anthropic wire (Z.ai, MiniMax, Kimi, Qwen). Those endpoints get the same bytes as before. `explicitNone` is ignored for Claude ids.
+- **Opus 4.6 and Sonnet 4.6 move from the thinking budget to adaptive thinking.** Both still accept a budget, but Anthropic has deprecated it. Adaptive thinking has no budget of its own and shares `maxTokens` with the answer, so raise `maxTokens` at `high` and `max`.
+
 ## [0.12.2] - 2026-09-26
 
 ### Fixed
