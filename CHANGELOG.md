@@ -9,6 +9,7 @@ The Claude thinking changes come from Anthropic's documentation, read 2026-09-27
 ### Added
 
 - **A user turn can carry a file: a PDF, a recording, a video.** The new part is `{ type: "file", mimeType, data }`, base64 bytes like an image part. The Gemini adapter sends it as `inlineData`, the way it sends an image. Gemini takes up to 100 MB of inline data per request, and 50 MB for a PDF (documented, Gemini API "File input methods", read 2026-09-27); nothing here enforces that limit. The OpenAI, Anthropic and Responses adapters throw an `invalid` `ProviderError` before any request goes out, naming the adapter and the media type. The exported converters (`toOpenAIMessages`, `toAnthropicMessages`, `toResponsesInput`) refuse it too, and take the provider id to name as an optional second argument.
+- **`parseJsonAnswer(text)` reads the JSON out of a model's answer.** It takes the first fenced block marked `json` or not marked at all, or else the text from the first `{` or `[` to the bracket that closes it, and parses that. A fence counts only at the start of a line, so a JSON value holding a code sample comes back whole. It returns `unknown`, for you to validate. When the text isn't JSON, it throws a `JsonAnswerError` whose `text` holds the first 2,000 characters of the answer and whose `cause` is the `SyntaxError`. No adapter calls it.
 
 ### Fixed
 

@@ -210,6 +210,83 @@ export interface JsonOutput {
 }
 
 /**
+ * Read the JSON out of a model's answer. Models wrap it: a ```json fence, an
+ * unmarked fence, a sentence before it, notes after it. This takes the first
+ * fenced block marked `json` or not marked at all. With no such block, it
+ * takes the text from the first `{` or `[` to the bracket that closes it, and
+ * with no bracket either, the whole answer (a bare number, say). Then it
+ * parses that.
+ *
+ * It returns `unknown` on purpose: parsed is not validated, and a model's JSON
+ * has the schema's shape only once the caller has checked it.
+ *
+ * @throws {JsonAnswerError} when that text is not JSON. The error carries the
+ * answer, so a log shows what the model actually said.
+ */
+export function parseJsonAnswer(text: string): unknown {
+  const candidate = fencedJson(text) ?? bracketed(text);
+  try {
+    return JSON.parse(candidate);
+  } catch (error) {
+    throw new JsonAnswerError(text, error);
+  }
+}
+
+/** An answer `parseJsonAnswer` found no JSON in. `text` is the answer, cut to
+ *  2,000 characters like a provider's error body; `cause` is the SyntaxError. */
+export class JsonAnswerError extends Error {
+  readonly text: string;
+
+  constructor(text: string, cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(`The model's answer is not JSON: ${reason}`, { cause });
+    this.name = "JsonAnswerError";
+    this.text = text.slice(0, 2_000);
+  }
+}
+
+/** A fenced block, whose fences count only at the start of a line. A JSON
+ *  string can't hold a raw newline, so no line of JSON starts with a fence, and
+ *  a value carrying one (a code sample) never ends the block early. `[^\S\n]`
+ *  is a space, a tab, or the `\r` of a CRLF line. */
+const FENCED_BLOCK = /^[^\S\n]*```[^\S\n]*([^\s`]*)[^\n]*\n([\s\S]*?)^[^\S\n]*```/gm;
+
+function fencedJson(text: string): string | undefined {
+  for (const [, info = "", body = ""] of text.matchAll(FENCED_BLOCK)) {
+    const language = info.toLowerCase();
+    if (language === "" || language === "json") return body;
+  }
+  return undefined;
+}
+
+/** From the first `{` or `[` to the bracket that closes it, skipping brackets
+ *  inside strings. An answer cut off before it closes keeps its tail, and
+ *  JSON.parse says what is wrong with it.
+ *
+ *  ponytail: the FIRST opener wins, so prose with a bracket before the JSON
+ *  ("see [1]: {…}") picks the prose's. The upgrade is to try the next opener
+ *  when one fails to parse, once a model that writes that turns up. */
+function bracketed(text: string): string {
+  const start = text.search(/[[{]/);
+  if (start === -1) return text;
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (char === "\\") i++;
+      else if (char === '"') inString = false;
+    } else if (char === '"') inString = true;
+    else if (char === "{" || char === "[") depth++;
+    else if (char === "}" || char === "]") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return text.slice(start);
+}
+
+/**
  * How the schema rides on a call that ALSO carries tools.
  *
  * `"response_format"` sends both — what the shapes document, what most models

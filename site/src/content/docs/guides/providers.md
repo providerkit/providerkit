@@ -144,6 +144,19 @@ extra system block, placed after the cached one. Gemini takes it via `responseJs
 Whatever the shape, the seam never guarantees the JSON — validate the answer regardless. `json`
 only decides whether the request is accepted.
 
+Models also wrap their JSON: a fence, a sentence before it, notes after it. `parseJsonAnswer(text)`
+reads it out of all of those:
+
+````ts
+parseJsonAnswer('Here you go:\n```json\n{"ok": true}\n```'); // { ok: true }
+````
+
+It takes the first fenced block marked `json` or not marked at all. With no fence, it takes the
+text from the first `{` or `[` to the bracket that closes it. A fence counts only at the start of a
+line, so a JSON value that holds a code sample comes back whole. It returns `unknown`, because
+parsed is not validated. When there is no JSON to read, it throws a `JsonAnswerError`, whose `text`
+holds the first 2,000 characters of the answer.
+
 ### When the same call also carries tools
 
 A model that cannot serve a schema and a tool call at once does not tell you. Its decoder is pinned
