@@ -28,6 +28,14 @@ describe("parseJsonAnswer", () => {
       { a: 1 },
     ],
     ["CRLF line ends", `${FENCE}json\r\n{"a": 1}\r\n${FENCE}\r\n`, { a: 1 }],
+    ["JSON on the fence line", `${FENCE}json {"a": 1}\n${FENCE}`, { a: 1 }],
+    [
+      "JSON that starts on the fence line and goes on",
+      `${FENCE}json {"a": 1,\n"b": 2}\n${FENCE}`,
+      { a: 1, b: 2 },
+    ],
+    ["JSON against the fence, with no language", `${FENCE}{"a": 1}\n${FENCE}`, { a: 1 }],
+    ["a no-break space after the language", `${FENCE}json\u00a0\n{"a": 1}\n${FENCE}`, { a: 1 }],
     ["a bare number", " 42 ", 42],
   ])("reads %s", (_name, text, expected) => {
     expect(parseJsonAnswer(text)).toEqual(expected);

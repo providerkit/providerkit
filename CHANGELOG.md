@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`parseJsonAnswer` threw when the JSON started on the fence line**, right after the `json`. The rest of that line was dropped along with the language, so the block read as empty, or as only its lines after the first. That rest now counts as the block's first line.
+
 ## [0.13.0] - 2026-09-27
 
 ### Added
