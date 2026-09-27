@@ -78,7 +78,7 @@ export default defineConfig({
               label: "Guides",
               paths: ["guides/**"],
               description:
-                "the hand-written guides only — errors, retries, streaming, tools, context, cost",
+                "the hand-written guides only — errors, retries, streaming, tools, context, cost, Jev",
             },
             {
               label: "API reference",
@@ -88,11 +88,11 @@ export default defineConfig({
           ],
         }),
         starlightTypeDoc({
-          entryPoints: ["../core/src/index.ts", "../core/src/zod.ts"],
+          entryPoints: ["../core/src/index.ts", "../core/src/zod.ts", "../core/src/jev.ts"],
           tsconfig: "../core/tsconfig.json",
           output: "reference",
-          // Two entry points, so the generated group has two children named after
-          // the import paths they document.
+          // Three entry points, so the generated group has three children named
+          // after the import paths they document.
           sidebar: { label: "API reference", collapsed: true },
           typeDoc: { excludeInternal: true, useCodeBlocks: true, parametersFormat: "table" },
         }),
@@ -133,6 +133,7 @@ export default defineConfig({
             { label: "Tools", slug: "guides/tools" },
             { label: "Context and compaction", slug: "guides/context" },
             { label: "Usage and cost", slug: "guides/usage" },
+            { label: "Jev decisions", slug: "guides/jev" },
           ],
         },
         typeDocSidebarGroup,

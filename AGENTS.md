@@ -119,6 +119,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator        |
 | `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets |
 | `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                       |
+| `jev.ts`                 | `@providerkit/core/jev` — TypeSafe's decision model on its four hosts      |
 
 Plus `test/golden.test.ts` — the cross-vendor conformance matrix. Not a module: the one place
 the four adapters are asked the same question, on recorded wire bytes, and have to agree.
