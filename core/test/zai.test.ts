@@ -4,7 +4,9 @@ import {
   createZaiCodingProvider,
   drainStream,
   ProviderError,
+  type ChatMessage,
   type Effort,
+  type ToolDefinition,
 } from "../src/index.ts";
 
 describe("Z.ai Coding Plan", () => {
@@ -93,6 +95,64 @@ describe("Z.ai Coding Plan", () => {
       expect(await sent(via, "medium")).toEqual(budget(8_192));
       expect(await sent(via, "high")).toEqual(budget(16_384));
       expect(await sent(via, "max")).toEqual(budget(32_768));
+    }
+  });
+
+  it("keeps thinking on through a tool loop, byte for byte", async () => {
+    // Claude 4.5 and older think only on the first request of a tool loop:
+    // extended mode wants a thinking block this adapter never sends back. That
+    // rule is Claude's. GLM gets exactly the body it got before the rule.
+    const loop: ChatMessage[] = [
+      { role: "user", content: "Weather in Paris?" },
+      {
+        role: "assistant",
+        content: "",
+        reasoning: "hmm",
+        toolCalls: [{ id: "call_1", name: "weather", arguments: '{"city":"Paris"}' }],
+      },
+      { role: "tool", toolCallId: "call_1", name: "weather", content: "20°C, sunny" },
+    ];
+    const weather: ToolDefinition = {
+      name: "weather",
+      description: "Weather for a city",
+      inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+    };
+    const expected = JSON.stringify({
+      model: "glm-5.3-flash",
+      max_tokens: 65_536,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Weather in Paris?" }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "call_1", name: "weather", input: { city: "Paris" } }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_1",
+              content: [{ type: "text", text: "20°C, sunny" }],
+            },
+          ],
+        },
+      ],
+      stream: true,
+      tools: [
+        { name: "weather", description: "Weather for a city", input_schema: weather.inputSchema },
+      ],
+      thinking: { type: "enabled", budget_tokens: 2_048 },
+    });
+    for (const via of ["coding", "preset"] as const) {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("data: [DONE]\n\n"));
+      const config = { apiKey: "test-key", model: "glm-5.3-flash", fetchImpl };
+      const provider =
+        via === "coding" ? createZaiCodingProvider(config) : createPresetProvider("zai", config);
+      await drainStream(
+        provider.createStream(loop, [weather], { effort: "low", temperature: 0.3 }),
+        provider.model,
+      );
+      expect(String(fetchImpl.mock.calls[0]?.[1]?.body)).toBe(expected);
     }
   });
 

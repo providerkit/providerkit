@@ -131,6 +131,10 @@ Anthropic-shape it depends on the model id:
 - Claude 4.5 and older, and other vendors' Anthropic-compatible endpoints, get a thinking budget
   in output tokens. It always stays below `maxTokens`, because a budget at or above that ceiling
   leaves no room to answer and the turn ends mid-thought.
+- On Claude 4.5 and older, only the first request of a tool loop thinks. The requests that send
+  tool results back run without thinking, and the next user turn thinks again. These models need
+  a thinking request's last assistant turn to start with a thinking block, and the adapter doesn't
+  send thinking blocks back (documented, Anthropic Thinking page, read 2026-09-27).
 
 ## Structured output
 

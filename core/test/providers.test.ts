@@ -11,6 +11,7 @@ import {
   type ChatMessage,
   type Effort,
   type ProviderChunk,
+  type ToolDefinition,
 } from "../src/types.ts";
 
 /** Records the request and replays a canned SSE transcript. */
@@ -302,6 +303,57 @@ describe("anthropic thinking, per Claude model", () => {
         thinking: { type: "enabled", budget_tokens: 2_048 },
       });
     }
+  });
+
+  it("thinks on the first request of a tool loop on Claude 4.5, and not on the ones after", async () => {
+    // Documented (Anthropic Thinking page, read 2026-09-27): in extended mode
+    // the final assistant turn of a thinking request must open with a thinking
+    // block, and this adapter sends none back. A request that turns thinking
+    // off mid-turn is documented not to error. Adaptive mode has no such rule.
+    const weather: ToolDefinition = {
+      name: "weather",
+      description: "Weather for a city",
+      inputSchema: { type: "object", properties: { city: { type: "string" } } },
+    };
+    const ask: ChatMessage = { role: "user", content: "Weather in Paris?" };
+    const call: ChatMessage = {
+      role: "assistant",
+      content: "",
+      reasoning: "The user wants the weather.",
+      toolCalls: [{ id: "toolu_1", name: "weather", arguments: '{"city":"Paris"}' }],
+    };
+    const result: ChatMessage = {
+      role: "tool",
+      toolCallId: "toolu_1",
+      name: "weather",
+      content: "20°C, sunny",
+    };
+    const answer: ChatMessage = { role: "assistant", content: "It's 20°C and sunny." };
+    const next: ChatMessage = { role: "user", content: "And tomorrow?" };
+
+    // The loop's two requests, then the first request of the next turn.
+    const loop = async (model: string) => {
+      const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+      const provider = createAnthropicProvider({ apiKey: "k", model, fetchImpl });
+      for (const history of [[ask], [ask, call, result], [ask, call, result, answer, next]]) {
+        await collect(
+          provider.createStream(history, [weather], { effort: "low", temperature: 0.3 }),
+        );
+      }
+      return seen.map(({ body }) => ({
+        thinking: body.thinking,
+        output_config: body.output_config,
+        temperature: body.temperature,
+      }));
+    };
+    const budget = { thinking: { type: "enabled", budget_tokens: 2_048 } };
+
+    for (const model of ["claude-haiku-4-5", "claude-sonnet-4-5-20250929"]) {
+      expect(await loop(model)).toEqual([budget, { temperature: 0.3 }, budget]);
+    }
+    const low = adaptive("low");
+    expect(await loop("claude-sonnet-4-6")).toEqual([low, low, low]);
+    expect(await loop("MiniMax-M3")).toEqual([budget, budget, budget]);
   });
 
   it("treats a Claude id it does not know as always on", async () => {

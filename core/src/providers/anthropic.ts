@@ -55,9 +55,10 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
    *  where an absent field means the MODEL's default, not off — Z.ai's coding
    *  endpoint reads silence as thinking ON for reasoning-mandatory models like
    *  GLM 5.3 Flash (measured 2026-09-13: omit → thinking block; disabled →
-   *  none), and it accepts the marker natively. Ignored for a Claude id: each
-   *  Claude model has its own spelling of none (see `CLAUDE_THINKING`), and
-   *  several reject this marker outright. */
+   *  none), and it accepts the marker natively. Ignored for a Claude id that
+   *  thinks adaptively (4.6 and later): each has its own spelling of none (see
+   *  `CLAUDE_THINKING`), and several reject this marker outright. Claude 4.5
+   *  and older accept it, and get it. */
   explicitNone?: boolean;
 }
 
@@ -159,6 +160,16 @@ function claudeThinking(model: string): ClaudeThinking | undefined {
   const family = model.replace(/-\d{8}$/, ""); // a dated snapshot is its family
   if (CLAUDE_EXTENDED_ONLY.test(family)) return undefined;
   return CLAUDE_THINKING.get(family) ?? ALWAYS_ON;
+}
+
+/** Whether a request continues a tool loop: its last assistant message made
+ *  tool calls, so the request carries their results inside the same turn. */
+function continuesToolLoop(messages: readonly ChatMessage[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role === "assistant") return (message.toolCalls?.length ?? 0) > 0;
+  }
+  return false;
 }
 
 function mapStopReason(reason: string | undefined): FinishReason | undefined {
@@ -359,6 +370,15 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
               : { type: "tool", name: opts.toolChoice.name };
       }
       const claude = claudeThinking(model);
+      // Extended mode, which is all Claude 4.5 and older have, requires the
+      // final assistant turn of a thinking request to open with a thinking
+      // block, and this adapter sends none back (see toAnthropicMessages). So a
+      // request that continues a tool loop runs without thinking. Turning it off
+      // mid-turn is documented not to error, and the next user turn thinks
+      // again. Documented (Anthropic Thinking page, read 2026-09-27).
+      // ponytail: every loop step after the first goes unthought on these
+      // models. The upgrade is replaying the signed thinking blocks.
+      const unthoughtStep = !claude && model.startsWith("claude-") && continuesToolLoop(messages);
       if (claude) {
         // An effort the caller never set sends nothing: the model keeps its own
         // default, which on most of these is thinking ON.
@@ -374,7 +394,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           delete request.temperature;
           delete request.top_p;
         }
-      } else if (effort && effort !== "none") {
+      } else if (effort && effort !== "none" && !unthoughtStep) {
         const budget = Math.min(THINKING_BUDGET[effort], Math.floor(maxTokens * 0.8));
         request.thinking = { type: "enabled", budget_tokens: budget };
         // Thinking and sampling are mutually exclusive on this shape.
