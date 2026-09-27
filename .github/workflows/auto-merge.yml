@@ -1,0 +1,383 @@
+name: Auto-merge member PRs
+
+# Self-contained auto-merge — does NOT use GitHub's native "Allow auto-merge"
+# (a paid feature on private repos). Instead this triggers AFTER the CI workflow
+# finishes and, if CI passed and the PR qualifies, merges it directly. CI (the
+# `check` job: format, lint, typecheck, test, the portability guard, build) is
+# the bar — this never bypasses it, it just merges once it's green.
+#
+# Opt out per-PR: keep the PR a draft, or add the `hold` label.
+#
+# Copied from aboard, the newest copy on 2026-09-27, so a fix there ports here
+# by diff. Only these header lines say what differs in this repo.
+#
+# Token: the default GITHUB_TOKEN. A push made with it starts no workflow
+# (GitHub's loop-prevention), and that guard does not stop at the push: it
+# rides on the RUN a dispatch creates, so a CI run dispatched from here wakes
+# no `workflow_run` listener either. Here the one deploy, Deploy Site, listens
+# for a push to main instead — which the merge below, made with that same
+# token, never starts. workflow_dispatch itself IS exempt, which is the whole
+# fix: this workflow dispatches CI, WAITS for its conclusion, and then
+# dispatches each deploy itself. Red, cancelled, or no answer at all ships
+# nothing. No PAT needed.
+#
+# Before 2026-09-17 this file dispatched CI and stopped there, on the belief
+# that "the deploy workflows fire on its completion exactly as they do for
+# any other push". That was measured false — see the step below for the two
+# run ids. An auto-merged PR produced a green CI run and deployed nothing,
+# every time.
+#
+# NOTE: workflow_run only runs from the copy of this file on the default branch,
+# so this takes effect once merged to main.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    # CI also runs on every push to main, and each of those completions would
+    # queue this workflow only for the `pull_request` guard below to skip it —
+    # free, but it buries the real runs in skipped noise. `branches-ignore`
+    # filters on the *triggering run's* head branch, which is `main` for a push
+    # and the PR's source branch for a PR, so this drops exactly the push runs.
+    branches-ignore: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  auto-merge:
+    # The step below waits for CI and then for the deploys, so this job is no
+    # longer instant. Three 25-minute ceilings plus the merge is the worst case;
+    # past that something is stuck and a runner must not keep billing for it.
+    timeout-minutes: 90
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Only when CI passed, it was a PR (not a push), and the PR is from this repo
+    # (forks carry no write token and aren't auto-merged).
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    steps:
+      - name: Merge the PR if it qualifies
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # The open PR whose head IS the commit CI just validated. This comment always said
+          # so and the filter never checked it: `commits/{sha}/pulls` answers for every open
+          # PR that CONTAINS the commit, so a push landing after this CI run went green, or a
+          # PR stacked on this branch, was picked and merged at a head no CI run had passed.
+          # A head that moved is merged by its own CI run, or not at all.
+          pr=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+                 --jq '[.[] | select(.state == "open" and .head.sha == env.HEAD_SHA) | .number] | .[0] // empty')
+          if [ -z "$pr" ]; then
+            echo "No open PR has ${HEAD_SHA} as its head; nothing to do."
+            exit 0
+          fi
+          echo "CI passed for PR #$pr — checking eligibility."
+
+          # Write access is settled by the job's `if` above, not by a field on the PR.
+          # `author_association` is computed from PUBLIC org membership, and every org in
+          # this fleet has zero public members — so the Actions token reads every author
+          # as CONTRIBUTOR, the owner included, and the `OWNER|MEMBER|COLLABORATOR` case
+          # that used to be here rejected all of them, in all twelve repos. One repo has
+          # PRs: there this workflow ran 200 times and merged nothing, bailing on that
+          # line every time (runs 34972724597, 34964390950, 34849218792, 35140986090,
+          # 35092629920, 35254834865 — all 'CONTRIBUTOR'). Queried with a PAT the same PR
+          # reads MEMBER. All 155 were merged by hand.
+          #
+          # What settles it instead is a fact the Actions token can see: the job already
+          # requires the PR's head repository to BE this repository, and a branch here can
+          # only exist because somebody with write access pushed it. Same claim, one step
+          # earlier, from something measurable.
+          #
+          # Nothing a fork could reach is newly admitted — a fork's head repository is the
+          # fork, which the job's `if` already refuses. One case is: a writer pushes the
+          # branch and a reader opens the PR from it. Still CI-gated, still squashed, and
+          # in a private repo whose readers are its writers.
+          pr_json=$(gh api "repos/${REPO}/pulls/${pr}")
+          draft=$(jq -r '.draft' <<<"$pr_json")
+          held=$(jq -r 'any(.labels[].name == "hold"; .)' <<<"$pr_json")
+
+          if [ "$draft" = "true" ]; then echo "PR #$pr is a draft; skipping."; exit 0; fi
+          if [ "$held" = "true" ]; then echo "PR #$pr has the 'hold' label; skipping."; exit 0; fi
+
+          echo "PR #$pr qualifies — squash-merging."
+          # --match-head-commit: the lookup above and this merge are separate requests, and a
+          # push can land between them. GitHub then refuses the merge instead of taking a head
+          # CI never saw.
+          #
+          # Two PRs that go green together race for this step: the first merge moves
+          # main, and GitHub refuses the second with "Base branch was modified" until it
+          # redoes that PR's test merge, which takes seconds. With no second try the PR
+          # stayed open, green and undeployed, and nothing said so: on 2026-09-25, 10 of
+          # 19 PRs released together in ilojista, atendime and prospectar stopped this
+          # way. So it tries again, with a growing wait and a few random seconds so the
+          # tries don't collide again. A head that moved or a PR that closed ends the
+          # tries: there is nothing left to try.
+          #
+          # A concurrency group would not fix it: this job waits for CI and the deploys,
+          # and GitHub cancels every pending run in a group except the newest.
+          for attempt in 1 2 3 4 5 6; do
+            if gh pr merge "$pr" --repo "$REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA"; then
+              break
+            fi
+            now=$(gh api "repos/${REPO}/pulls/${pr}" --jq '"\(.state) \(.head.sha)"' 2>/dev/null || echo "no answer")
+            case "$now" in
+              "open ${HEAD_SHA}" | "no answer") ;;
+              *)
+                echo "PR #${pr} is '${now}' now; no more tries."
+                break
+                ;;
+            esac
+            [ "$attempt" -lt 6 ] || break
+            wait_s=$((attempt * 10 + RANDOM % 10))
+            echo "Merge refused (try ${attempt} of 6); trying again in ${wait_s}s."
+            sleep "$wait_s"
+          done
+          if [ "$(gh api "repos/${REPO}/pulls/${pr}" --jq .merged)" != "true" ]; then
+            echo "::error::PR #${pr} was not merged. The refusals are above."
+            exit 1
+          fi
+
+          # ── Ship the squashed commit by hand, because the chain cannot. ──────────
+          # GITHUB_TOKEN's push starts no workflow, and the loop guard does not stop at
+          # the push: it rides on the RUN a dispatch creates, so the CI run dispatched
+          # below wakes no `workflow_run` listener either. Measured 2026-09-17 on a
+          # throwaway public repo — one listener, two runs of one workflow 78s apart:
+          # run 35257001821, dispatched by a workflow holding GITHUB_TOKEN, woke it not
+          # at all; run 35257134616, dispatched with a user token, woke it two seconds
+          # after finishing. Every deploy here triggers on `workflow_run` of CI, so what
+          # this file used to claim — that the deploys "fire on its completion exactly
+          # as they do for any other push" — was false: an auto-merged PR produced a
+          # green CI run and deployed nothing, every time, since the day it was written.
+          #
+          # workflow_dispatch itself IS exempt (same probe: the dispatched run started),
+          # so the fix is to walk the chain here — dispatch CI, wait for its conclusion,
+          # then dispatch each deploy.
+          #
+          # Dispatching deploys is how four repos on this stack did it before, and it
+          # was removed for two real reasons: a deploy checks out main's TIP, so it
+          # shipped a commit no CI run had passed; and the list of deploys was written
+          # out by hand, so one repo listed deploy-api alone and never shipped its web,
+          # site or docs at all. All three are answered below — the deploys go out only
+          # after THIS commit's CI is green, only while main's tip is still that commit,
+          # and the list is read from the API rather than kept here.
+          #
+          # Cost: the job now bills for the whole chain (~CI + the slowest deploy)
+          # instead of the two seconds a fire-and-forget dispatch took. That is the
+          # price of knowing the conclusion, and this path is rare — eleven of the
+          # twelve repos on this stack have never opened a PR. The 15s poll is not what
+          # costs: the job is billed by wall clock either way, so a tighter interval
+          # buys nothing but API calls, and 15s keeps a whole chain under ~100 requests
+          # while adding at most 15s of latency to a chain that takes minutes.
+          poll=15
+          ceiling=100 # 100 × 15s = 25 min per run, above CI's own cap and any deploy
+
+          # Print the id of the run the dispatch created, read from the dispatch's own
+          # answer: with `return_run_details` the API answers 200 with `workflow_run_id`
+          # (without it, a 204 with no body). A refused dispatch fails here, and an answer
+          # without an id prints nothing; the caller treats both as "did not start".
+          # </dev/null so gh cannot eat the stdin of a `while read` loop this runs inside.
+          #
+          # Until 2026-09-25 this listed the dispatch runs before and after, and took the
+          # smallest new id. The first list sometimes came back short, and the smallest
+          # "new" id was then the OLDEST run it had missed. In prospectar, one PR waited
+          # on a CI run from the day before and another on one from two days before. Both
+          # saw that their commit was not main, stood down, and nothing deployed until
+          # someone dispatched the deploys by hand.
+          dispatch() {
+            local wf=$1
+            shift
+            gh api -X POST "repos/${REPO}/actions/workflows/${wf}/dispatches" \
+              -f ref=main -F return_run_details=true "$@" \
+              --jq '.workflow_run_id // empty' </dev/null
+          }
+
+          # Poll until the run is terminal, then print its conclusion. Everything that
+          # is not the literal word "success" — failure, cancelled, timed_out,
+          # action_required, startup_failure, or a run that never finished — falls
+          # through to the caller's refusal. A gate that reads an unknown state as
+          # "fine" is the bug this whole step exists to close. A `gh` blip reads as no
+          # answer and is retried, never as a conclusion.
+          await() {
+            local id=$1 st
+            for _ in $(seq 1 "$ceiling"); do
+              st=$(gh run view "$id" --repo "$REPO" --json status --jq .status 2>/dev/null || echo "")
+              if [ "$st" = "completed" ]; then
+                gh run view "$id" --repo "$REPO" --json conclusion --jq '.conclusion // "unknown"'
+                return 0
+              fi
+              sleep "$poll"
+            done
+            echo "no conclusion after $((ceiling * poll / 60)) minutes"
+          }
+
+          echo "Dispatching CI on the squashed commit."
+          if ! ci=$(dispatch ci.yml) || [ -z "$ci" ]; then
+            echo "::error::The CI dispatch was refused or came back without a run id — nothing deployed."
+            exit 1
+          fi
+          echo "CI run $ci — waiting for it."
+          got=$(await "$ci")
+          validated=$(gh run view "$ci" --repo "$REPO" --json headSha --jq .headSha) &&
+            tip=$(gh api "repos/${REPO}/commits/main" --jq .sha) || {
+            echo "::error::could not read the CI run's commit or main's tip, so there is no way to tell whether a deploy would ship the commit CI checked — deploying nothing."
+            exit 1
+          }
+
+          # Only the commit CI just passed may be deployed, because a dispatched deploy
+          # checks out main's TIP. If main moved, the push that moved it started its own
+          # CI, and that run reaches the deploys the ordinary way — so standing down
+          # loses nothing and deploying would ship a commit nothing has checked. This is
+          # also what a second auto-merge looks like from here: its own CI dispatch
+          # cancels this one, sharing CI's concurrency group for main — and a conclusion
+          # about a commit that is no longer main says nothing about main.
+          if [ "$validated" != "$tip" ]; then
+            echo "::warning::CI run $ci on ${validated:0:7}: ${got}. But main is ${tip:0:7} now — standing down, that commit ships itself."
+            exit 0
+          fi
+          if [ "$got" != "success" ]; then
+            echo "::error::CI run $ci on the squashed commit ${validated:0:7}: ${got}. Deploying nothing."
+            exit 1
+          fi
+
+          # Every deploy workflow in the repo, read from the API rather than listed
+          # here, so one added later is dispatched by this code with no edit. `deploy-`
+          # is the filename convention every repo on this stack follows; a deploy named
+          # anything else is invisible here. `state == "active"` skips a disabled
+          # workflow, whose dispatch would 403.
+          deploys=$(gh api --paginate "repos/${REPO}/actions/workflows" \
+            --jq '.workflows[] | select(.state == "active")
+                  | select(.path | test("^\\.github/workflows/deploy-"))
+                  | "\(.id)\t\(.path)\t\(.name)"')
+          if [ -z "$deploys" ]; then
+            echo "::error::no active deploy-*.yml workflow in this repo — the squashed commit is on main and nothing shipped it."
+            exit 1
+          fi
+
+          # A deploy rides on CI, or on another deploy: three repos chain Deploy Worker
+          # onto Deploy API so the worker restarts on the code the API deploy pulled.
+          # That listener is dead here for the same reason CI's is, so the order is
+          # walked by hand — and TWO waves are enough, because GitHub connects at most
+          # three levels of workflow_run and CI is the first. A deploy that names
+          # anything else is refused below rather than silently skipped.
+          # Workflow name → the conclusion of the run we started, one "name<TAB>state"
+          # per line. A string rather than an associative array so this does not depend
+          # on the runner image's bash being 4+; the map holds at most five entries.
+          concluded=""
+          conclusion_of() { awk -F'\t' -v n="$1" '$1 == n { print $2; exit }' <<<"$concluded"; }
+
+          first=""  # rides on CI, or on nothing: dispatch now
+          second="" # rides on another deploy: dispatch once that one is green
+          failed=0
+
+          while IFS=$'\t' read -r id path name; do
+            [ -n "$path" ] || continue
+            body=$(gh api "repos/${REPO}/contents/${path}?ref=main" -H "Accept: application/vnd.github.raw") || {
+              echo "::error::could not read ${path}, so its place in the deploy order is unknown — nothing deployed."
+              exit 1
+            }
+            parents=""
+            if grep -qE '^[[:space:]]*workflow_run:' <<<"$body"; then
+              # Every deploy here writes the list as a flow sequence on one line —
+              # `workflows: [CI]`. Refuse anything else rather than guess: guessing
+              # wrong means restarting a worker onto code the API deploy has not pulled.
+              line=$(grep -m1 -E '^[[:space:]]*workflows:[[:space:]]*\[' <<<"$body" || true)
+              if [ -z "$line" ]; then
+                echo "::error::${path} has a workflow_run trigger this step cannot read, so its place in the deploy order is unknown — nothing deployed. Write its list on one line, e.g. workflows: [CI]."
+                exit 1
+              fi
+              parents=$(sed -E 's/^[^[]*\[//; s/\].*$//' <<<"$line" |
+                tr ',' '\n' | sed -E 's/["'"'"']//g; s/^ +//; s/ +$//' | grep -v '^$' || true)
+            fi
+            if [ -z "$parents" ] || [ "$parents" = "CI" ]; then
+              first+="${id}"$'\t'"${path}"$'\t'"${name}"$'\n'
+            else
+              second+="${id}"$'\t'"${path}"$'\t'"${name}"$'\t'"$(tr '\n' ',' <<<"$parents")"$'\n'
+            fi
+          done <<<"$deploys"
+
+          # Dispatch every deploy handed in, THEN wait for all of them: they run in
+          # parallel, so the wait costs the slowest one rather than the sum.
+          #
+          # force=false is the input the deploy gates grew for exactly this caller: it
+          # turns each app's changed-files gate ON, so an app deploys only when
+          # something it ships actually changed. Passing nothing takes the input's
+          # default, which is TRUE — a person clicking "Run workflow" wants a deploy —
+          # and every app would deploy on every auto-merge.
+          ship_wave() {
+            local id path name run c pending=""
+            while IFS=$'\t' read -r id path name; do
+              [ -n "$path" ] || continue
+              if run=$(dispatch "$id" -f 'inputs[force]=false') && [ -n "$run" ]; then
+                echo "dispatched ${name} → run ${run}"
+                pending+="${name}"$'\t'"${run}"$'\n'
+              else
+                echo "::error::${name} did not start — the dispatch was refused or came back without a run id — so it has not shipped this commit. A deploy-*.yml added later needs the same \`force\` input the others have, or its dispatch is refused with a 422."
+                failed=1
+              fi
+            done
+            while IFS=$'\t' read -r name run; do
+              [ -n "$name" ] || continue
+              c=$(await "$run")
+              # Deploy Web's concurrency cancels a running deploy when a newer one
+              # starts, so a second merge a minute behind this one cancels ours and
+              # this run went red with main fully deployed. Once main has moved, a
+              # cancel is that newer deploy taking over, not a failure: each deploy's
+              # gate diffs against its last SUCCESSFUL run, so the newer one ships this
+              # commit's changes too. A cancel with main unmoved still fails, because
+              # then nothing newer is coming.
+              if [ "$c" = "cancelled" ]; then
+                now=$(gh api "repos/${REPO}/commits/main" --jq .sha 2>/dev/null || true)
+                if [ -n "$now" ] && [ "$now" != "$validated" ]; then
+                  echo "::warning::${name} run ${run} was cancelled, and main is ${now:0:7} now. Its deploy ships ${validated:0:7} too."
+                  c="superseded"
+                fi
+              fi
+              concluded+="${name}"$'\t'"${c}"$'\n'
+              echo "${name}: ${c}"
+              # A deploy whose own gate found nothing to ship concludes success with
+              # every job skipped, so only a real failure reaches this.
+              [ "$c" = "success" ] || [ "$c" = "superseded" ] || failed=1
+            done <<<"$pending"
+          }
+
+          echo "Deploying ${validated:0:7} — the deploys that ride on CI."
+          ship_wave <<<"$first"
+
+          if [ -n "$second" ]; then
+            ready=""
+            while IFS=$'\t' read -r id path name parents; do
+              [ -n "$path" ] || continue
+              blocked=""
+              IFS=',' read -ra ps <<<"$parents"
+              for p in "${ps[@]}"; do
+                [ -n "$p" ] || continue
+                pc=$(conclusion_of "$p")
+                [ "$pc" = "success" ] ||
+                  blocked="${blocked}${p} (${pc:-never dispatched from here}); "
+              done
+              if [ -n "$blocked" ]; then
+                echo "::error::${name} was not dispatched — it rides on ${blocked%; }"
+                failed=1
+              else
+                ready+="${id}"$'\t'"${path}"$'\t'"${name}"$'\n'
+              fi
+            done <<<"$second"
+            if [ -n "$ready" ]; then
+              echo "The deploys that ride on another deploy."
+              ship_wave <<<"$ready"
+            fi
+          fi
+
+          if [ "$failed" != 0 ]; then
+            echo "::error::PR #$pr is merged and on main, but at least one deploy did not ship it — see above."
+            exit 1
+          fi
+          echo "main is deployed at ${validated:0:7}."

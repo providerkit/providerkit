@@ -1,7 +1,19 @@
 name: Deploy Site
 
 on:
+  # auto-merge dispatches every deploy-*.yml with force=false, and GitHub refuses
+  # (422) an input the workflow does not declare — so `force` is declared here.
+  # ponytail: nothing reads it; a dispatch always deploys. The push trigger's
+  # `paths` below is the gate for pushes, so the only extra cost is one ~2-minute
+  # Pages build after an auto-merge that changed nothing the site ships. If that
+  # starts to matter, gate on a diff against this workflow's last successful run,
+  # as aboard's deploy-web does.
   workflow_dispatch:
+    inputs:
+      force:
+        description: Kept for auto-merge, which passes it to every deploy. A dispatch here always deploys.
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths:
