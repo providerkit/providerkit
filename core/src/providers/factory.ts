@@ -141,8 +141,10 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         effort: config.effort,
         maxTokens,
         baseUrl: preset.baseUrl,
+        ...(preset.path ? { path: preset.path } : {}),
         id,
         headers,
+        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         fetchImpl: config.fetchImpl,
       });
       break;

@@ -137,22 +137,25 @@ async function drain(stream: AsyncIterable<unknown>): Promise<void> {
 }
 
 describe("opencode-go — the session header", () => {
-  it("sends the call's sessionId, and its own stable id when the call has none", async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
-    const provider = createPresetProvider("opencode-go", { apiKey: "k", fetchImpl });
-    const sent = (i: number) =>
-      new Headers(fetchImpl.mock.calls[i]?.[1]?.headers).get("x-opencode-session");
+  it.each(["opencode-go", "opencode-go-responses"] satisfies ProviderPresetId[])(
+    "%s sends the call's sessionId, and its own stable id when the call has none",
+    async (preset) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider(preset, { apiKey: "k", fetchImpl });
+      const sent = (i: number) =>
+        new Headers(fetchImpl.mock.calls[i]?.[1]?.headers).get("x-opencode-session");
 
-    await drain(
-      provider.createStream([{ role: "user", content: "hi" }], [], { sessionId: "conv-1" }),
-    );
-    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
-    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+      await drain(
+        provider.createStream([{ role: "user", content: "hi" }], [], { sessionId: "conv-1" }),
+      );
+      await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+      await drain(provider.createStream([{ role: "user", content: "hi" }], []));
 
-    expect(sent(0)).toBe("conv-1");
-    expect(sent(1)).toMatch(/^[0-9a-f-]{36}$/);
-    expect(sent(2)).toBe(sent(1));
-  });
+      expect(sent(0)).toBe("conv-1");
+      expect(sent(1)).toMatch(/^[0-9a-f-]{36}$/);
+      expect(sent(2)).toBe(sent(1));
+    },
+  );
 
   it("keeps the header off endpoints that don't ask for it", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
