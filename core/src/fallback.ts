@@ -2,6 +2,7 @@ import { classify, parseRetryAfterMs, ProviderError, type ErrorKind } from "./er
 import type { RateLimitWindow } from "./rate-limit.ts";
 import type { ProviderPresetId } from "./presets.ts";
 import type { Provider, ProviderChunk } from "./types.ts";
+import { withWatchdog, type WatchdogOptions } from "./watchdog.ts";
 import { createPresetProvider, type PresetProviderConfig } from "./providers/factory.ts";
 
 /** Retry intervals when the server supplies no deadline, not estimates of when
@@ -45,12 +46,18 @@ export interface FallbackSpec extends PresetProviderConfig {
 
 export type FallbackCandidate = Provider | FallbackSpec;
 
-function resolveFallback(candidate: FallbackCandidate): Provider {
+function resolveFallback(
+  candidate: FallbackCandidate,
+  inheritedWatchdog?: WatchdogOptions,
+): Provider {
   if (typeof candidate === "object" && candidate !== null && "createStream" in candidate) {
-    return candidate;
+    return inheritedWatchdog ? withWatchdog(candidate, inheritedWatchdog) : candidate;
   }
-  const { preset, ...config } = candidate;
-  return createPresetProvider(preset, config);
+  const { preset, watchdog = inheritedWatchdog, ...config } = candidate;
+  return createPresetProvider(preset, {
+    ...config,
+    ...(watchdog ? { watchdog } : {}),
+  });
 }
 
 /** Standard options that any provider config can accept to configure fallbacks inline. */
@@ -58,21 +65,30 @@ export interface ProviderFallbackConfig {
   /** Secondary and tertiary providers to try if this provider fails/exhausts:
    *  hand-built `Provider`s, preset-id `FallbackSpec`s, or both. */
   fallbacks?: readonly FallbackCandidate[];
+  /** Watch every candidate separately. A silent candidate then times out and
+   *  rotates; wrapping the completed pool would abort the whole chain instead.
+   *  Fallback specs inherit this unless they set their own watchdog. */
+  watchdog?: WatchdogOptions;
   /** Custom cooldown or telemetry options for the fallback pool. */
   fallbackOptions?: FallbackOptions<Provider>;
 }
 
 /**
- * Wrap a primary provider with its fallbacks if any are specified.
- * Returns the primary provider untouched when fallbacks is empty or omitted.
+ * Apply the watchdog before composing the pool: its timeout belongs to one
+ * candidate, while `createStream(..., { signal })` remains the caller's cancel
+ * for the whole chain. The distinction is what lets silence rotate safely.
  */
 export function withConfiguredFallbacks(
   primary: Provider,
   config?: ProviderFallbackConfig,
 ): Provider {
-  if (!config?.fallbacks || config.fallbacks.length === 0) return primary;
+  const watchedPrimary = config?.watchdog ? withWatchdog(primary, config.watchdog) : primary;
+  if (!config?.fallbacks || config.fallbacks.length === 0) return watchedPrimary;
   return withFallbackProviders(
-    [primary, ...config.fallbacks.map(resolveFallback)],
+    [
+      watchedPrimary,
+      ...config.fallbacks.map((candidate) => resolveFallback(candidate, config.watchdog)),
+    ],
     config.fallbackOptions,
   );
 }

@@ -218,6 +218,52 @@ describe("provider composition", () => {
     expect(chunks[0]?.source).toEqual({ provider: "openrouter", model: "z-ai/glm" });
   });
 
+  it("applies one inherited watchdog to each configured fallback candidate", async () => {
+    vi.useFakeTimers();
+    try {
+      const primary: Provider = {
+        id: "primary",
+        model: "a",
+        async *createStream() {
+          yield* [];
+          throw failure("overload");
+        },
+      };
+      const backup: Provider = {
+        id: "backup",
+        model: "b",
+        async *createStream(_messages, _tools, opts) {
+          yield* [];
+          await new Promise<void>((_resolve, reject) => {
+            const signal = opts?.signal;
+            if (!signal) throw new Error("expected a watchdog signal");
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+      };
+      const cooled: Array<{ candidate: Provider; kind: string }> = [];
+      const provider = withConfiguredFallbacks(primary, {
+        fallbacks: [backup],
+        watchdog: { idleMs: 10 },
+        fallbackOptions: {
+          onCooldown: ({ candidate, kind }) => cooled.push({ candidate, kind }),
+        },
+      });
+
+      const pending = drainStream(provider.createStream([], []), provider.model);
+      const failed = expect(pending).rejects.toMatchObject({ kind: "timeout" });
+      await vi.advanceTimersByTimeAsync(10);
+      await failed;
+
+      expect(cooled).toEqual([
+        { candidate: expect.objectContaining({ id: "primary", model: "a" }), kind: "overload" },
+        { candidate: expect.objectContaining({ id: "backup", model: "b" }), kind: "timeout" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("supports fallbacks directly on provider config (the easy option)", async () => {
     const backup: Provider = {
       id: "openrouter",

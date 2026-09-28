@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.14.1] - 2026-09-27
+
+### Fixed
+
+- **A watchdog around a model chain cancelled the whole chain instead of rotating.** The fallback pool correctly treats its input `signal` as the caller's cancellation, so `withWatchdog(createPresetProvider(...))` could not distinguish a silent candidate from a person pressing Stop. `createPresetProvider` now accepts `watchdog`; it wraps every model and configured fallback separately, while a caller's `signal` still cancels the whole chain immediately.
+
 ## [0.14.0] - 2026-09-27
 
 ### Added
