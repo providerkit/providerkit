@@ -91,6 +91,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
   const {
     fallbacks: _fallbacks,
     fallbackOptions: _fallbackOptions,
+    watchdog: _watchdog,
     models: _models,
     ...baseConfig
   } = config;

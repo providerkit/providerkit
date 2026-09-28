@@ -187,6 +187,72 @@ describe("model chains — one endpoint, one key, several models", () => {
     ]);
   });
 
+  it("times each candidate separately, then keeps the silent model on cooldown", async () => {
+    vi.useFakeTimers();
+    try {
+      const models: string[] = [];
+      const fetchImpl: typeof fetch = async (_url, init) => {
+        const model = modelOf(init);
+        models.push(model);
+        if (model === "silent") {
+          return await new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) throw new Error("expected a watchdog signal");
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        return new Response(
+          `data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      };
+      const provider = createPresetProvider("opencode-go", {
+        apiKey: "k",
+        models: ["silent", "answering"],
+        watchdog: { idleMs: 10 },
+        fetchImpl,
+      });
+
+      const first = drain(provider.createStream([{ role: "user", content: "hi" }], []));
+      await vi.advanceTimersByTimeAsync(10);
+      await first;
+      await drain(provider.createStream([{ role: "user", content: "again" }], []));
+
+      expect(models).toEqual(["silent", "answering", "answering"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still treats the caller's abort as cancellation of the whole chain", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) throw new Error("expected a bridged caller signal");
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    const provider = createPresetProvider("opencode-go", {
+      apiKey: "k",
+      models: ["a", "b"],
+      watchdog: { idleMs: 60_000 },
+      fetchImpl,
+    });
+    const controller = new AbortController();
+    const reason = new DOMException("stopped", "AbortError");
+    const pending = drain(
+      provider.createStream([{ role: "user", content: "hi" }], [], {
+        signal: controller.signal,
+      }),
+    );
+    const failed = expect(pending).rejects.toBe(reason);
+
+    controller.abort(reason);
+
+    await failed;
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("`models` overrides the chain, and `fallbacks` still run after it", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
