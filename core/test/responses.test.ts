@@ -466,6 +466,40 @@ describe("responses request", () => {
     expect(absent.seen[0]!.body.reasoning).toBeUndefined();
   });
 
+  it("uses Muse Contributor's lowest reasoning tier and encodes tool none by omission", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider({
+        fetchImpl,
+        model: "muse-spark-1.3-contributor",
+      }).createStream(
+        hi,
+        [
+          {
+            name: "search",
+            description: "look it up",
+            inputSchema: { type: "object" },
+          },
+        ],
+        { effort: "none", toolChoice: "none" },
+      ),
+    );
+
+    expect(seen[0]!.body.reasoning).toEqual({ effort: "minimal", summary: "auto" });
+    expect(seen[0]!.body.tools).toBeUndefined();
+    expect(seen[0]!.body.tool_choice).toBeUndefined();
+  });
+
+  it("keeps Muse Contributor's max tier instead of applying OpenAI's high ceiling", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider({ fetchImpl, model: "muse-spark-1.3-contributor" }).createStream(hi, [], {
+        effort: "max",
+      }),
+    );
+    expect(seen[0]!.body.reasoning).toEqual({ effort: "max", summary: "auto" });
+  });
+
   it("sends tools flat, plus tool_choice, max_output_tokens and a json schema", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
     await collect(

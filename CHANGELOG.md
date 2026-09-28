@@ -2,6 +2,17 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.15.0] - 2026-09-27
+
+### Added
+
+- **`opencode-go-responses` preset.** OpenCode Go serves Muse Spark Contributor on the Responses API rather than Chat Completions. The preset sends the required session header and defaults to `muse-spark-1.3-contributor`. Live checks passed text, images, strict JSON Schema, parallel tool calls and tool-result round trips.
+
+### Fixed
+
+- **Muse Spark Contributor rejected the shared meanings of `effort: "none"` and `toolChoice: "none"`.** Its lowest reasoning tier is `minimal`, and it accepts only automatic tool choice. The Responses adapter now maps no reasoning to `minimal` for this model and encodes no tools by omitting the tool list. Named and required choices remain explicit so the endpoint refuses unsupported behavior instead of silently weakening it.
+- **Responses presets could not send a per-call session header.** They now support the same stable fallback id and `StreamOptions.sessionId` override as Chat Completions presets.
+
 ## [0.14.1] - 2026-09-27
 
 ### Fixed

@@ -325,6 +325,22 @@ export const PROVIDER_PRESETS = {
     models: ["glm-5.3-flash", "glm-5.3", "glm-5.2"],
   },
   /**
+   * OpenCode Go's Responses route. Muse Contributor measured 2026-09-28:
+   * text, images, strict JSON Schema, parallel tools and tool-result round trips
+   * all passed. It requires reasoning (`none` becomes `minimal`) and accepts
+   * only automatic tool choice (`none` is encoded by sending no tools).
+   * Contributor requests may be used to improve Meta products; the workspace
+   * must explicitly allow those endpoints.
+   */
+  "opencode-go-responses": {
+    shape: "responses",
+    baseUrl: "https://opencode.ai/zen/go",
+    auth: "bearer",
+    defaultModel: "muse-spark-1.3-contributor",
+    models: ["muse-spark-1.3-contributor"],
+    sessionHeader: "x-opencode-session",
+  },
+  /**
    * OpenCode Go — one $10/month key across many open models, each with its own
    * monthly dollar limit (5h = 20%, week = 50%). Chain several models as
    * `fallbacks` so a spent one hands over to the next.

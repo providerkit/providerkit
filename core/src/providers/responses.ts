@@ -40,6 +40,9 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   /** Extra request headers — where a subscription backend's account id goes
    *  (`ChatGPT-Account-Id`), which those backends reject the request without. */
   headers?: Record<string, string>;
+  /** Header that carries `StreamOptions.sessionId`. When set and a call has no
+   *  sessionId, one stable id for this provider instance rides instead. */
+  sessionHeader?: string;
   /**
    * Where this backend serves the endpoint, when it is not `/v1/responses`.
    * The ChatGPT subscription surface serves it at `/backend-api/codex/responses`
@@ -53,6 +56,19 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
 const DEFAULT_PATH = "/v1/responses";
+const MUSE_SPARK_CONTRIBUTOR = "muse-spark-1.3-contributor";
+
+function isMuseSparkContributor(model: string): boolean {
+  return model === MUSE_SPARK_CONTRIBUTOR;
+}
+
+/** Go's Muse endpoint requires reasoning and starts at `minimal`; OpenAI's
+ * Responses models accept `none` but stop at `high`. Keep that dialect here,
+ * where the request shape already owns the spelling. */
+function reasoningEffort(model: string, effort: Effort): string {
+  if (isMuseSparkContributor(model)) return effort === "none" ? "minimal" : effort;
+  return effort === "max" ? "high" : effort;
+}
 
 /**
  * `response.incomplete` means the turn was cut short, and the seam has one word
@@ -236,6 +252,7 @@ interface PendingCall {
 export function createResponsesProvider(config: ResponsesConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "openai-responses";
+  const instanceSessionId = config.sessionHeader ? crypto.randomUUID() : undefined;
 
   const provider: Provider = {
     id,
@@ -247,10 +264,13 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
       const effort = opts.effort ?? config.effort;
+      const model = opts.model ?? config.model;
+      const museContributor = isMuseSparkContributor(model);
+      const requestTools = museContributor && opts.toolChoice === "none" ? [] : tools;
       const { instructions, input } = toResponsesInput(messages, id);
 
       const request: Record<string, unknown> = {
-        model: opts.model ?? config.model,
+        model,
         input,
         stream: true,
         // The caller's history is the entire state of a run. Server-side
@@ -266,29 +286,29 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       // No stop sequences on this shape — it has no equivalent field, and
       // inventing one would 400 the request rather than shorten the answer.
       if (effort) {
-        // `max` is this package's word, not OpenAI's: the enum here is
-        // none/low/medium/high. Every other shape clamps it — this one sent it
-        // through and earned a 400 on the top setting alone.
-        const level = effort === "max" ? "high" : effort;
+        const level = reasoningEffort(model, effort);
         // `summary` is what switches the reasoning stream ON. Without it this
         // shape emits no reasoning_summary_text events at all, and a caller
         // rendering a thinking pane silently gets nothing while the tokens are
-        // billed either way. At `none` there is nothing to summarise, and the
-        // field must still ride: omitting it is the model's own default, which
-        // is `medium` on everything older than GPT-5.1.
+        // billed either way. OpenAI accepts `none`; Go's Muse Contributor
+        // requires reasoning, so its lowest equivalent is `minimal`.
         request.reasoning =
           level === "none" ? { effort: "none" } : { effort: level, summary: "auto" };
       }
-      if (tools.length > 0) {
+      if (requestTools.length > 0) {
         // Flat here — no nested `function` envelope, unlike chat/completions.
-        request.tools = tools.map((tool) => ({
+        request.tools = requestTools.map((tool) => ({
           type: "function",
           name: tool.name,
           description: tool.description,
           parameters: tool.inputSchema,
         }));
       }
-      if (opts.toolChoice && opts.toolChoice !== "auto") {
+      // Muse Contributor accepts only `auto`. `none` has an exact wire-level
+      // equivalent: send no tools. Required/named choices stay explicit and let
+      // the endpoint refuse a promise it cannot keep.
+      const omitMuseTools = museContributor && opts.toolChoice === "none";
+      if (opts.toolChoice && opts.toolChoice !== "auto" && !omitMuseTools) {
         request.tool_choice =
           typeof opts.toolChoice === "string"
             ? opts.toolChoice
@@ -317,7 +337,13 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
-        headers: { authorization: `Bearer ${config.apiKey}`, ...config.headers },
+        headers: {
+          authorization: `Bearer ${config.apiKey}`,
+          ...(config.sessionHeader
+            ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
+            : {}),
+          ...config.headers,
+        },
         body: request,
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),

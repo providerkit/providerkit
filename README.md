@@ -88,8 +88,19 @@ const provider = createPresetProvider("opencode-go", { apiKey });
 
 By default it tries `mimo-v2.6-flash`, then `mimo-v2.5`, `glm-5.3-flash`,
 `qwen3.8-flash` and `longcat-2.0`. Pass `models: [...]` to set your own order, and
-`fallbacks` to add another provider after the last model. Pass
-`watchdog: { idleMs: 60_000 }` to time each model separately, so a model that opens a
+`fallbacks` to add another provider after the last model. Muse Spark uses Go's Responses
+route instead:
+
+```ts
+const muse = createPresetProvider("opencode-go-responses", { apiKey });
+```
+
+That preset defaults to `muse-spark-1.3-contributor`. It supports text, images, strict JSON
+Schema and parallel tools, but only automatic tool choice; `toolChoice: "none"` is encoded
+by sending no tools. Contributor requests may be used to improve Meta products and require
+the workspace to allow those endpoints.
+
+Pass `watchdog: { idleMs: 60_000 }` to time each model separately, so a model that opens a
 connection and then goes silent rotates too. Do not wrap the returned pool with
 `withWatchdog`: that timeout cancels the whole chain. Go refuses a call without a session
 id, so pass `sessionId` with each call (the conversation or job id). A call without one
