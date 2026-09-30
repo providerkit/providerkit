@@ -107,6 +107,9 @@ id, so pass `sessionId` with each call (the conversation or job id). A call with
 uses a random id the provider keeps for its whole life. Keep one provider alive across
 calls, so it remembers which models are spent.
 
+Go also asks each client to send its own user agent, not the runtime's default. Pass
+`headers: { "user-agent": "my-app" }`, and add it to each Go entry in `fallbacks` too.
+
 **Full documentation lives at [providerkit.dev](https://providerkit.dev)** — it is the single
 source of truth for usage, and this README deliberately stays a front door so the two cannot
 drift.
