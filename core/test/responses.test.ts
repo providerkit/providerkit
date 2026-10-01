@@ -338,6 +338,48 @@ describe("responses tool calls", () => {
     // only frames are the skeleton and the two argument deltas.
     expect(chunks.flatMap((c) => c.toolCalls ?? [])).toHaveLength(3);
   });
+
+  it("follows calls keyed by call_id alone, the way xAI's Grok streams them", async () => {
+    // Grok's lifecycle (cc-proxy's reducer fixture): no item id anywhere, the
+    // deltas and `.arguments.done` quote `call_id`, and the closing item states
+    // nothing but `call_id`. Keyed on item id only, this came back as a call
+    // with no name and empty arguments.
+    const { fetchImpl } = recorder([
+      j({
+        type: "response.output_item.added",
+        item: { type: "function_call", call_id: "call_1", name: "lookup" },
+      }),
+      j({
+        type: "response.output_item.added",
+        item: { type: "function_call", call_id: "call_2", name: "read" },
+      }),
+      j({ type: "response.function_call_arguments.delta", call_id: "call_1", delta: '{"q":' }),
+      j({ type: "response.function_call_arguments.delta", call_id: "call_2", delta: '{"p":"/a"}' }),
+      j({ type: "response.function_call_arguments.done", call_id: "call_1", arguments: '{"q":1}' }),
+      j({
+        type: "response.function_call_arguments.done",
+        call_id: "call_2",
+        arguments: '{"p":"/a"}',
+      }),
+      // Arguments that never streamed a delta still arrive, whole, on `.done`.
+      j({
+        type: "response.output_item.added",
+        item: { type: "function_call", call_id: "call_3", name: "ls" },
+      }),
+      j({ type: "response.function_call_arguments.done", call_id: "call_3", arguments: "{}" }),
+      j({ type: "response.output_item.done", item: { type: "function_call", call_id: "call_1" } }),
+      j({ type: "response.output_item.done", item: { type: "function_call", call_id: "call_2" } }),
+      j({ type: "response.output_item.done", item: { type: "function_call", call_id: "call_3" } }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(assemble(chunks)).toEqual([
+      { index: 0, id: "call_1", name: "lookup", arguments: '{"q":1}' },
+      { index: 1, id: "call_2", name: "read", arguments: '{"p":"/a"}' },
+      { index: 2, id: "call_3", name: "ls", arguments: "{}" },
+    ]);
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
+  });
 });
 
 // ── finish reasons and failures ───────────────────────────────────────────

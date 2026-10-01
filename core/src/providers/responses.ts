@@ -214,6 +214,10 @@ interface ResponsesEvent {
   type?: string;
   delta?: string;
   item_id?: string;
+  /** xAI keys argument events by the CALL id instead of the item id. */
+  call_id?: string;
+  /** The whole argument string, on `function_call_arguments.done`. */
+  arguments?: string;
   item?: ResponsesItem;
   response?: {
     usage?: ResponsesUsage;
@@ -247,6 +251,15 @@ interface PendingCall {
   id: string;
   name: string;
   streamed: string;
+}
+
+/** The part of an authoritative snapshot the deltas have not already sent.
+ *  Re-emitting it whole concatenates the JSON with itself and every argument
+ *  parse fails; all of it goes when no delta came. */
+function unsentTail(snapshot: string, streamed: string): string {
+  return snapshot.length > streamed.length && snapshot.startsWith(streamed)
+    ? snapshot.slice(streamed.length)
+    : "";
 }
 
 export function createResponsesProvider(config: ResponsesConfig): Provider {
@@ -327,9 +340,12 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       }
 
       // Tool calls arrive as an item skeleton plus argument deltas; keyed by the
-      // output item id so parallel calls never cross wires. The seam's index is
-      // ours to assign — `output_index` counts reasoning and message items too.
+      // output item id AND the call id, whichever the backend quotes, so
+      // parallel calls never cross wires. The seam's index is ours to assign —
+      // `output_index` counts reasoning and message items too.
       const pending = new Map<string, PendingCall>();
+      const pendingFor = (itemId?: string, callId?: string) =>
+        (itemId ? pending.get(itemId) : undefined) ?? (callId ? pending.get(callId) : undefined);
       let nextIndex = 0;
       // This shape never states a stop reason on a clean finish, so it is
       // inferred from whether the turn produced a function call.
@@ -371,18 +387,26 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
           case "response.output_item.added": {
             const item = event.item;
-            if (item?.type !== "function_call" || !item.id) break;
+            if (item?.type !== "function_call") break;
+            // OpenAI names the item (`fc_…`) and keys argument deltas by it;
+            // xAI's Grok sends no item id at all and keys them by `call_id`.
+            // Requiring the item id dropped every Grok call here, and the
+            // turn came back as a nameless call with empty arguments.
+            const key = item.id ?? item.call_id;
+            if (!key) break;
             sawToolCall = true;
             const index = nextIndex++;
             // Normally empty here, but a backend that already has the whole
             // call sends it in the skeleton.
             const seeded = item.arguments ?? "";
-            pending.set(item.id, {
+            const call: PendingCall = {
               index,
               id: item.call_id ?? "",
               name: item.name ?? "",
               streamed: seeded,
-            });
+            };
+            pending.set(key, call);
+            if (item.call_id) pending.set(item.call_id, call);
             // Only the fields the skeleton actually states. An empty `id` here
             // is not "unknown", it is a wrong answer: a consumer takes the last
             // stated value, so `""` written into the slot survives the real
@@ -402,18 +426,31 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           }
 
           case "response.function_call_arguments.delta": {
-            const call = event.item_id ? pending.get(event.item_id) : undefined;
+            const call = pendingFor(event.item_id, event.call_id);
             if (!call || !event.delta) break;
             call.streamed += event.delta;
             yield { type: "delta", toolCalls: [{ index: call.index, arguments: event.delta }] };
             break;
           }
 
+          // xAI states the finished argument string here and NOT on the
+          // closing item, which carries only `call_id`. Skipped, a call whose
+          // deltas never came reaches the caller with empty arguments.
+          case "response.function_call_arguments.done": {
+            const call = pendingFor(event.item_id, event.call_id);
+            const tail = call ? unsentTail(event.arguments ?? "", call.streamed) : "";
+            if (!call || !tail) break;
+            call.streamed += tail;
+            yield { type: "delta", toolCalls: [{ index: call.index, arguments: tail }] };
+            break;
+          }
+
           case "response.output_item.done": {
             const item = event.item;
             if (item?.type !== "function_call") break;
-            const known = item.id ? pending.get(item.id) : undefined;
+            const known = pendingFor(item.id, item.call_id);
             if (item.id) pending.delete(item.id);
+            if (item.call_id) pending.delete(item.call_id);
             const snapshot = item.arguments ?? "";
 
             if (!known) {
@@ -441,13 +478,8 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             }
 
             // The snapshot is authoritative, but the fragments already went
-            // out: re-emitting it whole concatenates the JSON with itself and
-            // every argument parse fails. Send only what the deltas missed —
-            // which is all of it when they never came.
-            const tail =
-              snapshot.length > known.streamed.length && snapshot.startsWith(known.streamed)
-                ? snapshot.slice(known.streamed.length)
-                : "";
+            // out: send only what the deltas missed.
+            const tail = unsentTail(snapshot, known.streamed);
             // `.done` restates the identity, and on a backend that leaves it
             // out of the skeleton this is the only frame that carries it. It
             // rides last so it WINS: the alternative is a caller assembling a
