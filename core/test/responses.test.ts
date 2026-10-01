@@ -427,6 +427,63 @@ describe("responses finish reasons", () => {
     });
   });
 
+  it("reads a spent Codex window as quota, with its clock and its window", async () => {
+    // Recorded by cc-proxy off a live turn that spent the 5-hour window. The
+    // status and the window clocks ride BESIDE `error`, not inside it.
+    const resetsAt = Math.floor(Date.now() / 1000) + 9_568;
+    const { fetchImpl } = recorder([
+      j({
+        type: "error",
+        status_code: 429,
+        error: {
+          type: "usage_limit_reached",
+          message: "The usage limit has been reached",
+          plan_type: "plus",
+          resets_at: resetsAt,
+          resets_in_seconds: 9_568,
+        },
+        headers: {
+          "X-Codex-Primary-Used-Percent": "100",
+          "X-Codex-Primary-Window-Minutes": "300",
+          "X-Codex-Primary-Reset-After-Seconds": "9569",
+          "X-Codex-Primary-Reset-At": String(resetsAt + 1),
+          "X-Codex-Secondary-Used-Percent": "16",
+          "X-Codex-Secondary-Window-Minutes": "10080",
+          "X-Codex-Secondary-Reset-After-Seconds": "596369",
+          "X-Codex-Secondary-Reset-At": String(resetsAt + 586_801),
+        },
+      }),
+    ]);
+    const err = (await collect(provider({ fetchImpl }).createStream(hi, [])).catch(
+      (e: unknown) => e,
+    )) as ProviderError;
+    expect(err).toMatchObject({ kind: "quota", status: 429, window: "5h" });
+    expect(err.resetAtMs).toBe((resetsAt + 1) * 1000);
+    // Neither retried nor walked: every backup on this key hits the same wall.
+    expect(err.isTransient).toBe(false);
+    expect(err.isBackupEligible).toBe(false);
+  });
+
+  it("does not retry a flagged prompt", async () => {
+    for (const code of ["invalid_prompt", "bio_policy"]) {
+      const { fetchImpl } = recorder([
+        j({
+          type: "response.failed",
+          response: {
+            error: {
+              code,
+              message:
+                "Invalid prompt: your prompt was flagged as potentially violating our usage policy.",
+            },
+          },
+        }),
+      ]);
+      await expect(collect(provider({ fetchImpl }).createStream(hi, []))).rejects.toMatchObject({
+        kind: "content",
+      });
+    }
+  });
+
   it("falls back to overload for an unrecognized error event", async () => {
     // A stream that dies after its headers is a transient upstream fault;
     // "unknown" would take it off the retry path entirely.

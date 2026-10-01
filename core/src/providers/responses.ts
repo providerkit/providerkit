@@ -227,6 +227,10 @@ interface ResponsesEvent {
   error?: { message?: string; code?: string };
   message?: string;
   code?: string;
+  /** The ChatGPT backend's error frame states the HTTP status it stands for,
+   *  and mirrors its `x-codex-*` rate-limit headers, beside `error`. */
+  status_code?: number;
+  headers?: Record<string, unknown>;
 }
 
 function usageChunk(usage: ResponsesUsage): ProviderChunk {
@@ -523,7 +527,20 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
           case "error":
           case "response.error":
-            throw streamError(id, event.error ?? { message: event.message, code: event.code });
+            throw streamError(
+              id,
+              event.error
+                ? {
+                    ...event.error,
+                    // The status and the window clocks ride beside `error`.
+                    // Without them a spent Codex window reads as an unnamed
+                    // in-stream failure: floored to overload, then retried and
+                    // walked across every backup on the same account wall.
+                    ...(event.status_code !== undefined ? { status_code: event.status_code } : {}),
+                    ...(event.headers ? { headers: event.headers } : {}),
+                  }
+                : { message: event.message, code: event.code },
+            );
         }
       }
 

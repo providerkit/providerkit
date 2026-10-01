@@ -57,6 +57,34 @@ const RESET_HEADERS = [
   "x-ratelimit-reset",
 ];
 
+/**
+ * The ChatGPT backend's two windows. Both ride every response — the slots are
+ * "primary" and "secondary", NOT "5h" and "weekly", so the window is named by
+ * its own `-window-minutes` (300 and 10080 in every capture), and its
+ * `-used-percent` says which one is full. Recorded by cc-proxy off a live turn
+ * that spent the 5-hour window, 2026-09.
+ */
+const CODEX_SLOTS = ["primary", "secondary"] as const;
+
+function windowForMinutes(minutes: number | undefined): RateLimitWindow | undefined {
+  if (minutes === undefined || minutes <= 0) return undefined;
+  const ms = minutes * 60_000;
+  return ms <= FIVE_HOUR_MAX_MS ? "5h" : ms <= WEEKLY_MAX_MS ? "weekly" : "monthly";
+}
+
+function codexWindow(headers: Headers, slot: (typeof CODEX_SLOTS)[number], now: number) {
+  const name = (suffix: string) => headers.get(`x-codex-${slot}-${suffix}`);
+  const percent = numeric(name("used-percent"));
+  const after = numeric(name("reset-after-seconds"));
+  return {
+    window: windowForMinutes(numeric(name("window-minutes"))),
+    // A percentage here; Anthropic's unified utilization is a fraction.
+    utilization: percent === undefined ? undefined : percent / 100,
+    reset:
+      unixSecondsToMs(name("reset-at")) ?? (after === undefined ? undefined : now + after * 1000),
+  };
+}
+
 /** Seconds since 1970 passed a billion in 2001, so a bare integer above this is
  *  a timestamp and anything below it is a countdown. Vendors disagree on which
  *  they send under the same header name, so magnitude decides. */
@@ -158,10 +186,11 @@ export function parseRateLimitReset(headers: Headers, now = Date.now()): RateLim
       utilization: numeric(headers.get(`${UNIFIED_7D}utilization`)),
       reset: unixSecondsToMs(headers.get(`${UNIFIED_7D}reset`)),
     },
+    ...CODEX_SLOTS.map((slot) => codexWindow(headers, slot, now)),
   ].filter((w) => w.utilization !== undefined && w.reset !== undefined && w.reset > now);
   const binding = windows.sort((a, b) => (b.utilization ?? 0) - (a.utilization ?? 0))[0];
   if (binding) {
-    result.window = binding.window;
+    if (binding.window) result.window = binding.window;
     // The window's own reset outranks retry-after: it names the real horizon,
     // where retry-after names the next polite attempt.
     if (binding.reset !== undefined) result.resetAtMs = binding.reset;

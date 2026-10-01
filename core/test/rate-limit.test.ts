@@ -184,6 +184,35 @@ describe("parseRateLimitReset", () => {
   });
 });
 
+describe("the ChatGPT backend's x-codex-* windows", () => {
+  // Both windows ride every response under "primary"/"secondary"; the window
+  // is named by its own minutes, and the fuller one is the one that binds.
+  const codex = (primaryPercent: number, secondaryPercent: number) =>
+    new Headers({
+      "x-codex-primary-used-percent": String(primaryPercent),
+      "x-codex-primary-window-minutes": "300",
+      "x-codex-primary-reset-after-seconds": String((4 * HOUR) / 1000),
+      "x-codex-secondary-used-percent": String(secondaryPercent),
+      "x-codex-secondary-window-minutes": "10080",
+      "x-codex-secondary-reset-at": inSeconds(3 * DAY),
+    });
+
+  it("names the 5-hour window when it is the full one", () => {
+    expect(parseRateLimitReset(codex(100, 16), NOW)).toEqual({
+      window: "5h",
+      resetAtMs: NOW + 4 * HOUR,
+    });
+  });
+
+  it("names the weekly window, and its days-away reset, when that one is full", () => {
+    // A short Retry-After beside it is not evidence the week has lifted.
+    expect(parseRateLimitReset(codex(40, 100), NOW)).toEqual({
+      window: "weekly",
+      resetAtMs: NOW + 3 * DAY,
+    });
+  });
+});
+
 describe("parseUsageLimitBody", () => {
   const body = (error: Record<string, unknown>) => JSON.stringify({ error });
 
