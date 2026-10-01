@@ -145,6 +145,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         id,
         headers,
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
+        ...(preset.imageLimits ? { imageLimits: preset.imageLimits } : {}),
         fetchImpl: config.fetchImpl,
       });
       break;

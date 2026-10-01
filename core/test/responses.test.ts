@@ -639,6 +639,39 @@ describe("responses request", () => {
     expect(seen[0]!.url).toBe("https://chatgpt.com/backend-api/codex/responses");
   });
 
+  it("swaps an image the backend would refuse for a note, only when it sets limits", async () => {
+    const webp: ChatMessage[] = [
+      { role: "user", content: [{ type: "image", mimeType: "image/webp", data: "UklGRg==" }] },
+    ];
+    const limits = { minSide: 8, minArea: 512, maxDecodedBytes: 5 * 1024 * 1024, maxImages: 4 };
+    const gated = recorder(TEXT_TURN);
+    await collect(
+      provider({ fetchImpl: gated.fetchImpl, imageLimits: limits }).createStream(webp, []),
+    );
+    expect(gated.seen[0]!.body.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "[image omitted: image/webp] (unreadable dimensions for image/webp)",
+          },
+        ],
+      },
+    ]);
+
+    const open = recorder(TEXT_TURN);
+    await collect(provider({ fetchImpl: open.fetchImpl }).createStream(webp, []));
+    expect(open.seen[0]!.body.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_image", image_url: "data:image/webp;base64,UklGRg==" }],
+      },
+    ]);
+  });
+
   it("asks for a reasoning summary whenever effort is on — the deltas need it", async () => {
     const on = recorder(TEXT_TURN);
     await collect(provider({ fetchImpl: on.fetchImpl, effort: "high" }).createStream(hi, []));

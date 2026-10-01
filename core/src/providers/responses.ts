@@ -26,6 +26,7 @@ import type {
 import { toDataUri } from "../types.ts";
 import { isStrictSchema, withoutPatterns } from "../schema.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import { gateImages, type ImageLimits } from "../image.ts";
 
 export interface ResponsesConfig extends ProviderFallbackConfig {
   apiKey: string;
@@ -52,6 +53,9 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
    * user is told the model id does not exist when the path was the problem.
    */
   path?: string;
+  /** What this backend accepts as an image. Each image it would refuse is
+   *  replaced by a note naming the reason, instead of failing the request. */
+  imageLimits?: ImageLimits;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -331,7 +335,10 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       const model = opts.model ?? config.model;
       const museContributor = isMuseSparkContributor(model);
       const requestTools = museContributor && opts.toolChoice === "none" ? [] : tools;
-      const { instructions, input } = toResponsesInput(messages, id);
+      const { instructions, input } = toResponsesInput(
+        config.imageLimits ? gateImages(messages, config.imageLimits) : messages,
+        id,
+      );
 
       const request: Record<string, unknown> = {
         model,
