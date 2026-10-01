@@ -151,8 +151,10 @@ export interface TokenUsage {
    *  prefixes and bill the hit portion far cheaper, so it must be tracked
    *  separately to cost a turn correctly. 0 when the provider reports none. */
   cachedInputTokens: number;
-  /** Tokens WRITTEN to cache. Anthropic bills these above the input rate;
-   *  the OpenAI-shape auto-cachers bill them at it. 0 when not reported. */
+  /** Tokens WRITTEN to cache — also a subset of `inputTokens`, so the total
+   *  stays the whole prompt the window has to hold. Anthropic bills these
+   *  above the input rate; the OpenAI-shape auto-cachers bill them at it.
+   *  0 when not reported. */
   cacheWriteTokens?: number;
   outputTokens: number;
   /**
