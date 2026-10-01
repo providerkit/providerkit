@@ -5,6 +5,7 @@ import {
   PROVIDER_PRESETS,
   type ProviderPresetId,
 } from "../src/index.ts";
+import type { ProviderPreset } from "../src/presets.ts";
 
 const ok = () => new Response("data: [DONE]\n\n");
 
@@ -16,7 +17,7 @@ describe("provider presets — every row joins to one request, correctly", () =>
   const model = "test-model";
 
   for (const id of PRESET_IDS) {
-    const preset = PROVIDER_PRESETS[id];
+    const preset: ProviderPreset = PROVIDER_PRESETS[id];
     it(`joins ${id} (${preset.shape}/${preset.auth})`, async () => {
       const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
       const provider = createPresetProvider(id, {

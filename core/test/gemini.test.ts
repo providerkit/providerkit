@@ -3,7 +3,13 @@
 // builds. Same shape as providers.test.ts, plus the signal the fetch must see.
 import { describe, expect, it } from "vitest";
 import { createGeminiProvider, toGeminiContents } from "../src/providers/gemini.ts";
-import type { ChatMessage, Effort, ProviderChunk, ToolChoice } from "../src/types.ts";
+import type {
+  ChatMessage,
+  Effort,
+  ProviderChunk,
+  ToolChoice,
+  ToolDefinition,
+} from "../src/types.ts";
 
 /** Records the request (url, body, headers, signal) and replays a canned SSE
  *  transcript — each frame one GenerateContentResponse. */
@@ -304,7 +310,7 @@ describe("gemini adapter", () => {
     // narrate the call instead of making it — `gemini-3.8-flash` managed 3/10
     // (2026-09-07). Only the calls that carry tools change.
     const schema = { type: "object" as const, properties: { hrn: { type: "string" } } };
-    const sent = async (tools: { name: string; description: string; inputSchema: object }[]) => {
+    const sent = async (tools: ToolDefinition[]) => {
       const { seen, fetchImpl } = recorder(TEXT_TURN);
       await collect(
         provider(fetchImpl, { jsonWithTools: "prompt" }).createStream(

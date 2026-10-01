@@ -1186,7 +1186,11 @@ describe("what the OpenAI dialect cannot carry", () => {
     // ends. Measured 2026-09-07: z-ai/glm-5.3-flash 0/10 tool calls under a
     // response format, 8/8 without one. It stays a setting because the opposite
     // is just as real: qwen3.8-flash went 6/6 → 1/6 the same way.
-    const tool = { name: "search", description: "look it up", inputSchema: { type: "object" } };
+    const tool: ToolDefinition = {
+      name: "search",
+      description: "look it up",
+      inputSchema: { type: "object" },
+    };
     const sent = async (jsonWithTools?: "response_format" | "prompt", withTools = true) => {
       const { seen, fetchImpl } = recorder([j({ choices: [] })]);
       await collect(
@@ -1270,13 +1274,17 @@ describe("the schema reaches a provider with no schema mode", () => {
       }),
     ).catch(() => undefined);
 
-    const system = seen[0].body.system as { type: string; text: string; cache_control?: unknown }[];
+    const system = seen[0]!.body.system as {
+      type: string;
+      text: string;
+      cache_control?: unknown;
+    }[];
     expect(system).toHaveLength(2);
-    expect(system[1].text).toContain('"required":["message"]');
+    expect(system[1]!.text).toContain('"required":["message"]');
     // The cache breakpoint stays on the STABLE block. Folding a per-call schema
     // into it would re-bill the whole system prompt every turn.
-    expect(system[0].cache_control).toBeDefined();
-    expect(system[1].cache_control).toBeUndefined();
+    expect(system[0]!.cache_control).toBeDefined();
+    expect(system[1]!.cache_control).toBeUndefined();
   });
 
   it("enforces strict only when the schema can satisfy it", async () => {
@@ -1292,7 +1300,7 @@ describe("the schema reaches a provider with no schema mode", () => {
           json: { name: "out", schema: candidate },
         }),
       ).catch(() => undefined);
-      const format = seen[0].body.response_format as { json_schema: { strict: boolean } };
+      const format = seen[0]!.body.response_format as { json_schema: { strict: boolean } };
       expect(format.json_schema.strict).toBe(expected);
     }
   });
@@ -1306,7 +1314,7 @@ describe("the schema reaches a provider with no schema mode", () => {
         stopSequences: ["</answer>"],
       }),
     ).catch(() => undefined);
-    expect(seen[0].body.top_p).toBe(0.1);
-    expect(seen[0].body.stop).toEqual(["</answer>"]);
+    expect(seen[0]!.body.top_p).toBe(0.1);
+    expect(seen[0]!.body.stop).toEqual(["</answer>"]);
   });
 });
