@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { createResponsesProvider, toResponsesInput } from "../src/providers/responses.ts";
 import { ProviderError } from "../src/errors.ts";
-import type { ChatMessage, ProviderChunk } from "../src/types.ts";
+import type { ChatMessage, ProviderChunk, ToolDefinition } from "../src/types.ts";
 
 /**
  * Records the request and replays a canned transcript. Frames go out with the
@@ -110,6 +110,21 @@ describe("responses adapter", () => {
       inputTokens: 1_000,
       cachedInputTokens: 800,
       outputTokens: 20,
+    });
+  });
+
+  it("reports the thinking share of the output, already inside it", async () => {
+    const { fetchImpl } = recorder([
+      j({ type: "response.output_text.delta", delta: "ok" }),
+      j({
+        type: "response.completed",
+        response: { usage: { ...USAGE, output_tokens_details: { reasoning_tokens: 12 } } },
+      }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(chunks.find((c) => c.type === "usage")?.usage).toMatchObject({
+      outputTokens: 20,
+      reasoningTokens: 12,
     });
   });
 
@@ -338,6 +353,48 @@ describe("responses tool calls", () => {
     // only frames are the skeleton and the two argument deltas.
     expect(chunks.flatMap((c) => c.toolCalls ?? [])).toHaveLength(3);
   });
+
+  it("follows calls keyed by call_id alone, the way xAI's Grok streams them", async () => {
+    // Grok's lifecycle (cc-proxy's reducer fixture): no item id anywhere, the
+    // deltas and `.arguments.done` quote `call_id`, and the closing item states
+    // nothing but `call_id`. Keyed on item id only, this came back as a call
+    // with no name and empty arguments.
+    const { fetchImpl } = recorder([
+      j({
+        type: "response.output_item.added",
+        item: { type: "function_call", call_id: "call_1", name: "lookup" },
+      }),
+      j({
+        type: "response.output_item.added",
+        item: { type: "function_call", call_id: "call_2", name: "read" },
+      }),
+      j({ type: "response.function_call_arguments.delta", call_id: "call_1", delta: '{"q":' }),
+      j({ type: "response.function_call_arguments.delta", call_id: "call_2", delta: '{"p":"/a"}' }),
+      j({ type: "response.function_call_arguments.done", call_id: "call_1", arguments: '{"q":1}' }),
+      j({
+        type: "response.function_call_arguments.done",
+        call_id: "call_2",
+        arguments: '{"p":"/a"}',
+      }),
+      // Arguments that never streamed a delta still arrive, whole, on `.done`.
+      j({
+        type: "response.output_item.added",
+        item: { type: "function_call", call_id: "call_3", name: "ls" },
+      }),
+      j({ type: "response.function_call_arguments.done", call_id: "call_3", arguments: "{}" }),
+      j({ type: "response.output_item.done", item: { type: "function_call", call_id: "call_1" } }),
+      j({ type: "response.output_item.done", item: { type: "function_call", call_id: "call_2" } }),
+      j({ type: "response.output_item.done", item: { type: "function_call", call_id: "call_3" } }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(assemble(chunks)).toEqual([
+      { index: 0, id: "call_1", name: "lookup", arguments: '{"q":1}' },
+      { index: 1, id: "call_2", name: "read", arguments: '{"p":"/a"}' },
+      { index: 2, id: "call_3", name: "ls", arguments: "{}" },
+    ]);
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
+  });
 });
 
 // ── finish reasons and failures ───────────────────────────────────────────
@@ -383,6 +440,141 @@ describe("responses finish reasons", () => {
     await expect(collect(provider({ fetchImpl }).createStream(hi, []))).rejects.toMatchObject({
       kind: "quota",
     });
+  });
+
+  it("reads the outcome a terminal event states, not the one its type implies", async () => {
+    // `completed` that says `incomplete` was cut; one that carries an error
+    // failed. Read as a clean stop, either is a broken turn reported finished.
+    const cut = recorder([
+      j({ type: "response.output_text.delta", delta: "Hel" }),
+      j({
+        type: "response.completed",
+        response: {
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          usage: USAGE,
+        },
+      }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl: cut.fetchImpl }).createStream(hi, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("length");
+    expect(chunks.find((c) => c.type === "usage")).toBeDefined();
+
+    const failed = recorder([
+      j({
+        type: "response.completed",
+        response: { status: "failed", error: { code: "server_error", message: "boom" } },
+      }),
+    ]);
+    await expect(
+      collect(provider({ fetchImpl: failed.fetchImpl }).createStream(hi, [])),
+    ).rejects.toMatchObject({ kind: "overload" });
+  });
+
+  it("ends on response.done, the terminal event OpenCode's gateway sends", async () => {
+    const { fetchImpl } = recorder([
+      j({ type: "response.output_text.delta", delta: "hi" }),
+      j({ type: "response.done", response: { usage: USAGE } }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("stop");
+    expect(chunks.find((c) => c.type === "usage")).toBeDefined();
+  });
+
+  it("says a stream with no terminal event was cut, after what it delivered", async () => {
+    const { fetchImpl } = recorder([j({ type: "response.output_text.delta", delta: "Hel" })]);
+    const seen: ProviderChunk[] = [];
+    const err = await (async () => {
+      for await (const chunk of provider({ fetchImpl }).createStream(hi, [])) seen.push(chunk);
+    })().catch((e: unknown) => e);
+    expect(seen).toEqual([{ type: "delta", content: "Hel" }]);
+    expect(err).toMatchObject({ kind: "network" });
+  });
+
+  it("names a spent window when the backend's last word was a quota snapshot", async () => {
+    // The snapshot is telemetry on a healthy turn. Followed by a close with no
+    // response, it is the reason — and the fuller window binds.
+    const wall = (extra: Record<string, unknown> = {}) =>
+      recorder([
+        j({
+          type: "codex.rate_limits",
+          rate_limits: {
+            limit_reached: true,
+            primary: { used_percent: 40, reset_after_seconds: 3_600 },
+            secondary: { used_percent: 100, reset_after_seconds: 400_000 },
+          },
+          ...extra,
+        }),
+      ]);
+    const err = (await collect(
+      provider({ fetchImpl: wall().fetchImpl }).createStream(hi, []),
+    ).catch((e: unknown) => e)) as ProviderError;
+    expect(err).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000 });
+
+    // Credits cover the window: not a wall, so the close is a plain cut.
+    const covered = await collect(
+      provider({
+        fetchImpl: wall({ credits: { has_credits: true } }).fetchImpl,
+      }).createStream(hi, []),
+    ).catch((e: unknown) => e);
+    expect(covered).toMatchObject({ kind: "network" });
+  });
+
+  it("reads a spent Codex window as quota, with its clock and its window", async () => {
+    // Recorded by cc-proxy off a live turn that spent the 5-hour window. The
+    // status and the window clocks ride BESIDE `error`, not inside it.
+    const resetsAt = Math.floor(Date.now() / 1000) + 9_568;
+    const { fetchImpl } = recorder([
+      j({
+        type: "error",
+        status_code: 429,
+        error: {
+          type: "usage_limit_reached",
+          message: "The usage limit has been reached",
+          plan_type: "plus",
+          resets_at: resetsAt,
+          resets_in_seconds: 9_568,
+        },
+        headers: {
+          "X-Codex-Primary-Used-Percent": "100",
+          "X-Codex-Primary-Window-Minutes": "300",
+          "X-Codex-Primary-Reset-After-Seconds": "9569",
+          "X-Codex-Primary-Reset-At": String(resetsAt + 1),
+          "X-Codex-Secondary-Used-Percent": "16",
+          "X-Codex-Secondary-Window-Minutes": "10080",
+          "X-Codex-Secondary-Reset-After-Seconds": "596369",
+          "X-Codex-Secondary-Reset-At": String(resetsAt + 586_801),
+        },
+      }),
+    ]);
+    const err = (await collect(provider({ fetchImpl }).createStream(hi, [])).catch(
+      (e: unknown) => e,
+    )) as ProviderError;
+    expect(err).toMatchObject({ kind: "quota", status: 429, window: "5h" });
+    expect(err.resetAtMs).toBe((resetsAt + 1) * 1000);
+    // Neither retried nor walked: every backup on this key hits the same wall.
+    expect(err.isTransient).toBe(false);
+    expect(err.isBackupEligible).toBe(false);
+  });
+
+  it("does not retry a flagged prompt", async () => {
+    for (const code of ["invalid_prompt", "bio_policy"]) {
+      const { fetchImpl } = recorder([
+        j({
+          type: "response.failed",
+          response: {
+            error: {
+              code,
+              message:
+                "Invalid prompt: your prompt was flagged as potentially violating our usage policy.",
+            },
+          },
+        }),
+      ]);
+      await expect(collect(provider({ fetchImpl }).createStream(hi, []))).rejects.toMatchObject({
+        kind: "content",
+      });
+    }
   });
 
   it("falls back to overload for an unrecognized error event", async () => {
@@ -526,6 +718,7 @@ describe("responses request", () => {
         name: "search",
         description: "look it up",
         parameters: { type: "object", properties: { q: { type: "string" } } },
+        strict: false,
       },
     ]);
     expect(seen[0]!.body.tool_choice).toEqual({ type: "function", name: "search" });
@@ -533,6 +726,64 @@ describe("responses request", () => {
     expect(seen[0]!.body.text).toEqual({
       format: { type: "json_schema", name: "answer", schema: { type: "object" }, strict: true },
     });
+  });
+
+  it("says strict either way, and leaves no regex for the backend to choke on", async () => {
+    // The ChatGPT backend 400s the WHOLE request on a pattern it cannot
+    // compile (Claude Code's Artifact tool, cc-proxy #141). A property NAMED
+    // `pattern` is data, not a constraint, and stays.
+    const strictTool: ToolDefinition = {
+      name: "save",
+      description: "save a file",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", pattern: "^(?!-)[a-z-]+$" },
+          pattern: { type: "string" },
+          tags: { type: "array", items: { type: "string", pattern: "^#" } },
+        },
+        required: ["id", "pattern", "tags"],
+        additionalProperties: false,
+      },
+    };
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(provider({ fetchImpl }).createStream(hi, [strictTool]));
+    expect(seen[0]!.body.tools).toEqual([
+      {
+        type: "function",
+        name: "save",
+        description: "save a file",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            pattern: { type: "string" },
+            tags: { type: "array", items: { type: "string" } },
+          },
+          required: ["id", "pattern", "tags"],
+          additionalProperties: false,
+        },
+        strict: true,
+      },
+    ]);
+  });
+
+  it("pins the cache to the session and serializes calls when asked", async () => {
+    const tool = { name: "t", description: "t", inputSchema: { type: "object" as const } };
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider({ fetchImpl }).createStream(hi, [tool], {
+        sessionId: "conv-42",
+        parallelToolCalls: false,
+      }),
+    );
+    await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(seen[0]!.body).toMatchObject({
+      prompt_cache_key: "conv-42",
+      parallel_tool_calls: false,
+    });
+    expect(seen[1]!.body).not.toHaveProperty("prompt_cache_key");
+    expect(seen[1]!.body).not.toHaveProperty("parallel_tool_calls");
   });
 
   it("lets a per-call model and effort override the bound ones", async () => {

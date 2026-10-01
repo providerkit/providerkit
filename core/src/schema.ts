@@ -134,6 +134,57 @@ export function isStrictSchema(node: unknown): boolean {
   );
 }
 
+/** Keywords whose value is a schema, a list of schemas, or a map of them —
+ *  the only places a `pattern` can mean a regex. Everything else (`default`,
+ *  `examples`, `enum`, property NAMES) is data and is left alone. */
+const SCHEMA_SLOTS = [
+  "items",
+  "additionalProperties",
+  "not",
+  "if",
+  "then",
+  "else",
+  "contains",
+  "propertyNames",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+];
+const SCHEMA_LISTS = ["anyOf", "oneOf", "allOf", "prefixItems"];
+const SCHEMA_MAPS = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"];
+
+/**
+ * A tool schema with every `pattern` constraint removed.
+ *
+ * The ChatGPT backend compiles tool schemas with OpenAI's own regex dialect and
+ * answers a pattern it cannot read with a 400 for the WHOLE request — strict
+ * or not. Claude Code's Artifact tool carries one, and every request that
+ * offered it failed (cc-proxy #141/#142). Losing the constraint costs a
+ * validation the caller's tool runner repeats anyway; the 400 costs the turn.
+ */
+export function withoutPatterns(node: unknown): unknown {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return node;
+  const { pattern: _pattern, ...schema } = node as Record<string, unknown>;
+  for (const key of SCHEMA_SLOTS) {
+    const value = schema[key];
+    if (value !== undefined) {
+      schema[key] = Array.isArray(value) ? value.map(withoutPatterns) : withoutPatterns(value);
+    }
+  }
+  for (const key of SCHEMA_LISTS) {
+    const value = schema[key];
+    if (Array.isArray(value)) schema[key] = value.map(withoutPatterns);
+  }
+  for (const key of SCHEMA_MAPS) {
+    const value = schema[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      schema[key] = Object.fromEntries(
+        Object.entries(value).map(([name, child]) => [name, withoutPatterns(child)]),
+      );
+    }
+  }
+  return schema;
+}
+
 /**
  * Sanitize a JSON Schema for Google Gemini's REST API.
  *

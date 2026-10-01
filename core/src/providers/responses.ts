@@ -10,7 +10,7 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
-import { fileRefused, streamError } from "../errors.ts";
+import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -24,7 +24,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
-import { isStrictSchema } from "../schema.ts";
+import { isStrictSchema, withoutPatterns } from "../schema.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
 export interface ResponsesConfig extends ProviderFallbackConfig {
@@ -198,6 +198,7 @@ interface ResponsesUsage {
   input_tokens?: number;
   input_tokens_details?: { cached_tokens?: number };
   output_tokens?: number;
+  output_tokens_details?: { reasoning_tokens?: number };
 }
 
 interface ResponsesItem {
@@ -214,15 +215,66 @@ interface ResponsesEvent {
   type?: string;
   delta?: string;
   item_id?: string;
+  /** xAI keys argument events by the CALL id instead of the item id. */
+  call_id?: string;
+  /** The whole argument string, on `function_call_arguments.done`. */
+  arguments?: string;
   item?: ResponsesItem;
   response?: {
+    /** `completed`, `incomplete` or `failed` — stated on the terminal event,
+     *  and not always the one its `type` implies. */
+    status?: string;
     usage?: ResponsesUsage;
-    incomplete_details?: { reason?: string };
-    error?: { message?: string; code?: string };
+    incomplete_details?: { reason?: string } | null;
+    error?: { message?: string; code?: string } | null;
   };
+  /** The ChatGPT backend's quota snapshot (`codex.rate_limits`). */
+  rate_limits?: CodexRateLimits;
+  credits?: { has_credits?: boolean; unlimited?: boolean };
   error?: { message?: string; code?: string };
   message?: string;
   code?: string;
+  /** The ChatGPT backend's error frame states the HTTP status it stands for,
+   *  and mirrors its `x-codex-*` rate-limit headers, beside `error`. */
+  status_code?: number;
+  headers?: Record<string, unknown>;
+}
+
+interface CodexWindow {
+  used_percent?: number;
+  reset_after_seconds?: number;
+}
+
+interface CodexRateLimits {
+  limit_reached?: boolean;
+  allowed?: boolean;
+  primary?: CodexWindow;
+  secondary?: CodexWindow;
+}
+
+/**
+ * The quota wall a `codex.rate_limits` snapshot reports, if it is one.
+ *
+ * The snapshot rides ahead of the first output on every turn and is telemetry
+ * — a full window the account's credits cover, or that the backend still
+ * `allowed`, lets the turn proceed. It is only the reason when the stream then
+ * closes without a response: that close is a spent window, not a dropped
+ * socket, and retrying it walks every backup into the same wall. The fuller
+ * window binds; cc-proxy took the primary's clock first and told a weekly wall
+ * to come back in a few hours.
+ */
+function quotaWall(event: ResponsesEvent, provider: string): ProviderError | undefined {
+  const limits = event.rate_limits;
+  if (!limits?.limit_reached || limits.allowed) return undefined;
+  if (event.credits?.has_credits || event.credits?.unlimited) return undefined;
+  const windows = [limits.primary, limits.secondary].filter((w): w is CodexWindow => !!w);
+  const binding = windows.sort((a, b) => (b.used_percent ?? 0) - (a.used_percent ?? 0))[0];
+  const after = binding?.reset_after_seconds;
+  return new ProviderError(provider, "quota", `${provider}: the usage limit has been reached`, {
+    ...(after !== undefined && after >= 0
+      ? { retryAfterMs: after * 1000, resetAtMs: Date.now() + after * 1000 }
+      : {}),
+  });
 }
 
 function usageChunk(usage: ResponsesUsage): ProviderChunk {
@@ -235,6 +287,9 @@ function usageChunk(usage: ResponsesUsage): ProviderChunk {
       cachedInputTokens: usage.input_tokens_details?.cached_tokens ?? 0,
       // Reasoning tokens are billed INSIDE output_tokens, not beside them.
       outputTokens: usage.output_tokens ?? 0,
+      ...(usage.output_tokens_details?.reasoning_tokens !== undefined
+        ? { reasoningTokens: usage.output_tokens_details.reasoning_tokens }
+        : {}),
     },
   };
 }
@@ -247,6 +302,15 @@ interface PendingCall {
   id: string;
   name: string;
   streamed: string;
+}
+
+/** The part of an authoritative snapshot the deltas have not already sent.
+ *  Re-emitting it whole concatenates the JSON with itself and every argument
+ *  parse fails; all of it goes when no delta came. */
+function unsentTail(snapshot: string, streamed: string): string {
+  return snapshot.length > streamed.length && snapshot.startsWith(streamed)
+    ? snapshot.slice(streamed.length)
+    : "";
 }
 
 export function createResponsesProvider(config: ResponsesConfig): Provider {
@@ -301,9 +365,20 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           type: "function",
           name: tool.name,
           description: tool.description,
-          parameters: tool.inputSchema,
+          parameters: withoutPatterns(tool.inputSchema),
+          // Said either way, never left to the default. Strict demands every
+          // property required and every object closed; on a schema that is not
+          // already shaped that way the backend makes optional arguments
+          // mandatory, and the model starts filling in parameters nobody asked
+          // for (cc-proxy, 0.1.15). Where the schema already qualifies, the
+          // enforcement is free.
+          strict: isStrictSchema(tool.inputSchema),
         }));
+        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
       }
+      // The cache affinity key. Without one the backend spreads a
+      // conversation's turns across cache shards, and a re-sent prefix misses.
+      if (opts.sessionId) request.prompt_cache_key = opts.sessionId;
       // Muse Contributor accepts only `auto`. `none` has an exact wire-level
       // equivalent: send no tools. Required/named choices stay explicit and let
       // the endpoint refuse a promise it cannot keep.
@@ -327,13 +402,18 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       }
 
       // Tool calls arrive as an item skeleton plus argument deltas; keyed by the
-      // output item id so parallel calls never cross wires. The seam's index is
-      // ours to assign — `output_index` counts reasoning and message items too.
+      // output item id AND the call id, whichever the backend quotes, so
+      // parallel calls never cross wires. The seam's index is ours to assign —
+      // `output_index` counts reasoning and message items too.
       const pending = new Map<string, PendingCall>();
+      const pendingFor = (itemId?: string, callId?: string) =>
+        (itemId ? pending.get(itemId) : undefined) ?? (callId ? pending.get(callId) : undefined);
       let nextIndex = 0;
       // This shape never states a stop reason on a clean finish, so it is
       // inferred from whether the turn produced a function call.
       let sawToolCall = false;
+      let wall: ProviderError | undefined;
+      let produced = false;
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
@@ -348,12 +428,16 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
       })) {
         let event: ResponsesEvent;
         try {
           event = JSON.parse(data) as ResponsesEvent;
         } catch {
           continue; // a keep-alive or a frame we do not model
+        }
+        if (event.type?.endsWith(".delta") || event.type === "response.output_item.added") {
+          produced = true;
         }
 
         switch (event.type) {
@@ -371,18 +455,26 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
           case "response.output_item.added": {
             const item = event.item;
-            if (item?.type !== "function_call" || !item.id) break;
+            if (item?.type !== "function_call") break;
+            // OpenAI names the item (`fc_…`) and keys argument deltas by it;
+            // xAI's Grok sends no item id at all and keys them by `call_id`.
+            // Requiring the item id dropped every Grok call here, and the
+            // turn came back as a nameless call with empty arguments.
+            const key = item.id ?? item.call_id;
+            if (!key) break;
             sawToolCall = true;
             const index = nextIndex++;
             // Normally empty here, but a backend that already has the whole
             // call sends it in the skeleton.
             const seeded = item.arguments ?? "";
-            pending.set(item.id, {
+            const call: PendingCall = {
               index,
               id: item.call_id ?? "",
               name: item.name ?? "",
               streamed: seeded,
-            });
+            };
+            pending.set(key, call);
+            if (item.call_id) pending.set(item.call_id, call);
             // Only the fields the skeleton actually states. An empty `id` here
             // is not "unknown", it is a wrong answer: a consumer takes the last
             // stated value, so `""` written into the slot survives the real
@@ -402,18 +494,31 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           }
 
           case "response.function_call_arguments.delta": {
-            const call = event.item_id ? pending.get(event.item_id) : undefined;
+            const call = pendingFor(event.item_id, event.call_id);
             if (!call || !event.delta) break;
             call.streamed += event.delta;
             yield { type: "delta", toolCalls: [{ index: call.index, arguments: event.delta }] };
             break;
           }
 
+          // xAI states the finished argument string here and NOT on the
+          // closing item, which carries only `call_id`. Skipped, a call whose
+          // deltas never came reaches the caller with empty arguments.
+          case "response.function_call_arguments.done": {
+            const call = pendingFor(event.item_id, event.call_id);
+            const tail = call ? unsentTail(event.arguments ?? "", call.streamed) : "";
+            if (!call || !tail) break;
+            call.streamed += tail;
+            yield { type: "delta", toolCalls: [{ index: call.index, arguments: tail }] };
+            break;
+          }
+
           case "response.output_item.done": {
             const item = event.item;
             if (item?.type !== "function_call") break;
-            const known = item.id ? pending.get(item.id) : undefined;
+            const known = pendingFor(item.id, item.call_id);
             if (item.id) pending.delete(item.id);
+            if (item.call_id) pending.delete(item.call_id);
             const snapshot = item.arguments ?? "";
 
             if (!known) {
@@ -441,13 +546,8 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             }
 
             // The snapshot is authoritative, but the fragments already went
-            // out: re-emitting it whole concatenates the JSON with itself and
-            // every argument parse fails. Send only what the deltas missed —
-            // which is all of it when they never came.
-            const tail =
-              snapshot.length > known.streamed.length && snapshot.startsWith(known.streamed)
-                ? snapshot.slice(known.streamed.length)
-                : "";
+            // out: send only what the deltas missed.
+            const tail = unsentTail(snapshot, known.streamed);
             // `.done` restates the identity, and on a backend that leaves it
             // out of the skeleton this is the only frame that carries it. It
             // rides last so it WINS: the alternative is a caller assembling a
@@ -464,12 +564,33 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             break;
           }
 
-          case "response.completed": {
-            const usage = event.response?.usage;
-            if (usage) yield usageChunk(usage);
+          // `response.done` is the same terminal event under the name
+          // OpenCode's gateway uses.
+          case "response.completed":
+          case "response.done": {
+            const response = event.response;
+            // A terminal event names its own outcome, and the type is not
+            // always it: a `completed` that states `failed` or carries an
+            // error failed, and one that states `incomplete` was cut. Read as
+            // a clean stop, either is a broken turn reported as a finished one.
+            if (response?.status === "failed" || response?.error) {
+              throw streamError(id, response.error ?? { message: "response failed" });
+            }
+            if (response?.usage) yield usageChunk(response.usage);
+            if (response?.status === "incomplete") {
+              yield {
+                type: "finish",
+                finishReason: mapIncompleteReason(response.incomplete_details?.reason),
+              };
+              return;
+            }
             yield { type: "finish", finishReason: sawToolCall ? "tool_calls" : "stop" };
             return;
           }
+
+          case "codex.rate_limits":
+            wall = quotaWall(event, id);
+            break;
 
           case "response.incomplete": {
             // A turn that ran out of output tokens still billed for its input,
@@ -491,13 +612,24 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
           case "error":
           case "response.error":
-            throw streamError(id, event.error ?? { message: event.message, code: event.code });
+            // The status and the window clocks ride beside `error`. Without
+            // them a spent Codex window reads as an unnamed in-stream failure:
+            // floored to overload, then retried and walked across every backup
+            // on the same account wall.
+            throw streamError(
+              id,
+              event.error
+                ? { ...event.error, status_code: event.status_code, headers: event.headers }
+                : { message: event.message, code: event.code },
+            );
         }
       }
 
-      // The stream closed without a terminal event. Nothing is lost but the
-      // finish reason and the usage record — every delta, tool-call fragment
-      // included, was already yielded as it arrived.
+      // The stream closed without a terminal event. If the backend's last word
+      // was a spent window and nothing was produced, that is why; otherwise
+      // the stream was cut (see `streamCut`).
+      if (wall && !produced) throw wall;
+      throw streamCut(id);
     },
   };
 

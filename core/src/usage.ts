@@ -42,6 +42,9 @@ export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
     cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
     outputTokens: a.outputTokens + b.outputTokens,
+    ...(a.reasoningTokens !== undefined || b.reasoningTokens !== undefined
+      ? { reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0) }
+      : {}),
   };
 }
 
@@ -55,6 +58,9 @@ export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
     cacheWriteTokens: Math.max(0, (a.cacheWriteTokens ?? 0) - (b.cacheWriteTokens ?? 0)),
     outputTokens: Math.max(0, a.outputTokens - b.outputTokens),
+    ...(a.reasoningTokens !== undefined
+      ? { reasoningTokens: Math.max(0, a.reasoningTokens - (b.reasoningTokens ?? 0)) }
+      : {}),
   };
 }
 
@@ -64,17 +70,20 @@ export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
  * A cost the provider reported wins outright, including a reported 0: a free
  * call priced at the rate would be billed for something nobody charged.
  *
- * Cached tokens are a SUBSET of input, not an addition to it: the miss part
- * bills at the full rate and the hit part at the cache rate. `cached` is
- * clamped to `input` so an over-reporting provider can neither drive the miss
- * count negative nor bill for more prompt than it was sent.
+ * Cached and written tokens are SUBSETS of input, not additions to it: the
+ * miss part bills at the full rate, the hit part at the cache rate, the write
+ * part at the write rate. `cached` is clamped to `input` so an over-reporting
+ * provider can neither drive the miss count negative nor bill for more prompt
+ * than it was sent.
  */
 export function costUsd(usage: TokenUsage, rate: ModelRate): number {
   if (usage.reportedCostUsd !== undefined) return usage.reportedCostUsd;
   const input = Math.max(0, usage.inputTokens);
   const cached = Math.min(Math.max(0, usage.cachedInputTokens), input);
   const written = Math.max(0, usage.cacheWriteTokens ?? 0);
-  const miss = input - cached;
+  // Writes are inside `input` too. Left in the miss count they billed twice —
+  // once at the input rate, again at the write rate: 2.25× on Claude.
+  const miss = Math.max(0, input - cached - written);
   const writeRate = rate.cacheWrite ?? rate.input;
   return (
     (miss * rate.input +

@@ -2,6 +2,43 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.16.0] - 2026-10-01
+
+Lessons from cc-proxy, a proxy that serves Claude Code over Codex, Kimi, Grok, OpenCode Go and GLM every day. Most of these are bugs it hit live, and this package had too.
+
+### Changed
+
+- **A stream that ends before its turn does now throws.** No finish reason, no terminal event, no `[DONE]`: all four adapters hand over what arrived, then throw a `network` error, the same one a socket dying mid-read throws. Before, the turn ended quietly with no finish and no usage. A caller that never checks the finish kept half an answer as the whole one, and the ledger booked a billed turn as free. A test double that streams without an end signal now fails; give it the one its wire sends.
+- **The watchdog runs two clocks.** The idle clock (60 s) now counts any byte, keep-alives included, so a provider that pings while it buffers a long tool call is no longer killed at 60 s. A new progress clock (`progressMs`, 300 s) counts chunks from the moment the request is sent. It still catches a route that only sends keep-alives, and it gives a backend room to think before its first byte: the ChatGPT backend sends nothing for minutes on a large high-effort turn.
+- **An empty turn right after a tool result is no longer a failure.** An agent whose answer IS the tool call ends every turn that way. Empty with a length finish, or after a user message, still fails.
+- **Responses tools say `strict: true` or `false`, never nothing.** It is `true` only when the schema already qualifies. Left to the default, the backend made optional arguments required and the model invented values for them.
+
+### Added
+
+- **`parallelToolCalls: false`** asks for at most one tool call per turn. Gemini has no such switch, so it refuses `false` with an `invalid` error instead of ignoring it.
+- **`TokenUsage.reasoningTokens`**: the thinking share of `outputTokens`, on Responses, the OpenAI dialect and Gemini. It explains a turn that came back empty with a length finish. Anthropic does not report it.
+- **`grok` preset** for a Grok subscription (SuperGrok, X Premium), on the backend the Grok CLI uses. `xai` stays the keyed API.
+- **`StreamOptions.onActivity`** is called on every byte the stream reads. The watchdog uses it, and so can you.
+- **`withoutPatterns`** removes every `pattern` from a JSON Schema, wherever a schema can sit.
+- **`streamCut`**, the error an adapter throws when a stream ends early.
+
+### Fixed
+
+- **The `chatgpt` preset failed every call with a 404**, reported as a wrong model id. It now posts to `/backend-api/codex/responses` and sends the `session-id` header the backend keys its cache on.
+- **A spent ChatGPT window was retried as a throttle.** `usage_limit_reached` is now `quota`, with its reset time and its window (5 h or weekly) read from the `x-codex-*` headers. A `codex.rate_limits` frame that says the limit is reached, followed by a closed stream, is `quota` too, unless credits cover it.
+- **Flagged prompts were retried three times.** `invalid_prompt` and `bio_policy` are `content` now, and never retried.
+- **Grok tool calls came back with no name and no arguments.** Grok keys a call by `call_id` alone, and the Responses adapter now follows it.
+- **A Responses turn that ended `incomplete` or `failed` read as a clean stop.** The status on the terminal event now decides it. `response.done`, OpenCode's name for that event, is read too.
+- **A Gemini prompt blocked outright** was read as a cut stream and retried into the same block. It is `content` now.
+- **The ChatGPT backend 400'd any request with a regex it could not compile** in a tool schema, like the one in Claude Code's Artifact tool. Responses tools now go out without `pattern`.
+- **Anthropic cache writes were billed twice**, at 2.25× the input rate.
+- **Kimi cache hits were billed at the full input rate.** Kimi reports them at `usage.cached_tokens`, which is now read.
+- **Parallel tool calls with images 400'd on the OpenAI dialect.** The images went out after each tool result. They now follow the whole run of results.
+- **`Retry-After: 1.5` meant "retry now"**, and `retry-after-ms` was ignored. Both are read as waits now.
+- **A Claude OAuth 529 benched its model for days.** The account's window reset, sent on every response, was read as the wait. Window headers now count only on a `rate` or `quota` answer.
+- **The SSE reader** reads bare-CR line endings, gives up on a frame over 8 MiB instead of buffering forever, and no longer rescans the whole buffer on every read.
+- **`sessionId` becomes `prompt_cache_key` on Responses**, so a conversation's turns hit the same cache.
+
 ## [0.15.1] - 2026-10-01
 
 ### Fixed

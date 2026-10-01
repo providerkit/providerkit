@@ -1,6 +1,6 @@
 ---
 title: Streaming and the watchdog
-description: The idle watchdog that catches a stream which stops sending, plus time-to-first-token.
+description: The two watchdog clocks that catch a stream which stops sending, plus time-to-first-token.
 ---
 
 import WatchdogTimeline from "../../../components/WatchdogTimeline.astro";
@@ -19,10 +19,13 @@ chunks_.
 ```ts
 import { streamWatch, watchChunks } from "@providerkit/core";
 
-const watch = streamWatch({ provider: "anthropic", idleMs: 60_000, signal: callerSignal });
+const watch = streamWatch({ provider: "anthropic", signal: callerSignal });
 
 try {
-  const chunks = provider.createStream(messages, tools, { signal: watch.signal });
+  const chunks = provider.createStream(messages, tools, {
+    signal: watch.signal,
+    onActivity: watch.sawActivity,
+  });
   for await (const chunk of watchChunks(watch, chunks)) {
     handle(chunk);
   }
@@ -31,13 +34,25 @@ try {
 }
 ```
 
-`watchChunks` calls `sawByte()` for you on each chunk and re-arms the timer. If `idleMs` passes
-with no chunk, `watch.signal` aborts, and `watch.classify(err)` turns the resulting abort into a
-`timeout` — distinguishing _the provider went quiet_ from _the caller pressed Stop_, which land
-as the same `AbortError` otherwise.
+The watch runs two clocks, because "silent" means two different things:
 
-Default idle is 60 seconds (`STREAM_IDLE_MS`). Three of the five codebases providerkit came from
-had independently arrived at exactly that number.
+- **Idle, 60 seconds** (`idleMs`, `STREAM_IDLE_MS`): no byte at all once the response has
+  started. That is a dead socket. Every read resets it, keep-alives included, which is what
+  `onActivity` is for. Leave it out and keep-alives don't count: a provider that pings while it
+  writes a long tool call gets killed at 60 seconds.
+- **Progress, 5 minutes** (`progressMs`, `STREAM_PROGRESS_MS`): no chunk, counted from the moment
+  the request is sent. That catches a stream that stays alive and goes nowhere, and it covers
+  the wait for the response to start. Some backends think before they send a single byte: the
+  ChatGPT backend can stay silent for minutes on a large prompt at high effort, and that turn is
+  healthy.
+
+`watchChunks` calls `sawByte()` for you on each chunk, which resets both. When either runs out,
+`watch.signal` aborts, and `watch.classify(err)` turns the abort into a `timeout`. That is how you
+tell _the provider went quiet_ from _the caller pressed Stop_, which both arrive as the same
+`AbortError` otherwise.
+
+Three of the five codebases providerkit came from had each picked 60 seconds for the idle clock,
+on their own.
 
 :::danger[Always `dispose()`]
 The watchdog holds a timer. Without `dispose()` in a `finally`, a long-lived process leaks one
@@ -46,10 +61,10 @@ per stream.
 
 ## The composition, wrapped
 
-Those three lines — build a watch, hand the provider the WATCH's signal, wrap the chunks — are
-easy to get subtly wrong, and the middle one fails silently in every test: pass the caller's
-signal instead and the watchdog still arms, still fires, and cancels nothing, because the request
-it was meant to abort was never told about it. The composition ships as a wrapper so the next
+Those lines — build a watch, hand the provider the WATCH's signal and `sawActivity`, wrap the
+chunks — are easy to get subtly wrong, and the middle one fails silently in every test: pass the
+caller's signal instead and the watchdog still arms, still fires, and cancels nothing, because
+the request it was meant to abort was never told about it. The composition ships as a wrapper so the next
 caller does not have to get it right by reading carefully:
 
 ```ts
@@ -63,10 +78,19 @@ for await (const chunk of guarded.createStream(messages, tools, { signal: caller
 ```
 
 `guarded` is an ordinary `Provider`, so retry and backup-model walkers wrap it unchanged — and
-both failures it raises are transient, which is what makes that correct. The wrapper catches the
-other way a stream fails silently too: a turn that ends having said nothing throws as `overload`
-instead of succeeding with an empty answer. `requireContent: false` turns that off;
+both failures it raises are transient, which is what makes that correct. It passes
+`onActivity` for you. The wrapper catches the other way a stream fails silently too: a turn that
+ends having said nothing throws as `overload` instead of succeeding with an empty answer. One
+exception: an empty `stop` right after a tool result passes, because an agent whose answer is
+the tool call ends its turn exactly that way. `requireContent: false` turns the check off;
 `onFirstChunk` reports TTFT without the plumbing.
+
+## A stream that ends too early
+
+A connection can also close cleanly in the middle of a turn: no finish reason, no closing event,
+no `[DONE]`. Every adapter hands over what arrived, then throws a `network` error, the same one a
+socket dying mid-read throws. So a half-written answer is never kept as the whole one, and the
+retry and backup walkers see a failure they know how to handle.
 
 ## Bridging the caller's signal
 

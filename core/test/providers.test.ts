@@ -10,6 +10,7 @@ import {
   stripReasoning,
   type ChatMessage,
   type Effort,
+  type ImagePart,
   type ProviderChunk,
   type ToolChoice,
   type ToolDefinition,
@@ -30,6 +31,8 @@ function recorder(frames: string[], status = 200) {
       new ReadableStream<Uint8Array>({
         start(controller) {
           for (const frame of frames) controller.enqueue(encoder.encode(`data: ${frame}\n\n`));
+          // How every OpenAI-shape stream ends. The Anthropic shape ignores it.
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
         },
       }),
@@ -957,6 +960,10 @@ describe("cached-token spellings", () => {
     expect(
       await usage({ prompt_tokens: 1000, completion_tokens: 5, prompt_cache_hit_tokens: 900 }),
     ).toMatchObject({ inputTokens: 1000, cachedInputTokens: 900 });
+    // Kimi's spelling — top level of `usage`.
+    expect(
+      await usage({ prompt_tokens: 1000, completion_tokens: 5, cached_tokens: 600 }),
+    ).toMatchObject({ inputTokens: 1000, cachedInputTokens: 600 });
     expect(
       await usage({
         prompt_tokens: 1000,
@@ -1046,6 +1053,7 @@ describe("provider-reported cost", () => {
         inputTokens: 1_200,
         cachedInputTokens: 1_000,
         outputTokens: 40,
+        reasoningTokens: 0,
         reportedCostUsd: 0.000196,
       },
     ]);
@@ -1092,6 +1100,7 @@ describe("provider-reported cost", () => {
       inputTokens: 1_200,
       cachedInputTokens: 1_000,
       outputTokens: 40,
+      reasoningTokens: 0,
     });
   });
 });
@@ -1115,6 +1124,29 @@ describe("what the OpenAI dialect cannot carry", () => {
         role: "user",
         content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }],
       },
+    ]);
+  });
+
+  it("holds the images until every parallel tool result has answered", async () => {
+    // An assistant turn with parallel calls needs all its tool messages before
+    // any user message. A user message wedged between two of them is a 400.
+    const shot = (data: string): ImagePart => ({ type: "image", mimeType: "image/png", data });
+    const url = (data: string) => ({
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${data}` },
+    });
+    const out = toOpenAIMessages([
+      { role: "tool", toolCallId: "a", name: "shot", content: "one", images: [shot("AAAA")] },
+      { role: "tool", toolCallId: "b", name: "read", content: "two" },
+      { role: "tool", toolCallId: "c", name: "shot", content: "three", images: [shot("BBBB")] },
+      { role: "user", content: "next" },
+    ]);
+    expect(out).toEqual([
+      { role: "tool", tool_call_id: "a", content: "one" },
+      { role: "tool", tool_call_id: "b", content: "two" },
+      { role: "tool", tool_call_id: "c", content: "three" },
+      { role: "user", content: [url("AAAA"), url("BBBB")] },
+      { role: "user", content: "next" },
     ]);
   });
 
@@ -1316,5 +1348,73 @@ describe("the schema reaches a provider with no schema mode", () => {
     ).catch(() => undefined);
     expect(seen[0]!.body.top_p).toBe(0.1);
     expect(seen[0]!.body.stop).toEqual(["</answer>"]);
+  });
+});
+
+describe("one tool call per turn", () => {
+  const tool: ToolDefinition = {
+    name: "weather",
+    description: "The weather in a city",
+    inputSchema: { type: "object", properties: { city: { type: "string" } } },
+  };
+  const HI: ChatMessage[] = [{ role: "user", content: "Weather in Paris?" }];
+
+  it("rides inside Anthropic's tool choice, auto when the caller named none", async () => {
+    const choiceSent = async (toolChoice: ToolChoice | undefined, tools = [tool]) => {
+      const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+      await collect(
+        createAnthropicProvider({ apiKey: "k", model: "claude-opus-5", fetchImpl }).createStream(
+          HI,
+          tools,
+          { parallelToolCalls: false, ...(toolChoice ? { toolChoice } : {}) },
+        ),
+      );
+      return seen[0]!.body.tool_choice;
+    };
+    expect(await choiceSent(undefined)).toEqual({ type: "auto", disable_parallel_tool_use: true });
+    expect(await choiceSent("required")).toEqual({ type: "any", disable_parallel_tool_use: true });
+    // `none` calls nothing, so there is nothing to serialize.
+    expect(await choiceSent("none")).toEqual({ type: "none" });
+    expect(await choiceSent(undefined, [])).toBeUndefined();
+  });
+
+  it("sends parallel_tool_calls on the OpenAI shape only beside tools, only when false", async () => {
+    const sent = async (parallelToolCalls: boolean | undefined, tools = [tool]) => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await collect(
+        createOpenAIProvider({ apiKey: "k", model: "gpt-5.6", fetchImpl }).createStream(
+          HI,
+          tools,
+          parallelToolCalls === undefined ? {} : { parallelToolCalls },
+        ),
+      );
+      return seen[0]!.body.parallel_tool_calls;
+    };
+    expect(await sent(false)).toBe(false);
+    expect(await sent(true)).toBeUndefined();
+    expect(await sent(undefined)).toBeUndefined();
+    // OpenAI refuses the field on a request with no tools.
+    expect(await sent(false, [])).toBeUndefined();
+  });
+
+  it("reports the thinking share of the output on the OpenAI shape", async () => {
+    const { fetchImpl } = recorder([
+      j({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }),
+      j({
+        choices: [],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 120,
+          completion_tokens_details: { reasoning_tokens: 100 },
+        },
+      }),
+    ]);
+    const chunks = await collect(
+      createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl }).createStream(HI, []),
+    );
+    expect(chunks.find((c) => c.type === "usage")?.usage).toMatchObject({
+      outputTokens: 120,
+      reasoningTokens: 100,
+    });
   });
 });

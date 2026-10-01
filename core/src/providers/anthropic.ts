@@ -1,5 +1,5 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
-import { fileRefused, streamError } from "../errors.ts";
+import { fileRefused, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
@@ -14,6 +14,7 @@ import type {
   Provider,
   ProviderChunk,
   StreamOptions,
+  ToolChoice,
   ToolDefinition,
 } from "../types.ts";
 
@@ -203,6 +204,18 @@ function mapStopReason(reason: string | undefined): FinishReason | undefined {
   }
 }
 
+interface AnthropicToolChoice {
+  type: "auto" | "any" | "none" | "tool";
+  name?: string;
+  disable_parallel_tool_use?: boolean;
+}
+
+function toAnthropicToolChoice(choice: Exclude<ToolChoice, "auto">): AnthropicToolChoice {
+  if (choice === "none") return { type: "none" };
+  if (choice === "required") return { type: "any" };
+  return { type: "tool", name: choice.name };
+}
+
 function partsToAnthropic(content: string | ContentPart[], provider: string): unknown[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
   return content.map((part) => {
@@ -387,13 +400,17 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           input_schema: toAnthropicToolSchema(tool.inputSchema),
         }));
       }
-      if (opts.toolChoice && opts.toolChoice !== "auto" && !unforced) {
-        request.tool_choice =
-          opts.toolChoice === "none"
-            ? { type: "none" }
-            : opts.toolChoice === "required"
-              ? { type: "any" }
-              : { type: "tool", name: opts.toolChoice.name };
+      const choice =
+        opts.toolChoice && opts.toolChoice !== "auto" && !unforced
+          ? toAnthropicToolChoice(opts.toolChoice)
+          : undefined;
+      // This wire says "one call at a time" inside the tool choice, so asking
+      // for it needs a choice to ride on — `auto` when the caller named none.
+      // `none` calls nothing, so there is nothing to serialize.
+      if (opts.parallelToolCalls === false && offered.length > 0 && choice?.type !== "none") {
+        request.tool_choice = { ...(choice ?? { type: "auto" }), disable_parallel_tool_use: true };
+      } else if (choice) {
+        request.tool_choice = choice;
       }
       // Extended mode, which is all Claude 4.5 and older have, can't think on
       // two kinds of request this adapter sends, so those run without thinking.
@@ -448,6 +465,19 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       let outputTokens = 0;
       let toolCall: { index: number; id: string; name: string } | null = null;
       let blockIndex = -1;
+      // What proves the turn ended rather than the socket: a stated stop
+      // reason, or `message_stop`. See the check after the loop.
+      let stopped = false;
+      let closed = false;
+      const usageChunk = (): ProviderChunk => ({
+        type: "usage",
+        usage: {
+          inputTokens: freshInputTokens + cachedInputTokens + cacheWriteTokens,
+          cachedInputTokens,
+          cacheWriteTokens,
+          outputTokens,
+        },
+      });
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, "/v1/messages"),
@@ -463,6 +493,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
       })) {
         let event: AnthropicEvent;
         try {
@@ -530,24 +561,26 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             cachedInputTokens = event.usage?.cache_read_input_tokens ?? cachedInputTokens;
             cacheWriteTokens = event.usage?.cache_creation_input_tokens ?? cacheWriteTokens;
             outputTokens = event.usage?.output_tokens ?? outputTokens;
+            if (event.delta?.stop_reason) stopped = true;
             const finishReason = mapStopReason(event.delta?.stop_reason);
             if (finishReason) yield { type: "finish", finishReason };
             break;
           }
 
           case "message_stop":
-            yield {
-              type: "usage",
-              usage: {
-                inputTokens: freshInputTokens + cachedInputTokens + cacheWriteTokens,
-                cachedInputTokens,
-                cacheWriteTokens,
-                outputTokens,
-              },
-            };
+            closed = true;
+            yield usageChunk();
             break;
         }
       }
+      if (closed) return;
+      // A gateway that states its stop reason and then skips `message_stop`
+      // still finished the turn — and still billed it.
+      if (stopped) {
+        yield usageChunk();
+        return;
+      }
+      throw streamCut(id);
     },
   };
   return withConfiguredFallbacks(provider, config);

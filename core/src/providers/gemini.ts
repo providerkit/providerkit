@@ -5,7 +5,7 @@
 // its own chain of thought on the next turn. Written straight against the REST
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
-import { streamError } from "../errors.ts";
+import { ProviderError, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
@@ -257,6 +257,8 @@ interface GeminiResponse {
   };
   /** Present only on the in-band failure below — never on a real candidate. */
   error?: GeminiStatus;
+  /** A prompt Gemini refused outright: no candidate at all, just the reason. */
+  promptFeedback?: { blockReason?: string };
 }
 
 export function createGeminiProvider(config: GeminiConfig): Provider {
@@ -329,6 +331,16 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       ];
       if (systemParts.length > 0) request.systemInstruction = { parts: systemParts };
       if (tools.length > 0) {
+        // Gemini has no switch for one call per turn. Sending the request
+        // anyway would hand back the parallel calls the caller ruled out.
+        if (opts.parallelToolCalls === false) {
+          throw new ProviderError(
+            id,
+            "invalid",
+            `${id}: Gemini can't limit a turn to one tool call. Leave parallelToolCalls unset ` +
+              "for Gemini models, or run the calls it returns one at a time.",
+          );
+        }
         request.tools = [
           {
             functionDeclarations: tools.map((tool) => ({
@@ -351,6 +363,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // remembered rather than read off the final chunk.
       let sawFunctionCalls = false;
       let callIndex = 0;
+      let finished = false;
 
       for await (const data of streamSse({
         // Without `?alt=sse` the response is one long JSON array that only
@@ -361,6 +374,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
       })) {
         let chunk: GeminiResponse;
         try {
@@ -373,6 +387,14 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         // throttle or an overload landing after that arrives here as a
         // google.rpc.Status in the body rather than as a status line.
         if (chunk.error) throw streamError(id, chunk.error);
+        // A blocked PROMPT has no candidate to finish, so it reads as a cut
+        // stream — retried, into the same block. It is a content failure.
+        const blocked = chunk.promptFeedback?.blockReason;
+        if (blocked) {
+          throw new ProviderError(id, "content", `${id}: the prompt was blocked (${blocked})`, {
+            code: blocked,
+          });
+        }
 
         if (chunk.usageMetadata) {
           const usage = chunk.usageMetadata;
@@ -385,6 +407,9 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
               // turn by most of what it cost.
               outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
               cachedInputTokens: usage.cachedContentTokenCount ?? 0,
+              ...(usage.thoughtsTokenCount !== undefined
+                ? { reasoningTokens: usage.thoughtsTokenCount }
+                : {}),
             },
           };
         }
@@ -428,6 +453,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         }
 
         if (candidate.finishReason) {
+          finished = true;
           yield {
             type: "finish",
             // A turn that called tools finishes as tool_calls whatever the
@@ -437,6 +463,9 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
           };
         }
       }
+      // Gemini states a finish reason on the last candidate of every turn it
+      // completes; a stream that closes without one was cut.
+      if (!finished) throw streamCut(id);
     },
   };
 

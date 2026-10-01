@@ -3,7 +3,7 @@
 // This is the dialect most gateways speak, so one adapter serves OpenAI,
 // OpenRouter, DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio.
 // Their divergences are small and named where they appear.
-import { fileRefused, streamError } from "../errors.ts";
+import { fileRefused, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
@@ -315,7 +315,14 @@ function partsToOpenAI(content: string | ContentPart[], provider: string): unkno
  */
 export function toOpenAIMessages(messages: readonly ChatMessage[], provider = "openai"): unknown[] {
   const out: unknown[] = [];
+  // Images from a run of tool results, held until the run ends. See "tool".
+  let toolImages: unknown[] = [];
+  const flushToolImages = () => {
+    if (toolImages.length > 0) out.push({ role: "user", content: toolImages });
+    toolImages = [];
+  };
   for (const message of messages) {
+    if (message.role !== "tool") flushToolImages();
     switch (message.role) {
       case "system":
         out.push({ role: "system", content: message.content });
@@ -329,17 +336,16 @@ export function toOpenAIMessages(messages: readonly ChatMessage[], provider = "o
         out.push({ role: "tool", tool_call_id: message.toolCallId, content: message.content });
         // This dialect has no image slot on a tool message — a `tool` role takes
         // text and nothing else. A screenshot a tool hands back therefore
-        // follows as its own user message, which is the only way the model ever
-        // sees it. Dropped instead, the turn reads as a tool that returned
-        // words about a picture nobody was shown.
-        if (message.images?.length) {
-          out.push({
-            role: "user",
-            content: message.images.map((image) => ({
-              type: "image_url",
-              image_url: { url: toDataUri(image) },
-            })),
-          });
+        // follows as a user message, which is the only way the model ever sees
+        // it. Dropped instead, the turn reads as a tool that returned words
+        // about a picture nobody was shown.
+        //
+        // It follows the whole RUN of tool results, not this one: an assistant
+        // turn that made parallel calls needs every answer before any user
+        // message, and an image wedged between two of them is a 400 that
+        // classifies as "invalid" — never retried, never walked to a backup.
+        for (const image of message.images ?? []) {
+          toolImages.push({ type: "image_url", image_url: { url: toDataUri(image) } });
         }
         break;
 
@@ -369,6 +375,7 @@ export function toOpenAIMessages(messages: readonly ChatMessage[], provider = "o
       }
     }
   }
+  flushToolImages();
   return out;
 }
 
@@ -392,9 +399,12 @@ interface OpenAIChunk {
     prompt_tokens?: number;
     completion_tokens?: number;
     prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
     /** DeepSeek's native API reports the cache-hit count here instead of in
      *  `prompt_tokens_details`, and it is absent from every OpenAI SDK type. */
     prompt_cache_hit_tokens?: number;
+    /** Kimi (Moonshot) puts it at the top level of `usage`. */
+    cached_tokens?: number;
     /** OpenRouter only, from here down: what the call cost, in its credits,
      *  which are US dollars. */
     cost?: unknown;
@@ -487,6 +497,8 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             parameters: tool.inputSchema,
           },
         }));
+        // Only beside tools: OpenAI refuses the field on a request without any.
+        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
       }
       if (opts.toolChoice && opts.toolChoice !== "auto") {
         request.tool_choice =
@@ -561,6 +573,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         ? "/chat/completions"
         : "/v1/chat/completions";
 
+      let ended = false;
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
@@ -575,6 +588,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
+        onDone: () => {
+          ended = true;
+        },
       })) {
         let chunk: OpenAIChunk;
         try {
@@ -594,13 +611,15 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         // A usage-only frame carries no choices — this shape sends it last.
         if (chunk.usage) {
           const input = chunk.usage.prompt_tokens ?? 0;
-          // Two spellings for the same subset. DeepSeek's native endpoint uses
-          // its own field, and reading only the standard one bills every cached
-          // token at the full input rate — on an agent loop, where the re-sent
-          // prefix is overwhelmingly hits, that overstates a run by up to 10×.
+          // Three spellings for the same subset. DeepSeek's native endpoint and
+          // Kimi each use their own field, and reading only the standard one
+          // bills every cached token at the full input rate — on an agent loop,
+          // where the re-sent prefix is overwhelmingly hits, that overstates a
+          // run by up to 10×.
           const cached =
             chunk.usage.prompt_tokens_details?.cached_tokens ??
             chunk.usage.prompt_cache_hit_tokens ??
+            chunk.usage.cached_tokens ??
             0;
           const reportedCostUsd = reportsCost ? openRouterCostUsd(chunk.usage) : undefined;
           yield {
@@ -611,6 +630,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
               // Anthropic's, which excludes them. No reconciling to do.
               cachedInputTokens: cached,
               outputTokens: chunk.usage.completion_tokens ?? 0,
+              ...(chunk.usage.completion_tokens_details?.reasoning_tokens !== undefined
+                ? { reasoningTokens: chunk.usage.completion_tokens_details.reasoning_tokens }
+                : {}),
               ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
             },
           };
@@ -653,9 +675,13 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           if (has) yield out;
         }
 
+        if (choice.finish_reason) ended = true;
         const finishReason = mapFinishReason(choice.finish_reason);
         if (finishReason) yield { type: "finish", finishReason };
       }
+      // Either proof will do: some gateways send `[DONE]` with no finish, and
+      // some a finish with no `[DONE]`. Neither means the socket closed early.
+      if (!ended) throw streamCut(id);
     },
   };
 

@@ -1,17 +1,30 @@
 // The two ways a stream fails without failing: it goes silent, or it ends
 // having said nothing at all.
 //
-// The stream-idle watchdog.
+// The stream watchdog.
 //
 // A provider that stops sending bytes is indistinguishable from a long prefill
 // — except that it never ends, and every SDK's default is to wait forever. A
 // queued route or a wedged prefill upstream hangs the caller indefinitely, and
 // the symptom is the worst kind: nothing. No error, no log, no timeout.
 //
-// So the seam gives itself a deadline. Any byte of any kind re-arms it
-// (reasoning models emit thinking deltas continuously, so silence really is
-// silence). When it fires, the watchdog aborts ITS OWN controller and the
-// caller's signal is only bridged in — which is what keeps a person's Stop
+// So the seam gives itself two deadlines, because "silent" means two things:
+//
+// - IDLE: no byte at all, keep-alives included, for a minute after the
+//   response started. A dead socket. Any read re-arms it — a keep-alive is
+//   proof of life no chunk can carry (cc-proxy pings every 15s while it
+//   buffers a long tool call, and the old chunk-only clock killed those turns).
+// - PROGRESS: no chunk for five minutes, counted from the POST. A stream that
+//   is alive and going nowhere — a route parked behind keep-alives — and the
+//   wait for the response to START, which is the one some backends take
+//   minutes over: the ChatGPT backend withholds its headers until the model's
+//   first output, so a high-effort turn on a large prompt sends nothing at all
+//   for minutes and is healthy the whole time (cc-proxy defaults that wait to
+//   300s, measured). On a one-minute clock it was aborted and retried from
+//   scratch, which re-ran the reasoning into the same deadline.
+//
+// When either fires, the watchdog aborts ITS OWN controller and the caller's
+// signal is only bridged in — which is what keeps a person's Stop
 // distinguishable from our timeout. One is their cancel and is never retried;
 // the other is ours, is transient, and fires while nothing has streamed yet,
 // so the retry is always safe.
@@ -24,44 +37,54 @@ import type {
   ToolDefinition,
 } from "./types.ts";
 
-/** No byte at all for this long and the stream is considered wedged. */
+/** No byte at all for this long, once the response has started, and the
+ *  stream is dead. */
 export const STREAM_IDLE_MS = 60_000;
+
+/** No chunk for this long — the wait for the response to start included —
+ *  and the stream is going nowhere, keep-alives or not. */
+export const STREAM_PROGRESS_MS = 300_000;
 
 export interface StreamWatch {
   /** Hand this to the provider in place of the caller's signal. */
   readonly signal: AbortSignal;
-  /** A byte arrived: re-arm the deadline, and mark TTFT if it was the first. */
+  /** A chunk arrived: re-arm both deadlines, and mark TTFT if it was the first. */
   sawByte(): void;
+  /** The response showed life without a chunk — its headers, a keep-alive, a
+   *  partial frame. Starts or re-arms the idle deadline only. */
+  sawActivity(): void;
   /**
-   * Milliseconds from the call opening to its first byte of any kind — the
+   * Milliseconds from the call opening to its first chunk of any kind — the
    * wait a person actually experiences, and the number a prompt-cache pin
    * exists to shrink. Null until something arrives.
    */
   firstChunkMs(): number | null;
   /**
-   * Re-issue a provider failure as the idle timeout when — and only when — it
-   * was our deadline that aborted. A caller's Stop passes through untouched.
+   * Re-issue a provider failure as the timeout when — and only when — it was
+   * one of our deadlines that aborted. A caller's Stop passes through untouched.
    */
   classify(err: unknown): unknown;
-  /** Clear the deadline timer. Safe to call more than once. */
+  /** Clear the deadline timers. Safe to call more than once. */
   dispose(): void;
 }
 
 export interface StreamWatchOptions {
   provider?: string;
   idleMs?: number;
+  progressMs?: number;
   signal?: AbortSignal;
 }
 
 export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
   const provider = opts.provider ?? "provider";
   const idleMs = opts.idleMs ?? STREAM_IDLE_MS;
+  const progressMs = opts.progressMs ?? STREAM_PROGRESS_MS;
   const callerSignal = opts.signal;
   const started = Date.now();
   const timeout = new AbortController();
 
   let firstChunk: number | null = null;
-  let idle = false;
+  let fired: ProviderError | null = null;
   let disposed = false;
 
   // The bridge is structural rather than an event listener: AbortSignal.any
@@ -71,40 +94,49 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
   // nicety: every runtime this package targets has had it for years.
   const signal = callerSignal ? AbortSignal.any([callerSignal, timeout.signal]) : timeout.signal;
 
-  const idleError = (cause?: unknown) =>
-    new ProviderError(provider, "timeout", `stream went ${idleMs / 1000}s without a byte`, {
-      cause,
-    });
-
-  function arm(): ReturnType<typeof setTimeout> {
+  function deadline(ms: number, what: string): ReturnType<typeof setTimeout> {
     const timer = setTimeout(() => {
-      idle = true;
-      timeout.abort(idleError());
-    }, idleMs);
+      fired = new ProviderError(provider, "timeout", `stream went ${ms / 1000}s without ${what}`);
+      timeout.abort(fired);
+    }, ms);
     // An orphaned watch — its consumer gone, dispose never called — must not
     // hold a Node event loop open for a full deadline.
     (timer as { unref?: () => void }).unref?.();
     return timer;
   }
 
-  let timer = arm();
+  // The idle clock waits for the response to start; until then only the
+  // progress clock runs (see the header comment).
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  let progress = deadline(progressMs, "a chunk");
+  const live = () => !disposed && !signal.aborted;
+
+  function sawActivity() {
+    clearTimeout(idle);
+    if (live()) idle = deadline(idleMs, "a byte");
+  }
 
   return {
     signal,
     sawByte() {
       firstChunk ??= Date.now() - started;
-      clearTimeout(timer);
-      if (!disposed && !signal.aborted) timer = arm();
+      sawActivity();
+      clearTimeout(progress);
+      if (live()) progress = deadline(progressMs, "a chunk");
     },
+    sawActivity,
     firstChunkMs: () => firstChunk,
     classify(err: unknown) {
       // Our deadline, not theirs — and not the caller's Stop.
-      if (idle && !(callerSignal?.aborted ?? false)) return idleError(err);
+      if (fired && !(callerSignal?.aborted ?? false)) {
+        return new ProviderError(fired.provider, "timeout", fired.message, { cause: err });
+      }
       return err;
     },
     dispose() {
       disposed = true;
-      clearTimeout(timer);
+      clearTimeout(idle);
+      clearTimeout(progress);
     },
   };
 }
@@ -148,11 +180,14 @@ export async function* watchChunks<T>(
 export async function* requireContent<T extends ProviderChunk>(
   provider: string,
   chunks: AsyncIterable<T>,
+  opts: { afterToolResult?: boolean } = {},
 ): AsyncGenerator<T> {
   const held: T[] = [];
   let usable = false;
+  let finish: ProviderChunk["finishReason"];
 
   for await (const chunk of chunks) {
+    if (chunk.type === "finish") finish = chunk.finishReason;
     if (!usable) {
       usable = Boolean(chunk.content || chunk.reasoning || chunk.toolCalls?.length);
       // Held rather than forwarded: once a chunk is out, the stream is
@@ -169,14 +204,26 @@ export async function* requireContent<T extends ProviderChunk>(
     yield chunk;
   }
 
-  if (!usable) {
-    throw new ProviderError(provider, "overload", `${provider}: completed with no content`);
+  if (usable) return;
+  // The one empty turn that is an answer: the model read a tool result and
+  // chose to stop. An agent whose reply IS a tool (a chat bot's send_message)
+  // ends every turn this way — retried, cc-proxy measured one such bot
+  // failing ~68% of real turns (11 retries, ~3 minutes, then an error). A
+  // `length` stop or no finish at all is still the failure this guard is for.
+  if (opts.afterToolResult && finish === "stop") {
+    yield* held;
+    return;
   }
+  throw new ProviderError(provider, "overload", `${provider}: completed with no content`);
 }
 
 export interface WatchdogOptions {
-  /** Silence this long and the stream is wedged. Defaults to `STREAM_IDLE_MS`. */
+  /** No byte this long after the response starts and the stream is dead.
+   *  Defaults to `STREAM_IDLE_MS`. */
   idleMs?: number;
+  /** No chunk this long, from the POST on, and the stream is going nowhere.
+   *  Defaults to `STREAM_PROGRESS_MS`. */
+  progressMs?: number;
   /**
    * Reject a turn that ends having said nothing, as `requireContent` does. On
    * by default: an empty completion is a failure in every loop, and the one
@@ -214,20 +261,26 @@ export function withWatchdog(provider: Provider, opts: WatchdogOptions = {}): Pr
       // Armed on first read, not here: a stream built now and iterated later
       // must not spend its deadline sitting in a variable.
       async function* watched(): AsyncGenerator<ProviderChunk> {
-        // idleMs and signal both default inside streamWatch.
+        // The deadlines and signal all default inside streamWatch.
         const watch = streamWatch({
           provider: provider.id,
           idleMs: opts.idleMs,
+          progressMs: opts.progressMs,
           signal: streamOpts.signal,
         });
+        const callerActivity = streamOpts.onActivity;
         const source = provider.createStream(messages, tools, {
           ...streamOpts,
           signal: watch.signal,
+          onActivity: () => {
+            watch.sawActivity();
+            callerActivity?.();
+          },
         });
         let reported = false;
         for await (const chunk of watchChunks(watch, source)) {
           // Before `requireContent` holds anything back — TTFT is the first
-          // byte of any kind, not the first byte worth showing.
+          // chunk of any kind, not the first one worth showing.
           if (!reported) {
             reported = true;
             opts.onFirstChunk?.(watch.firstChunkMs() ?? 0);
@@ -236,7 +289,11 @@ export function withWatchdog(provider: Provider, opts: WatchdogOptions = {}): Pr
         }
       }
 
-      return opts.requireContent === false ? watched() : requireContent(provider.id, watched());
+      return opts.requireContent === false
+        ? watched()
+        : requireContent(provider.id, watched(), {
+            afterToolResult: messages.at(-1)?.role === "tool",
+          });
     },
   };
 }

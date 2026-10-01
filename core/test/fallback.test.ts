@@ -244,7 +244,9 @@ describe("provider composition", () => {
       const cooled: Array<{ candidate: Provider; kind: string }> = [];
       const provider = withConfiguredFallbacks(primary, {
         fallbacks: [backup],
-        watchdog: { idleMs: 10 },
+        // Never answers at all, so it is the progress clock that catches it:
+        // the idle one only starts once a response does.
+        watchdog: { progressMs: 10 },
         fallbackOptions: {
           onCooldown: ({ candidate, kind }) => cooled.push({ candidate, kind }),
         },

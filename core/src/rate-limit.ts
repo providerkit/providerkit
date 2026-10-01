@@ -57,6 +57,32 @@ const RESET_HEADERS = [
   "x-ratelimit-reset",
 ];
 
+/**
+ * The ChatGPT backend's two windows. Both ride every response — the slots are
+ * "primary" and "secondary", NOT "5h" and "weekly", so the window is named by
+ * its own `-window-minutes` (300 and 10080 in every capture), and its
+ * `-used-percent` says which one is full. Recorded by cc-proxy off a live turn
+ * that spent the 5-hour window, 2026-09.
+ */
+const CODEX_SLOTS = ["primary", "secondary"] as const;
+
+function windowForMinutes(minutes: number | undefined): RateLimitWindow | undefined {
+  return minutes !== undefined && minutes > 0 ? windowForMs(minutes * 60_000) : undefined;
+}
+
+function codexWindow(headers: Headers, slot: (typeof CODEX_SLOTS)[number], now: number) {
+  const name = (suffix: string) => headers.get(`x-codex-${slot}-${suffix}`);
+  const percent = numeric(name("used-percent"));
+  const after = numeric(name("reset-after-seconds"));
+  return {
+    window: windowForMinutes(numeric(name("window-minutes"))),
+    // A percentage here; Anthropic's unified utilization is a fraction.
+    utilization: percent === undefined ? undefined : percent / 100,
+    reset:
+      unixSecondsToMs(name("reset-at")) ?? (after === undefined ? undefined : now + after * 1000),
+  };
+}
+
 /** Seconds since 1970 passed a billion in 2001, so a bare integer above this is
  *  a timestamp and anything below it is a countdown. Vendors disagree on which
  *  they send under the same header name, so magnitude decides. */
@@ -158,10 +184,11 @@ export function parseRateLimitReset(headers: Headers, now = Date.now()): RateLim
       utilization: numeric(headers.get(`${UNIFIED_7D}utilization`)),
       reset: unixSecondsToMs(headers.get(`${UNIFIED_7D}reset`)),
     },
+    ...CODEX_SLOTS.map((slot) => codexWindow(headers, slot, now)),
   ].filter((w) => w.utilization !== undefined && w.reset !== undefined && w.reset > now);
   const binding = windows.sort((a, b) => (b.utilization ?? 0) - (a.utilization ?? 0))[0];
   if (binding) {
-    result.window = binding.window;
+    if (binding.window) result.window = binding.window;
     // The window's own reset outranks retry-after: it names the real horizon,
     // where retry-after names the next polite attempt.
     if (binding.reset !== undefined) result.resetAtMs = binding.reset;
@@ -190,6 +217,20 @@ const WINDOW_FLOOR_MS = 10 * 60_000;
  *  request fell, so a 5-hour window routinely reports four hours and change. */
 const FIVE_HOUR_MAX_MS = 5.5 * 3_600_000;
 const WEEKLY_MAX_MS = 7.5 * 86_400_000;
+
+/** The window a span this long belongs to. */
+function windowForMs(ms: number): RateLimitWindow {
+  if (ms <= FIVE_HOUR_MAX_MS) return "5h";
+  if (ms <= WEEKLY_MAX_MS) return "weekly";
+  return "monthly";
+}
+
+/** A wait read off a body, named as a window once it is long enough to be one. */
+function resetAfter(waitMs: number, now: number): RateLimitReset {
+  const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
+  if (waitMs > WINDOW_FLOOR_MS) result.window = windowForMs(waitMs);
+  return result;
+}
 
 /** A finite number off a JSON field, the string form a relay may stringify it
  *  into included. Bare `Number()` is the trap `numeric()` guards against one
@@ -248,34 +289,24 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
 
     const inSeconds = jsonSeconds(error.resets_in_seconds);
     const atSeconds = jsonSeconds(error.resets_at);
-    const waitMs =
-      inSeconds !== undefined && inSeconds >= 0
-        ? inSeconds * 1000
-        : atSeconds !== undefined && atSeconds > 0
-          ? Math.max(0, atSeconds * 1000 - now)
-          : undefined;
-    if (waitMs !== undefined) {
-      const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
-      if (waitMs > WINDOW_FLOOR_MS) {
-        result.window =
-          waitMs <= FIVE_HOUR_MAX_MS ? "5h" : waitMs <= WEEKLY_MAX_MS ? "weekly" : "monthly";
-      }
-      return result;
+    // The plain wait some gateways put in the error body instead of a header,
+    // under either name (cc-proxy reads both off the ChatGPT backend's frames).
+    const afterSeconds =
+      jsonSeconds(error.retry_after) ??
+      jsonSeconds(error.retry_after_seconds) ??
+      jsonSeconds((body as Record<string, unknown>).retry_after_seconds);
+    if (inSeconds !== undefined && inSeconds >= 0) return resetAfter(inSeconds * 1000, now);
+    if (atSeconds !== undefined && atSeconds > 0) {
+      return resetAfter(Math.max(0, atSeconds * 1000 - now), now);
+    }
+    if (afterSeconds !== undefined && afterSeconds >= 0) {
+      return resetAfter(afterSeconds * 1000, now);
     }
   }
 
   // If structured JSON did not yield a reset, check prose wording
   const waitMs = parseProseRetryMs(bodyText);
-  if (waitMs !== undefined) {
-    const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
-    if (waitMs > WINDOW_FLOOR_MS) {
-      result.window =
-        waitMs <= FIVE_HOUR_MAX_MS ? "5h" : waitMs <= WEEKLY_MAX_MS ? "weekly" : "monthly";
-    }
-    return result;
-  }
-
-  return {};
+  return waitMs === undefined ? {} : resetAfter(waitMs, now);
 }
 
 /** Read both places an endpoint can report its reset. A short Retry-After is

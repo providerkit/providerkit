@@ -59,7 +59,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 410 tests
+bun run test                 # vitest, 763 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -98,14 +98,14 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 ## State
 
-**Built, tested, green** (416 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (763 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
 | `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`                |
 | `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them              |
 | `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker        |
-| `watchdog.ts`            | 60s idle deadline + TTFT; `withWatchdog`, the composition done right       |
+| `watchdog.ts`            | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                 |
 | `usage.ts`               | cost arithmetic (rates stay with the caller)                               |
 | `transport.ts`           | fetch + the error envelope, and `parseSseStream` on its own                |
 | `tool-args.ts`           | truncation salvage + double-escape healing                                 |
@@ -138,7 +138,13 @@ un-learned.
    another model's voice mid-render).
 2. **The watchdog aborts its OWN controller**, bridging the caller's via `AbortSignal.any`.
    That is what keeps a user's Stop (never retried) distinguishable from our timeout (always
-   retried). `AbortSignal.any` also catches the already-aborted race no listener can.
+   retried). `AbortSignal.any` also catches the already-aborted race no listener can. It runs
+   **two clocks**, and neither can stand in for the other: idle (60s) counts any byte once the
+   response started, keep-alives included, so a provider that pings while it buffers a long tool
+   call lives; progress (300s) counts chunks from the POST, so a route that only pings still
+   dies, and a backend that withholds its headers while it thinks (the ChatGPT backend, for
+   minutes) is not re-sent into the same deadline. One clock on chunks killed the first; one
+   clock on bytes never kills the second.
 3. **Body outranks status for the 4xx family**, and within it context › entitlement › quota ›
    auth. Each earlier fix is useless for the later ones. Swap two and the suite fails.
 4. **Anthropic usage must be reconciled.** Its `input_tokens` EXCLUDES cache reads/writes;
@@ -165,7 +171,10 @@ un-learned.
 11. **A failure inside a 200 is still a failure.** An SSE response commits to 200 at its headers,
     so a throttle landing after them arrives as a body payload. Unread, the turn ends as a
     successful zero-token completion: nothing retries, nothing logs, no key rotates. One
-    `streamError` for all four shapes.
+    `streamError` for all four shapes. Its sibling: **a stream that closes before its turn
+    did is a failure too** — no finish, no terminal event, no `[DONE]` throws `streamCut`
+    (`network`) after what was delivered, on all four. A quiet null finish is honest, and no
+    caller reads it.
 12. **A value the caller set must not produce the request they'd get by saying nothing.**
     `effort: "none"` was a no-op on the OpenAI dialect and on Responses: both emitted the field
     only for graded levels, so "do not think" and "I never asked" were the same bytes — and the
@@ -267,6 +276,14 @@ lands — that is the whole point, and it is how the other four repos get it.
   being odd — an app with its own copy, log levels or auth refresh is the normal case.
   `parseSseStream` is exported beside `streamSse` for exactly that. Expect the same shape
   elsewhere and cut there **before** an adopter has to keep a copy.
+- **A proxy in daily use is a donor too, and its changelog is the audit.** cc-proxy serves
+  Claude Code over Codex, Kimi, Grok and OpenCode Go, and every release note is an incident.
+  Read against this package, that changelog found a preset that 404'd on every call, a spent
+  window retried as a throttle, Anthropic cache writes billed twice, a watchdog that killed
+  healthy streams, and streams that ended early read as finished — none of it named by any
+  test here. Its fixes were already measured on live traffic, so they came up with their
+  evidence. Where its behaviour could not be checked here (Codex `max` effort on older
+  models, Kimi's effort scale), it stayed out until someone measures it.
 - **Not everything should migrate.** The adopter's context-window ladder stayed put: it learns
   the real ceiling from a provider's own length rejection instead of guessing from a model
   name, which is better than the regex ladder here, and it is tied to that app's storage. A

@@ -38,6 +38,16 @@ describe("costUsd", () => {
     expect(written).toBeCloseTo(3.75, 10);
   });
 
+  it("bills a write once, on the turn the Anthropic adapter reports it", () => {
+    // The adapter counts writes INSIDE inputTokens (the window holds them).
+    // 1k fresh + 2k read + 3k written: each part at its own rate, once.
+    const cost = costUsd(
+      usage({ inputTokens: 6_000, cachedInputTokens: 2_000, cacheWriteTokens: 3_000 }),
+      CLAUDE,
+    );
+    expect(cost).toBeCloseTo((1_000 * 3 + 2_000 * 0.3 + 3_000 * 3.75) / 1_000_000, 12);
+  });
+
   it("falls back to the input rate when a vendor does not price writes", () => {
     const written = costUsd(usage({ inputTokens: 0, cacheWriteTokens: 1_000_000 }), FLASH);
     expect(written).toBeCloseTo(0.5, 10);
@@ -175,5 +185,15 @@ describe("subtractUsage", () => {
       cacheWriteTokens: 0,
       outputTokens: 0,
     });
+  });
+});
+
+describe("reasoningTokens", () => {
+  it("sums only where a provider reported it, so absent never reads as zero", () => {
+    const thinking = usage({ outputTokens: 10, reasoningTokens: 6 });
+    const silent = usage({ outputTokens: 5 });
+    expect(addUsage(thinking, silent).reasoningTokens).toBe(6);
+    expect(addUsage(silent, silent)).not.toHaveProperty("reasoningTokens");
+    expect(subtractUsage(thinking, usage({ reasoningTokens: 9 })).reasoningTokens).toBe(0);
   });
 });

@@ -10,7 +10,7 @@
 // read before the status — status alone gives the wrong advice ("retry" for an
 // empty balance, "check your key" for a plan that never included the API).
 
-import { parseUsageLimitBody, type RateLimitWindow } from "./rate-limit.ts";
+import { parseRateLimitResponse, parseUsageLimitBody, type RateLimitWindow } from "./rate-limit.ts";
 import type { FilePart } from "./types.ts";
 
 /** What kind of failure this is, named by what actually fixes it. */
@@ -379,6 +379,12 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   /usage limits? (?:reached|exceeded|hit)/i,
   /reached your (?:usage|weekly|monthly|daily) limit/i,
   /(?:weekly|monthly|daily|plan) usage limit/i,
+  // The ChatGPT backend's spent-window error: `usage_limit_reached`, worded
+  // "The usage limit has been reached". As a 429 it read as a throttle and in
+  // a stream as an overload, so the backup walker spent every model on the
+  // same account-wide wall (cc-proxy: "a 502 retry storm").
+  /usage[_\s]limit[_\s]reached/i,
+  /usage limit has been reached/i,
   /purchase extra usage/i,
   /upgrade your plan/i,
   /quota\b[^.]{0,40}\b(?:exhausted|exceeded|will be refreshed)/i,
@@ -429,6 +435,12 @@ const CONTENT_PATTERNS: readonly RegExp[] = [
   /content policy/i,
   /cyber[_\s]policy/i,
   /safety|PROHIBITED_CONTENT|blocked|refusal|policy violation|misalignment/i,
+  // OpenAI's flagged-prompt codes. They arrive with no status inside a stream,
+  // where an unnamed failure is floored to overload and retried — three more
+  // copies of a prompt that will be flagged every time.
+  /\binvalid_prompt\b/,
+  /\bbio[_\s]policy\b/i,
+  /violat\w* (?:our |the )?usage polic/i,
   // Document and media boundary violations
   /maximum of \d+ PDF pages/i,
   /PDF specified is password protected/i,
@@ -576,8 +588,10 @@ export function parseRetryAfterMs(err: unknown, body?: string): number | undefin
         ? (headers as Record<string, unknown>)["retry-after"]
         : undefined;
   if (typeof value !== "string") return undefined;
-  // Seconds, or an HTTP-date — both are legal per RFC 9110.
-  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  // Seconds, or an HTTP-date — both are legal per RFC 9110. Seconds are read
+  // as a NUMBER first: `Date.parse("1.5")` is a day in 2001, a wait of zero.
+  const seconds = Number(value.trim());
+  if (value.trim() !== "" && Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
   const date = Date.parse(value);
   return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }
@@ -660,7 +674,8 @@ export function parseContextOverflow(err: unknown, body?: string): ContextOverfl
  */
 export function streamError(provider: string, error: unknown): ProviderError {
   const body = JSON.stringify(error ?? {}) ?? "";
-  const status = readNumber(error, "code") ?? readNumber(error, "status");
+  const status =
+    readNumber(error, "code") ?? readNumber(error, "status") ?? readNumber(error, "status_code");
   const code =
     readString(error, "code") ?? readString(error, "status") ?? readString(error, "type");
   const kind = classifyHttp(status, body);
@@ -672,9 +687,49 @@ export function streamError(provider: string, error: unknown): ProviderError {
       ...(status !== undefined ? { status } : {}),
       ...(code ? { code } : {}),
       retryAfterMs: parseRetryAfterMs(error, body),
-      ...parseUsageLimitBody(body),
+      ...readReset(error, body),
       body: body.slice(0, 2_000),
     },
+  );
+}
+
+/** The reset a stream error carries: the body's clock, plus the rate-limit
+ *  headers the ChatGPT backend mirrors INTO its error frame — the only place a
+ *  failure after the 200 can say which window ran out. */
+function readReset(error: unknown, body: string) {
+  const raw =
+    typeof error === "object" && error !== null
+      ? (error as { headers?: unknown }).headers
+      : undefined;
+  if (typeof raw !== "object" || raw === null) return parseUsageLimitBody(body);
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value === "string" || typeof value === "number") headers.set(name, String(value));
+  }
+  return parseRateLimitResponse(headers, body);
+}
+
+/**
+ * A stream that closed before its turn did: no finish stated, no terminal
+ * event, no `[DONE]`.
+ *
+ * It used to end quietly, with a null finish and no usage. Honest, and nobody
+ * read it: a caller that never checks the finish keeps half an answer as if it
+ * were the whole one, the ledger records a billed turn as free, and no pool
+ * learns the endpoint is dropping streams. cc-proxy shipped the same fix
+ * (0.1.39) for the same reason — "instead of marking affected streamed
+ * responses as successful".
+ *
+ * `network`, because that is what it is: the same failure as a socket that
+ * dies mid-read, seen from the other side of a clean close. Transient, so a
+ * cut that lands before anything was emitted is retried; one that lands after
+ * is not (invariant 1), and reaches the caller after everything it delivered.
+ */
+export function streamCut(provider: string): ProviderError {
+  return new ProviderError(
+    provider,
+    "network",
+    `${provider}: the stream ended before the turn did`,
   );
 }
 

@@ -107,15 +107,24 @@ const failing = (make: () => Response): typeof fetch =>
   (async () => make()) as unknown as typeof fetch;
 
 /** 200, headers out, and then nothing that carries an event. Bytes still
- *  arrive — a keep-alive comment is bytes — which is exactly why the deadline
- *  is armed at the SEAM and not on the socket. */
+ *  arrive, every few milliseconds — a keep-alive comment is bytes — which is
+ *  exactly why the progress deadline is armed at the SEAM and not on the
+ *  socket. */
 const wedged: typeof fetch = (async (_url: string, init: RequestInit) => {
   const signal = init.signal!;
   return new Response(
     new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoder.encode(": keep-alive\n\n"));
-        signal.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+        const beat = setInterval(() => controller.enqueue(encoder.encode(": keep-alive\n\n")), 5);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearInterval(beat);
+            controller.error(signal.reason);
+          },
+          { once: true },
+        );
       },
     }),
     { status: 200 },
@@ -138,7 +147,7 @@ const OPENAI_TURN = crlf(
     'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"q\\":"}}]},"finish_reason":null}]}',
     'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"cats\\"}"}}]},"finish_reason":null}]}',
     'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
-    'data: {"choices":[],"usage":{"prompt_tokens":1050,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":900}}}',
+    'data: {"choices":[],"usage":{"prompt_tokens":1050,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":900},"completion_tokens_details":{"reasoning_tokens":4}}}',
     "data: [DONE]",
   ),
 );
@@ -177,7 +186,7 @@ const RESPONSES_TURN = wire(
   'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"q\\":"}',
   'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\\"cats\\"}"}',
   'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"search","arguments":"{\\"q\\":\\"cats\\"}"}}',
-  'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1050,"output_tokens":12,"input_tokens_details":{"cached_tokens":900}}}}',
+  'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1050,"output_tokens":12,"input_tokens_details":{"cached_tokens":900},"output_tokens_details":{"reasoning_tokens":4}}}}',
 );
 
 // The throttle each backend reports AFTER committing to 200 — the failure with
@@ -279,6 +288,7 @@ interface Turn {
     cachedInputTokens: number;
     cacheWriteTokens: number;
     outputTokens: number;
+    reasoningTokens?: number;
   };
   finishReason: FinishReason | null;
 }
@@ -440,18 +450,39 @@ describe.each(VENDORS)("$name", (vendor) => {
         cachedInputTokens: 900,
         cacheWriteTokens: 0,
         outputTokens: 12,
+        // The thinking share of those 12, on every wire that reports one.
+        // Anthropic's does not, and a guessed number is worse than none.
+        ...(vendor.name === "anthropic" ? {} : { reasoningTokens: 4 }),
       },
       finishReason: "tool_calls",
     } satisfies Turn);
   });
 
-  it("keeps what arrived and states no finish when the stream is cut short", async () => {
-    // A socket that closes mid-turn. The temptation is to close the turn out
-    // with a synthesized `stop` — which reads to every caller as a model that
-    // chose to answer that much, so the run is never retried and the truncated
-    // answer is kept. A null finish is the only honest report.
+  it("delivers what arrived, then says the stream was cut", async () => {
+    // A socket that closes mid-turn. A synthesized `stop` reads to every caller
+    // as a model that chose to answer that much, so the run is never retried
+    // and the truncated answer is kept. A quiet null finish reads the same way
+    // to every caller that never checks it — and books a billed turn as free.
+    // So all four hand over what came, then throw the `network` failure a
+    // socket dying mid-read throws.
     const cut = vendor.turn.slice(0, vendor.turn.indexOf(" there"));
-    expect(await assemble(ask(vendor.create(serving(cut))))).toEqual({
+    const delivered: ProviderChunk[] = [];
+    const err = await thrownBy(
+      (async function* () {
+        for await (const chunk of ask(vendor.create(serving(cut)))) {
+          delivered.push(chunk);
+          yield chunk;
+        }
+      })(),
+    );
+    expect(failure(err)).toMatchObject({ kind: "network" });
+    expect(
+      await assemble(
+        (async function* () {
+          yield* delivered;
+        })(),
+      ),
+    ).toEqual({
       text: "Hello",
       reasoning: "Let me think.",
       toolCalls: [],
@@ -525,21 +556,24 @@ describe.each(VENDORS)("$name", (vendor) => {
   });
 
   it("gives up on a stream that goes quiet, and never on one that is talking", async () => {
-    const watch = streamWatch({ provider: vendor.name, idleMs: 20 });
+    const watch = streamWatch({ provider: vendor.name, idleMs: 20, progressMs: 60 });
     const err = await thrownBy(
       watchChunks(
         watch,
         vendor.create(wedged).createStream([{ role: "user", content: "hi" }], [], {
           signal: watch.signal,
+          onActivity: watch.sawActivity,
         }),
       ),
     );
     expect(failure(err)).toMatchObject({ kind: "timeout" });
-    // Keep-alive bytes arrived and re-armed nothing: the deadline is on EVENTS
-    // at the seam, which is what a wedged prefill actually starves the caller of.
+    // Keep-alive bytes arrived, and they keep the socket's clock alive — but
+    // the progress clock is on EVENTS at the seam, which is what a wedged
+    // prefill actually starves the caller of.
+    expect(String(err)).toContain("without a chunk");
     expect(watch.firstChunkMs()).toBeNull();
 
-    const talking = streamWatch({ provider: vendor.name, idleMs: 20 });
+    const talking = streamWatch({ provider: vendor.name, idleMs: 20, progressMs: 60 });
     await assemble(watchChunks(talking, ask(vendor.create(serving(vendor.turn)))));
     expect(talking.firstChunkMs()).not.toBeNull();
   });

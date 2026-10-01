@@ -451,14 +451,49 @@ export const PROVIDER_PRESETS = {
     // by tabrunner's Claude plan sign-in).
     headers: { "anthropic-beta": "claude-code-20250219,oauth-2025-04-20" },
   },
-  /** The Codex backend behind a ChatGPT sign-in — Responses wire, no public
-   *  model list, so these ids are the list. */
+  /**
+   * The Codex backend behind a ChatGPT sign-in — Responses wire, no public
+   * model list, so these ids are the list.
+   *
+   * The endpoint is `/backend-api/codex/responses`, with no version segment.
+   * Without the `path` the adapter appends `/v1/responses`, the POST 404s, and
+   * a 404 classifies as "model": every call failed telling the user their
+   * model id was wrong. `session-id` is the header the official Codex client
+   * sends; the backend keys its prompt cache on it (cc-proxy, in daily use
+   * against this backend, 2026-09).
+   */
   chatgpt: {
     shape: "responses",
     baseUrl: "https://chatgpt.com/backend-api/codex",
+    path: "/responses",
+    sessionHeader: "session-id",
     auth: "oauth",
     defaultModel: "gpt-5.3-codex",
     models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.4-mini"],
+  },
+  /**
+   * A Grok subscription (SuperGrok, X Premium) — the backend the Grok CLI
+   * talks to, Responses wire. Distinct from `xai`, which is the keyed API and
+   * bills per token.
+   *
+   * The two `x-…` headers are what switch the backend into CLI-token mode;
+   * without them the subscription token is refused. The version header is the
+   * Grok CLI release cc-proxy sends by default (2026-09); pass your own in
+   * `headers` when the backend starts asking for a newer one. Tool calls on
+   * this backend are keyed by `call_id` alone, which the adapter follows.
+   */
+  grok: {
+    shape: "responses",
+    baseUrl: "https://cli-chat-proxy.grok.com/v1",
+    path: "/responses",
+    auth: "oauth",
+    defaultModel: "grok-4.7",
+    models: ["grok-4.7", "grok-4.6", "grok-4.5", "grok-composer-2.5-fast"],
+    headers: {
+      "x-xai-token-auth": "xai-grok-cli",
+      "x-grok-client-identifier": "grok-shell",
+      "x-grok-client-version": "0.2.93",
+    },
   },
   /** Kimi's coding endpoint reached with a subscription token instead of a
    *  key — Kimi bills the two separately. */

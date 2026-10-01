@@ -7,7 +7,20 @@ import {
 } from "../src/index.ts";
 import type { ProviderPreset } from "../src/presets.ts";
 
-const ok = () => new Response("data: [DONE]\n\n");
+/** A body that ends a turn on every shape: each adapter reads its own end
+ *  signal and skips the other three's frames. These tests are about the
+ *  request; a response that never ends would fail them on the way back. */
+const ok = () =>
+  new Response(
+    [
+      '{"type":"message_stop"}',
+      '{"type":"response.completed","response":{}}',
+      '{"candidates":[{"finishReason":"STOP"}]}',
+      "[DONE]",
+    ]
+      .map((payload) => `data: ${payload}\n\n`)
+      .join(""),
+  );
 
 describe("provider presets — every row joins to one request, correctly", () => {
   // One mocked request per preset. This is the table-driven check that keeps
@@ -158,6 +171,31 @@ describe("opencode-go — the session header", () => {
     },
   );
 
+  it("chatgpt posts to the Codex path, not /v1, and carries its session header", async () => {
+    // Without the path the POST 404s, and a 404 reads as kind "model": the
+    // user is told the model id is wrong when the URL was.
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("chatgpt", { apiKey: "k", fetchImpl });
+    await drain(
+      provider.createStream([{ role: "user", content: "hi" }], [], { sessionId: "conv-1" }),
+    );
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(new Headers(init?.headers).get("session-id")).toBe("conv-1");
+  });
+
+  it("grok reaches the CLI backend with the headers that admit a subscription token", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("grok", { apiKey: "tok", fetchImpl });
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    const headers = new Headers(init?.headers);
+    expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+    expect(headers.get("authorization")).toBe("Bearer tok");
+    expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
+    expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
+  });
+
   it("keeps the header off endpoints that don't ask for it", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
     const provider = createPresetProvider("openrouter", { apiKey: "k", model: "m", fetchImpl });
@@ -213,7 +251,9 @@ describe("model chains — one endpoint, one key, several models", () => {
       const provider = createPresetProvider("opencode-go", {
         apiKey: "k",
         models: ["silent", "answering"],
-        watchdog: { idleMs: 10 },
+        // Never answers at all, so it is the progress clock that catches it:
+        // the idle one only starts once a response does.
+        watchdog: { progressMs: 10 },
         fetchImpl,
       });
 
