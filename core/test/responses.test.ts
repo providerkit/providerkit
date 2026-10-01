@@ -778,7 +778,10 @@ describe("responses request", () => {
       }),
     );
     await collect(provider({ fetchImpl }).createStream(hi, []));
-    expect(seen[0]!.body).toMatchObject({ prompt_cache_key: "conv-42", parallel_tool_calls: false });
+    expect(seen[0]!.body).toMatchObject({
+      prompt_cache_key: "conv-42",
+      parallel_tool_calls: false,
+    });
     expect(seen[1]!.body).not.toHaveProperty("prompt_cache_key");
     expect(seen[1]!.body).not.toHaveProperty("parallel_tool_calls");
   });
