@@ -2,6 +2,13 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.15.1] - 2026-10-01
+
+### Fixed
+
+- **A forced tool choice failed on every request to Claude Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1.** `toolChoice: "required"` or `{ name }` went out as `tool_choice` `any` or `tool`, and Anthropic's Thinking page says these four models "reject forced tool use on every request with a 400 error". They now get no `tool_choice`, which means `auto`, as that page advises. `{ name }` sends only that tool, so the model cannot call a different one. It can still answer in text, so check for the tool call. A Claude id the adapter does not know yet is treated the same way. `"none"` and every other model are unchanged.
+- **`effort: "none"` still thought on Claude Sonnet 5.5.** The adapter had no row for it and sent the lowest effort, which thinks when the model judges a turn hard. It now sends `thinking: { type: "between_tools" }`, the model's lowest setting: no thinking before the answer. `disabled` is a 400 on this model.
+
 ## [0.15.0] - 2026-09-27
 
 ### Added
