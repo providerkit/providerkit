@@ -471,6 +471,30 @@ export const PROVIDER_PRESETS = {
     defaultModel: "gpt-5.3-codex",
     models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.4-mini"],
   },
+  /**
+   * A Grok subscription (SuperGrok, X Premium) — the backend the Grok CLI
+   * talks to, Responses wire. Distinct from `xai`, which is the keyed API and
+   * bills per token.
+   *
+   * The two `x-…` headers are what switch the backend into CLI-token mode;
+   * without them the subscription token is refused. The version header is the
+   * Grok CLI release cc-proxy sends by default (2026-09); pass your own in
+   * `headers` when the backend starts asking for a newer one. Tool calls on
+   * this backend are keyed by `call_id` alone, which the adapter follows.
+   */
+  grok: {
+    shape: "responses",
+    baseUrl: "https://cli-chat-proxy.grok.com/v1",
+    path: "/responses",
+    auth: "oauth",
+    defaultModel: "grok-4.7",
+    models: ["grok-4.7", "grok-4.6", "grok-4.5", "grok-composer-2.5-fast"],
+    headers: {
+      "x-xai-token-auth": "xai-grok-cli",
+      "x-grok-client-identifier": "grok-shell",
+      "x-grok-client-version": "0.2.93",
+    },
+  },
   /** Kimi's coding endpoint reached with a subscription token instead of a
    *  key — Kimi bills the two separately. */
   "kimi-plan": {

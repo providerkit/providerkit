@@ -184,6 +184,18 @@ describe("opencode-go — the session header", () => {
     expect(new Headers(init?.headers).get("session-id")).toBe("conv-1");
   });
 
+  it("grok reaches the CLI backend with the headers that admit a subscription token", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("grok", { apiKey: "tok", fetchImpl });
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    const headers = new Headers(init?.headers);
+    expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+    expect(headers.get("authorization")).toBe("Bearer tok");
+    expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
+    expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
+  });
+
   it("keeps the header off endpoints that don't ask for it", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
     const provider = createPresetProvider("openrouter", { apiKey: "k", model: "m", fetchImpl });
