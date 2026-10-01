@@ -118,6 +118,7 @@ describe("gemini adapter", () => {
         { text: "still weighing", thought: true },
         { text: "the answer" },
       ]),
+      candidate([], "STOP"),
     ]);
     const chunks = await collect(provider(fetchImpl).createStream(HI, []));
 
@@ -133,6 +134,7 @@ describe("gemini adapter", () => {
           thoughtSignature: "sig-abc",
         },
       ]),
+      candidate([], "STOP"),
     ]);
     const [call] = (await collect(provider(fetchImpl).createStream(HI, []))).flatMap(
       (c) => c.toolCalls ?? [],
@@ -151,6 +153,7 @@ describe("gemini adapter", () => {
     const { fetchImpl } = recorder([
       candidate([{ functionCall: { name: "a", args: {} } }]),
       candidate([{ functionCall: { name: "b" } }, { functionCall: { name: "c", args: {} } }]),
+      candidate([], "STOP"),
     ]);
     const calls = (await collect(provider(fetchImpl).createStream(HI, []))).flatMap(
       (c) => c.toolCalls ?? [],
@@ -160,6 +163,16 @@ describe("gemini adapter", () => {
     expect(calls.map((c) => c.id)).toEqual(["call_0", "call_1", "call_2"]);
     // An absent `args` is an empty object, never `undefined` in the JSON.
     expect(calls.map((c) => c.arguments)).toEqual(["{}", "{}", "{}"]);
+  });
+
+  it("reads a blocked prompt as content, not as a cut stream", async () => {
+    // No candidate at all, so nothing ever states a finish. Read as a cut
+    // stream it is retried, into the same block.
+    const { fetchImpl } = recorder([j({ promptFeedback: { blockReason: "SAFETY" } })]);
+    await expect(collect(provider(fetchImpl).createStream(HI, []))).rejects.toMatchObject({
+      kind: "content",
+      code: "SAFETY",
+    });
   });
 
   it("finishes as tool_calls even when STOP lands on a LATER chunk", async () => {

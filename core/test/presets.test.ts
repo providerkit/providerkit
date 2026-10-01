@@ -7,7 +7,20 @@ import {
 } from "../src/index.ts";
 import type { ProviderPreset } from "../src/presets.ts";
 
-const ok = () => new Response("data: [DONE]\n\n");
+/** A body that ends a turn on every shape: each adapter reads its own end
+ *  signal and skips the other three's frames. These tests are about the
+ *  request; a response that never ends would fail them on the way back. */
+const ok = () =>
+  new Response(
+    [
+      '{"type":"message_stop"}',
+      '{"type":"response.completed","response":{}}',
+      '{"candidates":[{"finishReason":"STOP"}]}',
+      "[DONE]",
+    ]
+      .map((payload) => `data: ${payload}\n\n`)
+      .join(""),
+  );
 
 describe("provider presets — every row joins to one request, correctly", () => {
   // One mocked request per preset. This is the table-driven check that keeps
@@ -226,7 +239,9 @@ describe("model chains — one endpoint, one key, several models", () => {
       const provider = createPresetProvider("opencode-go", {
         apiKey: "k",
         models: ["silent", "answering"],
-        watchdog: { idleMs: 10 },
+        // Never answers at all, so it is the progress clock that catches it:
+        // the idle one only starts once a response does.
+        watchdog: { progressMs: 10 },
         fetchImpl,
       });
 

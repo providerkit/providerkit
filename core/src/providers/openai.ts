@@ -3,7 +3,7 @@
 // This is the dialect most gateways speak, so one adapter serves OpenAI,
 // OpenRouter, DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio.
 // Their divergences are small and named where they appear.
-import { fileRefused, streamError } from "../errors.ts";
+import { fileRefused, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
@@ -570,6 +570,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         ? "/chat/completions"
         : "/v1/chat/completions";
 
+      let ended = false;
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
@@ -584,6 +585,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
+        onDone: () => {
+          ended = true;
+        },
       })) {
         let chunk: OpenAIChunk;
         try {
@@ -664,9 +669,13 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           if (has) yield out;
         }
 
+        if (choice.finish_reason) ended = true;
         const finishReason = mapFinishReason(choice.finish_reason);
         if (finishReason) yield { type: "finish", finishReason };
       }
+      // Either proof will do: some gateways send `[DONE]` with no finish, and
+      // some a finish with no `[DONE]`. Neither means the socket closed early.
+      if (!ended) throw streamCut(id);
     },
   };
 

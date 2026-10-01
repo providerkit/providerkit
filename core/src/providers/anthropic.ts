@@ -1,5 +1,5 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
-import { fileRefused, streamError } from "../errors.ts";
+import { fileRefused, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
@@ -448,6 +448,19 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       let outputTokens = 0;
       let toolCall: { index: number; id: string; name: string } | null = null;
       let blockIndex = -1;
+      // What proves the turn ended rather than the socket: a stated stop
+      // reason, or `message_stop`. See the check after the loop.
+      let stopped = false;
+      let closed = false;
+      const usageChunk = (): ProviderChunk => ({
+        type: "usage",
+        usage: {
+          inputTokens: freshInputTokens + cachedInputTokens + cacheWriteTokens,
+          cachedInputTokens,
+          cacheWriteTokens,
+          outputTokens,
+        },
+      });
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, "/v1/messages"),
@@ -463,6 +476,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
       })) {
         let event: AnthropicEvent;
         try {
@@ -530,24 +544,26 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             cachedInputTokens = event.usage?.cache_read_input_tokens ?? cachedInputTokens;
             cacheWriteTokens = event.usage?.cache_creation_input_tokens ?? cacheWriteTokens;
             outputTokens = event.usage?.output_tokens ?? outputTokens;
+            if (event.delta?.stop_reason) stopped = true;
             const finishReason = mapStopReason(event.delta?.stop_reason);
             if (finishReason) yield { type: "finish", finishReason };
             break;
           }
 
           case "message_stop":
-            yield {
-              type: "usage",
-              usage: {
-                inputTokens: freshInputTokens + cachedInputTokens + cacheWriteTokens,
-                cachedInputTokens,
-                cacheWriteTokens,
-                outputTokens,
-              },
-            };
+            closed = true;
+            yield usageChunk();
             break;
         }
       }
+      if (closed) return;
+      // A gateway that states its stop reason and then skips `message_stop`
+      // still finished the turn — and still billed it.
+      if (stopped) {
+        yield usageChunk();
+        return;
+      }
+      throw streamCut(id);
     },
   };
   return withConfiguredFallbacks(provider, config);

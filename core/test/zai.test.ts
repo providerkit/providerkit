@@ -52,7 +52,9 @@ describe("Z.ai Coding Plan", () => {
   });
 
   it("says no thinking out loud where silence means on, and sends budgets for graded effort", async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("data: [DONE]\n\n"));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('data: {"type":"message_stop"}\n\n'));
     const provider = createZaiCodingProvider({ apiKey: "test-key", model: "glm-5.2", fetchImpl });
     await drainStream(
       provider.createStream([{ role: "user", content: "Hi" }], [], { effort: "low" }),
@@ -69,7 +71,9 @@ describe("Z.ai Coding Plan", () => {
     // The adapter spells thinking per Claude model; none of that may reach this
     // endpoint, whose dialect was measured on its own (see createZaiCodingProvider).
     const sent = async (via: "coding" | "preset", effort: Effort | undefined) => {
-      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("data: [DONE]\n\n"));
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response('data: {"type":"message_stop"}\n\n'));
       const config = { apiKey: "test-key", model: "glm-5.3-flash", fetchImpl };
       const provider =
         via === "coding" ? createZaiCodingProvider(config) : createPresetProvider("zai", config);
@@ -112,7 +116,9 @@ describe("Z.ai Coding Plan", () => {
   const bodies = async (messages: ChatMessage[], opts: StreamOptions) => {
     const out: string[] = [];
     for (const via of ["coding", "preset"] as const) {
-      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response("data: [DONE]\n\n"));
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response('data: {"type":"message_stop"}\n\n'));
       const config = { apiKey: "test-key", model: "glm-5.3-flash", fetchImpl };
       const provider =
         via === "coding" ? createZaiCodingProvider(config) : createPresetProvider("zai", config);

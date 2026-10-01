@@ -427,6 +427,84 @@ describe("responses finish reasons", () => {
     });
   });
 
+  it("reads the outcome a terminal event states, not the one its type implies", async () => {
+    // `completed` that says `incomplete` was cut; one that carries an error
+    // failed. Read as a clean stop, either is a broken turn reported finished.
+    const cut = recorder([
+      j({ type: "response.output_text.delta", delta: "Hel" }),
+      j({
+        type: "response.completed",
+        response: {
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          usage: USAGE,
+        },
+      }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl: cut.fetchImpl }).createStream(hi, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("length");
+    expect(chunks.find((c) => c.type === "usage")).toBeDefined();
+
+    const failed = recorder([
+      j({
+        type: "response.completed",
+        response: { status: "failed", error: { code: "server_error", message: "boom" } },
+      }),
+    ]);
+    await expect(
+      collect(provider({ fetchImpl: failed.fetchImpl }).createStream(hi, [])),
+    ).rejects.toMatchObject({ kind: "overload" });
+  });
+
+  it("ends on response.done, the terminal event OpenCode's gateway sends", async () => {
+    const { fetchImpl } = recorder([
+      j({ type: "response.output_text.delta", delta: "hi" }),
+      j({ type: "response.done", response: { usage: USAGE } }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("stop");
+    expect(chunks.find((c) => c.type === "usage")).toBeDefined();
+  });
+
+  it("says a stream with no terminal event was cut, after what it delivered", async () => {
+    const { fetchImpl } = recorder([j({ type: "response.output_text.delta", delta: "Hel" })]);
+    const seen: ProviderChunk[] = [];
+    const err = await (async () => {
+      for await (const chunk of provider({ fetchImpl }).createStream(hi, [])) seen.push(chunk);
+    })().catch((e: unknown) => e);
+    expect(seen).toEqual([{ type: "delta", content: "Hel" }]);
+    expect(err).toMatchObject({ kind: "network" });
+  });
+
+  it("names a spent window when the backend's last word was a quota snapshot", async () => {
+    // The snapshot is telemetry on a healthy turn. Followed by a close with no
+    // response, it is the reason — and the fuller window binds.
+    const wall = (extra: Record<string, unknown> = {}) =>
+      recorder([
+        j({
+          type: "codex.rate_limits",
+          rate_limits: {
+            limit_reached: true,
+            primary: { used_percent: 40, reset_after_seconds: 3_600 },
+            secondary: { used_percent: 100, reset_after_seconds: 400_000 },
+          },
+          ...extra,
+        }),
+      ]);
+    const err = (await collect(
+      provider({ fetchImpl: wall().fetchImpl }).createStream(hi, []),
+    ).catch((e: unknown) => e)) as ProviderError;
+    expect(err).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000 });
+
+    // Credits cover the window: not a wall, so the close is a plain cut.
+    const covered = await collect(
+      provider({
+        fetchImpl: wall({ credits: { has_credits: true } }).fetchImpl,
+      }).createStream(hi, []),
+    ).catch((e: unknown) => e);
+    expect(covered).toMatchObject({ kind: "network" });
+  });
+
   it("reads a spent Codex window as quota, with its clock and its window", async () => {
     // Recorded by cc-proxy off a live turn that spent the 5-hour window. The
     // status and the window clocks ride BESIDE `error`, not inside it.

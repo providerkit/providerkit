@@ -709,6 +709,30 @@ function readReset(error: unknown, body: string) {
   return parseRateLimitResponse(headers, body);
 }
 
+/**
+ * A stream that closed before its turn did: no finish stated, no terminal
+ * event, no `[DONE]`.
+ *
+ * It used to end quietly, with a null finish and no usage. Honest, and nobody
+ * read it: a caller that never checks the finish keeps half an answer as if it
+ * were the whole one, the ledger records a billed turn as free, and no pool
+ * learns the endpoint is dropping streams. cc-proxy shipped the same fix
+ * (0.1.39) for the same reason — "instead of marking affected streamed
+ * responses as successful".
+ *
+ * `network`, because that is what it is: the same failure as a socket that
+ * dies mid-read, seen from the other side of a clean close. Transient, so a
+ * cut that lands before anything was emitted is retried; one that lands after
+ * is not (invariant 1), and reaches the caller after everything it delivered.
+ */
+export function streamCut(provider: string): ProviderError {
+  return new ProviderError(
+    provider,
+    "network",
+    `${provider}: the stream ended before the turn did`,
+  );
+}
+
 /** The loggable surface of a failure — so a dead run never reads
  *  "400 status code (no body)". */
 export function describeProviderError(err: unknown): Record<string, unknown> {

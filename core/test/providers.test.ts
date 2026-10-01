@@ -30,6 +30,8 @@ function recorder(frames: string[], status = 200) {
       new ReadableStream<Uint8Array>({
         start(controller) {
           for (const frame of frames) controller.enqueue(encoder.encode(`data: ${frame}\n\n`));
+          // How every OpenAI-shape stream ends. The Anthropic shape ignores it.
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
         },
       }),

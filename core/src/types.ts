@@ -365,6 +365,14 @@ export interface StreamOptions {
    * caches by it); every other endpoint ignores it.
    */
   sessionId?: string;
+  /**
+   * Called when the response headers arrive and on every read of the body
+   * after, keep-alives included. `withWatchdog` sets it: a stream that is only
+   * sending keep-alives is alive, which no chunk an adapter yields can show.
+   * Every adapter here forwards it; a custom Provider that does not still
+   * works, on the watchdog's progress clock alone.
+   */
+  onActivity?: () => void;
 }
 
 export interface Provider {

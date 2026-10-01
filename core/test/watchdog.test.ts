@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "../src/errors.ts";
 import {
   STREAM_IDLE_MS,
+  STREAM_PROGRESS_MS,
   requireContent,
   streamWatch,
   watchChunks,
@@ -15,13 +16,41 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("streamWatch", () => {
-  it("aborts once the stream goes quiet for the whole window", () => {
+  it("aborts once a started stream goes quiet for the whole idle window", () => {
     const watch = streamWatch({ provider: "openai" });
+    watch.sawActivity(); // the headers arrived
     expect(watch.signal.aborted).toBe(false);
     vi.advanceTimersByTime(STREAM_IDLE_MS);
     expect(watch.signal.aborted).toBe(true);
     expect(watch.signal.reason).toBeInstanceOf(ProviderError);
     expect((watch.signal.reason as ProviderError).kind).toBe("timeout");
+    watch.dispose();
+  });
+
+  it("gives a response that has not started the progress window, not the idle one", () => {
+    // The ChatGPT backend withholds its headers until the model's first output
+    // — minutes, on a large high-effort turn. Healthy the whole time.
+    const watch = streamWatch({ provider: "chatgpt" });
+    vi.advanceTimersByTime(STREAM_IDLE_MS * 2);
+    expect(watch.signal.aborted).toBe(false);
+    vi.advanceTimersByTime(STREAM_PROGRESS_MS - STREAM_IDLE_MS * 2);
+    expect(watch.signal.aborted).toBe(true);
+    expect((watch.signal.reason as ProviderError).kind).toBe("timeout");
+    watch.dispose();
+  });
+
+  it("lives on keep-alives, but not forever", () => {
+    // A keep-alive is proof the socket is up — and a stream that sends nothing
+    // else is still going nowhere. The idle clock never trips; progress does.
+    const watch = streamWatch({ idleMs: 1_000, progressMs: 10_000 });
+    for (let i = 0; i < 11; i++) {
+      vi.advanceTimersByTime(900);
+      watch.sawActivity();
+    }
+    expect(watch.signal.aborted).toBe(false); // 9.9s of keep-alives
+    vi.advanceTimersByTime(100);
+    expect(watch.signal.aborted).toBe(true);
+    expect(String((watch.signal.reason as ProviderError).message)).toContain("without a chunk");
     watch.dispose();
   });
 
@@ -50,6 +79,7 @@ describe("streamWatch", () => {
 
   it("classifies its OWN deadline as a timeout", () => {
     const watch = streamWatch({ provider: "gemini", idleMs: 1_000 });
+    watch.sawActivity();
     vi.advanceTimersByTime(1_000);
     const classified = watch.classify(new Error("aborted"));
     expect(classified).toBeInstanceOf(ProviderError);
@@ -108,6 +138,7 @@ describe("watchChunks", () => {
 
   it("re-classifies a failure through the watch", async () => {
     const watch = streamWatch({ provider: "anthropic", idleMs: 1_000 });
+    watch.sawActivity();
     vi.advanceTimersByTime(1_000); // the deadline fires
     const failing = watchChunks(
       watch,
@@ -202,6 +233,7 @@ describe("requireContent", () => {
 describe("an error this package classified stays classified", () => {
   it("keeps the watchdog's own timeout retryable", () => {
     const watch = streamWatch({ provider: "claude", idleMs: STREAM_IDLE_MS });
+    watch.sawActivity();
     vi.advanceTimersByTime(STREAM_IDLE_MS);
     const err = watch.classify(new Error("aborted"));
     watch.dispose();
@@ -228,6 +260,7 @@ describe("withWatchdog", () => {
       seen,
       async *createStream(_m: ChatMessage[], _t, opts: StreamOptions = {}) {
         seen.push(opts);
+        opts.onActivity?.(); // the headers, as every adapter reports them
         for (const chunk of chunks) {
           // A real request dies when its signal aborts. A stub that ignores it
           // would pass whether or not the wrapper wired the signal at all.
@@ -245,9 +278,9 @@ describe("withWatchdog", () => {
       },
     };
   }
-  const drain = async (provider: Provider) => {
+  const drain = async (provider: Provider, messages: ChatMessage[] = []) => {
     const out: ProviderChunk[] = [];
-    for await (const chunk of provider.createStream([], [])) out.push(chunk);
+    for await (const chunk of provider.createStream(messages, [])) out.push(chunk);
     return out;
   };
 
@@ -276,6 +309,32 @@ describe("withWatchdog", () => {
   it("rejects a turn that completed having said nothing", async () => {
     const guarded = withWatchdog(stub([{ type: "finish", finishReason: "stop" }]));
     await expect(drain(guarded)).rejects.toMatchObject({ kind: "overload" });
+  });
+
+  it("accepts an empty stop right after a tool result — the reply WAS the tool", async () => {
+    // A bot whose send_message tool is the answer ends every turn this way.
+    // Retried, cc-proxy measured one such bot failing ~68% of real turns.
+    const afterTool: ChatMessage[] = [
+      { role: "user", content: "say hi" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "send_message", arguments: '{"text":"hi"}' }],
+      },
+      { role: "tool", toolCallId: "c1", name: "send_message", content: "sent" },
+    ];
+    const stopped = withWatchdog(stub([{ type: "finish", finishReason: "stop" }]));
+    expect(await drain(stopped, afterTool)).toEqual([{ type: "finish", finishReason: "stop" }]);
+
+    // Thinking that ate the whole budget is still the failure, tool or not.
+    const cut = withWatchdog(stub([{ type: "finish", finishReason: "length" }]));
+    await expect(drain(cut, afterTool)).rejects.toMatchObject({ kind: "overload" });
+
+    // And an empty stop after a USER turn is still nothing said to anyone.
+    const userTail = withWatchdog(stub([{ type: "finish", finishReason: "stop" }]));
+    await expect(drain(userTail, [{ role: "user", content: "hi" }])).rejects.toMatchObject({
+      kind: "overload",
+    });
   });
 
   it("leaves the empty turn alone when the caller opts out", async () => {

@@ -116,6 +116,35 @@ describe("streamSse", () => {
     expect(await collect(stream)).toEqual(['{"a":1}']);
   });
 
+  it("reports [DONE] through its hook while still swallowing it", async () => {
+    let done = false;
+    const body = sseResponse(['data: {"a":1}\n\n', "data: [DONE]\n\n"]).body!;
+    const out = await collect(parseSseStream(body, { onDone: () => (done = true) }));
+    expect(out).toEqual(['{"a":1}']);
+    expect(done).toBe(true);
+  });
+
+  it("reads bare-CR line endings, and a CRLF split across reads", async () => {
+    // The spec allows CR alone; a CR at the end of one read may be half a CRLF.
+    const body = sseResponse(['data: {"a":1}\r\r', 'data: {"b":2}\r', "\n\r\n"]).body!;
+    expect(await collect(parseSseStream(body))).toEqual(['{"a":1}', '{"b":2}']);
+  });
+
+  it("counts every read as activity, keep-alives included", async () => {
+    let reads = 0;
+    const body = sseResponse([": keep-alive\n\n", ": keep-alive\n\n", 'data: {"a":1}\n\n']).body!;
+    await collect(parseSseStream(body, { onActivity: () => reads++ }));
+    expect(reads).toBe(3);
+  });
+
+  it("gives up on a frame that never ends instead of buffering forever", async () => {
+    const body = sseResponse(["data: " + "x".repeat(64), "y".repeat(64)]).body!;
+    const err = await collect(parseSseStream(body, { maxFrameChars: 100, provider: "p" })).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ provider: "p", kind: "overload", shouldRetry: false });
+  });
+
   it("does not drop a final frame that arrived without its blank line", async () => {
     // Losing this loses the last delta — or the whole usage record.
     const stream = streamSse(

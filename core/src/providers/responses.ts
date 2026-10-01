@@ -10,7 +10,7 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
-import { fileRefused, streamError } from "../errors.ts";
+import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
   ChatMessage,
@@ -220,10 +220,16 @@ interface ResponsesEvent {
   arguments?: string;
   item?: ResponsesItem;
   response?: {
+    /** `completed`, `incomplete` or `failed` — stated on the terminal event,
+     *  and not always the one its `type` implies. */
+    status?: string;
     usage?: ResponsesUsage;
-    incomplete_details?: { reason?: string };
-    error?: { message?: string; code?: string };
+    incomplete_details?: { reason?: string } | null;
+    error?: { message?: string; code?: string } | null;
   };
+  /** The ChatGPT backend's quota snapshot (`codex.rate_limits`). */
+  rate_limits?: CodexRateLimits;
+  credits?: { has_credits?: boolean; unlimited?: boolean };
   error?: { message?: string; code?: string };
   message?: string;
   code?: string;
@@ -231,6 +237,43 @@ interface ResponsesEvent {
    *  and mirrors its `x-codex-*` rate-limit headers, beside `error`. */
   status_code?: number;
   headers?: Record<string, unknown>;
+}
+
+interface CodexWindow {
+  used_percent?: number;
+  reset_after_seconds?: number;
+}
+
+interface CodexRateLimits {
+  limit_reached?: boolean;
+  allowed?: boolean;
+  primary?: CodexWindow;
+  secondary?: CodexWindow;
+}
+
+/**
+ * The quota wall a `codex.rate_limits` snapshot reports, if it is one.
+ *
+ * The snapshot rides ahead of the first output on every turn and is telemetry
+ * — a full window the account's credits cover, or that the backend still
+ * `allowed`, lets the turn proceed. It is only the reason when the stream then
+ * closes without a response: that close is a spent window, not a dropped
+ * socket, and retrying it walks every backup into the same wall. The fuller
+ * window binds; cc-proxy took the primary's clock first and told a weekly wall
+ * to come back in a few hours.
+ */
+function quotaWall(event: ResponsesEvent, provider: string): ProviderError | undefined {
+  const limits = event.rate_limits;
+  if (!limits?.limit_reached || limits.allowed) return undefined;
+  if (event.credits?.has_credits || event.credits?.unlimited) return undefined;
+  const windows = [limits.primary, limits.secondary].filter((w): w is CodexWindow => !!w);
+  const binding = windows.sort((a, b) => (b.used_percent ?? 0) - (a.used_percent ?? 0))[0];
+  const after = binding?.reset_after_seconds;
+  return new ProviderError(provider, "quota", `${provider}: the usage limit has been reached`, {
+    ...(after !== undefined && after >= 0
+      ? { retryAfterMs: after * 1000, resetAtMs: Date.now() + after * 1000 }
+      : {}),
+  });
 }
 
 function usageChunk(usage: ResponsesUsage): ProviderChunk {
@@ -354,6 +397,8 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       // This shape never states a stop reason on a clean finish, so it is
       // inferred from whether the turn produced a function call.
       let sawToolCall = false;
+      let wall: ProviderError | undefined;
+      let produced = false;
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
@@ -368,12 +413,16 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         provider: id,
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
       })) {
         let event: ResponsesEvent;
         try {
           event = JSON.parse(data) as ResponsesEvent;
         } catch {
           continue; // a keep-alive or a frame we do not model
+        }
+        if (event.type?.endsWith(".delta") || event.type === "response.output_item.added") {
+          produced = true;
         }
 
         switch (event.type) {
@@ -500,12 +549,33 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             break;
           }
 
-          case "response.completed": {
-            const usage = event.response?.usage;
-            if (usage) yield usageChunk(usage);
+          // `response.done` is the same terminal event under the name
+          // OpenCode's gateway uses.
+          case "response.completed":
+          case "response.done": {
+            const response = event.response;
+            // A terminal event names its own outcome, and the type is not
+            // always it: a `completed` that states `failed` or carries an
+            // error failed, and one that states `incomplete` was cut. Read as
+            // a clean stop, either is a broken turn reported as a finished one.
+            if (response?.status === "failed" || response?.error) {
+              throw streamError(id, response.error ?? { message: "response failed" });
+            }
+            if (response?.usage) yield usageChunk(response.usage);
+            if (response?.status === "incomplete") {
+              yield {
+                type: "finish",
+                finishReason: mapIncompleteReason(response.incomplete_details?.reason),
+              };
+              return;
+            }
             yield { type: "finish", finishReason: sawToolCall ? "tool_calls" : "stop" };
             return;
           }
+
+          case "codex.rate_limits":
+            wall = quotaWall(event, id);
+            break;
 
           case "response.incomplete": {
             // A turn that ran out of output tokens still billed for its input,
@@ -544,9 +614,11 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         }
       }
 
-      // The stream closed without a terminal event. Nothing is lost but the
-      // finish reason and the usage record — every delta, tool-call fragment
-      // included, was already yielded as it arrived.
+      // The stream closed without a terminal event. If the backend's last word
+      // was a spent window and nothing was produced, that is why; otherwise
+      // the stream was cut (see `streamCut`).
+      if (wall && !produced) throw wall;
+      throw streamCut(id);
     },
   };
 
