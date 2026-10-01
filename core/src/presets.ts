@@ -451,11 +451,22 @@ export const PROVIDER_PRESETS = {
     // by tabrunner's Claude plan sign-in).
     headers: { "anthropic-beta": "claude-code-20250219,oauth-2025-04-20" },
   },
-  /** The Codex backend behind a ChatGPT sign-in — Responses wire, no public
-   *  model list, so these ids are the list. */
+  /**
+   * The Codex backend behind a ChatGPT sign-in — Responses wire, no public
+   * model list, so these ids are the list.
+   *
+   * The endpoint is `/backend-api/codex/responses`, with no version segment.
+   * Without the `path` the adapter appends `/v1/responses`, the POST 404s, and
+   * a 404 classifies as "model": every call failed telling the user their
+   * model id was wrong. `session-id` is the header the official Codex client
+   * sends; the backend keys its prompt cache on it (cc-proxy, in daily use
+   * against this backend, 2026-09).
+   */
   chatgpt: {
     shape: "responses",
     baseUrl: "https://chatgpt.com/backend-api/codex",
+    path: "/responses",
+    sessionHeader: "session-id",
     auth: "oauth",
     defaultModel: "gpt-5.3-codex",
     models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.4-mini"],

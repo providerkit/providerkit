@@ -158,6 +158,19 @@ describe("opencode-go — the session header", () => {
     },
   );
 
+  it("chatgpt posts to the Codex path, not /v1, and carries its session header", async () => {
+    // Without the path the POST 404s, and a 404 reads as kind "model": the
+    // user is told the model id is wrong when the URL was.
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("chatgpt", { apiKey: "k", fetchImpl });
+    await drain(
+      provider.createStream([{ role: "user", content: "hi" }], [], { sessionId: "conv-1" }),
+    );
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(new Headers(init?.headers).get("session-id")).toBe("conv-1");
+  });
+
   it("keeps the header off endpoints that don't ask for it", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
     const provider = createPresetProvider("openrouter", { apiKey: "k", model: "m", fetchImpl });
