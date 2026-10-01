@@ -272,6 +272,18 @@ describe("anthropic thinking, per Claude model", () => {
     }
   });
 
+  it("turns Sonnet 5.5's up-front thinking off with between_tools, its lowest setting", async () => {
+    // `disabled` is a 400 on Sonnet 5.5. `between_tools` holds at effort high
+    // or below, and high is its default, so no effort rides beside it.
+    expect(await sent("claude-sonnet-5-5")).toEqual({});
+    expect(await sent("claude-sonnet-5-5", "none")).toEqual({
+      thinking: { type: "between_tools" },
+    });
+    for (const effort of graded) {
+      expect(await sent("claude-sonnet-5-5", effort)).toEqual(adaptive(effort));
+    }
+  });
+
   it("keeps Opus 5 thinking at low for none, not disabled", async () => {
     // Opus 5 accepts `disabled`, but with it the model can write a tool call
     // into its text instead of a tool_use block. That call never runs.
@@ -394,6 +406,54 @@ describe("anthropic thinking, per Claude model", () => {
     // dialect is this adapter's to change.
     expect(await forced("claude-sonnet-4-6", "required")).toEqual({ ...adaptive("low"), ...any });
     expect(await forced("MiniMax-M3", { name: "weather" })).toEqual({ ...budget, ...named });
+  });
+
+  it("never forces a tool on a model that refuses one, and offers only the tool it named", async () => {
+    // Documented (Anthropic Thinking page, read 2026-10-01): Opus 5.5, Sonnet
+    // 5.5, Fable 5.1 and Mythos 5.1 "reject forced tool use on every request
+    // with a 400 error. On those models, use `tool_choice: {"type": "auto"}`".
+    // A Claude id this table does not know is treated as the newest.
+    const clock: ToolDefinition = {
+      name: "clock",
+      description: "The time in a city",
+      inputSchema: { type: "object", properties: { city: { type: "string" } } },
+    };
+    const offered = async (model: string, toolChoice: ToolChoice) => {
+      const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+      await collect(
+        createAnthropicProvider({ apiKey: "k", model, fetchImpl }).createStream(
+          [{ role: "user", content: "Weather in Paris?" }],
+          [weather, clock],
+          { toolChoice },
+        ),
+      );
+      const body = seen[0]!.body;
+      const tools = body.tools as { name: string }[] | undefined;
+      return { tool_choice: body.tool_choice, tools: tools?.map((tool) => tool.name) };
+    };
+    const both = ["weather", "clock"];
+
+    for (const model of [
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-fable-5-1",
+      "claude-mythos-5-1-20260901",
+      "claude-opus-7",
+    ]) {
+      expect(await offered(model, "required")).toEqual({ tools: both });
+      expect(await offered(model, { name: "clock" })).toEqual({ tools: ["clock"] });
+      expect(await offered(model, "none")).toEqual({ tool_choice: { type: "none" }, tools: both });
+    }
+    for (const model of ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8"]) {
+      expect(await offered(model, "required")).toEqual({
+        tool_choice: { type: "any" },
+        tools: both,
+      });
+      expect(await offered(model, { name: "clock" })).toEqual({
+        tool_choice: { type: "tool", name: "clock" },
+        tools: both,
+      });
+    }
   });
 
   it("treats a Claude id it does not know as always on", async () => {
@@ -1126,7 +1186,11 @@ describe("what the OpenAI dialect cannot carry", () => {
     // ends. Measured 2026-09-07: z-ai/glm-5.3-flash 0/10 tool calls under a
     // response format, 8/8 without one. It stays a setting because the opposite
     // is just as real: qwen3.8-flash went 6/6 → 1/6 the same way.
-    const tool = { name: "search", description: "look it up", inputSchema: { type: "object" } };
+    const tool: ToolDefinition = {
+      name: "search",
+      description: "look it up",
+      inputSchema: { type: "object" },
+    };
     const sent = async (jsonWithTools?: "response_format" | "prompt", withTools = true) => {
       const { seen, fetchImpl } = recorder([j({ choices: [] })]);
       await collect(
@@ -1210,13 +1274,17 @@ describe("the schema reaches a provider with no schema mode", () => {
       }),
     ).catch(() => undefined);
 
-    const system = seen[0].body.system as { type: string; text: string; cache_control?: unknown }[];
+    const system = seen[0]!.body.system as {
+      type: string;
+      text: string;
+      cache_control?: unknown;
+    }[];
     expect(system).toHaveLength(2);
-    expect(system[1].text).toContain('"required":["message"]');
+    expect(system[1]!.text).toContain('"required":["message"]');
     // The cache breakpoint stays on the STABLE block. Folding a per-call schema
     // into it would re-bill the whole system prompt every turn.
-    expect(system[0].cache_control).toBeDefined();
-    expect(system[1].cache_control).toBeUndefined();
+    expect(system[0]!.cache_control).toBeDefined();
+    expect(system[1]!.cache_control).toBeUndefined();
   });
 
   it("enforces strict only when the schema can satisfy it", async () => {
@@ -1232,7 +1300,7 @@ describe("the schema reaches a provider with no schema mode", () => {
           json: { name: "out", schema: candidate },
         }),
       ).catch(() => undefined);
-      const format = seen[0].body.response_format as { json_schema: { strict: boolean } };
+      const format = seen[0]!.body.response_format as { json_schema: { strict: boolean } };
       expect(format.json_schema.strict).toBe(expected);
     }
   });
@@ -1246,7 +1314,7 @@ describe("the schema reaches a provider with no schema mode", () => {
         stopSequences: ["</answer>"],
       }),
     ).catch(() => undefined);
-    expect(seen[0].body.top_p).toBe(0.1);
-    expect(seen[0].body.stop).toEqual(["</answer>"]);
+    expect(seen[0]!.body.top_p).toBe(0.1);
+    expect(seen[0]!.body.stop).toEqual(["</answer>"]);
   });
 });

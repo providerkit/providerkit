@@ -11,41 +11,18 @@
  * Usage:
  *   bun run scripts/probe-model.ts <preset> [model] [--api-key=...]
  *
+ * The key comes from --api-key or the preset's env var. Bun reads `.env` from
+ * the working directory; for a file elsewhere, add --env-file=<path> after `bun`.
+ *
  * Example:
  *   bun run scripts/probe-model.ts zai
  *   bun run scripts/probe-model.ts google gemini-2.5-flash
  *   bun run scripts/probe-model.ts openrouter z-ai/glm-5.3-flash
  */
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { probeJsonWithTools } from "../src/capability.ts";
 import { createPresetProvider } from "../src/providers/factory.ts";
 import { PROVIDER_PRESETS, type ProviderPresetId } from "../src/presets.ts";
 import type { ChatMessage, Provider, ProviderChunk, ToolDefinition } from "../src/types.ts";
-
-// Load environment variables from dev projects if available
-function loadDevEnv() {
-  const envPaths = [
-    "/Users/gus/dev/.env",
-    "/Users/gus/dev/prospectar/apps/api/.env",
-    "/Users/gus/dev/featury/apps/api/.env",
-    "/Users/gus/dev/smartgenius/apps/api/.env",
-    "/Users/gus/dev/atendime/apps/api/.env",
-  ];
-  for (const envPath of envPaths) {
-    if (existsSync(envPath)) {
-      const content = readFileSync(envPath, "utf-8");
-      for (const line of content.split("\n")) {
-        const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)?\s*$/.exec(line);
-        if (match && match[1] && !process.env[match[1]]) {
-          const val = (match[2] ?? "").replace(/^['"]|['"]$/g, "").trim();
-          if (val) process.env[match[1]] = val;
-        }
-      }
-    }
-  }
-}
-loadDevEnv();
 
 const ENV_KEY_MAP: Record<string, string> = {
   anthropic: "ANTHROPIC_API_KEY",

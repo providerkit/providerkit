@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/core",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "description": "The layer under your agent loop: one seam for every LLM provider, plus the failure handling you only learn in production.",
   "type": "module",
   "license": "MIT",
@@ -46,7 +46,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p test",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src test",

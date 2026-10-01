@@ -1,0 +1,13 @@
+{
+  // Typechecks the tests, and emits nothing: ../tsconfig.json builds src alone,
+  // so before this file nothing read them at all. Same rules as src, plus
+  // ES2024 for Promise.withResolvers, which the tests use.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "lib": ["ES2024", "DOM"]
+  },
+  "include": ["./**/*", "../src/**/*"],
+  "exclude": []
+}

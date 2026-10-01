@@ -18,8 +18,8 @@ describe("toGeminiToolSchema", () => {
     };
     const sanitized = toGeminiToolSchema(input);
     const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.note.type).toBe("string");
-    expect(props.note.nullable).toBe(true);
+    expect(props.note!.type).toBe("string");
+    expect(props.note!.nullable).toBe(true);
   });
 
   it("converts type arrays with null to nullable: true", () => {
@@ -33,8 +33,8 @@ describe("toGeminiToolSchema", () => {
     };
     const sanitized = toGeminiToolSchema(input);
     const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.count.type).toBe("integer");
-    expect(props.count.nullable).toBe(true);
+    expect(props.count!.type).toBe("integer");
+    expect(props.count!.nullable).toBe(true);
   });
 
   it("converts const to enum", () => {
@@ -48,8 +48,8 @@ describe("toGeminiToolSchema", () => {
     };
     const sanitized = toGeminiToolSchema(input);
     const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.action.enum).toEqual(["send_message"]);
-    expect(props.action.const).toBeUndefined();
+    expect(props.action!.enum).toEqual(["send_message"]);
+    expect(props.action!.const).toBeUndefined();
   });
 
   it("converts numeric enums to string enums", () => {
@@ -64,7 +64,7 @@ describe("toGeminiToolSchema", () => {
     };
     const sanitized = toGeminiToolSchema(input);
     const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.level.enum).toEqual(["1", "2", "3"]);
+    expect(props.level!.enum).toEqual(["1", "2", "3"]);
   });
 
   it("ensures array schemas have items", () => {
@@ -78,7 +78,7 @@ describe("toGeminiToolSchema", () => {
     };
     const sanitized = toGeminiToolSchema(input);
     const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.tags.items).toEqual({ type: "string" });
+    expect(props.tags!.items).toEqual({ type: "string" });
   });
 
   it("strips unsupported keywords ($schema, additionalProperties: true)", () => {

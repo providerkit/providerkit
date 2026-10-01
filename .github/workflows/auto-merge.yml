@@ -8,8 +8,8 @@ name: Auto-merge member PRs
 #
 # Opt out per-PR: keep the PR a draft, or add the `hold` label.
 #
-# Copied from aboard, the newest copy on 2026-09-27, so a fix there ports here
-# by diff. Only these header lines say what differs in this repo.
+# Copied from the newest copy in the fleet on 2026-09-27, so a fix there ports
+# here by diff. Only these header lines say what differs in this repo.
 #
 # Token: the default GITHUB_TOKEN. A push made with it starts no workflow
 # (GitHub's loop-prevention), and that guard does not stop at the push: it
@@ -116,7 +116,7 @@ jobs:
           # main, and GitHub refuses the second with "Base branch was modified" until it
           # redoes that PR's test merge, which takes seconds. With no second try the PR
           # stayed open, green and undeployed, and nothing said so: on 2026-09-25, 10 of
-          # 19 PRs released together in ilojista, atendime and prospectar stopped this
+          # 19 PRs released together in three sibling repos stopped this
           # way. So it tries again, with a growing wait and a few random seconds so the
           # tries don't collide again. A head that moved or a PR that closed ends the
           # tries: there is nothing left to try.
@@ -187,7 +187,7 @@ jobs:
           #
           # Until 2026-09-25 this listed the dispatch runs before and after, and took the
           # smallest new id. The first list sometimes came back short, and the smallest
-          # "new" id was then the OLDEST run it had missed. In prospectar, one PR waited
+          # "new" id was then the OLDEST run it had missed. In one repo, one PR waited
           # on a CI run from the day before and another on one from two days before. Both
           # saw that their commit was not main, stood down, and nothing deployed until
           # someone dispatched the deploys by hand.

@@ -82,14 +82,19 @@ const THINKING_BUDGET: Record<Exclude<Effort, "none">, number> = {
 
 /** How one Claude model that thinks adaptively takes `effort`. */
 interface ClaudeThinking {
-  /** How `effort: "none"` is said: nothing, an explicit off, or the lowest
-   *  effort where there is no off to ask for. */
-  none: "omit" | "disabled" | "low";
+  /** How `effort: "none"` is said: nothing, an explicit off, an off for
+   *  up-front thinking only, or the lowest effort where there is no off. */
+  none: "omit" | "disabled" | "between_tools" | "low";
   /** Whether a non-default temperature or top_p survives while thinking is off. */
   sampling: boolean;
+  /** Whether a tool choice that forces a tool (`any`, or one named tool) is
+   *  accepted. Where it is not, it is a 400 on every request. */
+  forcedTool: boolean;
 }
 
-const ALWAYS_ON: ClaudeThinking = { none: "low", sampling: false };
+const ALWAYS_ON: ClaudeThinking = { none: "low", sampling: false, forcedTool: true };
+/** Always on, and a forced tool choice is a 400: the 5.1 and 5.5 models. */
+const LATEST: ClaudeThinking = { ...ALWAYS_ON, forcedTool: false };
 
 /**
  * Claude models that take adaptive thinking, keyed by id. A graded effort is
@@ -103,6 +108,10 @@ const ALWAYS_ON: ClaudeThinking = { none: "low", sampling: false };
  * `sampling: false` marks the models where a non-default temperature, top_p or
  * top_k is a 400 on every request, thinking or not. Documented on the same date
  * (…/build-with-claude/thinking, "Sampling parameters").
+ *
+ * `forcedTool: false` marks the models that "reject forced tool use on every
+ * request with a 400 error" (same page, "Response prefill and forced tool use",
+ * read 2026-10-01). Every other model here takes it with adaptive thinking.
  */
 const CLAUDE_THINKING: ReadonlyMap<string, ClaudeThinking> = new Map([
   // Always on: `enabled` and `disabled` are both 400s (Mythos Preview still
@@ -110,12 +119,17 @@ const CLAUDE_THINKING: ReadonlyMap<string, ClaudeThinking> = new Map([
   // effort rather than silence, because silence runs the model's own default —
   // `high`, or `medium` on Opus 5.5 — which is the request `none` exists to
   // refuse (invariant 12).
-  ["claude-fable-5-1", ALWAYS_ON],
-  ["claude-mythos-5-1", ALWAYS_ON],
+  ["claude-fable-5-1", LATEST],
+  ["claude-mythos-5-1", LATEST],
+  ["claude-opus-5-5", LATEST],
   ["claude-fable-5", ALWAYS_ON],
   ["claude-mythos-5", ALWAYS_ON],
   ["claude-mythos-preview", ALWAYS_ON],
-  ["claude-opus-5-5", ALWAYS_ON],
+  // On by default, and `disabled` is a 400. `between_tools` is its lowest
+  // setting: no thinking up front, at effort high or below — and high is this
+  // model's default, so it needs no effort beside it (effort page, read
+  // 2026-10-01). It is also the one field it takes.
+  ["claude-sonnet-5-5", { ...LATEST, none: "between_tools" }],
   // On by default, and `disabled` is accepted at effort high or below. `none`
   // still says `low`: with thinking disabled, Opus 5 occasionally writes a tool
   // call into its visible text instead of a tool_use block, most often on
@@ -126,16 +140,16 @@ const CLAUDE_THINKING: ReadonlyMap<string, ClaudeThinking> = new Map([
   // thinking on a turn it judges simple.
   ["claude-opus-5", ALWAYS_ON],
   // On by default; `disabled` is accepted, with no such warning attached.
-  ["claude-sonnet-5", { none: "disabled", sampling: false }],
+  ["claude-sonnet-5", { none: "disabled", sampling: false, forcedTool: true }],
   // Off by default, so saying nothing already is none.
-  ["claude-opus-4-8", { none: "omit", sampling: false }],
-  ["claude-opus-4-7", { none: "omit", sampling: false }],
+  ["claude-opus-4-8", { none: "omit", sampling: false, forcedTool: true }],
+  ["claude-opus-4-7", { none: "omit", sampling: false, forcedTool: true }],
   // These still take `budget_tokens`, deprecated. Adaptive is the mode the docs
   // say to use where both exist, and it drops extended mode's rule that the
   // final assistant turn open with a thinking block — which this adapter,
   // replaying no thinking, can never satisfy.
-  ["claude-opus-4-6", { none: "omit", sampling: true }],
-  ["claude-sonnet-4-6", { none: "omit", sampling: true }],
+  ["claude-opus-4-6", { none: "omit", sampling: true, forcedTool: true }],
+  ["claude-sonnet-4-6", { none: "omit", sampling: true, forcedTool: true }],
 ]);
 
 /** Claude 4.5 and everything before it: extended thinking only (`adaptive` is
@@ -152,14 +166,15 @@ const CLAUDE_EXTENDED_ONLY = /^claude-(3-|(opus|sonnet|haiku)-4(-[0-5])?$)/;
  * rejects `enabled`; the newest reject `disabled` too; and `output_config.effort`
  * is accepted by every model that thinks adaptively. So an unknown id gets the
  * one request none of them has refused, and no sampling fields, since every
- * Claude since Opus 4.7 answers a non-default one with a 400. A model that
- * turns out to differ will say so with a 400 of its own, and earn a row.
+ * Claude since Opus 4.7 answers a non-default one with a 400. Nor a forced tool
+ * choice, which the newest refuse and an unforced request never trips. A model
+ * that turns out to differ will say so with a 400 of its own, and earn a row.
  */
 function claudeThinking(model: string): ClaudeThinking | undefined {
   if (!model.startsWith("claude-")) return undefined;
   const family = model.replace(/-\d{8}$/, ""); // a dated snapshot is its family
   if (CLAUDE_EXTENDED_ONLY.test(family)) return undefined;
-  return CLAUDE_THINKING.get(family) ?? ALWAYS_ON;
+  return CLAUDE_THINKING.get(family) ?? LATEST;
 }
 
 /** Whether a request continues a tool loop: its last assistant message made
@@ -354,14 +369,25 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
       if (opts.topP !== undefined) request.top_p = opts.topP;
       if (opts.stopSequences?.length) request.stop_sequences = opts.stopSequences;
-      if (tools.length > 0) {
-        request.tools = tools.map((tool) => ({
+      const claude = claudeThinking(model);
+      const forcesTool = opts.toolChoice === "required" || typeof opts.toolChoice === "object";
+      // A model that refuses a forced tool choice gets `auto` instead, which is
+      // the docs' own advice, and a named tool becomes the only tool it is
+      // offered. Sending the choice anyway is a 400 on every request.
+      // ponytail: the model may still answer in text. The upgrade is strict
+      // tool use or structured outputs, which the docs pair with `auto`.
+      const unforced = forcesTool && claude?.forcedTool === false;
+      const named = typeof opts.toolChoice === "object" ? opts.toolChoice.name : undefined;
+      const offered =
+        unforced && named !== undefined ? tools.filter((tool) => tool.name === named) : tools;
+      if (offered.length > 0) {
+        request.tools = offered.map((tool) => ({
           name: tool.name,
           description: tool.description,
           input_schema: toAnthropicToolSchema(tool.inputSchema),
         }));
       }
-      if (opts.toolChoice && opts.toolChoice !== "auto") {
+      if (opts.toolChoice && opts.toolChoice !== "auto" && !unforced) {
         request.tool_choice =
           opts.toolChoice === "none"
             ? { type: "none" }
@@ -369,7 +395,6 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
               ? { type: "any" }
               : { type: "tool", name: opts.toolChoice.name };
       }
-      const claude = claudeThinking(model);
       // Extended mode, which is all Claude 4.5 and older have, can't think on
       // two kinds of request this adapter sends, so those run without thinking.
       // Documented (Anthropic Thinking page, read 2026-09-27):
@@ -382,7 +407,6 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       //   manual extended thinking." The caller asked for the tool, so it wins.
       // ponytail: every loop step after the first goes unthought on these
       // models. The upgrade is replaying the signed thinking blocks.
-      const forcesTool = opts.toolChoice === "required" || typeof opts.toolChoice === "object";
       const unthought =
         !claude && model.startsWith("claude-") && (forcesTool || continuesToolLoop(messages));
       if (claude) {
@@ -390,6 +414,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         // default, which on most of these is thinking ON.
         if (effort === "none") {
           if (claude.none === "disabled") request.thinking = { type: "disabled" };
+          if (claude.none === "between_tools") request.thinking = { type: "between_tools" };
           if (claude.none === "low") request.output_config = { effort: "low" };
         } else if (effort) {
           request.thinking = { type: "adaptive" };
