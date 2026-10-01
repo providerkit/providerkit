@@ -47,7 +47,8 @@ const guarded = withWatchdog(provider); // same Provider, both silent failures h
 ```
 
 A stream that stops sending now fails as a retryable `timeout` instead of hanging forever, and a
-turn that completes having said nothing fails instead of showing an empty answer.
+turn that completes without an answer fails instead of showing an empty one. A turn that only
+thought counts as no answer.
 [Streaming](/guides/streaming/) has the details.
 
 ## Swapping the vendor

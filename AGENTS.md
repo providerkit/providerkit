@@ -187,10 +187,17 @@ un-learned.
     while its models defaulted to off. From Claude 5 on they think unless told not to, and some
     cannot be told at all, so the adapter spells `none` per model id (documented, Anthropic's
     per-model table, read 2026-09-27) — `disabled`, nothing, or the lowest effort.
+13. **Reasoning is not an answer.** `requireContent` counts text or a tool call, never thinking
+    alone. It counted reasoning until 0.17.0, so a review capped at 2,048 tokens on a
+    high-effort model thought for all 2,048, answered `""`, and passed as a success 22 times in
+    a row in production; the app's JSON parse failed with nothing to say why. Reasoning still
+    streams live, so a reader watches the model think. An empty turn with a `length` finish is
+    `invalid`, not `overload`: the cap is the caller's, so a retry or a backup model meets the
+    same cap and fails the same way, and cooling a model down for it punishes the wrong party.
 
 ## Next
 
-`0.16.1` is on npm. **Four of the five source codebases have migrated**, and every one of them
+`0.17.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
 came out smaller:
 
 | Migration                           | Runtime                                   |    Net |

@@ -200,15 +200,92 @@ describe("requireContent", () => {
     expect(out).toHaveLength(2);
   });
 
-  it("counts reasoning and tool calls as content", async () => {
-    await expect(
-      collect(requireContent("claude", frames({ type: "delta", reasoning: "hmm" }))),
-    ).resolves.toHaveLength(1);
+  it("counts a tool call as an answer", async () => {
     await expect(
       collect(
         requireContent("claude", frames({ type: "delta", toolCalls: [{ index: 0, name: "f" }] })),
       ),
     ).resolves.toHaveLength(1);
+  });
+
+  // Production, 2026-10-01: a review capped at 2,048 tokens on a high-effort
+  // model thought for all 2,048, answered "", and passed as a success 22 times.
+  it("streams reasoning live but rejects a turn whose cap ran out on it", async () => {
+    const seen: ProviderChunk[] = [];
+    const error = await (async () => {
+      for await (const chunk of requireContent(
+        "go",
+        frames(
+          { type: "delta", reasoning: "weighing every citation…" },
+          {
+            type: "usage",
+            usage: {
+              inputTokens: 16_328,
+              cachedInputTokens: 0,
+              outputTokens: 2_048,
+              reasoningTokens: 2_048,
+            },
+          },
+          { type: "finish", finishReason: "length" },
+        ),
+      )) {
+        seen.push(chunk);
+      }
+    })().catch((err: unknown) => err);
+
+    expect(seen[0]).toEqual({ type: "delta", reasoning: "weighing every citation…" });
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).kind).toBe("invalid");
+    expect((error as ProviderError).message).toMatch(
+      /2048 of 2048 output tokens went to reasoning/,
+    );
+  });
+
+  // The caller's cap is the cause, so the same cap must not be retried — the
+  // old `overload` here retried it, then walked every backup model into it.
+  it("does not retry an empty turn that hit the cap", async () => {
+    vi.useRealTimers();
+    let attempt = 0;
+    await expect(
+      collect(
+        withStreamRetry<ProviderChunk>(
+          () => {
+            attempt += 1;
+            return requireContent(
+              "claude",
+              frames({ type: "usage" }, { type: "finish", finishReason: "length" }),
+            );
+          },
+          { sleep: async () => undefined },
+        ),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(attempt).toBe(1);
+  });
+
+  it("rejects a turn that only thought and stopped", async () => {
+    await expect(
+      collect(
+        requireContent(
+          "claude",
+          frames({ type: "delta", reasoning: "hmm" }, { type: "finish", finishReason: "stop" }),
+        ),
+      ),
+    ).rejects.toMatchObject({ kind: "overload" });
+  });
+
+  // After a tool result, a turn that thought and stopped chose the tool as its
+  // reply — the exception the guard already makes for an empty stop.
+  it("passes a turn that thought after a tool result and chose to stop", async () => {
+    await expect(
+      collect(
+        requireContent(
+          "claude",
+          frames({ type: "delta", reasoning: "done" }, { type: "finish", finishReason: "stop" }),
+          { afterToolResult: true },
+        ),
+      ),
+    ).resolves.toHaveLength(2);
   });
 
   // The failure this exists for: stop_reason end_turn, zero content blocks. It
@@ -343,9 +420,10 @@ describe("withWatchdog", () => {
     const stopped = withWatchdog(stub([{ type: "finish", finishReason: "stop" }]));
     expect(await drain(stopped, afterTool)).toEqual([{ type: "finish", finishReason: "stop" }]);
 
-    // Thinking that ate the whole budget is still the failure, tool or not.
+    // Thinking that ate the whole budget is still the failure, tool or not —
+    // and it is the caller's cap, so it is not retried into the same one.
     const cut = withWatchdog(stub([{ type: "finish", finishReason: "length" }]));
-    await expect(drain(cut, afterTool)).rejects.toMatchObject({ kind: "overload" });
+    await expect(drain(cut, afterTool)).rejects.toMatchObject({ kind: "invalid" });
 
     // And an empty stop after a USER turn is still nothing said to anyone.
     const userTail = withWatchdog(stub([{ type: "finish", finishReason: "stop" }]));
