@@ -14,6 +14,7 @@ import type {
   Provider,
   ProviderChunk,
   StreamOptions,
+  ToolChoice,
   ToolDefinition,
 } from "../types.ts";
 
@@ -203,6 +204,18 @@ function mapStopReason(reason: string | undefined): FinishReason | undefined {
   }
 }
 
+interface AnthropicToolChoice {
+  type: "auto" | "any" | "none" | "tool";
+  name?: string;
+  disable_parallel_tool_use?: boolean;
+}
+
+function toAnthropicToolChoice(choice: Exclude<ToolChoice, "auto">): AnthropicToolChoice {
+  if (choice === "none") return { type: "none" };
+  if (choice === "required") return { type: "any" };
+  return { type: "tool", name: choice.name };
+}
+
 function partsToAnthropic(content: string | ContentPart[], provider: string): unknown[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
   return content.map((part) => {
@@ -389,11 +402,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       }
       const choice =
         opts.toolChoice && opts.toolChoice !== "auto" && !unforced
-          ? opts.toolChoice === "none"
-            ? { type: "none" }
-            : opts.toolChoice === "required"
-              ? { type: "any" }
-              : { type: "tool", name: opts.toolChoice.name }
+          ? toAnthropicToolChoice(opts.toolChoice)
           : undefined;
       // This wire says "one call at a time" inside the tool choice, so asking
       // for it needs a choice to ride on — `auto` when the caller named none.

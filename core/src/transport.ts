@@ -196,11 +196,11 @@ export async function* parseSseStream(
   // for the next read before it is turned into a line break.
   let heldCR = false;
 
-  const emit = function* (frame: string) {
+  function* emit(frame: string): Generator<string> {
     const payload = payloadOf(frame);
     if (payload === "[DONE]") hooks.onDone?.();
     else if (payload !== null) yield payload;
-  };
+  }
 
   try {
     for (;;) {

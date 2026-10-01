@@ -67,9 +67,7 @@ const RESET_HEADERS = [
 const CODEX_SLOTS = ["primary", "secondary"] as const;
 
 function windowForMinutes(minutes: number | undefined): RateLimitWindow | undefined {
-  if (minutes === undefined || minutes <= 0) return undefined;
-  const ms = minutes * 60_000;
-  return ms <= FIVE_HOUR_MAX_MS ? "5h" : ms <= WEEKLY_MAX_MS ? "weekly" : "monthly";
+  return minutes !== undefined && minutes > 0 ? windowForMs(minutes * 60_000) : undefined;
 }
 
 function codexWindow(headers: Headers, slot: (typeof CODEX_SLOTS)[number], now: number) {
@@ -220,6 +218,20 @@ const WINDOW_FLOOR_MS = 10 * 60_000;
 const FIVE_HOUR_MAX_MS = 5.5 * 3_600_000;
 const WEEKLY_MAX_MS = 7.5 * 86_400_000;
 
+/** The window a span this long belongs to. */
+function windowForMs(ms: number): RateLimitWindow {
+  if (ms <= FIVE_HOUR_MAX_MS) return "5h";
+  if (ms <= WEEKLY_MAX_MS) return "weekly";
+  return "monthly";
+}
+
+/** A wait read off a body, named as a window once it is long enough to be one. */
+function resetAfter(waitMs: number, now: number): RateLimitReset {
+  const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
+  if (waitMs > WINDOW_FLOOR_MS) result.window = windowForMs(waitMs);
+  return result;
+}
+
 /** A finite number off a JSON field, the string form a relay may stringify it
  *  into included. Bare `Number()` is the trap `numeric()` guards against one
  *  layer up: `Number(null)`, `Number("")`, `Number([])` and `Number(false)` are
@@ -283,36 +295,18 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
       jsonSeconds(error.retry_after) ??
       jsonSeconds(error.retry_after_seconds) ??
       jsonSeconds((body as Record<string, unknown>).retry_after_seconds);
-    const waitMs =
-      inSeconds !== undefined && inSeconds >= 0
-        ? inSeconds * 1000
-        : atSeconds !== undefined && atSeconds > 0
-          ? Math.max(0, atSeconds * 1000 - now)
-          : afterSeconds !== undefined && afterSeconds >= 0
-            ? afterSeconds * 1000
-            : undefined;
-    if (waitMs !== undefined) {
-      const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
-      if (waitMs > WINDOW_FLOOR_MS) {
-        result.window =
-          waitMs <= FIVE_HOUR_MAX_MS ? "5h" : waitMs <= WEEKLY_MAX_MS ? "weekly" : "monthly";
-      }
-      return result;
+    if (inSeconds !== undefined && inSeconds >= 0) return resetAfter(inSeconds * 1000, now);
+    if (atSeconds !== undefined && atSeconds > 0) {
+      return resetAfter(Math.max(0, atSeconds * 1000 - now), now);
+    }
+    if (afterSeconds !== undefined && afterSeconds >= 0) {
+      return resetAfter(afterSeconds * 1000, now);
     }
   }
 
   // If structured JSON did not yield a reset, check prose wording
   const waitMs = parseProseRetryMs(bodyText);
-  if (waitMs !== undefined) {
-    const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
-    if (waitMs > WINDOW_FLOOR_MS) {
-      result.window =
-        waitMs <= FIVE_HOUR_MAX_MS ? "5h" : waitMs <= WEEKLY_MAX_MS ? "weekly" : "monthly";
-    }
-    return result;
-  }
-
-  return {};
+  return waitMs === undefined ? {} : resetAfter(waitMs, now);
 }
 
 /** Read both places an endpoint can report its reset. A short Retry-After is

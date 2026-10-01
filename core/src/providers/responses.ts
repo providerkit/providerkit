@@ -612,18 +612,14 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
           case "error":
           case "response.error":
+            // The status and the window clocks ride beside `error`. Without
+            // them a spent Codex window reads as an unnamed in-stream failure:
+            // floored to overload, then retried and walked across every backup
+            // on the same account wall.
             throw streamError(
               id,
               event.error
-                ? {
-                    ...event.error,
-                    // The status and the window clocks ride beside `error`.
-                    // Without them a spent Codex window reads as an unnamed
-                    // in-stream failure: floored to overload, then retried and
-                    // walked across every backup on the same account wall.
-                    ...(event.status_code !== undefined ? { status_code: event.status_code } : {}),
-                    ...(event.headers ? { headers: event.headers } : {}),
-                  }
+                ? { ...event.error, status_code: event.status_code, headers: event.headers }
                 : { message: event.message, code: event.code },
             );
         }

@@ -94,7 +94,7 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
   // nicety: every runtime this package targets has had it for years.
   const signal = callerSignal ? AbortSignal.any([callerSignal, timeout.signal]) : timeout.signal;
 
-  const deadline = (ms: number, what: string) => {
+  function deadline(ms: number, what: string): ReturnType<typeof setTimeout> {
     const timer = setTimeout(() => {
       fired = new ProviderError(provider, "timeout", `stream went ${ms / 1000}s without ${what}`);
       timeout.abort(fired);
@@ -103,7 +103,7 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
     // hold a Node event loop open for a full deadline.
     (timer as { unref?: () => void }).unref?.();
     return timer;
-  };
+  }
 
   // The idle clock waits for the response to start; until then only the
   // progress clock runs (see the header comment).
