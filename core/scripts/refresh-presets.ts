@@ -5,7 +5,7 @@
  *
  * Usage: bun run scripts/refresh-presets.ts
  */
-import { PRESET_IDS, PROVIDER_PRESETS } from "../src/presets.ts";
+import { PRESET_IDS, PROVIDER_PRESETS, type ProviderPreset } from "../src/presets.ts";
 
 interface ModelsDevProvider {
   name?: string;
@@ -50,7 +50,7 @@ async function main() {
   let driftCount = 0;
 
   for (const id of PRESET_IDS) {
-    const preset = PROVIDER_PRESETS[id];
+    const preset: ProviderPreset = PROVIDER_PRESETS[id];
     const catalogKey = ID_MAP[id] ?? id;
     const remote = catalog[catalogKey];
 

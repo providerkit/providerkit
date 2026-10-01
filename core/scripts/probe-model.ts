@@ -21,8 +21,8 @@
  */
 import { probeJsonWithTools } from "../src/capability.ts";
 import { createPresetProvider } from "../src/providers/factory.ts";
-import { PROVIDER_PRESETS, type ProviderPresetId } from "../src/presets.ts";
-import type { ChatMessage, Provider, ProviderChunk, ToolDefinition } from "../src/types.ts";
+import { PROVIDER_PRESETS, type ProviderPreset, type ProviderPresetId } from "../src/presets.ts";
+import type { ChatMessage, Provider, ToolDefinition } from "../src/types.ts";
 
 const ENV_KEY_MAP: Record<string, string> = {
   anthropic: "ANTHROPIC_API_KEY",
@@ -72,7 +72,7 @@ if (!presetId || !PROVIDER_PRESETS[presetId]) {
   process.exit(1);
 }
 
-const preset = PROVIDER_PRESETS[presetId];
+const preset: ProviderPreset = PROVIDER_PRESETS[presetId];
 const targetEnvKey = ENV_KEY_MAP[presetId] ?? `${presetId.toUpperCase()}_API_KEY`;
 const apiKey =
   flags["api-key"] ??
@@ -133,7 +133,7 @@ async function collectStream(
       } else if (chunk.type === "usage") {
         usage = chunk.usage;
       } else if (chunk.type === "finish") {
-        finishReason = chunk.reason;
+        finishReason = chunk.finishReason;
       }
     }
   } catch (err: unknown) {

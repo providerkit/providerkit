@@ -2,9 +2,12 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
-    // No "types" and no DOM-only lib: the package must compile against the
+    // No Node types and no DOM-only lib: the package must compile against the
     // WHATWG globals every target already has (fetch, AbortSignal, ReadableStream)
-    // without pulling in @types/node — that is what keeps it MV3-safe.
+    // without pulling in @types/node — that is what keeps it MV3-safe. "types" is
+    // empty rather than absent because scripts/ installs @types/node, and tsc
+    // would otherwise load every installed @types package into src as well.
+    "types": [],
     "lib": ["ES2022", "DOM"],
     "moduleResolution": "bundler",
     "rootDir": "./src",
