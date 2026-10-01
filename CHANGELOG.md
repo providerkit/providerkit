@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.17.2] - 2026-10-01
+
+### Fixed
+
+- **The `chatgpt` preset's default model no longer fails every call.** It defaulted to `gpt-5.3-codex`, which the ChatGPT backend no longer accepts, so every call that used the default got a 400 that said the model isn't supported with a ChatGPT account. `gpt-5.3-codex-spark` and `gpt-5.4-mini` were in the list too, and the backend rejects them as well. The default is now `gpt-6-sol`. The list holds the eight models the backend accepted on 2026-10-01, from `gpt-6-sol` down to `gpt-5.5`.
+
 ## [0.17.1] - 2026-10-01
 
 ### Fixed

@@ -466,6 +466,15 @@ export const PROVIDER_PRESETS = {
    * model id was wrong. `session-id` is the header the official Codex client
    * sends; the backend keys its prompt cache on it (cc-proxy, in daily use
    * against this backend, 2026-09).
+   *
+   * The backend retires models without notice, and models.dev doesn't list
+   * this backend, so `refresh-presets` can't catch the drift. By 2026-10-01 the
+   * default here (gpt-5.3-codex) and two of the other three listed ids
+   * answered 400 "not supported when using Codex with a ChatGPT account": a
+   * caller who took the default failed on every call. This list is what the
+   * backend accepted that day. It checks the model before the quota, so an
+   * account with its window spent still tells the two apart: 400 for a
+   * rejected model, 429 for an accepted one.
    */
   chatgpt: {
     shape: "responses",
@@ -473,8 +482,17 @@ export const PROVIDER_PRESETS = {
     path: "/responses",
     sessionHeader: "session-id",
     auth: "oauth",
-    defaultModel: "gpt-5.3-codex",
-    models: ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.4-mini"],
+    defaultModel: "gpt-6-sol",
+    models: [
+      "gpt-6-sol",
+      "gpt-6.1-sol",
+      "gpt-6-astra",
+      "gpt-6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ],
   },
   /**
    * A Grok subscription (SuperGrok, X Premium) — the backend the Grok CLI
