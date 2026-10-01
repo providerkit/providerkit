@@ -61,6 +61,13 @@ adapter and the media type, before any request goes out. They never drop the fil
 model would then answer about a file it never saw. A `FallbackPool` doesn't pass an `invalid` error
 on to the next provider, so send a request with a file to a Gemini provider directly.
 
+Some backends fail the whole request over one image they won't take. The `grok` preset knows its
+backend's limits: each side at least 8 px, an area of at least 512 px², and at most 5 MB once
+decoded. It replaces any other image with a note the model reads, like
+`[image omitted: image/webp] (unreadable dimensions for image/webp)`, so the turn still runs. WebP
+always gets a note, because its size can't be checked. Only the last 4 images in a request are
+sent. To apply the same check in your own adapter, call `gateImages(messages, limits)`.
+
 ## Chunks
 
 ```ts

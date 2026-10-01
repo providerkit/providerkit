@@ -196,6 +196,24 @@ describe("opencode-go — the session header", () => {
     expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
   });
 
+  it("grok gets a note instead of an image its backend would fail the request over", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("grok", { apiKey: "tok", fetchImpl });
+    await drain(
+      provider.createStream(
+        [{ role: "user", content: [{ type: "image", mimeType: "image/webp", data: "UklGRg==" }] }],
+        [],
+      ),
+    );
+    const { input } = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
+    expect(input[0].content).toEqual([
+      {
+        type: "input_text",
+        text: "[image omitted: image/webp] (unreadable dimensions for image/webp)",
+      },
+    ]);
+  });
+
   it("keeps the header off endpoints that don't ask for it", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
     const provider = createPresetProvider("openrouter", { apiKey: "k", model: "m", fetchImpl });

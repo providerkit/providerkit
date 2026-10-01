@@ -2,6 +2,16 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.17.1] - 2026-10-01
+
+### Fixed
+
+- **One image Grok won't take no longer fails the whole request.** The Grok backend refuses an image with a side under 8 px, an area under 512 px², or more than 5 MB once decoded. The `grok` preset now replaces each of those with a note the model reads, like `[image omitted: image/png] (4x4 below minimum side 8px)`. A WebP image becomes a note too, because its size can't be checked. Only the last 4 images in a request are sent, and each older one gets a note that says so. The limits come from cc-proxy, which measured them on the live backend.
+
+### Added
+
+- **`gateImages(messages, limits)`** applies the same check to any history, for an app with its own adapter. `ImageLimits` holds the numbers, and the `imageLimits` option sets them on a Responses provider.
+
 ## [0.17.0] - 2026-10-01
 
 ### Changed

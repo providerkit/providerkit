@@ -18,6 +18,8 @@
  * (`https://<resource>.openai.azure.com`), so no static preset can carry it —
  * point createOpenAIProvider's baseUrl at your resource instead.
  */
+import type { ImageLimits } from "./image.ts";
+
 export type PresetShape = "anthropic" | "openai" | "responses" | "gemini";
 
 /**
@@ -71,6 +73,9 @@ export interface ProviderPreset {
   /** Default model chain when the caller names neither `model` nor `models`:
    *  the first answers, the rest take over (same key) when it fails. */
   rotation?: readonly string[];
+  /** Responses shape: what the backend accepts as an image, for backends that
+   *  fail a whole request over one image they won't take. */
+  imageLimits?: ImageLimits;
 }
 
 export const PROVIDER_PRESETS = {
@@ -494,6 +499,10 @@ export const PROVIDER_PRESETS = {
       "x-grok-client-identifier": "grok-shell",
       "x-grok-client-version": "0.2.93",
     },
+    // Measured by cc-proxy on 2026-07-20: an 8x8 image fails the whole request,
+    // 32x32 passes. Too small, over 5 MB decoded, WebP (its size can't be read)
+    // or older than the last four: each becomes a note instead.
+    imageLimits: { minSide: 8, minArea: 512, maxDecodedBytes: 5 * 1024 * 1024, maxImages: 4 },
   },
   /** Kimi's coding endpoint reached with a subscription token instead of a
    *  key — Kimi bills the two separately. */

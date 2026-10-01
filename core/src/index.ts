@@ -11,6 +11,7 @@ export * from "./tool-args.ts";
 export * from "./tools.ts";
 export * from "./schema.ts";
 export * from "./context.ts";
+export * from "./image.ts";
 export * from "./capability.ts";
 export * from "./attribution.ts";
 export * from "./presets.ts";
