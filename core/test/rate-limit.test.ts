@@ -210,6 +210,14 @@ describe("parseUsageLimitBody", () => {
     expect(parseUsageLimitBody(text, NOW).retryAfterMs).toBe(HOUR);
   });
 
+  it("reads a plain retry_after wait off the body, under either name", () => {
+    expect(parseUsageLimitBody(body({ retry_after: 7 }), NOW).retryAfterMs).toBe(7_000);
+    expect(parseUsageLimitBody(body({ retry_after_seconds: "12" }), NOW).retryAfterMs).toBe(12_000);
+    expect(parseUsageLimitBody(JSON.stringify({ retry_after_seconds: 3 }), NOW).retryAfterMs).toBe(
+      3_000,
+    );
+  });
+
   it("clamps a resets_at already in the past to zero", () => {
     expect(parseUsageLimitBody(body({ resets_at: NOW_SECONDS - 600 }), NOW)).toEqual({
       retryAfterMs: 0,

@@ -5,7 +5,7 @@
 // Adapters keep only their per-event mapping; everything about being an HTTP
 // client lives here once.
 import { classifyHttp, isTransportFailure, parseRetryAfterMs, ProviderError } from "./errors.ts";
-import { parseRateLimitResponse } from "./rate-limit.ts";
+import { parseRateLimitReset, parseRateLimitResponse } from "./rate-limit.ts";
 
 export interface RequestInit_ {
   url: string;
@@ -30,12 +30,12 @@ export function apiUrl(baseUrl: string, path: string): string {
  * per-minute throttle, because "try again in a moment" is a lie for those.
  */
 export function retryAfterFromHeaders(headers: Headers, now = Date.now()): number | undefined {
-  const retryAfter = headers.get("retry-after");
-  if (retryAfter) {
-    if (/^\d+$/.test(retryAfter)) return Number(retryAfter) * 1000;
-    const date = Date.parse(retryAfter);
-    if (!Number.isNaN(date)) return Math.max(0, date - now);
-  }
+  // `retry-after-ms`, then `Retry-After` as seconds (fractions included), a
+  // duration or an HTTP-date — one parser for both modules. This one used to
+  // test for digits and hand anything else to `Date.parse`, which reads "1.5"
+  // as a day in 2001: a wait of zero, and an immediate retry into the throttle.
+  const asked = parseRateLimitReset(headers, now).retryAfterMs;
+  if (asked !== undefined) return asked;
   // Anthropic and several gateways publish an epoch-seconds reset instead.
   for (const name of [
     "anthropic-ratelimit-unified-reset",
@@ -64,7 +64,17 @@ export function retryAfterFromHeaders(headers: Headers, now = Date.now()): numbe
 async function errorFor(provider: string, res: Response): Promise<ProviderError> {
   const text = await res.text().catch(() => "");
   const kind = classifyHttp(res.status, text);
-  const reset = parseRateLimitResponse(res.headers, text);
+  // A window-reset header describes the ACCOUNT, not this failure, and only a
+  // throttle or a quota answer is about the window. Claude OAuth stamps the
+  // unified reset on every response, so read on any status a 529 said "lifts in
+  // three days": past every retry budget, and the backup walker benched the
+  // model until the weekly window rolled — the overload that most wants another
+  // attempt got none. A server's own Retry-After is honoured on any status.
+  const aboutWindow = kind === "rate" || kind === "quota";
+  const reset = aboutWindow ? parseRateLimitResponse(res.headers, text) : {};
+  const asked = aboutWindow
+    ? retryAfterFromHeaders(res.headers)
+    : parseRateLimitReset(res.headers).retryAfterMs;
   const message = text
     ? `${provider} ${res.status}: ${text.slice(0, 500)}`
     : `${provider} ${res.status} ${res.statusText}`;
@@ -75,7 +85,7 @@ async function errorFor(provider: string, res: Response): Promise<ProviderError>
     status: res.status,
     ...reset,
     shouldRetry,
-    retryAfterMs: retryAfterFromHeaders(res.headers) ?? parseRetryAfterMs({}, text),
+    retryAfterMs: asked ?? parseRetryAfterMs({}, text),
     body: text.slice(0, 2_000) || undefined,
   });
 }

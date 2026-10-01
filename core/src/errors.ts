@@ -576,8 +576,10 @@ export function parseRetryAfterMs(err: unknown, body?: string): number | undefin
         ? (headers as Record<string, unknown>)["retry-after"]
         : undefined;
   if (typeof value !== "string") return undefined;
-  // Seconds, or an HTTP-date — both are legal per RFC 9110.
-  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  // Seconds, or an HTTP-date — both are legal per RFC 9110. Seconds are read
+  // as a NUMBER first: `Date.parse("1.5")` is a day in 2001, a wait of zero.
+  const seconds = Number(value.trim());
+  if (value.trim() !== "" && Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
   const date = Date.parse(value);
   return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }

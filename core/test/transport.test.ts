@@ -144,6 +144,49 @@ describe("streamSse", () => {
     expect(err.retryAfterMs).toBe(42_000);
   });
 
+  it("reads a fractional Retry-After and retry-after-ms as waits, not dates", async () => {
+    // `Date.parse("1.5")` is a day in 2001 — a wait of zero.
+    const failWith = async (headers: Record<string, string>) =>
+      (await collect(
+        streamSse(opts(fetchReturning(new Response("slow down", { status: 429, headers })))),
+      ).catch((e) => e)) as ProviderError;
+    expect((await failWith({ "retry-after": "1.5" })).retryAfterMs).toBe(1_500);
+    expect((await failWith({ "retry-after-ms": "250" })).retryAfterMs).toBe(250);
+  });
+
+  it("does not read the account's window reset as the wait on an overload", async () => {
+    // Claude OAuth stamps the unified reset on every response. On a 529 it is
+    // the account's weekly horizon, not this failure's: read as the wait, the
+    // overload was never retried and its model was benched for days.
+    const reset = String(Math.floor(Date.now() / 1000) + 3 * 86_400);
+    const res = new Response('{"type":"error","error":{"type":"overloaded_error"}}', {
+      status: 529,
+      headers: { "anthropic-ratelimit-unified-reset": reset },
+    });
+    const err = (await collect(streamSse(opts(fetchReturning(res)))).catch(
+      (e) => e,
+    )) as ProviderError;
+    expect(err.kind).toBe("overload");
+    expect(err.retryAfterMs).toBeUndefined();
+    expect(err.resetAtMs).toBeUndefined();
+    expect(err.isTransient).toBe(true);
+
+    // The same header on a throttle IS about the window.
+    const throttled = (await collect(
+      streamSse(
+        opts(
+          fetchReturning(
+            new Response("rate limited", {
+              status: 429,
+              headers: { "anthropic-ratelimit-unified-reset": reset },
+            }),
+          ),
+        ),
+      ),
+    ).catch((e) => e)) as ProviderError;
+    expect(throttled.resetAtMs).toBe(Number(reset) * 1000);
+  });
+
   it("turns a transport rejection into a network ProviderError", async () => {
     const failing = (async () => {
       throw new TypeError("Failed to fetch");

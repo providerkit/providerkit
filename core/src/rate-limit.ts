@@ -248,12 +248,20 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
 
     const inSeconds = jsonSeconds(error.resets_in_seconds);
     const atSeconds = jsonSeconds(error.resets_at);
+    // The plain wait some gateways put in the error body instead of a header,
+    // under either name (cc-proxy reads both off the ChatGPT backend's frames).
+    const afterSeconds =
+      jsonSeconds(error.retry_after) ??
+      jsonSeconds(error.retry_after_seconds) ??
+      jsonSeconds((body as Record<string, unknown>).retry_after_seconds);
     const waitMs =
       inSeconds !== undefined && inSeconds >= 0
         ? inSeconds * 1000
         : atSeconds !== undefined && atSeconds > 0
           ? Math.max(0, atSeconds * 1000 - now)
-          : undefined;
+          : afterSeconds !== undefined && afterSeconds >= 0
+            ? afterSeconds * 1000
+            : undefined;
     if (waitMs !== undefined) {
       const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
       if (waitMs > WINDOW_FLOOR_MS) {
