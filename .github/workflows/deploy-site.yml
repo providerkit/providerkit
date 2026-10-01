@@ -7,7 +7,7 @@ on:
   # `paths` below is the gate for pushes, so the only extra cost is one ~2-minute
   # Pages build after an auto-merge that changed nothing the site ships. If that
   # starts to matter, gate on a diff against this workflow's last successful run,
-  # as aboard's deploy-web does.
+  # as one sibling repo's web deploy does.
   workflow_dispatch:
     inputs:
       force:
