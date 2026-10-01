@@ -957,6 +957,10 @@ describe("cached-token spellings", () => {
     expect(
       await usage({ prompt_tokens: 1000, completion_tokens: 5, prompt_cache_hit_tokens: 900 }),
     ).toMatchObject({ inputTokens: 1000, cachedInputTokens: 900 });
+    // Kimi's spelling — top level of `usage`.
+    expect(
+      await usage({ prompt_tokens: 1000, completion_tokens: 5, cached_tokens: 600 }),
+    ).toMatchObject({ inputTokens: 1000, cachedInputTokens: 600 });
     expect(
       await usage({
         prompt_tokens: 1000,
@@ -1115,6 +1119,29 @@ describe("what the OpenAI dialect cannot carry", () => {
         role: "user",
         content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }],
       },
+    ]);
+  });
+
+  it("holds the images until every parallel tool result has answered", async () => {
+    // An assistant turn with parallel calls needs all its tool messages before
+    // any user message. A user message wedged between two of them is a 400.
+    const shot = (data: string) => ({ type: "image" as const, mimeType: "image/png", data });
+    const url = (data: string) => ({
+      type: "image_url",
+      image_url: { url: `data:image/png;base64,${data}` },
+    });
+    const out = toOpenAIMessages([
+      { role: "tool", toolCallId: "a", name: "shot", content: "one", images: [shot("AAAA")] },
+      { role: "tool", toolCallId: "b", name: "read", content: "two" },
+      { role: "tool", toolCallId: "c", name: "shot", content: "three", images: [shot("BBBB")] },
+      { role: "user", content: "next" },
+    ]);
+    expect(out).toEqual([
+      { role: "tool", tool_call_id: "a", content: "one" },
+      { role: "tool", tool_call_id: "b", content: "two" },
+      { role: "tool", tool_call_id: "c", content: "three" },
+      { role: "user", content: [url("AAAA"), url("BBBB")] },
+      { role: "user", content: "next" },
     ]);
   });
 
