@@ -556,7 +556,11 @@ describe.each(VENDORS)("$name", (vendor) => {
   });
 
   it("gives up on a stream that goes quiet, and never on one that is talking", async () => {
-    const watch = streamWatch({ provider: vendor.name, idleMs: 20, progressMs: 60 });
+    // The fixture beats every 5ms. The idle clock needs real headroom over
+    // that: at 20ms, a full parallel run delayed one beat past it and the
+    // socket's clock fired instead of the progress clock.
+    const clocks = { idleMs: 200, progressMs: 400 };
+    const watch = streamWatch({ provider: vendor.name, ...clocks });
     const err = await thrownBy(
       watchChunks(
         watch,
@@ -573,7 +577,7 @@ describe.each(VENDORS)("$name", (vendor) => {
     expect(String(err)).toContain("without a chunk");
     expect(watch.firstChunkMs()).toBeNull();
 
-    const talking = streamWatch({ provider: vendor.name, idleMs: 20, progressMs: 60 });
+    const talking = streamWatch({ provider: vendor.name, ...clocks });
     await assemble(watchChunks(talking, ask(vendor.create(serving(vendor.turn)))));
     expect(talking.firstChunkMs()).not.toBeNull();
   });
