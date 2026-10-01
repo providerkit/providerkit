@@ -34,6 +34,7 @@ import type {
   Provider,
   ProviderChunk,
   StreamOptions,
+  TokenUsage,
   ToolDefinition,
 } from "./types.ts";
 
@@ -167,19 +168,29 @@ export async function* watchChunks<T>(
 }
 
 /**
- * Reject a turn that completed but produced nothing usable.
+ * Reject a turn that completed without an answer.
  *
- * A stream that ends with no text, no reasoning and no tool call is a failure
- * wearing a success's clothes: `stop_reason: end_turn` with zero content
- * blocks, which the vendors emit under load and after a thinking block eats
- * the whole `max_tokens`. Nothing throws, so nothing retries — the caller
- * simply shows a person an empty answer, and the only trace is a bill.
+ * A stream that ends with no text and no tool call is a failure wearing a
+ * success's clothes: `stop_reason: end_turn` with zero content blocks, which
+ * the vendors emit under load, or a thinking block that ate the whole
+ * `max_tokens`. Nothing throws, so nothing retries — the caller simply shows a
+ * person an empty answer, and the only trace is a bill.
  *
- * Classified `overload` because that is both true and useful: it is theirs and
- * temporary, so it is transient (the same model, retried, usually answers) and
- * backup-eligible (a model that keeps doing it should be walked away from).
- * The throw lands before any chunk is yielded downstream, so the retry rule
- * that matters — retry only while nothing was emitted — still holds.
+ * Reasoning is not an answer. It still streams the moment it arrives, so a
+ * reader can watch the model think, but a turn that only thought has said
+ * nothing. Counting it as content is how a review capped at 2,048 tokens on a
+ * high-effort model passed this guard 22 times in a row in production: every
+ * token went to thinking, the answer was an empty string, and the app's JSON
+ * parse failed on it with nothing to say why.
+ *
+ * Classified by what fixes it. A `length` finish is the caller's own cap:
+ * `invalid`, so nothing retries it into the same cap and no backup model is
+ * cooled down for it — the fix is a larger `maxTokens` or a lower effort. Any
+ * other empty turn is `overload`, because that is both true and useful: it is
+ * theirs and temporary, so it is transient (the same model, retried, usually
+ * answers) and backup-eligible (a model that keeps doing it should be walked
+ * away from). Until something streams, the empty frames are held back, so the
+ * retry rule that matters — retry only while nothing was emitted — still holds.
  */
 export async function* requireContent<T extends ProviderChunk>(
   provider: string,
@@ -187,18 +198,22 @@ export async function* requireContent<T extends ProviderChunk>(
   opts: { afterToolResult?: boolean } = {},
 ): AsyncGenerator<T> {
   const held: T[] = [];
-  let usable = false;
+  let streaming = false;
+  let answered = false;
   let finish: ProviderChunk["finishReason"];
+  let usage: TokenUsage | undefined;
 
   for await (const chunk of chunks) {
     if (chunk.type === "finish") finish = chunk.finishReason;
-    if (!usable) {
-      usable = Boolean(chunk.content || chunk.reasoning || chunk.toolCalls?.length);
+    if (chunk.usage) usage = chunk.usage;
+    answered ||= Boolean(chunk.content || chunk.toolCalls?.length);
+    if (!streaming) {
+      streaming = answered || Boolean(chunk.reasoning);
       // Held rather than forwarded: once a chunk is out, the stream is
       // committed and the retry this guard exists to trigger can no longer
-      // fire. Nothing content-bearing has arrived yet, so there is nothing to
+      // fire. Nothing has arrived worth showing yet, so there is nothing to
       // hold back but the empty frames.
-      if (!usable) {
+      if (!streaming) {
         held.push(chunk);
         continue;
       }
@@ -208,7 +223,7 @@ export async function* requireContent<T extends ProviderChunk>(
     yield chunk;
   }
 
-  if (usable) return;
+  if (answered) return;
   // The one empty turn that is an answer: the model read a tool result and
   // chose to stop. An agent whose reply IS a tool (a chat bot's send_message)
   // ends every turn this way — retried, cc-proxy measured one such bot
@@ -217,6 +232,16 @@ export async function* requireContent<T extends ProviderChunk>(
   if (opts.afterToolResult && finish === "stop") {
     yield* held;
     return;
+  }
+  if (finish === "length") {
+    const spent = usage?.reasoningTokens
+      ? ` (${usage.reasoningTokens} of ${usage.outputTokens} output tokens went to reasoning)`
+      : "";
+    throw new ProviderError(
+      provider,
+      "invalid",
+      `${provider}: the output cap ran out before any answer${spent} — raise maxTokens or lower effort`,
+    );
   }
   throw new ProviderError(provider, "overload", `${provider}: completed with no content`);
 }

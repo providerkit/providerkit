@@ -2,6 +2,13 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.17.0] - 2026-10-01
+
+### Changed
+
+- **A turn that only thought now fails.** `requireContent`, which `withWatchdog` turns on by default, used to count reasoning as an answer. A high-effort model capped at 2,048 tokens spent all of them thinking and answered with an empty string. That passed as a success 22 times in a row in one production app, and the app's JSON parse failed with no hint why. An answer is now text or a tool call. Reasoning still streams as it arrives. An empty `stop` right after a tool result still passes.
+- **An empty turn that hit `maxTokens` is `invalid`, not `overload`.** The cap was yours, so retrying it, or walking to a backup model, fails the same way and cools down models that did nothing wrong. The error says so: `the output cap ran out before any answer (2048 of 2048 output tokens went to reasoning) — raise maxTokens or lower effort`. Any other empty turn is still `overload`.
+
 ## [0.16.1] - 2026-10-01
 
 ### Fixed

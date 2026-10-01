@@ -77,12 +77,22 @@ for await (const chunk of guarded.createStream(messages, tools, { signal: caller
 }
 ```
 
-`guarded` is an ordinary `Provider`, so retry and backup-model walkers wrap it unchanged — and
-both failures it raises are transient, which is what makes that correct. It passes
-`onActivity` for you. The wrapper catches the other way a stream fails silently too: a turn that
-ends having said nothing throws as `overload` instead of succeeding with an empty answer. One
-exception: an empty `stop` right after a tool result passes, because an agent whose answer is
-the tool call ends its turn exactly that way. `requireContent: false` turns the check off;
+`guarded` is an ordinary `Provider`, so retry and backup-model walkers wrap it unchanged. It
+passes `onActivity` for you. The wrapper catches the other way a stream fails silently too: a
+turn that ends without an answer throws instead of succeeding with an empty one. An answer is
+text or a tool call. Reasoning still streams as it arrives, but a turn that only thought has
+said nothing.
+
+How it throws depends on why the turn was empty:
+
+- **It hit `maxTokens`** (a `length` finish): `invalid`. On most providers thinking and answer
+  share the cap, so a high-effort model can spend all of it thinking. Raise `maxTokens` or
+  lower `effort`. It is never retried and never sent to a backup model, because the same cap
+  would fail the same way.
+- **Anything else**: `overload`, which is transient, so the retry and backup walkers try again.
+
+One exception: an empty `stop` right after a tool result passes, because an agent whose answer
+is the tool call ends its turn exactly that way. `requireContent: false` turns the check off;
 `onFirstChunk` reports TTFT without the plumbing.
 
 ## A stream that ends too early
