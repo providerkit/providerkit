@@ -78,7 +78,11 @@ export interface StreamWatchOptions {
 export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
   const provider = opts.provider ?? "provider";
   const idleMs = opts.idleMs ?? STREAM_IDLE_MS;
-  const progressMs = opts.progressMs ?? STREAM_PROGRESS_MS;
+  // Never shorter than the idle clock unless the caller says so. Progress is
+  // the PATIENT clock; a caller who raised `idleMs` past five minutes (to
+  // keep an outer watch from cutting a model chain's own rotation) was still
+  // cut at five, by a clock they never set (@falai/agent, on 0.16.0).
+  const progressMs = opts.progressMs ?? Math.max(STREAM_PROGRESS_MS, idleMs);
   const callerSignal = opts.signal;
   const started = Date.now();
   const timeout = new AbortController();
@@ -222,7 +226,7 @@ export interface WatchdogOptions {
    *  Defaults to `STREAM_IDLE_MS`. */
   idleMs?: number;
   /** No chunk this long, from the POST on, and the stream is going nowhere.
-   *  Defaults to `STREAM_PROGRESS_MS`. */
+   *  Defaults to `STREAM_PROGRESS_MS`, or to `idleMs` when that is longer. */
   progressMs?: number;
   /**
    * Reject a turn that ends having said nothing, as `requireContent` does. On

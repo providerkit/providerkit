@@ -44,7 +44,7 @@ The watch runs two clocks, because "silent" means two different things:
   the request is sent. That catches a stream that stays alive and goes nowhere, and it covers
   the wait for the response to start. Some backends think before they send a single byte: the
   ChatGPT backend can stay silent for minutes on a large prompt at high effort, and that turn is
-  healthy.
+  healthy. If you set a longer `idleMs` and leave `progressMs` out, progress waits as long as idle.
 
 `watchChunks` calls `sawByte()` for you on each chunk, which resets both. When either runs out,
 `watch.signal` aborts, and `watch.classify(err)` turns the abort into a `timeout`. That is how you

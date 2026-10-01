@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.16.1] - 2026-10-01
+
+### Fixed
+
+- **A long `idleMs` was cut short at 5 minutes.** 0.16.0 added a progress clock with a 5-minute default, and raising `idleMs` didn't raise it. An outer watchdog set to 30 minutes, so a model chain could rotate inside it, aborted the whole chain at 5. When you don't set `progressMs`, it now defaults to `idleMs` if that is longer. A `progressMs` you set is still used as given.
+
 ## [0.16.0] - 2026-10-01
 
 Lessons from cc-proxy, a proxy that serves Claude Code over Codex, Kimi, Grok, OpenCode Go and GLM every day. Most of these are bugs it hit live, and this package had too.
