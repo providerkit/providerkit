@@ -39,6 +39,23 @@ describe("streamWatch", () => {
     watch.dispose();
   });
 
+  it("never runs the progress clock shorter than a longer idle clock", () => {
+    // An outer watch raised to 30 minutes so a model chain can rotate inside
+    // it must not be cut at five by a default the caller never set.
+    const watch = streamWatch({ idleMs: 30 * 60_000 });
+    vi.advanceTimersByTime(STREAM_PROGRESS_MS * 2);
+    expect(watch.signal.aborted).toBe(false);
+    vi.advanceTimersByTime(30 * 60_000 - STREAM_PROGRESS_MS * 2);
+    expect(watch.signal.aborted).toBe(true);
+    watch.dispose();
+
+    // A progress clock the caller DID set is theirs.
+    const explicit = streamWatch({ idleMs: 30 * 60_000, progressMs: 1_000 });
+    vi.advanceTimersByTime(1_000);
+    expect(explicit.signal.aborted).toBe(true);
+    explicit.dispose();
+  });
+
   it("lives on keep-alives, but not forever", () => {
     // A keep-alive is proof the socket is up — and a stream that sends nothing
     // else is still going nowhere. The idle clock never trips; progress does.
