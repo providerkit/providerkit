@@ -387,13 +387,21 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           input_schema: toAnthropicToolSchema(tool.inputSchema),
         }));
       }
-      if (opts.toolChoice && opts.toolChoice !== "auto" && !unforced) {
-        request.tool_choice =
-          opts.toolChoice === "none"
+      const choice =
+        opts.toolChoice && opts.toolChoice !== "auto" && !unforced
+          ? opts.toolChoice === "none"
             ? { type: "none" }
             : opts.toolChoice === "required"
               ? { type: "any" }
-              : { type: "tool", name: opts.toolChoice.name };
+              : { type: "tool", name: opts.toolChoice.name }
+          : undefined;
+      // This wire says "one call at a time" inside the tool choice, so asking
+      // for it needs a choice to ride on — `auto` when the caller named none.
+      // `none` calls nothing, so there is nothing to serialize.
+      if (opts.parallelToolCalls === false && offered.length > 0 && choice?.type !== "none") {
+        request.tool_choice = { ...(choice ?? { type: "auto" }), disable_parallel_tool_use: true };
+      } else if (choice) {
+        request.tool_choice = choice;
       }
       // Extended mode, which is all Claude 4.5 and older have, can't think on
       // two kinds of request this adapter sends, so those run without thinking.

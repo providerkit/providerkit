@@ -399,6 +399,7 @@ interface OpenAIChunk {
     prompt_tokens?: number;
     completion_tokens?: number;
     prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
     /** DeepSeek's native API reports the cache-hit count here instead of in
      *  `prompt_tokens_details`, and it is absent from every OpenAI SDK type. */
     prompt_cache_hit_tokens?: number;
@@ -496,6 +497,8 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             parameters: tool.inputSchema,
           },
         }));
+        // Only beside tools: OpenAI refuses the field on a request without any.
+        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
       }
       if (opts.toolChoice && opts.toolChoice !== "auto") {
         request.tool_choice =
@@ -627,6 +630,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
               // Anthropic's, which excludes them. No reconciling to do.
               cachedInputTokens: cached,
               outputTokens: chunk.usage.completion_tokens ?? 0,
+              ...(chunk.usage.completion_tokens_details?.reasoning_tokens !== undefined
+                ? { reasoningTokens: chunk.usage.completion_tokens_details.reasoning_tokens }
+                : {}),
               ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
             },
           };

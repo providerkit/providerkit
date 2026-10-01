@@ -331,6 +331,16 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       ];
       if (systemParts.length > 0) request.systemInstruction = { parts: systemParts };
       if (tools.length > 0) {
+        // Gemini has no switch for one call per turn. Sending the request
+        // anyway would hand back the parallel calls the caller ruled out.
+        if (opts.parallelToolCalls === false) {
+          throw new ProviderError(
+            id,
+            "invalid",
+            `${id}: Gemini can't limit a turn to one tool call. Leave parallelToolCalls unset ` +
+              "for Gemini models, or run the calls it returns one at a time.",
+          );
+        }
         request.tools = [
           {
             functionDeclarations: tools.map((tool) => ({
@@ -397,6 +407,9 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
               // turn by most of what it cost.
               outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
               cachedInputTokens: usage.cachedContentTokenCount ?? 0,
+              ...(usage.thoughtsTokenCount !== undefined
+                ? { reasoningTokens: usage.thoughtsTokenCount }
+                : {}),
             },
           };
         }

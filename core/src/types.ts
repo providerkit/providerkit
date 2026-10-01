@@ -158,6 +158,13 @@ export interface TokenUsage {
   cacheWriteTokens?: number;
   outputTokens: number;
   /**
+   * The part of `outputTokens` spent thinking, when the provider reports it —
+   * already INSIDE `outputTokens`, so never add it again. It is the number
+   * that explains a turn that came back empty with a length finish: the
+   * reasoning ate the budget. Anthropic does not report it; absent there.
+   */
+  reasoningTokens?: number;
+  /**
    * What the provider says this call cost, in USD: its bill, not our
    * arithmetic. Only OpenRouter sends one today. It is the one number a rate
    * cannot give, because OpenRouter serves one model id from many hosts at
@@ -373,6 +380,13 @@ export interface StreamOptions {
    * works, on the watchdog's progress clock alone.
    */
   onActivity?: () => void;
+  /**
+   * `false` asks for at most one tool call per turn — for tools that must run
+   * in order, or a backend lane that refuses parallel calls. Absent or `true`
+   * is every vendor's default and sends nothing. Gemini has no such switch,
+   * so it refuses `false` rather than silently ignore it.
+   */
+  parallelToolCalls?: boolean;
 }
 
 export interface Provider {

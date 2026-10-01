@@ -147,7 +147,7 @@ const OPENAI_TURN = crlf(
     'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"q\\":"}}]},"finish_reason":null}]}',
     'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"cats\\"}"}}]},"finish_reason":null}]}',
     'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
-    'data: {"choices":[],"usage":{"prompt_tokens":1050,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":900}}}',
+    'data: {"choices":[],"usage":{"prompt_tokens":1050,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":900},"completion_tokens_details":{"reasoning_tokens":4}}}',
     "data: [DONE]",
   ),
 );
@@ -186,7 +186,7 @@ const RESPONSES_TURN = wire(
   'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"q\\":"}',
   'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\\"cats\\"}"}',
   'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"search","arguments":"{\\"q\\":\\"cats\\"}"}}',
-  'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1050,"output_tokens":12,"input_tokens_details":{"cached_tokens":900}}}}',
+  'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1050,"output_tokens":12,"input_tokens_details":{"cached_tokens":900},"output_tokens_details":{"reasoning_tokens":4}}}}',
 );
 
 // The throttle each backend reports AFTER committing to 200 — the failure with
@@ -288,6 +288,7 @@ interface Turn {
     cachedInputTokens: number;
     cacheWriteTokens: number;
     outputTokens: number;
+    reasoningTokens?: number;
   };
   finishReason: FinishReason | null;
 }
@@ -449,6 +450,9 @@ describe.each(VENDORS)("$name", (vendor) => {
         cachedInputTokens: 900,
         cacheWriteTokens: 0,
         outputTokens: 12,
+        // The thinking share of those 12, on every wire that reports one.
+        // Anthropic's does not, and a guessed number is worse than none.
+        ...(vendor.name === "anthropic" ? {} : { reasoningTokens: 4 }),
       },
       finishReason: "tool_calls",
     } satisfies Turn);

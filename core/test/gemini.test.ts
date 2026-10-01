@@ -108,7 +108,25 @@ describe("gemini adapter", () => {
       inputTokens: 1_000,
       cachedInputTokens: 800,
       outputTokens: 320,
+      reasoningTokens: 300,
     });
+  });
+
+  it("refuses one-call-per-turn rather than ignore it", async () => {
+    // Gemini has no switch for it. Sent anyway, the turn hands back the
+    // parallel calls the caller ruled out.
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    const tool = { name: "t", description: "t", inputSchema: { type: "object" as const } };
+    const err = await collect(
+      provider(fetchImpl).createStream(HI, [tool], { parallelToolCalls: false }),
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ kind: "invalid" });
+    expect(seen).toHaveLength(0);
+
+    // Without tools there is nothing to serialize, and `true` is the default.
+    await collect(provider(fetchImpl).createStream(HI, [], { parallelToolCalls: false }));
+    await collect(provider(fetchImpl).createStream(HI, [tool], { parallelToolCalls: true }));
+    expect(seen).toHaveLength(2);
   });
 
   it("splits thought parts into reasoning and the rest into content", async () => {

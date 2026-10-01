@@ -42,6 +42,9 @@ export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
     cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
     outputTokens: a.outputTokens + b.outputTokens,
+    ...(a.reasoningTokens !== undefined || b.reasoningTokens !== undefined
+      ? { reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0) }
+      : {}),
   };
 }
 
@@ -55,6 +58,9 @@ export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
     cacheWriteTokens: Math.max(0, (a.cacheWriteTokens ?? 0) - (b.cacheWriteTokens ?? 0)),
     outputTokens: Math.max(0, a.outputTokens - b.outputTokens),
+    ...(a.reasoningTokens !== undefined
+      ? { reasoningTokens: Math.max(0, a.reasoningTokens - (b.reasoningTokens ?? 0)) }
+      : {}),
   };
 }
 

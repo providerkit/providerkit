@@ -187,3 +187,13 @@ describe("subtractUsage", () => {
     });
   });
 });
+
+describe("reasoningTokens", () => {
+  it("sums only where a provider reported it, so absent never reads as zero", () => {
+    const thinking = usage({ outputTokens: 10, reasoningTokens: 6 });
+    const silent = usage({ outputTokens: 5 });
+    expect(addUsage(thinking, silent).reasoningTokens).toBe(6);
+    expect(addUsage(silent, silent)).not.toHaveProperty("reasoningTokens");
+    expect(subtractUsage(thinking, usage({ reasoningTokens: 9 })).reasoningTokens).toBe(0);
+  });
+});

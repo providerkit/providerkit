@@ -4,6 +4,7 @@ import {
   isStrictSchema,
   toAnthropicToolSchema,
   toGeminiToolSchema,
+  withoutPatterns,
 } from "../src/schema.ts";
 
 describe("toGeminiToolSchema", () => {
@@ -167,5 +168,39 @@ describe("isStrictSchema", () => {
       additionalProperties: false,
     };
     expect(isStrictSchema(schema)).toBe(false);
+  });
+});
+
+describe("withoutPatterns", () => {
+  it("strips every regex constraint, wherever a schema can nest one", () => {
+    const pattern = "^[a-z]+$";
+    expect(
+      withoutPatterns({
+        type: "object",
+        pattern,
+        properties: { slug: { type: "string", pattern } },
+        patternProperties: { "^x-": { type: "string", pattern } },
+        anyOf: [{ type: "string", pattern }],
+        items: [{ type: "string", pattern }],
+        $defs: { id: { type: "string", pattern } },
+      }),
+    ).toEqual({
+      type: "object",
+      properties: { slug: { type: "string" } },
+      patternProperties: { "^x-": { type: "string" } },
+      anyOf: [{ type: "string" }],
+      items: [{ type: "string" }],
+      $defs: { id: { type: "string" } },
+    });
+  });
+
+  it("leaves data alone — a default or enum may hold a key named pattern", () => {
+    const schema = {
+      type: "object",
+      default: { pattern: "keep" },
+      enum: [{ pattern: "keep" }],
+      properties: { pattern: { type: "string" } },
+    };
+    expect(withoutPatterns(schema)).toEqual(schema);
   });
 });

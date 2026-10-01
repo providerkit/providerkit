@@ -24,7 +24,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
-import { isStrictSchema } from "../schema.ts";
+import { isStrictSchema, withoutPatterns } from "../schema.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
 export interface ResponsesConfig extends ProviderFallbackConfig {
@@ -198,6 +198,7 @@ interface ResponsesUsage {
   input_tokens?: number;
   input_tokens_details?: { cached_tokens?: number };
   output_tokens?: number;
+  output_tokens_details?: { reasoning_tokens?: number };
 }
 
 interface ResponsesItem {
@@ -286,6 +287,9 @@ function usageChunk(usage: ResponsesUsage): ProviderChunk {
       cachedInputTokens: usage.input_tokens_details?.cached_tokens ?? 0,
       // Reasoning tokens are billed INSIDE output_tokens, not beside them.
       outputTokens: usage.output_tokens ?? 0,
+      ...(usage.output_tokens_details?.reasoning_tokens !== undefined
+        ? { reasoningTokens: usage.output_tokens_details.reasoning_tokens }
+        : {}),
     },
   };
 }
@@ -361,9 +365,20 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           type: "function",
           name: tool.name,
           description: tool.description,
-          parameters: tool.inputSchema,
+          parameters: withoutPatterns(tool.inputSchema),
+          // Said either way, never left to the default. Strict demands every
+          // property required and every object closed; on a schema that is not
+          // already shaped that way the backend makes optional arguments
+          // mandatory, and the model starts filling in parameters nobody asked
+          // for (cc-proxy, 0.1.15). Where the schema already qualifies, the
+          // enforcement is free.
+          strict: isStrictSchema(tool.inputSchema),
         }));
+        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
       }
+      // The cache affinity key. Without one the backend spreads a
+      // conversation's turns across cache shards, and a re-sent prefix misses.
+      if (opts.sessionId) request.prompt_cache_key = opts.sessionId;
       // Muse Contributor accepts only `auto`. `none` has an exact wire-level
       // equivalent: send no tools. Required/named choices stay explicit and let
       // the endpoint refuse a promise it cannot keep.

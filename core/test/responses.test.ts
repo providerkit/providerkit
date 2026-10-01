@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { createResponsesProvider, toResponsesInput } from "../src/providers/responses.ts";
 import { ProviderError } from "../src/errors.ts";
-import type { ChatMessage, ProviderChunk } from "../src/types.ts";
+import type { ChatMessage, ProviderChunk, ToolDefinition } from "../src/types.ts";
 
 /**
  * Records the request and replays a canned transcript. Frames go out with the
@@ -110,6 +110,21 @@ describe("responses adapter", () => {
       inputTokens: 1_000,
       cachedInputTokens: 800,
       outputTokens: 20,
+    });
+  });
+
+  it("reports the thinking share of the output, already inside it", async () => {
+    const { fetchImpl } = recorder([
+      j({ type: "response.output_text.delta", delta: "ok" }),
+      j({
+        type: "response.completed",
+        response: { usage: { ...USAGE, output_tokens_details: { reasoning_tokens: 12 } } },
+      }),
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(chunks.find((c) => c.type === "usage")?.usage).toMatchObject({
+      outputTokens: 20,
+      reasoningTokens: 12,
     });
   });
 
@@ -703,6 +718,7 @@ describe("responses request", () => {
         name: "search",
         description: "look it up",
         parameters: { type: "object", properties: { q: { type: "string" } } },
+        strict: false,
       },
     ]);
     expect(seen[0]!.body.tool_choice).toEqual({ type: "function", name: "search" });
@@ -710,6 +726,61 @@ describe("responses request", () => {
     expect(seen[0]!.body.text).toEqual({
       format: { type: "json_schema", name: "answer", schema: { type: "object" }, strict: true },
     });
+  });
+
+  it("says strict either way, and leaves no regex for the backend to choke on", async () => {
+    // The ChatGPT backend 400s the WHOLE request on a pattern it cannot
+    // compile (Claude Code's Artifact tool, cc-proxy #141). A property NAMED
+    // `pattern` is data, not a constraint, and stays.
+    const strictTool: ToolDefinition = {
+      name: "save",
+      description: "save a file",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", pattern: "^(?!-)[a-z-]+$" },
+          pattern: { type: "string" },
+          tags: { type: "array", items: { type: "string", pattern: "^#" } },
+        },
+        required: ["id", "pattern", "tags"],
+        additionalProperties: false,
+      },
+    };
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(provider({ fetchImpl }).createStream(hi, [strictTool]));
+    expect(seen[0]!.body.tools).toEqual([
+      {
+        type: "function",
+        name: "save",
+        description: "save a file",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            pattern: { type: "string" },
+            tags: { type: "array", items: { type: "string" } },
+          },
+          required: ["id", "pattern", "tags"],
+          additionalProperties: false,
+        },
+        strict: true,
+      },
+    ]);
+  });
+
+  it("pins the cache to the session and serializes calls when asked", async () => {
+    const tool = { name: "t", description: "t", inputSchema: { type: "object" as const } };
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider({ fetchImpl }).createStream(hi, [tool], {
+        sessionId: "conv-42",
+        parallelToolCalls: false,
+      }),
+    );
+    await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(seen[0]!.body).toMatchObject({ prompt_cache_key: "conv-42", parallel_tool_calls: false });
+    expect(seen[1]!.body).not.toHaveProperty("prompt_cache_key");
+    expect(seen[1]!.body).not.toHaveProperty("parallel_tool_calls");
   });
 
   it("lets a per-call model and effort override the bound ones", async () => {
