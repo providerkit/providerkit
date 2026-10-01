@@ -190,7 +190,7 @@ un-learned.
 
 ## Next
 
-`0.4.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
+`0.16.1` is on npm. **Four of the five source codebases have migrated**, and every one of them
 came out smaller:
 
 | Migration                           | Runtime                                   |    Net |
@@ -213,12 +213,13 @@ all landed here, so what remains is mechanical and needs only a free tree.
 Every migration is tracked in `ROADMAP.local.md`, deliberately not in this repo because it is a
 map of codebases that are not open.
 
-**The fleet is on `^0.4.0` from the registry** — every adopter, including the one whose migration
+**The fleet is on `^0.16` from the registry** — every adopter, including the one whose migration
 was backed out but whose newest module was already written against the package. No `link:`, no
-`file:`, nothing that resolves only on one machine. Each flip was verified against the adopter's
-own gates, not just installed. The two that were on a `bun link` were already running this exact
-code — the published `dist/` is byte-identical to what the link served — so for them it was a
-resolution change and nothing more; the two on `^0.1.0`/`^0.2.0` gained the round that inverted
+`file:`, nothing that resolves only on one machine. Each bump is verified against the adopter's
+own gates, not just installed. On the first flip, to `^0.4.0`, the two that were on a `bun link`
+were already running that exact code — the published `dist/` was byte-identical to what the link
+served — so for them it was a resolution change and nothing more; the two on `^0.1.0`/`^0.2.0`
+gained the round that inverted
 invariant 2 (`classify` re-deriving a `ProviderError` it had already classified, landing on
 `unknown`, so the watchdog's own idle timeout was never retried).
 
@@ -284,6 +285,14 @@ lands — that is the whole point, and it is how the other four repos get it.
   test here. Its fixes were already measured on live traffic, so they came up with their
   evidence. Where its behaviour could not be checked here (Codex `max` effort on older
   models, Kimi's effort scale), it stayed out until someone measures it.
+- **A bump is an audit too, and it breaks where an adopter rebuilt a composition.** Taking 0.16
+  across nine repos found three that had assembled the watchdog or the error envelope by hand.
+  Two built `streamWatch` without `onActivity`, so keep-alives never counted and the new idle
+  clock would cut a long tool-call buffer at 60s. One re-derived a core `ProviderError` from its
+  status and landed on `unknown` — `classify`'s old bug, one layer up. And the new progress clock
+  ignored the `idleMs` callers had already raised, which cut `@falai/agent`'s 30-minute outer
+  watch at five (0.16.1). Hand adopters `withWatchdog` and the error's `kind`, not the parts; and
+  a new knob takes its default from the one it constrains.
 - **Not everything should migrate.** The adopter's context-window ladder stayed put: it learns
   the real ceiling from a provider's own length rejection instead of guessing from a model
   name, which is better than the regex ladder here, and it is tied to that app's storage. A
