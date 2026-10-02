@@ -216,6 +216,10 @@ describe("classifyHttp — the response-shaped entry point", () => {
     expect(classifyHttp(400, "Upgrade for access to frontier models")).toBe("entitlement");
   });
 
+  it("reads an OAuth invalid_grant as auth, not as a bad request", () => {
+    expect(classifyHttp(400, '{"error":"invalid_grant"}')).toBe("auth");
+  });
+
   it("reads expired token and unrecognized client as auth", () => {
     expect(classifyHttp(400, "token has expired: expired_token")).toBe("auth");
     expect(classifyHttp(400, '{"__type":"UnrecognizedClientException"}')).toBe("auth");

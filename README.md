@@ -124,6 +124,7 @@ drift.
 | [Tools](https://providerkit.dev/guides/tools/)                          | Tool kernel, truncated-argument salvage, zod     |
 | [Context and compaction](https://providerkit.dev/guides/context/)       | When to compact, and where to cut                |
 | [Usage and cost](https://providerkit.dev/guides/usage/)                 | Reconciling cache tokens, cost, savings          |
+| [Sign in to a subscription](https://providerkit.dev/guides/auth/)       | Device code and PKCE sign-in, token refresh      |
 | [Jev decisions](https://providerkit.dev/guides/jev/)                    | TypeSafe's decision model on four hosts          |
 
 The [API reference](https://providerkit.dev/reference/) is generated from the source, so it

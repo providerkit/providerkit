@@ -105,6 +105,10 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    *  no sessionId, the provider's own per-instance id rides instead, so the
    *  gateway never sees a call without one. */
   sessionHeader?: string;
+  /** Send `X-Initiator`: `user` when the last message is the user's, else
+   *  `agent`. GitHub Copilot bills a premium request per `user` turn and lets
+   *  the agent's own follow-ups (tool results) ride free. */
+  initiatorHeader?: boolean;
   /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
   serviceTier?: ServiceTier;
 }
@@ -586,6 +590,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           ...attributionHeaders(config, config.headers),
           ...(config.sessionHeader
             ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
+            : {}),
+          ...(config.initiatorHeader
+            ? { "X-Initiator": messages.at(-1)?.role === "user" ? "user" : "agent" }
             : {}),
           ...config.headers,
         },

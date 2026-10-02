@@ -423,6 +423,9 @@ const AUTH_PATTERNS: readonly RegExp[] = [
   /account (?:disabled|suspended|deactivated|banned)/i,
   /unrecognizedclient|unauthorizedexception|accessdeniedexception/i,
   /expired[_\s]?token/i,
+  // OAuth's answer to a refresh token that was revoked, spent or expired. It
+  // arrives as a 400, which on status alone reads as `invalid`.
+  /\binvalid_grant\b/i,
   /OAuth token has been revoked/i,
   // Cloudflare's code 7003, for an account id that names no account. It
   // arrives as a 404, which on status alone reads as a missing model — but

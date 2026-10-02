@@ -25,7 +25,7 @@ import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallbac
 
 export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** The credential: an API key for `key`/`bearer` presets, an ACCESS TOKEN
-   *  for `oauth` ones. Acquiring the token is the caller's job. */
+   *  for `oauth` ones. `@providerkit/core/auth` signs in and renews it. */
   apiKey: string;
   /** Which model to run. Absent = the preset's `defaultModel`; a preset
    *  without either throws rather than sending a request nobody chose. */
@@ -34,6 +34,9 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    *  take over in order when it fails (quota, rate, outage). Wins over `model`
    *  and the preset's `rotation`; `fallbacks` still run after the chain. */
   models?: readonly string[];
+  /** Replaces the preset's API root. For a vendor that gives each account its
+   *  own host (Copilot: `credential.baseUrl` from the sign-in). */
+  baseUrl?: string;
   effort?: Effort;
   /** Output ceiling. The Anthropic shape requires one; adapters default it. */
   maxTokens?: number;
@@ -95,6 +98,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
     );
   }
   const headers = { ...preset.headers, ...config.headers };
+  const baseUrl = config.baseUrl ?? preset.baseUrl;
   const maxTokens = config.maxTokens ?? preset.maxTokens;
 
   const {
@@ -116,7 +120,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         model,
         effort: config.effort,
         maxTokens,
-        baseUrl: preset.baseUrl,
+        baseUrl,
         id,
         headers,
         bearer: preset.auth !== "key",
@@ -134,11 +138,12 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         model,
         effort: config.effort,
         maxTokens,
-        baseUrl: preset.baseUrl,
+        baseUrl,
         ...(preset.path ? { path: preset.path } : {}),
         headers,
         ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
+        ...(preset.initiatorHeader ? { initiatorHeader: true } : {}),
         fetchImpl: config.fetchImpl,
       });
       break;
@@ -149,7 +154,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         model,
         effort: config.effort,
         maxTokens,
-        baseUrl: preset.baseUrl,
+        baseUrl,
         ...(preset.path ? { path: preset.path } : {}),
         id,
         headers,
@@ -165,7 +170,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         apiKey: config.apiKey,
         model,
         effort: config.effort,
-        baseUrl: preset.baseUrl,
+        baseUrl,
         id,
         headers,
         fetchImpl: config.fetchImpl,
