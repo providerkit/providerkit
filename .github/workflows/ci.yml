@@ -20,7 +20,9 @@ concurrency:
 
 jobs:
   check:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # GitHub's own runner, unless the org sets the CI_RUNNER variable to another label
+    # (Blacksmith, self-hosted): one setting moves every job in every repo, with no PR.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@v7
 
