@@ -2,6 +2,20 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
+/** No em dash in user-facing text: it gives away AI-written copy. Every string, template
+ *  piece and JSX text in the shipped sources is checked; comments are not nodes, so they
+ *  stay free, and tests are exempt. The README, changelog, docs, Astro components and
+ *  package descriptions are covered by core/scripts/check-no-em-dash.ts. The regex uses a
+ *  unicode escape so this file does not contain the character itself. */
+const NO_EM_DASH = [
+  "Literal[value=/\\u2014/]",
+  "TemplateElement[value.raw=/\\u2014/]",
+  "JSXText[value=/\\u2014/]",
+].map((selector) => ({
+  selector,
+  message: "No em dash in user-facing text. Use a period, comma, colon or parentheses.",
+}));
+
 // One config for the whole repo — eslint walks up from each workspace, so
 // `eslint src` in core/ or site/ resolves to this file.
 export default tseslint.config(
@@ -26,6 +40,12 @@ export default tseslint.config(
       ],
       "@typescript-eslint/no-explicit-any": "error",
     },
+  },
+  {
+    files: ["core/src/**/*.ts", "core/scripts/**/*.ts", "site/src/**/*.{ts,tsx}", "brand/**/*.ts"],
+    // The guard script names the character, so the rule would flag its own constant.
+    ignores: ["core/scripts/check-no-em-dash.ts"],
+    rules: { "no-restricted-syntax": ["error", ...NO_EM_DASH] },
   },
   {
     // The site only. exhaustive-deps is the rule that catches real React bugs.
