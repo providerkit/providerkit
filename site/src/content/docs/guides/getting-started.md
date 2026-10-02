@@ -7,7 +7,7 @@ description: Install providerkit, stream your first completion, and understand w
 bun add @providerkit/core   # npm / pnpm / yarn all fine
 ```
 
-Zero runtime dependencies. `fetch` only — no vendor SDKs, no Node built-ins — so the same build
+Zero runtime dependencies. `fetch` only, with no vendor SDKs and no Node built-ins, so the same build
 runs in Node 22+, Bun, Deno, Cloudflare Workers and a Chrome MV3 service worker.
 
 ## A first stream
@@ -54,7 +54,7 @@ thought counts as no answer.
 ## Swapping the vendor
 
 An OpenAI-shaped provider is the same call with a different factory. `baseUrl` points it at any
-OpenAI-compatible endpoint — OpenRouter, DeepSeek, Groq, Together, LM Studio, Ollama:
+OpenAI-compatible endpoint: OpenRouter, DeepSeek, Groq, Together, LM Studio, Ollama.
 
 ```ts
 import { createOpenAIProvider } from "@providerkit/core";
@@ -72,14 +72,14 @@ Everything downstream is unchanged. That is the point of the seam.
 ## What this package is not
 
 It is **not** an agent framework. There is no loop, no prompt templates, no graph, no memory
-abstraction, no chain. Your loop is where your product actually lives — the approval gates, the
-sub-agents, the terminal-submit rules — and every one of those differs per app.
+abstraction, no chain. Your loop is where your product actually lives: the approval gates, the
+sub-agents, the terminal-submit rules. Every one of those differs per app.
 
 What is here is everything _underneath_ that loop: the provider seam, the error taxonomy, retry
 and fallback, the idle watchdog, the tool kernel, compaction decisions, and cost maths.
 
 ## Where to go next
 
-- [The provider seam](/guides/providers/) — the shapes every adapter speaks.
-- [Errors](/guides/errors/) — the thirteen kinds, and why status codes are not enough.
-- [Retries and fallback](/guides/retries/) — including the one rule that matters for streams.
+- [The provider seam](/guides/providers/): the shapes every adapter speaks.
+- [Errors](/guides/errors/): the thirteen kinds, and why status codes are not enough.
+- [Retries and fallback](/guides/retries/): including the one rule that matters for streams.

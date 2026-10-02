@@ -41,8 +41,8 @@ type ChatMessage =
 ```
 
 `reasoning` on an assistant turn is not decoration. Thinking-mode providers demand it echoed
-verbatim — DeepSeek returns a 400 on a tool-call turn that arrives without its `reasoning_content`
-— so the loop has to commit it even though the UI treats reasoning as display-only.
+verbatim. DeepSeek returns a 400 on a tool-call turn that arrives without its `reasoning_content`,
+so the loop has to commit it even though the UI treats reasoning as display-only.
 
 The mirror of that rule: a turn with thinking **disabled** must not carry reasoning. Use
 `stripReasoning(messages)` before sending one.
@@ -101,12 +101,12 @@ interface ToolCall {
 
 Gemini returns an opaque signature alongside a tool call, and it must go back **verbatim** on
 the next turn. Drop it and the model resumes from a chain of thought that no longer contains
-the call it just made — it re-plans, and often re-issues the tool call you already answered.
+the call it just made. It re-plans, and often re-issues the tool call you already answered.
 
 Nothing else in the seam is opaque, so it is the one field a store must round-trip without
 understanding. If your history layer normalises tool calls, keep this field.
 
-`reasoningDetails` is OpenRouter's normalized version of the same idea — its reasoning payload,
+`reasoningDetails` is OpenRouter's normalized version of the same idea: its reasoning payload,
 arriving on the stream and going back verbatim as `reasoning_details` on the next turn. Same
 contract: opaque, provider-owned. `drainStream` keeps it on the `Completion`; `stripReasoning`
 drops it along with `reasoning`, because a thinking-off turn must not carry either half of the
@@ -163,13 +163,13 @@ Anthropic-shape it depends on the model id:
 ## Structured output
 
 `json` asks for a schema-constrained answer. On the OpenAI shapes it rides the native schema mode,
-and `isStrictSchema` decides whether OpenAI's strict mode is requested — strict demands every
+and `isStrictSchema` decides whether OpenAI's strict mode is requested. Strict demands every
 listed property be required and every object closed with `additionalProperties: false`, all the
 way down, so a schema with one optional field would otherwise 400 the request. Pass `json.strict`
 to overrule that guess. Anthropic has no schema mode, so the schema rides in the prompt as an
 extra system block, placed after the cached one. Gemini takes it via `responseJsonSchema`.
 
-Whatever the shape, the seam never guarantees the JSON — validate the answer regardless. `json`
+Whatever the shape, the seam never guarantees the JSON, so validate the answer regardless. `json`
 only decides whether the request is accepted.
 
 Models also wrap their JSON: a fence, a sentence before it, notes after it. `parseJsonAnswer(text)`
@@ -189,8 +189,8 @@ the start of a line, so a JSON value that holds a code sample comes back whole. 
 ### When the same call also carries tools
 
 A model that cannot serve a schema and a tool call at once does not tell you. Its decoder is pinned
-to the schema, so the tool call has nowhere to go and the model writes the announcement instead —
-_"let me look that up for you"_ — and the turn ends. Nothing is logged, because nothing failed. It
+to the schema, so the tool call has nowhere to go and the model writes the announcement instead:
+_"let me look that up for you"_. Then the turn ends. Nothing is logged, because nothing failed. It
 reads as a model with no initiative, and no amount of prompting fixes it.
 
 Measured 2026-09-07, one request, sampled:
@@ -198,20 +198,20 @@ Measured 2026-09-07, one request, sampled:
 | model                    | response format | schema in the prompt |
 | ------------------------ | --------------- | -------------------- |
 | `z-ai/glm-5.3-flash`     | 0/10            | 8/8                  |
-| `z-ai/glm-5.3`           | 0/5             | —                    |
-| `deepseek-v4-flash-0731` | 0/5             | —                    |
-| `gemini-3.8-flash`       | 3/10            | —                    |
+| `z-ai/glm-5.3`           | 0/5             | -                    |
+| `deepseek-v4-flash-0731` | 0/5             | -                    |
+| `gemini-3.8-flash`       | 3/10            | -                    |
 | `gemini-3.5-flash-lite`  | 10/10           | 6/6                  |
 | `gpt-5.6-luna`           | 10/10           | 6/6                  |
 | `qwen3.8-flash`          | 10/10           | 1/6                  |
 
 `jsonWithTools: "prompt"` drops the response format from the calls that carry tools and sends the
-schema as prompt instead — what the Anthropic adapter has always done, which is why this cannot
+schema as prompt instead. That is what the Anthropic adapter has always done, which is why this cannot
 happen there. Calls without tools keep the format, where it is strictly better. It works the same
 way on the Gemini adapter, and `StreamOptions.jsonWithTools` overrides it per call.
 
 No default is right for everyone, and the qwen row is the whole argument: it is as broken by the
-prompt as GLM is by the format. So don't read it off a model card — ask the model:
+prompt as GLM is by the format. So don't read it off a model card. Ask the model:
 
 ```ts
 const probe = await probeJsonWithTools(provider);
@@ -219,10 +219,10 @@ const probe = await probeJsonWithTools(provider);
 if (!probe.use) throw new Error(`${model} cannot use tools with a schema at all`);
 ```
 
-Six short calls, once, at whatever moment you choose to ask — boot is the usual one. Log `calls`
+Six short calls, once, at whatever moment you choose to ask. Boot is the usual one. Log `calls`
 rather than just `use`: `0/3 and 3/3` is what makes the next model swap's regression obvious.
 
-It catches the structural failure — the model that _cannot_ emit the call, on the easiest question
+It catches the structural failure: the model that _cannot_ emit the call, on the easiest question
 there is. A model that is merely unreliable passes: `gemini-3.8-flash` answers the probe 3/3 and a
 real turn 3/10. That is the right line. A harder probe would start failing good models for being
 terse, and "sometimes forgets its tools" is a prompt problem, not a wire shape one.
@@ -237,7 +237,7 @@ terse, and "sometimes forgets its tools" is a prompt problem, not a wire shape o
 | `createGeminiProvider`    | Gemini REST             | no SDK; thought signatures survive tool turns, thoughts bill as output, Gemini 3 dials |
 
 On the OpenAI-shape adapter, `effortDialect` names which spelling of _think this hard_ the endpoint
-accepts — `openai`, `openrouter`, `deepseek`, or `off` for one that rejects the field outright. It
+accepts: `openai`, `openrouter`, `deepseek`, or `off` for one that rejects the field outright. It
 is inferred from the provider `id` where the name gives it away.
 
 ### OpenRouter sticky routing
@@ -265,7 +265,7 @@ any of the 48 curated presets directly:
 ```ts
 import { createPresetProvider } from "@providerkit/core";
 
-// One line — wire headers, auth mode and endpoints resolve from the table
+// One line: wire headers, auth mode and endpoints resolve from the table
 const zai = createPresetProvider("zai", { apiKey: process.env.ZAI_API_KEY! });
 const qwen = createPresetProvider("qwen", { apiKey: process.env.DASHSCOPE_API_KEY! });
 const deepseek = createPresetProvider("deepseek", { apiKey: process.env.DEEPSEEK_API_KEY! });
@@ -337,14 +337,14 @@ createAnthropicProvider({
 `createPresetProvider`, and ride every request whenever they are set. The Gemini and Responses
 shapes ignore them. A raw entry in `headers` always wins over them.
 
-Three fields cover the difference between one host and another — `baseUrl`, `headers`, and on the
+Three fields cover the difference between one host and another: `baseUrl`, `headers`, and on the
 Anthropic shape `bearer`. There is no base class to extend and no vendor list to be absent from;
 a host that ships next month works the day it ships. What the adapters do NOT do is guess: a
 dialect's optional corners (`tool_choice` forcing, `count_tokens`, thinking blocks) are uneven
 across gateways, so a switch is worth one real tool-calling turn against the new host.
 
 `bearer` is about where the credential rides, not what kind it is. Two unrelated cases want it:
-a gateway that reads `Authorization` instead of `x-api-key`, and a **subscription backend** —
+a gateway that reads `Authorization` instead of `x-api-key`, and a **subscription backend**:
 Claude or ChatGPT signed in as a person rather than billed per token. Those carry an OAuth
 access token that expires and rotates. [`@providerkit/core/auth`](/guides/auth/) signs in and
 renews it for ChatGPT, Kimi, Grok, GitHub Copilot, Meta and OpenRouter. Your app still stores the
@@ -357,7 +357,7 @@ that no amount of retrying fixes.
 The four adapters go through `streamSse`, which is one `fetch`, one classified error and one SSE
 reader. Some apps can only take the last of those three. An extension with translated failure
 copy, its own log levels, or a token refresh in front of every request has to build the request
-and read the failure itself — but it should not be writing a fourth SSE parser to do it.
+and read the failure itself, but it should not be writing a fourth SSE parser to do it.
 
 ```ts
 import { parseSseStream } from "@providerkit/core";
@@ -374,5 +374,5 @@ payload containing a newline survives), CRLF normalised, continuation lines join
 swallowed, and the final frame emitted even when the stream ends without its trailing blank line.
 
 It also yields a bare JSON object appended **outside** the framing, because Gemini reports a
-mid-stream failure that way — dropped, a 429 that lands after the headers reads as an empty,
+mid-stream failure that way. Dropped, a 429 that lands after the headers reads as an empty,
 successful turn.

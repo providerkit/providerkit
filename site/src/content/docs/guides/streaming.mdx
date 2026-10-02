@@ -6,7 +6,7 @@ description: The two watchdog clocks that catch a stream which stops sending, pl
 import WatchdogTimeline from "../../../components/WatchdogTimeline.astro";
 
 The nastiest streaming failure is not an error. It is a provider that accepts the request,
-returns 200, sends a few bytes — and then nothing. No error, no close, no timeout. Every SDK's
+returns 200, sends a few bytes, and then nothing. No error, no close, no timeout. Every SDK's
 default is to wait forever, and the symptom is the worst kind: none at all.
 
 A request timeout does not catch it either. The request succeeded. What died is the _gap between
@@ -61,8 +61,8 @@ per stream.
 
 ## The composition, wrapped
 
-Those lines — build a watch, hand the provider the WATCH's signal and `sawActivity`, wrap the
-chunks — are easy to get subtly wrong, and the middle one fails silently in every test: pass the
+Those lines (build a watch, hand the provider the WATCH's signal and `sawActivity`, wrap the
+chunks) are easy to get subtly wrong, and the middle one fails silently in every test: pass the
 caller's signal instead and the watchdog still arms, still fires, and cancels nothing, because
 the request it was meant to abort was never told about it. The composition ships as a wrapper so the next
 caller does not have to get it right by reading carefully:
@@ -106,7 +106,7 @@ retry and backup walkers see a failure they know how to handle.
 
 `streamWatch` composes your signal with its own using `AbortSignal.any`, which is deliberate:
 `AbortSignal.any` aborts **synchronously** when an input is already aborted. An event listener
-cannot catch that case — if the caller aborted before you subscribed, the event has already
+cannot catch that case: if the caller aborted before you subscribed, the event has already
 fired and your handler never runs.
 
 Where the runtime supports it the timer is `unref`'d, so a pending watchdog never holds a Node
@@ -118,7 +118,7 @@ process open on its own.
 const ttft = watch.firstChunkMs(); // null until the first chunk arrives
 ```
 
-TTFT is the number users actually feel — total duration is dominated by answer length, but the
+TTFT is the number users actually feel. Total duration is dominated by answer length, but the
 wait before _anything_ appears is the perceived latency. It is also the first thing to move when
 a provider degrades, usually well before the error rate does. Under `withWatchdog`, pass
 `onFirstChunk` and skip the plumbing.

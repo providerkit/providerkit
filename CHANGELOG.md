@@ -69,7 +69,7 @@ All notable changes to `@providerkit/core` will be documented in this file.
 ### Changed
 
 - **A turn that only thought now fails.** `requireContent`, which `withWatchdog` turns on by default, used to count reasoning as an answer. A high-effort model capped at 2,048 tokens spent all of them thinking and answered with an empty string. That passed as a success 22 times in a row in one production app, and the app's JSON parse failed with no hint why. An answer is now text or a tool call. Reasoning still streams as it arrives. An empty `stop` right after a tool result still passes.
-- **An empty turn that hit `maxTokens` is `invalid`, not `overload`.** The cap was yours, so retrying it, or walking to a backup model, fails the same way and cools down models that did nothing wrong. The error says so: `the output cap ran out before any answer (2048 of 2048 output tokens went to reasoning) — raise maxTokens or lower effort`. Any other empty turn is still `overload`.
+- **An empty turn that hit `maxTokens` is `invalid`, not `overload`.** The cap was yours, so retrying it, or walking to a backup model, fails the same way and cools down models that did nothing wrong. The error says so: `the output cap ran out before any answer (2048 of 2048 output tokens went to reasoning). Raise maxTokens or lower effort.`. Any other empty turn is still `overload`.
 
 ## [0.16.1] - 2026-10-01
 
@@ -234,7 +234,7 @@ The Claude thinking changes come from Anthropic's documentation, read 2026-09-27
 
 ### Fixed
 
-- **Gemini 2 cannot take a response schema beside tools.** The adapter sent both whenever `jsonWithTools` was not `"prompt"`, and Gemini 2.x answers that with `400 "Function calling with a response mime type: 'application/json' is unsupported"` — so every tool-carrying call to a 2.x model failed outright. On that generation the model id decides and `jsonWithTools` is ignored: the schema travels in the prompt, the one way it can. Gemini 3 serves both and keeps the enforced schema.
+- **Gemini 2 cannot take a response schema beside tools.** The adapter sent both whenever `jsonWithTools` was not `"prompt"`, and Gemini 2.x answers that with `400 "Function calling with a response mime type: 'application/json' is unsupported"`, so every tool-carrying call to a 2.x model failed outright. On that generation the model id decides and `jsonWithTools` is ignored: the schema travels in the prompt, the one way it can. Gemini 3 serves both and keeps the enforced schema.
 
 ## [0.11.0] - 2026-09-21
 
