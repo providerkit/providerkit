@@ -20,7 +20,7 @@ import {
   type ProviderPreset,
   type ProviderPresetId,
 } from "../presets.ts";
-import type { Effort, Provider } from "../types.ts";
+import type { Effort, Provider, ServiceTier } from "../types.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
 export interface PresetProviderConfig extends ProviderFallbackConfig {
@@ -57,6 +57,9 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    *  between rounds — pinning keeps a conversation's rounds (and their cache)
    *  on one host. Empty/absent = default routing. */
   providerOrder?: string[];
+  /** Default `service_tier` for every call on the OpenAI and Responses shapes;
+   *  `StreamOptions.serviceTier` wins. Anthropic and Gemini presets refuse it. */
+  serviceTier?: ServiceTier;
   fetchImpl?: typeof fetch;
 }
 
@@ -84,6 +87,12 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
   const model = chain?.[0] ?? config.model ?? preset.defaultModel;
   if (!model) {
     throw new Error(`[providerkit] Preset "${id}" has no defaultModel — pass a model.`);
+  }
+  if (config.serviceTier && (preset.shape === "anthropic" || preset.shape === "gemini")) {
+    throw new Error(
+      `[providerkit] Preset "${id}" speaks the ${preset.shape} shape, which has no service tier. ` +
+        "Remove serviceTier.",
+    );
   }
   const headers = { ...preset.headers, ...config.headers };
   const maxTokens = config.maxTokens ?? preset.maxTokens;

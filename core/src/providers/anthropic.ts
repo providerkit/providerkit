@@ -1,5 +1,5 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
-import { fileRefused, streamCut, streamError } from "../errors.ts";
+import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
@@ -371,6 +371,15 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       const effort = opts.effort ?? config.effort;
       const { system, messages: body } = toAnthropicMessages(messages, id);
 
+      // Anthropic's own `service_tier` means auto or standard_only, not this.
+      if (opts.serviceTier) {
+        throw new ProviderError(
+          id,
+          "invalid",
+          `${id}: Anthropic has no priority or flex tier (its service_tier field means something else). ` +
+            "Leave serviceTier unset for Claude models.",
+        );
+      }
       const request: Record<string, unknown> = {
         model,
         max_tokens: maxTokens,

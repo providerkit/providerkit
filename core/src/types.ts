@@ -387,7 +387,18 @@ export interface StreamOptions {
    * so it refuses `false` rather than silently ignore it.
    */
   parallelToolCalls?: boolean;
+  /**
+   * Which service tier to buy this call on: `priority` is faster and costs
+   * more, `flex` is slower and costs less. Sent as `service_tier` on the
+   * OpenAI and Responses shapes. Anthropic and Gemini refuse it with an
+   * `invalid` error: Anthropic's own `service_tier` means something else, and
+   * Gemini has no such switch. Overrides the provider's own setting.
+   */
+  serviceTier?: ServiceTier;
 }
+
+// ponytail: Codex's `ultrafast` tier (gpt-6-astra only) is the next value to add.
+export type ServiceTier = "priority" | "flex";
 
 export interface Provider {
   readonly id: string;
