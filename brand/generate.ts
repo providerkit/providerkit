@@ -36,7 +36,7 @@ function png(svg: string, width: number, out: string): void {
 const avatar = readFileSync(`${HERE}/providerkit-avatar.svg`, "utf8");
 const mark = readFileSync(`${HERE}/providerkit-mark.svg`, "utf8");
 
-console.log("avatar (GitHub org — ink tile, full bleed):");
+console.log("avatar (GitHub org: ink tile, full bleed):");
 for (const size of [1024, 512, 256]) {
   png(avatar, size, `${HERE}/providerkit-avatar-${size}.png`);
 }
@@ -51,10 +51,10 @@ try {
   ]);
   console.log("  ./brand/providerkit-avatar-1024.jpg");
 } catch {
-  console.log("  (skipped .jpg — ImageMagick not installed; the .png works everywhere)");
+  console.log("  (skipped .jpg, ImageMagick not installed; the .png works everywhere)");
 }
 
-console.log("mark (transparent — docs, site):");
+console.log("mark (transparent: docs, site):");
 for (const size of [512, 256, 128]) {
   png(mark, size, `${HERE}/providerkit-mark-${size}.png`);
 }

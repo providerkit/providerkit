@@ -17,10 +17,10 @@ export interface Kind {
  *  they cannot drift. `Record<ErrorKind, …>` is what makes this exhaustive —
  *  add a kind to core and this stops compiling until it is described. */
 const FIX: Record<ErrorKind, { family: Family; fix: string }> = {
-  aborted: { family: "inert", fix: "Nothing. The caller pressed Stop — this is not a failure." },
+  aborted: { family: "inert", fix: "Nothing. The caller pressed Stop. This is not a failure." },
   timeout: { family: "retry", fix: "Retry. Our deadline fired, not their answer." },
   network: { family: "retry", fix: "Retry. The request never reached them." },
-  overload: { family: "retry", fix: "Retry — or fall back to another model." },
+  overload: { family: "retry", fix: "Retry, or fall back to another model." },
   rate: { family: "retry", fix: "Wait out the window, or rotate the key or model." },
   quota: { family: "account", fix: "Top up, or wait for the reset. Retrying will not help." },
   entitlement: {
@@ -30,7 +30,7 @@ const FIX: Record<ErrorKind, { family: Family; fix: string }> = {
   auth: { family: "account", fix: "Fix the credential. Every retry lands the same." },
   context: {
     family: "context",
-    fix: "Send less. Compact the conversation — waiting fixes nothing.",
+    fix: "Send less. Compact the conversation. Waiting fixes nothing.",
   },
   model: { family: "ours", fix: "Use a model this endpoint actually serves." },
   content: { family: "ours", fix: "A safety filter caught the prompt or the answer." },

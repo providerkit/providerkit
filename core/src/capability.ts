@@ -23,7 +23,7 @@ import type { JsonWithTools, Provider } from "./types.ts";
 const PROBE_TOOL = {
   name: "get_current_time",
   description:
-    "The only source of the current time. You cannot know the time without calling this — never answer a time question from memory or guess.",
+    "The only source of the current time. You cannot know the time without calling this. Never answer a time question from memory or guess.",
   inputSchema: {
     type: "object" as const,
     properties: { timezone: { type: "string", description: "IANA timezone, e.g. Asia/Tokyo" } },

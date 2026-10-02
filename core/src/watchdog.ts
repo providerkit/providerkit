@@ -240,7 +240,7 @@ export async function* requireContent<T extends ProviderChunk>(
     throw new ProviderError(
       provider,
       "invalid",
-      `${provider}: the output cap ran out before any answer${spent} — raise maxTokens or lower effort`,
+      `${provider}: the output cap ran out before any answer${spent}. Raise maxTokens or lower effort.`,
     );
   }
   throw new ProviderError(provider, "overload", `${provider}: completed with no content`);

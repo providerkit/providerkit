@@ -115,14 +115,14 @@ const DIM_Y = 278;
         y={DIM_Y + 22}
         text-anchor="middle"
       >
-        idleMs — 60 s by default
+        idleMs: 60 s by default
       </text>
     </svg>
   </div>
-  <p class="bench-hint">Wider than this screen — scroll the figure sideways.</p>
+  <p class="bench-hint">Wider than this screen. Scroll the figure sideways.</p>
   <figcaption class="leader">
     <span>
-      Fig. — each chunk cancels the pending timer and arms a new one, so the ghosts are the time
+      Fig. Each chunk cancels the pending timer and arms a new one, so the ghosts are the time
       that was left. Only silence reaches the end of a window, and{" "}
       <code>watch.classify()</code> is what tells that abort apart from the caller pressing Stop.
     </span>

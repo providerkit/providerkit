@@ -92,7 +92,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
   }
   const model = chain?.[0] ?? config.model ?? preset.defaultModel;
   if (!model) {
-    throw new Error(`[providerkit] Preset "${id}" has no defaultModel — pass a model.`);
+    throw new Error(`[providerkit] Preset "${id}" has no defaultModel. Pass a model.`);
   }
   const wire = wireFor(preset, model);
   if (config.serviceTier && (wire.shape === "anthropic" || wire.shape === "gemini")) {

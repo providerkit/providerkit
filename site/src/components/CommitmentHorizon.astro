@@ -142,14 +142,14 @@ const CHUNKS = Array.from({ length: 9 }, (_, i) => HORIZON_X + i * 34);
         y2={RETURN_Y + 12}
       />
       <text class="fig-outcome blocked" x={(HORIZON_X + FAIL_LATE_X) / 2} y={RETURN_Y + 24}>
-        no way back — it propagates
+        no way back, it propagates
       </text>
     </svg>
   </div>
-  <p class="bench-hint">Wider than this screen — scroll the figure sideways.</p>
+  <p class="bench-hint">Wider than this screen. Scroll the figure sideways.</p>
   <figcaption class="leader">
     <span>
-      Fig. — the same failure, twice. <code>withStreamRetry</code> retries only to the left of the
+      Fig. The same failure, twice. <code>withStreamRetry</code> retries only to the left of the
       horizon; past it a retry would replay tokens the reader has already seen, so the error is
       handed to the caller instead.
     </span>
