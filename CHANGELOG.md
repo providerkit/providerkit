@@ -2,7 +2,7 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
-## [0.21.0] - 2026-10-01
+## [0.21.0] - 2026-10-02
 
 ### Changed
 
