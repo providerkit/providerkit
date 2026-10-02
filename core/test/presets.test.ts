@@ -251,6 +251,8 @@ describe("opencode-go — the session header", () => {
 
     it.each([
       ["glm-5.3-flash", "none", "high"],
+      ["glm-5.3-flash", "low", "high"],
+      ["glm-5.2", "medium", "high"],
       ["glm-5.2", "high", "high"],
       ["glm-5.3", "max", "max"],
       ["deepseek-v4-pro", "none", "low"],
@@ -264,18 +266,17 @@ describe("opencode-go — the session header", () => {
       expect(sent.body.reasoning_effort).toBe(wire);
     });
 
-    it.each([
-      ["glm-5.3-flash", "low"],
-      ["glm-5.2", "medium"],
-      ["mimo-v2.5", "max"],
-    ] as const)("refuses effort %2$s on %1$s instead of changing it", async (model, effort) => {
-      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
-      const provider = createPresetProvider("opencode-go", { apiKey: "k", model, fetchImpl });
-      await expect(drain(provider.createStream(hi, [], { effort }))).rejects.toMatchObject({
-        kind: "invalid",
-      });
-      expect(fetchImpl).not.toHaveBeenCalled();
-    });
+    it.each([["mimo-v2.5", "max"]] as const)(
+      "refuses effort %2$s on %1$s instead of changing it",
+      async (model, effort) => {
+        const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+        const provider = createPresetProvider("opencode-go", { apiKey: "k", model, fetchImpl });
+        await expect(drain(provider.createStream(hi, [], { effort }))).rejects.toMatchObject({
+          kind: "invalid",
+        });
+        expect(fetchImpl).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it("only chatgpt replays reasoning", () => {
