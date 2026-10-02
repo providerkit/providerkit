@@ -2,6 +2,19 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.20.0] - 2026-10-01
+
+### Added
+
+- **`@providerkit/core/auth`: sign in to a subscription and keep the token fresh.** `createAuthFlow(id, host)` signs a person in to ChatGPT, Kimi (`kimi-plan`), Grok, GitHub Copilot, Meta or OpenRouter, and gives you the matching `refresh`. It uses only `fetch`. Your app passes a host with `appName`, `openUrl(url)` and `captureRedirect(...)`, the two things a package can't do. `tokenSource({ load, save, refresh })` returns `getToken()`: two calls at once refresh once, and the new token is saved before it is used. If the server rejects a refresh, it reloads and uses a newer token another tab saved, and only then throws. A network failure keeps the credential. The sign-in code came from TabRunner, now fetch-only. See the new "Sign in to a subscription" guide.
+- **Sign-in errors you can tell apart.** A sign-in that ends without a credential throws `SignInError` (`denied`, `expired` or `cancelled`). The other failures are `ProviderError`s coded `token_refused`, `token_incomplete`, `device_response_invalid`, `setup_required` or `refresh_dead`.
+- **`baseUrl` on `PresetProviderConfig`.** It replaces the preset's API root, for a vendor that gives each account its own host.
+
+### Fixed
+
+- **The `github-copilot` preset works.** It posted to `/v1/chat/completions` on `api.githubcopilot.com`, which Copilot doesn't serve, so every call failed. It now posts to `/chat/completions` on `api.individual.githubcopilot.com`, sends the headers Copilot's gate checks, and sets `X-Initiator` per call: `user` when the last message is the user's, `agent` after a tool result. GitHub bills a premium request per `user` turn, so this decides what a run costs. Other plans have their own host: pass the sign-in's `credential.baseUrl` as `baseUrl`. A new `initiatorHeader` preset option does this on the OpenAI shape.
+- **An OAuth `invalid_grant` is an `auth` error.** A refresh token that was revoked or spent came back as a 400 and classified as `invalid`. It now classifies as `auth`, so a caller is told to sign in again.
+
 ## [0.19.0] - 2026-10-01
 
 ### Added

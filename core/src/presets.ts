@@ -7,7 +7,7 @@
  * they drift on a vendor's schedule and a wrong number in a library is a
  * wrong number in everyone's ledger), icons, colors, marketing names, and
  * sign-in flows (an `oauth` preset expects the CALLER to hand over an access
- * token; acquiring one stays app-side).
+ * token; `@providerkit/core/auth` is how to get and renew one).
  *
  * Sources: the coding-plan endpoints and auth quirks are measured
  * (tabrunner's extension + this repo's adopters, 2026-09); the model lists
@@ -31,7 +31,7 @@ export type PresetShape = "anthropic" | "openai" | "responses" | "gemini";
  *   coding-plan gateways' mode on the Anthropic wire (measured: Z.ai's coding
  *   endpoint ignores `x-api-key` and reads Bearer).
  * - `oauth`: same wire as `bearer`, but the token is a short-lived access
- *   token from a sign-in flow the caller owns. The preset may carry the beta
+ *   token from a sign-in flow (see `@providerkit/core/auth`). The preset may carry the beta
  *   headers that switch the endpoint into OAuth mode.
  */
 export type PresetAuth = "key" | "bearer" | "oauth";
@@ -80,6 +80,9 @@ export interface ProviderPreset {
    *  on the next turn. Only for backends that take `include`; `chatgpt` is the
    *  one that does, and Go and Grok may refuse it. */
   replayReasoning?: boolean;
+  /** OpenAI shape: send `X-Initiator` (`user` or `agent`) on every call. GitHub
+   *  Copilot bills a premium request per `user` turn. */
+  initiatorHeader?: boolean;
 }
 
 export const PROVIDER_PRESETS = {
@@ -449,7 +452,7 @@ export const PROVIDER_PRESETS = {
     auth: "bearer",
   },
 
-  // ── OAuth — the caller owns the sign-in flow and hands over the token ───
+  // ── OAuth — sign in with `@providerkit/core/auth`, hand over the token ──
   claude: {
     shape: "anthropic",
     baseUrl: "https://api.anthropic.com",
@@ -535,12 +538,33 @@ export const PROVIDER_PRESETS = {
     auth: "oauth",
     defaultModel: "kimi-for-coding",
   },
+  /**
+   * GitHub Copilot, on an individual seat's host. Other plans have their own
+   * host, which the sign-in returns as `credential.baseUrl`: pass it as
+   * `baseUrl`. Copilot serves chat at `/chat/completions` with no `/v1`, and the
+   * default path would have added one and 404'd.
+   *
+   * The headers are the ones its gate checks on every call. Pass
+   * `copilotHeaders(appName, "user")` from `@providerkit/core/auth` in
+   * `headers` to name your app in `Editor-Version`. `X-Initiator` is set per
+   * call, because it decides what Copilot bills.
+   */
   "github-copilot": {
     shape: "openai",
-    baseUrl: "https://api.githubcopilot.com",
+    baseUrl: "https://api.individual.githubcopilot.com",
+    path: "/chat/completions",
     auth: "oauth",
     defaultModel: "gpt-5.6-sol",
     models: ["gpt-5.6-sol", "claude-opus-5", "claude-sonnet-5", "gpt-6-astra"],
+    headers: {
+      "Copilot-Integration-Id": "vscode-chat",
+      "Editor-Version": "providerkit",
+      "Editor-Plugin-Version": "providerkit",
+      "X-GitHub-Api-Version": "2026-06-01",
+      "Openai-Intent": "conversation-edits",
+      "Copilot-Vision-Request": "true",
+    },
+    initiatorHeader: true,
   },
 } as const satisfies Record<string, ProviderPreset>;
 

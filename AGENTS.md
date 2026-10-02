@@ -120,6 +120,9 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets |
 | `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                       |
 | `jev.ts`                 | `@providerkit/core/jev` — TypeSafe's decision model on its four hosts      |
+| `auth/`                  | `@providerkit/core/auth` — sign-in flows and `tokenSource`, fetch only     |
+
+Scope of `auth/`: it signs in and refreshes. Token storage and sign-in screens stay in the app.
 
 Plus `test/golden.test.ts` — the cross-vendor conformance matrix. Not a module: the one place
 the four adapters are asked the same question, on recorded wire bytes, and have to agree.

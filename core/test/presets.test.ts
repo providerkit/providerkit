@@ -191,6 +191,39 @@ describe("opencode-go — the session header", () => {
     expect(new Headers(init?.headers).get("session-id")).toBe("conv-1");
   });
 
+  it("github-copilot posts to /chat/completions on the host the sign-in named, and says who started the turn", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+    const provider = createPresetProvider("github-copilot", {
+      apiKey: "tok",
+      baseUrl: "https://api.business.githubcopilot.com",
+      fetchImpl,
+    });
+    await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+    await drain(
+      provider.createStream(
+        [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "", toolCalls: [{ id: "c", name: "t", arguments: "{}" }] },
+          { role: "tool", toolCallId: "c", name: "t", content: "done" },
+        ],
+        [],
+      ),
+    );
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe("https://api.business.githubcopilot.com/chat/completions");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer tok");
+    expect(headers.get("copilot-integration-id")).toBe("vscode-chat");
+    expect(headers.get("x-initiator")).toBe("user");
+    expect(new Headers(fetchImpl.mock.calls[1]![1]?.headers).get("x-initiator")).toBe("agent");
+
+    const own = createPresetProvider("github-copilot", { apiKey: "tok", fetchImpl });
+    await drain(own.createStream([{ role: "user", content: "hi" }], []));
+    expect(String(fetchImpl.mock.calls[2]![0])).toBe(
+      "https://api.individual.githubcopilot.com/chat/completions",
+    );
+  });
+
   it("grok reaches the CLI backend with the headers that admit a subscription token", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
     const provider = createPresetProvider("grok", { apiKey: "tok", fetchImpl });

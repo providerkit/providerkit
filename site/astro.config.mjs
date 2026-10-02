@@ -88,10 +88,15 @@ export default defineConfig({
           ],
         }),
         starlightTypeDoc({
-          entryPoints: ["../core/src/index.ts", "../core/src/zod.ts", "../core/src/jev.ts"],
+          entryPoints: [
+            "../core/src/index.ts",
+            "../core/src/zod.ts",
+            "../core/src/jev.ts",
+            "../core/src/auth/index.ts",
+          ],
           tsconfig: "../core/tsconfig.json",
           output: "reference",
-          // Three entry points, so the generated group has three children named
+          // Four entry points, so the generated group has four children named
           // after the import paths they document.
           sidebar: { label: "API reference", collapsed: true },
           typeDoc: { excludeInternal: true, useCodeBlocks: true, parametersFormat: "table" },
@@ -125,6 +130,7 @@ export default defineConfig({
             { label: "Retries and fallback", slug: "guides/retries" },
             { label: "Limits and key pools", slug: "guides/limits" },
             { label: "Streaming and the watchdog", slug: "guides/streaming" },
+            { label: "Sign in to a subscription", slug: "guides/auth" },
           ],
         },
         {

@@ -321,8 +321,9 @@ across gateways, so a switch is worth one real tool-calling turn against the new
 `bearer` is about where the credential rides, not what kind it is. Two unrelated cases want it:
 a gateway that reads `Authorization` instead of `x-api-key`, and a **subscription backend** —
 Claude or ChatGPT signed in as a person rather than billed per token. Those carry an OAuth
-access token that expires and rotates, so the login and the refresh stay in your app; the
-package only ever sees the resulting bearer. Give one its own `id`, because a 401 there means
+access token that expires and rotates. [`@providerkit/core/auth`](/guides/auth/) signs in and
+renews it for ChatGPT, Kimi, Grok, GitHub Copilot, Meta and OpenRouter; storing the token and the
+sign-in screens stay in your app. Give one its own `id`, because a 401 there means
 _sign in again_, not _bad API key_, and a ledger that cannot tell them apart will retry the one
 that no amount of retrying fixes.
 
