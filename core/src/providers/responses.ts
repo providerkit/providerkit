@@ -57,6 +57,10 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   /** What this backend accepts as an image. Each image it would refuse is
    *  replaced by a note naming the reason, instead of failing the request. */
   imageLimits?: ImageLimits;
+  /** Ask for the encrypted reasoning items and replay them on the next turn,
+   *  so the model keeps its chain of thought across a stateless turn. Only for
+   *  backends that accept `include: ["reasoning.encrypted_content"]`. */
+  replayReasoning?: boolean;
   /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
   serviceTier?: ServiceTier;
 }
@@ -94,7 +98,33 @@ type ResponsesContentPart =
   | { type: "output_text"; text: string }
   | { type: "input_image"; image_url: string };
 
+/** A reasoning item the backend made, sent back as it came. */
+type ReplayedReasoning = { type: "reasoning" } & Record<string, unknown>;
+
+function isReplayedReasoning(item: unknown): item is ReplayedReasoning {
+  return typeof item === "object" && item !== null && "type" in item && item.type === "reasoning";
+}
+
+/** The most encrypted reasoning one request carries back. Newest turns win. */
+const MAX_REPLAY_BYTES = 8 * 1024 * 1024;
+
+/** Which assistant messages get their reasoning replayed: this provider's own,
+ *  newest first, until the cap. An older turn's reasoning is the cheapest to lose. */
+function replayable(messages: readonly ChatMessage[], provider: string): Set<ChatMessage> {
+  const keep = new Set<ChatMessage>();
+  let bytes = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.role !== "assistant" || message.reasoningItems?.provider !== provider) continue;
+    bytes += JSON.stringify(message.reasoningItems.items).length;
+    if (bytes > MAX_REPLAY_BYTES) break;
+    keep.add(message);
+  }
+  return keep;
+}
+
 type ResponsesInputItem =
+  | ReplayedReasoning
   | { type: "message"; role: "user" | "assistant"; content: ResponsesContentPart[] }
   | { type: "function_call"; call_id: string; name: string; arguments: string }
   | { type: "function_call_output"; call_id: string; output: string | ResponsesContentPart[] };
@@ -144,6 +174,7 @@ export function toResponsesInput(
     .map((message) => message.content)
     .join("\n\n");
 
+  const replayed = replayable(messages, provider);
   const input: ResponsesInputItem[] = [];
   for (const message of messages) {
     switch (message.role) {
@@ -170,12 +201,15 @@ export function toResponsesInput(
         break;
 
       case "assistant": {
-        // Reasoning is deliberately NOT replayed. This shape wants the ORIGINAL
-        // reasoning item back — its `rs_…` id, and under `store: false` its
-        // `encrypted_content` blob — and the seam carries neither, only the
-        // plain summary text a caller renders. A synthesized reasoning item is
-        // rejected; omitting it costs only the model re-deriving its own chain
-        // of thought, which is what every stateless caller already lives with.
+        // `reasoning` (the summary a caller renders) is never replayed: this
+        // shape wants the ORIGINAL item back, `rs_…` id and `encrypted_content`
+        // blob included, and a synthesized one is rejected. `reasoningItems`
+        // are those originals, so they go back first, but only to the provider
+        // that made them. Without them the model re-derives its own chain of
+        // thought, which is what every stateless caller already lives with.
+        if (replayed.has(message)) {
+          input.push(...message.reasoningItems!.items.filter(isReplayedReasoning));
+        }
         if (message.content) {
           input.push({
             type: "message",
@@ -216,6 +250,7 @@ interface ResponsesItem {
   call_id?: string;
   name?: string;
   arguments?: string;
+  encrypted_content?: string;
 }
 
 interface ResponsesEvent {
@@ -353,6 +388,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         store: false,
       };
       if (instructions) request.instructions = instructions;
+      if (config.replayReasoning) request.include = ["reasoning.encrypted_content"];
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) request.max_output_tokens = maxTokens;
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
@@ -426,6 +462,11 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       let sawToolCall = false;
       let wall: ProviderError | undefined;
       let produced = false;
+      const reasoningItems: unknown[] = [];
+      const reasoningChunk = (): ProviderChunk[] =>
+        reasoningItems.length
+          ? [{ type: "delta", reasoningItems: { provider: id, items: reasoningItems } }]
+          : [];
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
@@ -527,6 +568,12 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
           case "response.output_item.done": {
             const item = event.item;
+            // Kept whole and emitted once, at the end of the turn: it is the
+            // backend's own record, and it only means something complete.
+            if (config.replayReasoning && item?.type === "reasoning") {
+              reasoningItems.push(item);
+              break;
+            }
             if (item?.type !== "function_call") break;
             const known = pendingFor(item.id, item.call_id);
             if (item.id) pending.delete(item.id);
@@ -588,6 +635,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             if (response?.status === "failed" || response?.error) {
               throw streamError(id, response.error ?? { message: "response failed" });
             }
+            yield* reasoningChunk();
             if (response?.usage) yield usageChunk(response.usage);
             if (response?.status === "incomplete") {
               yield {
@@ -607,6 +655,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           case "response.incomplete": {
             // A turn that ran out of output tokens still billed for its input,
             // and this event carries usage in the same shape as `completed`.
+            yield* reasoningChunk();
             const usage = event.response?.usage;
             if (usage) yield usageChunk(usage);
             yield {

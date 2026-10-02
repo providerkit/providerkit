@@ -833,6 +833,47 @@ describe("responses request", () => {
     expect(seen[2]!.body).not.toHaveProperty("service_tier");
   });
 
+  it("asks for encrypted reasoning, captures it once, and replays it on the next turn", async () => {
+    const item = { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "AAAA" };
+    const turn = [
+      j({ type: "response.output_item.done", output_index: 0, item }),
+      j({ type: "response.output_item.done", output_index: 1, item: { ...item, id: "rs_2" } }),
+      ...TEXT_TURN,
+    ];
+    const { seen, fetchImpl } = recorder(turn);
+    const replaying = provider({ fetchImpl, id: "chatgpt", replayReasoning: true });
+    const chunks = await collect(replaying.createStream(hi, []));
+    expect(seen[0]!.body.include).toEqual(["reasoning.encrypted_content"]);
+    const carried = chunks.filter((c) => c.reasoningItems);
+    expect(carried).toHaveLength(1);
+    expect(carried[0]!.reasoningItems!.provider).toBe("chatgpt");
+    expect(carried[0]!.reasoningItems!.items).toHaveLength(2);
+
+    await collect(
+      replaying.createStream(
+        [
+          ...hi,
+          { role: "assistant", content: "Hello", reasoningItems: carried[0]!.reasoningItems! },
+          { role: "user", content: "and?" },
+        ],
+        [],
+      ),
+    );
+    const input = seen[1]!.body.input as { type: string; id?: string }[];
+    expect(input.filter((i) => i.type === "reasoning").map((i) => i.id)).toEqual(["rs_1", "rs_2"]);
+  });
+
+  it("neither asks for nor keeps reasoning items unless the preset says so", async () => {
+    const item = { type: "reasoning", id: "rs_1", encrypted_content: "AAAA" };
+    const { seen, fetchImpl } = recorder([
+      j({ type: "response.output_item.done", output_index: 0, item }),
+      ...TEXT_TURN,
+    ]);
+    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(seen[0]!.body).not.toHaveProperty("include");
+    expect(chunks.some((c) => c.reasoningItems)).toBe(false);
+  });
+
   it("lets a per-call model and effort override the bound ones", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
     await collect(
@@ -889,11 +930,46 @@ describe("toResponsesInput", () => {
     ]);
   });
 
-  it("does NOT replay reasoning — the item's id and encrypted blob are not on the seam", () => {
+  it("never replays the plain reasoning summary — only the backend's own items", () => {
     const { input } = toResponsesInput([
       { role: "assistant", content: "hi", reasoning: "secret thoughts" },
     ]);
     expect(JSON.stringify(input)).not.toContain("secret thoughts");
+  });
+
+  describe("replayed reasoning items", () => {
+    const item = { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "AAAA" };
+    const turn = (provider: string): ChatMessage => ({
+      role: "assistant",
+      content: "hi",
+      reasoningItems: { provider, items: [item] },
+    });
+
+    it("sends them back, before the answer, to the provider that made them", () => {
+      const { input } = toResponsesInput([turn("chatgpt")], "chatgpt");
+      expect(input[0]).toEqual(item);
+      expect(input[1]).toMatchObject({ type: "message", role: "assistant" });
+    });
+
+    it("drops them for a different provider, such as a fallback", () => {
+      const { input } = toResponsesInput([turn("chatgpt")], "grok");
+      expect(JSON.stringify(input)).not.toContain("rs_1");
+    });
+
+    it("keeps the newest turns when the 8 MiB cap is hit", () => {
+      const big = (n: number): ChatMessage => ({
+        role: "assistant",
+        content: String(n),
+        reasoningItems: {
+          provider: "chatgpt",
+          items: [{ type: "reasoning", id: `rs_${n}`, encrypted_content: "A".repeat(5_000_000) }],
+        },
+      });
+      const { input } = toResponsesInput([big(1), big(2)], "chatgpt");
+      const text = JSON.stringify(input);
+      expect(text).toContain("rs_2");
+      expect(text).not.toContain("rs_1");
+    });
   });
 
   it("carries user images as data URIs", () => {

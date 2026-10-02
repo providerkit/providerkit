@@ -171,6 +171,13 @@ describe("opencode-go — the session header", () => {
     },
   );
 
+  it("only chatgpt replays reasoning", () => {
+    expect(PROVIDER_PRESETS.chatgpt.replayReasoning).toBe(true);
+    for (const [id, preset] of Object.entries(PROVIDER_PRESETS)) {
+      if (id !== "chatgpt") expect(preset).not.toHaveProperty("replayReasoning");
+    }
+  });
+
   it("chatgpt posts to the Codex path, not /v1, and carries its session header", async () => {
     // Without the path the POST 404s, and a 404 reads as kind "model": the
     // user is told the model id is wrong when the URL was.
