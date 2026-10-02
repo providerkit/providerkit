@@ -88,14 +88,21 @@ const provider = createPresetProvider("opencode-go", { apiKey });
 
 By default it tries `mimo-v2.6-flash`, then `mimo-v2.5`, `glm-5.3-flash`,
 `qwen3.8-flash` and `longcat-2.0`. Pass `models: [...]` to set your own order, and
-`fallbacks` to add another provider after the last model. Muse Spark uses Go's Responses
-route instead:
+`fallbacks` to add another provider after the last model.
+
+Go serves three wires, and the preset picks one from the model id: `minimax-` and `qwen`
+models on Anthropic Messages, `gpt-`, `grok-` and `muse-spark-` models on Responses, and
+everything else on chat completions. A chain can mix them:
 
 ```ts
-const muse = createPresetProvider("opencode-go-responses", { apiKey });
+const provider = createPresetProvider("opencode-go", {
+  apiKey,
+  models: ["muse-spark-1.3-contributor", "mimo-v2.5"],
+});
 ```
 
-That preset defaults to `muse-spark-1.3-contributor`. It supports text, images, strict JSON
+A per-call `model` on a different wire than the provider's own is refused with an
+`invalid` error, before any request. Muse Contributor supports text, images, strict JSON
 Schema and parallel tools, but only automatic tool choice; `toolChoice: "none"` is encoded
 by sending no tools. Contributor requests may be used to improve Meta products and require
 the workspace to allow those endpoints.

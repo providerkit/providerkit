@@ -51,6 +51,9 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
   /** Send the key as a Bearer instead of `x-api-key` — what a subscription
    *  access token needs. */
   bearer?: boolean;
+  /** Header that carries `StreamOptions.sessionId`. When set and a call has no
+   *  sessionId, one stable id for this provider instance rides instead. */
+  sessionHeader?: string;
   /** Say "no thinking" with an explicit `thinking: { type: "disabled" }` when
    *  effort resolves to none, instead of omitting the field. For endpoints
    *  where an absent field means the MODEL's default, not off — Z.ai's coding
@@ -356,6 +359,7 @@ interface AnthropicEvent {
 export function createAnthropicProvider(config: AnthropicConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "anthropic";
+  const instanceSessionId = config.sessionHeader ? crypto.randomUUID() : undefined;
 
   const provider: Provider = {
     id,
@@ -496,6 +500,9 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             ? { authorization: `Bearer ${config.apiKey}` }
             : { "x-api-key": config.apiKey }),
           ...attributionHeaders(config, config.headers),
+          ...(config.sessionHeader
+            ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
+            : {}),
           ...config.headers,
         },
         body: request,

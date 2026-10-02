@@ -22,6 +22,12 @@ const ok = () =>
       .join(""),
   );
 
+const modelOf = (init?: RequestInit) => JSON.parse(String(init?.body)).model as string;
+const spent = () =>
+  new Response(JSON.stringify({ error: { message: "monthly usage limit reached" } }), {
+    status: 429,
+  });
+
 describe("provider presets — every row joins to one request, correctly", () => {
   // One mocked request per preset. This is the table-driven check that keeps
   // the data honest: a wrong base URL, a wrong auth header, or a preset
@@ -151,25 +157,126 @@ async function drain(stream: AsyncIterable<unknown>): Promise<void> {
 }
 
 describe("opencode-go — the session header", () => {
-  it.each(["opencode-go", "opencode-go-responses"] satisfies ProviderPresetId[])(
+  it.each(["mimo-v2.6-flash", "muse-spark-1.3-contributor", "minimax-m3"])(
     "%s sends the call's sessionId, and its own stable id when the call has none",
-    async (preset) => {
+    async (model) => {
+      // The stream is the chat dialect's, so the other wires end in an error
+      // after the request. Only the request is under test here.
       const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
-      const provider = createPresetProvider(preset, { apiKey: "k", fetchImpl });
+      const provider = createPresetProvider("opencode-go", { apiKey: "k", model, fetchImpl });
       const sent = (i: number) =>
         new Headers(fetchImpl.mock.calls[i]?.[1]?.headers).get("x-opencode-session");
 
-      await drain(
-        provider.createStream([{ role: "user", content: "hi" }], [], { sessionId: "conv-1" }),
-      );
-      await drain(provider.createStream([{ role: "user", content: "hi" }], []));
-      await drain(provider.createStream([{ role: "user", content: "hi" }], []));
+      const ask = (opts = {}) =>
+        drain(provider.createStream([{ role: "user", content: "hi" }], [], opts)).catch(() => {});
+      await ask({ sessionId: "conv-1" });
+      await ask();
+      await ask();
 
       expect(sent(0)).toBe("conv-1");
       expect(sent(1)).toMatch(/^[0-9a-f-]{36}$/);
       expect(sent(2)).toBe(sent(1));
     },
   );
+
+  describe("opencode-go routes", () => {
+    const hi = [{ role: "user" as const, content: "hi" }];
+    const call = async (model: string, opts = {}) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider("opencode-go", { apiKey: "k", model, fetchImpl });
+      await drain(provider.createStream(hi, [], opts)).catch(() => {});
+      const [url, init] = fetchImpl.mock.calls[0]!;
+      return {
+        url: String(url),
+        headers: new Headers(init?.headers),
+        body: JSON.parse(String(init?.body)),
+      };
+    };
+
+    it.each([
+      ["mimo-v2.6-flash", "https://opencode.ai/zen/go/v1/chat/completions"],
+      ["glm-5.3-flash", "https://opencode.ai/zen/go/v1/chat/completions"],
+      ["kimi-k3", "https://opencode.ai/zen/go/v1/chat/completions"],
+      ["minimax-m3", "https://opencode.ai/zen/go/v1/messages"],
+      ["qwen3.8-flash", "https://opencode.ai/zen/go/v1/messages"],
+      ["gpt-6-luna", "https://opencode.ai/zen/go/v1/responses"],
+      ["grok-4.7", "https://opencode.ai/zen/go/v1/responses"],
+      ["muse-spark-1.3-contributor", "https://opencode.ai/zen/go/v1/responses"],
+    ])("sends %s to %s", async (model, url) => {
+      const sent = await call(model);
+      expect(sent.url).toBe(url);
+      expect(sent.body.model).toBe(model);
+    });
+
+    it("reads the key as x-api-key on the Anthropic route and as a Bearer on the others", async () => {
+      expect((await call("minimax-m3")).headers.get("x-api-key")).toBe("k");
+      expect((await call("minimax-m3")).headers.get("authorization")).toBeNull();
+      expect((await call("gpt-6-luna")).headers.get("authorization")).toBe("Bearer k");
+      expect((await call("mimo-v2.5")).headers.get("authorization")).toBe("Bearer k");
+    });
+
+    it("refuses a per-call model that lives on another wire, before any request", async () => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider("opencode-go", {
+        apiKey: "k",
+        model: "mimo-v2.5",
+        fetchImpl,
+      });
+      await expect(
+        drain(provider.createStream(hi, [], { model: "gpt-6-luna" })),
+      ).rejects.toMatchObject({ kind: "invalid" });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      // Another model on the SAME wire is fine.
+      await drain(provider.createStream(hi, [], { model: "glm-5.3-flash" }));
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends each member of a chain down its own wire", async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async (_url, init) =>
+          modelOf(init) === "muse-spark-1.3-contributor" ? spent() : ok(),
+        );
+      const provider = createPresetProvider("opencode-go", {
+        apiKey: "k",
+        models: ["muse-spark-1.3-contributor", "mimo-v2.5"],
+        fetchImpl,
+      });
+      await drain(provider.createStream(hi, []));
+      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+        "https://opencode.ai/zen/go/v1/responses",
+        "https://opencode.ai/zen/go/v1/chat/completions",
+      ]);
+    });
+
+    it.each([
+      ["glm-5.3-flash", "none", "high"],
+      ["glm-5.2", "high", "high"],
+      ["glm-5.3", "max", "max"],
+      ["deepseek-v4-pro", "none", "low"],
+      ["deepseek-v4-flash", "medium", "medium"],
+      ["deepseek-v4-flash", "max", "max"],
+      ["mimo-v2.6-flash", "none", "none"],
+      ["mimo-v2.5", "medium", "medium"],
+      ["longcat-2.0", "none", "none"],
+    ] as const)("says %s at effort %s as reasoning_effort %s", async (model, effort, wire) => {
+      const sent = await call(model, { effort });
+      expect(sent.body.reasoning_effort).toBe(wire);
+    });
+
+    it.each([
+      ["glm-5.3-flash", "low"],
+      ["glm-5.2", "medium"],
+      ["mimo-v2.5", "max"],
+    ] as const)("refuses effort %2$s on %1$s instead of changing it", async (model, effort) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider("opencode-go", { apiKey: "k", model, fetchImpl });
+      await expect(drain(provider.createStream(hi, [], { effort }))).rejects.toMatchObject({
+        kind: "invalid",
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+  });
 
   it("only chatgpt replays reasoning", () => {
     expect(PROVIDER_PRESETS.chatgpt.replayReasoning).toBe(true);
@@ -267,12 +374,6 @@ describe("opencode-go — the session header", () => {
 });
 
 describe("model chains — one endpoint, one key, several models", () => {
-  const modelOf = (init?: RequestInit) => JSON.parse(String(init?.body)).model as string;
-  const spent = () =>
-    new Response(JSON.stringify({ error: { message: "monthly usage limit reached" } }), {
-      status: 429,
-    });
-
   it("opencode-go rotates through its own chain when a model's limit is spent", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()

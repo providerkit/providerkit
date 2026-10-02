@@ -10,6 +10,7 @@
 // `effort` passes through to the adapter unchanged — the per-endpoint
 // thinking dialects (Z.ai's explicit disabled marker, OpenRouter's floors)
 // are the adapters' knowledge, and this factory must not re-derive them.
+import { ProviderError } from "../errors.ts";
 import { createAnthropicProvider } from "./anthropic.ts";
 import { createGeminiProvider } from "./gemini.ts";
 import { createOpenAIProvider } from "./openai.ts";
@@ -17,6 +18,8 @@ import { createResponsesProvider } from "./responses.ts";
 import {
   PRESET_IDS,
   PROVIDER_PRESETS,
+  type PresetAuth,
+  type PresetShape,
   type ProviderPreset,
   type ProviderPresetId,
 } from "../presets.ts";
@@ -91,14 +94,15 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
   if (!model) {
     throw new Error(`[providerkit] Preset "${id}" has no defaultModel — pass a model.`);
   }
-  if (config.serviceTier && (preset.shape === "anthropic" || preset.shape === "gemini")) {
+  const wire = wireFor(preset, model);
+  if (config.serviceTier && (wire.shape === "anthropic" || wire.shape === "gemini")) {
     throw new Error(
-      `[providerkit] Preset "${id}" speaks the ${preset.shape} shape, which has no service tier. ` +
+      `[providerkit] Preset "${id}" speaks the ${wire.shape} shape, which has no service tier. ` +
         "Remove serviceTier.",
     );
   }
   const headers = { ...preset.headers, ...config.headers };
-  const baseUrl = config.baseUrl ?? preset.baseUrl;
+  const baseUrl = config.baseUrl ?? wire.baseUrl;
   const maxTokens = config.maxTokens ?? preset.maxTokens;
 
   const {
@@ -110,7 +114,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
   } = config;
 
   let provider: Provider;
-  switch (preset.shape) {
+  switch (wire.shape) {
     case "anthropic":
       // `key` rides Anthropic's native x-api-key; coding plans and OAuth
       // tokens read Bearer (measured across the family's coding endpoints).
@@ -123,7 +127,8 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         baseUrl,
         id,
         headers,
-        bearer: preset.auth !== "key",
+        bearer: wire.auth !== "key",
+        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         // The endpoint's thinking dialect rides the table (zai: silence means
         // the model default, which is ON — "none" must be said out loud).
         ...(preset.explicitNone ? { explicitNone: true } : {}),
@@ -139,7 +144,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         effort: config.effort,
         maxTokens,
         baseUrl,
-        ...(preset.path ? { path: preset.path } : {}),
+        ...(wire.path ? { path: wire.path } : {}),
         headers,
         ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
@@ -155,7 +160,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         effort: config.effort,
         maxTokens,
         baseUrl,
-        ...(preset.path ? { path: preset.path } : {}),
+        ...(wire.path ? { path: wire.path } : {}),
         id,
         headers,
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
@@ -178,5 +183,50 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
       break;
   }
 
-  return withConfiguredFallbacks(provider, config);
+  return withConfiguredFallbacks(
+    preset.routes ? refuseOtherWires(provider, preset, wire) : provider,
+    config,
+  );
+}
+
+/** The endpoint a model is served from: its route when the preset has one for
+ *  it, else the preset's own. */
+function wireFor(preset: ProviderPreset, model: string): Wire {
+  const route = preset.routes?.find((r) => r.prefixes.some((prefix) => model.startsWith(prefix)));
+  return route
+    ? { ...route, auth: route.auth ?? preset.auth }
+    : { shape: preset.shape, baseUrl: preset.baseUrl, path: preset.path, auth: preset.auth };
+}
+
+interface Wire {
+  shape: PresetShape;
+  baseUrl: string;
+  path?: string;
+  auth: PresetAuth;
+}
+
+const sameWire = (a: Wire, b: Wire) =>
+  a.shape === b.shape && a.baseUrl === b.baseUrl && a.path === b.path;
+
+/**
+ * A per-call `model` that lives on another wire than the one this provider was
+ * built for would be posted to an endpoint that doesn't serve it, and the 404
+ * would read as an unknown model. Refuse it before any request goes out. To use
+ * a model on another wire, build a provider for it (a `models` chain does).
+ */
+function refuseOtherWires(provider: Provider, preset: ProviderPreset, bound: Wire): Provider {
+  return {
+    ...provider,
+    async *createStream(messages, tools, opts) {
+      if (opts?.model && !sameWire(wireFor(preset, opts.model), bound)) {
+        throw new ProviderError(
+          provider.id,
+          "invalid",
+          `${provider.id}: ${opts.model} is served on a different endpoint than ${provider.model}. ` +
+            `Build a provider for ${opts.model}, or put both in a models chain.`,
+        );
+      }
+      yield* provider.createStream(messages, tools, opts);
+    },
+  };
 }

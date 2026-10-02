@@ -2,6 +2,17 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.21.0] - 2026-10-01
+
+### Changed
+
+- **Breaking: `opencode-go-responses` is gone. `opencode-go` serves every Go wire.** The preset now picks the wire from the model id: `minimax-` and `qwen` on Anthropic Messages (the key in `x-api-key`), `gpt-`, `grok-` and `muse-spark-` on Responses, and everything else on chat completions. Replace `createPresetProvider("opencode-go-responses", …)` with `createPresetProvider("opencode-go", { models: ["muse-spark-1.3-contributor", …] })`. A chain can mix wires, and each model in it uses its own. A per-call `model` on a different wire than the provider's own is refused with an `invalid` error before any request, because the endpoint would 404 it as an unknown model. Anthropic requests to Go now carry `x-opencode-session` too.
+- **Go's chat models get the reasoning effort they take.** GLM 5.2 and 5.3 take only `high` and `max`: `none` and `high` send `high`, `max` sends `max`, and `low` and `medium` are refused. DeepSeek V4 takes `low` to `max`, and `none` sends `low`. MiMo takes `none`, `low`, `medium` and `high`, and refuses `max`. Other Go models keep the OpenAI spelling. These come from cc-proxy's measurements on live traffic. Note that `qwen3.8-flash`, in the default chain, now goes to Messages instead of chat completions.
+
+### Added
+
+- **`ProviderPreset.routes`** lets a preset serve different models on different wires.
+
 ## [0.20.0] - 2026-10-01
 
 ### Added

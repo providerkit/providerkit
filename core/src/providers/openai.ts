@@ -3,7 +3,7 @@
 // This is the dialect most gateways speak, so one adapter serves OpenAI,
 // OpenRouter, DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio.
 // Their divergences are small and named where they appear.
-import { fileRefused, streamCut, streamError } from "../errors.ts";
+import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
@@ -160,7 +160,7 @@ export function openRouterHostFor(baseUrl: string, model: string): string | unde
 
 /** The spellings of "think this hard" across the dialects that share this
  *  adapter. `off` sends nothing and leaves the model on its own default. */
-export type EffortDialect = "openai" | "openrouter" | "deepseek" | "off";
+export type EffortDialect = "openai" | "openrouter" | "deepseek" | "opencode-go" | "off";
 
 /**
  * How `none` is said on OpenRouter, per model id: the `reasoning.effort` that
@@ -274,6 +274,8 @@ export function effortParams(
       return model !== undefined && OPENROUTER_NONE.has(model)
         ? { reasoning: { effort: OPENROUTER_NONE.get(model) } }
         : {};
+    case "opencode-go":
+      return goEffortParams(effort, model);
     case "openai":
       return { reasoning_effort: level ?? "none" };
     case "off":
@@ -281,11 +283,45 @@ export function effortParams(
   }
 }
 
+/**
+ * OpenCode Go's chat models each take a different set of `reasoning_effort`
+ * values (cc-proxy's table, measured on live traffic). A level a model can't
+ * take is refused here, rather than sent as a 400 or quietly changed into a
+ * level the caller didn't ask for.
+ *
+ * - GLM 5.2 and 5.3 take only `high` and `max`, with no way to turn thinking
+ *   off. `none` gets `high`, the least they offer.
+ * - DeepSeek V4 takes `low` to `max`. `none` gets `low`, its least.
+ * - MiMo takes `low`, `medium` and `high`, and `none` (measured 2026-09-27 on
+ *   `mimo-v2.6-flash`; cc-proxy maps it to `low` instead).
+ * - Every other Go chat model gets the OpenAI spelling, as before.
+ */
+function goEffortParams(effort: Effort, model = ""): Record<string, unknown> {
+  const id = model.toLowerCase();
+  const refuse = (allowed: string): never => {
+    throw new ProviderError(
+      "opencode-go",
+      "invalid",
+      `opencode-go: ${model} can't take reasoning effort "${effort}". Use ${allowed}.`,
+    );
+  };
+  const level = (value: string) => ({ reasoning_effort: value });
+  if (/glm-5[-.p]?[23]/.test(id)) {
+    if (effort === "none" || effort === "high") return level("high");
+    return effort === "max" ? level("max") : refuse("high or max");
+  }
+  if (id.includes("deepseek-v4")) return level(effort === "none" ? "low" : effort);
+  if (id.includes("mimo"))
+    return effort === "max" ? refuse("none, low, medium or high") : level(effort);
+  return level(effort === "max" ? "high" : effort);
+}
+
 /** Gateways named after their dialect get it for free; everything else keeps
  *  the dialect this adapter is named for. */
 function dialectFor(id: string): EffortDialect {
   if (id === "openrouter") return "openrouter";
   if (id === "deepseek") return "deepseek";
+  if (id === "opencode-go") return "opencode-go";
   return "openai";
 }
 
