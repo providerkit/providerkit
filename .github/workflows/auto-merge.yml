@@ -52,7 +52,7 @@ jobs:
     # longer instant. Three 25-minute ceilings plus the merge is the worst case;
     # past that something is stuck and a runner must not keep billing for it.
     timeout-minutes: 90
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
     # Only when CI passed, it was a PR (not a push), and the PR is from this repo
     # (forks carry no write token and aren't auto-merged).
     if: >-
