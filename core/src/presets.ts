@@ -36,6 +36,21 @@ export type PresetShape = "anthropic" | "openai" | "responses" | "gemini";
  */
 export type PresetAuth = "key" | "bearer" | "oauth";
 
+/**
+ * One wire a preset serves besides its own. A gateway that puts different
+ * models on different wires (OpenCode Go) lists the exceptions here, and the
+ * preset's own `shape` and `baseUrl` serve every other model.
+ */
+export interface PresetRoute {
+  /** The model ids this route serves, matched by prefix. */
+  prefixes: readonly string[];
+  shape: PresetShape;
+  baseUrl: string;
+  path?: string;
+  /** Defaults to the preset's `auth`. */
+  auth?: PresetAuth;
+}
+
 export interface ProviderPreset {
   /** Adapter wire format. */
   shape: PresetShape;
@@ -70,6 +85,11 @@ export interface ProviderPreset {
    *  and cache per conversation — and refuse a call without it (OpenCode Go:
    *  `MissingSessionID`, measured 2026-09-27). */
   sessionHeader?: string;
+  /** Wires for model ids that don't use the preset's own `shape`. The first
+   *  route with a matching prefix serves the model. A model on a different wire
+   *  than the one the provider was built for is refused with `invalid`, so a
+   *  per-call `model` can't send a request to an endpoint that would 404 it. */
+  routes?: readonly PresetRoute[];
   /** Default model chain when the caller names neither `model` nor `models`:
    *  the first answers, the rest take over (same key) when it fails. */
   rotation?: readonly string[];
@@ -337,22 +357,6 @@ export const PROVIDER_PRESETS = {
     models: ["glm-5.3-flash", "glm-5.3", "glm-5.2"],
   },
   /**
-   * OpenCode Go's Responses route. Muse Contributor measured 2026-09-28:
-   * text, images, strict JSON Schema, parallel tools and tool-result round trips
-   * all passed. It requires reasoning (`none` becomes `minimal`) and accepts
-   * only automatic tool choice (`none` is encoded by sending no tools).
-   * Contributor requests may be used to improve Meta products; the workspace
-   * must explicitly allow those endpoints.
-   */
-  "opencode-go-responses": {
-    shape: "responses",
-    baseUrl: "https://opencode.ai/zen/go",
-    auth: "bearer",
-    defaultModel: "muse-spark-1.3-contributor",
-    models: ["muse-spark-1.3-contributor"],
-    sessionHeader: "x-opencode-session",
-  },
-  /**
    * OpenCode Go — one $10/month key across many open models, each with its own
    * monthly dollar limit (5h = 20%, week = 50%). Chain several models as
    * `fallbacks` so a spent one hands over to the next.
@@ -362,17 +366,50 @@ export const PROVIDER_PRESETS = {
    * `reasoning_effort: "none"`, tool calls and json_schema; `glm-5.3-flash`
    * 400s on a tool without a description and on a `thinking` field.
    *
-   * This preset speaks chat completions only. Go serves GPT/Grok/Muse Spark on
-   * /responses and some Qwen/MiniMax ids on Anthropic /messages — those ids
-   * fail here.
+   * Go serves three wires, and `routes` picks one from the model id (cc-proxy's
+   * table, from Go's own docs): `minimax-` and `qwen` on Anthropic /messages
+   * (key in `x-api-key`), `gpt-`, `grok-` and `muse-spark-` on /responses, and
+   * everything else on chat completions. Each model in a chain resolves its
+   * own route, so one preset serves a chain that crosses wires.
+   *
+   * Muse Contributor, measured 2026-09-28 on /responses: text, images, strict
+   * JSON Schema, parallel tools and tool-result round trips all passed. It
+   * requires reasoning (`none` becomes `minimal`) and accepts only automatic
+   * tool choice (`none` is encoded by sending no tools). Contributor requests
+   * may be used to improve Meta products; the workspace must explicitly allow
+   * those endpoints.
+   *
+   * Reasoning effort is spelled per model on chat completions (see
+   * `effortParams`): GLM takes only `high` and `max`, DeepSeek V4 and MiMo
+   * take graded levels.
    */
   "opencode-go": {
     shape: "openai",
     baseUrl: "https://opencode.ai/zen/go/v1",
     auth: "bearer",
     defaultModel: "mimo-v2.6-flash",
-    models: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
+    models: [
+      "mimo-v2.6-flash",
+      "mimo-v2.5",
+      "glm-5.3-flash",
+      "qwen3.8-flash",
+      "longcat-2.0",
+      "muse-spark-1.3-contributor",
+    ],
     sessionHeader: "x-opencode-session",
+    routes: [
+      {
+        prefixes: ["minimax-", "qwen"],
+        shape: "anthropic",
+        baseUrl: "https://opencode.ai/zen/go",
+        auth: "key",
+      },
+      {
+        prefixes: ["gpt-", "grok-", "muse-spark-"],
+        shape: "responses",
+        baseUrl: "https://opencode.ai/zen/go",
+      },
+    ],
     // Cheapest first, each with its own monthly limit ($60, qwen3.8-flash $30).
     // All five passed plain text, a described tool call and json_schema on
     // 2026-09-27; longcat-2.0 ignores reasoning "none", so it goes last.
