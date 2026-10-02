@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.21.1] - 2026-10-02
+
+### Fixed
+
+- **GLM on `opencode-go` no longer refuses `low` and `medium`.** GLM 5.2 and 5.3 take only `high` and `max`, and 0.21.0 threw an `invalid` error for the other two. `invalid` stops the whole fallback chain, so one low-effort call to GLM ended the turn. `low` and `medium` now send `high`, the least GLM offers, the same as `none` already did. `high` and `max` are unchanged, and MiMo still refuses `max`.
+
 ## [0.21.0] - 2026-10-02
 
 ### Changed

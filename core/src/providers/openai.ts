@@ -286,11 +286,12 @@ export function effortParams(
 /**
  * OpenCode Go's chat models each take a different set of `reasoning_effort`
  * values (cc-proxy's table, measured on live traffic). A level a model can't
- * take is refused here, rather than sent as a 400 or quietly changed into a
- * level the caller didn't ask for.
+ * take is raised to the least it offers (GLM, DeepSeek) or refused (MiMo
+ * `max`), rather than sent as a 400. A refusal is `invalid`, which stops the
+ * whole fallback chain, so refuse only where there is nothing sensible to send.
  *
  * - GLM 5.2 and 5.3 take only `high` and `max`, with no way to turn thinking
- *   off. `none` gets `high`, the least they offer.
+ *   off. `none`, `low` and `medium` get `high`, the least they offer.
  * - DeepSeek V4 takes `low` to `max`. `none` gets `low`, its least.
  * - MiMo takes `low`, `medium` and `high`, and `none` (measured 2026-09-27 on
  *   `mimo-v2.6-flash`; cc-proxy maps it to `low` instead).
@@ -307,8 +308,7 @@ function goEffortParams(effort: Effort, model = ""): Record<string, unknown> {
   };
   const level = (value: string) => ({ reasoning_effort: value });
   if (/glm-5[-.p]?[23]/.test(id)) {
-    if (effort === "none" || effort === "high") return level("high");
-    return effort === "max" ? level("max") : refuse("high or max");
+    return level(effort === "max" ? "max" : "high");
   }
   if (id.includes("deepseek-v4")) return level(effort === "none" ? "low" : effort);
   if (id.includes("mimo"))
