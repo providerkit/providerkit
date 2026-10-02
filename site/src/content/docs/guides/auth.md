@@ -7,7 +7,16 @@ A subscription backend takes a short-lived token, not an API key. `@providerkit/
 that token and renews it. It uses only `fetch`, so it runs in a browser extension, a worker or a
 server.
 
-Your app supplies the two things a package can't do, and where tokens are stored.
+Once you have signed a person in, getting a token is one call:
+
+```ts
+const { accessToken } = await token.getToken(); // a token that works now
+```
+
+`token` comes from `tokenSource`, below. If the stored token has expired, this call renews it first.
+
+To sign in the first time, your app supplies the two things a package can't do: opening a browser
+page and catching a redirect. It also decides where tokens are stored.
 
 ```ts
 import { createAuthFlow, tokenSource, type AuthHost } from "@providerkit/core/auth";

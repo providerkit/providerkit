@@ -260,7 +260,7 @@ createOpenAIProvider({
 ### Curated presets and `createPresetProvider`
 
 Instead of hand-crafting `baseUrl`, header styles, and dialect quirks per vendor, you can instantiate
-any of the 45 curated presets directly:
+any of the 48 curated presets directly:
 
 ```ts
 import { createPresetProvider } from "@providerkit/core";
@@ -273,6 +273,31 @@ const deepseek = createPresetProvider("deepseek", { apiKey: process.env.DEEPSEEK
 
 Endpoints supporting both Anthropic (`/v1/messages`) and OpenAI (`/v1/chat/completions`) wires are
 explicitly distinguished (e.g. `zai` vs `zai-openai`, `qwen` token plan vs `qwen-token-plan-openai`).
+
+Three preset options cover what a vendor needs beyond a key:
+
+- `baseUrl` replaces the preset's API root, for a vendor that gives each account its own host.
+- `replayReasoning` sends the model's encrypted reasoning back on the next turn. Only `chatgpt` turns
+  it on. Go and Grok may refuse the `include` field it needs.
+- `initiatorHeader` sends `X-Initiator` (`user` or `agent`) on every call. Only `github-copilot`
+  uses it, because GitHub bills a premium request per `user` turn.
+
+### Subscription presets
+
+Five presets take a short-lived token from a sign-in, not an API key. Pass the token as `apiKey`.
+[`@providerkit/core/auth`](/guides/auth/) gets and renews it.
+
+| Preset           | Signs in as         | Sign-in flow     |
+| ---------------- | ------------------- | ---------------- |
+| `chatgpt`        | ChatGPT             | `chatgpt`        |
+| `grok`           | Grok (SuperGrok, X) | `grok`           |
+| `kimi-plan`      | Kimi plan           | `kimi-plan`      |
+| `github-copilot` | GitHub Copilot      | `github-copilot` |
+| `claude`         | Claude plan         | none yet         |
+
+`claude` takes a token you got another way, because `createAuthFlow` has no Claude flow. The `meta`
+and `openrouter` flows have no subscription preset of their own. `openrouter` gives you a key for
+the keyed `openrouter` preset.
 
 ### Declaring cross-provider fallbacks by preset ID
 
@@ -322,8 +347,8 @@ across gateways, so a switch is worth one real tool-calling turn against the new
 a gateway that reads `Authorization` instead of `x-api-key`, and a **subscription backend** —
 Claude or ChatGPT signed in as a person rather than billed per token. Those carry an OAuth
 access token that expires and rotates. [`@providerkit/core/auth`](/guides/auth/) signs in and
-renews it for ChatGPT, Kimi, Grok, GitHub Copilot, Meta and OpenRouter; storing the token and the
-sign-in screens stay in your app. Give one its own `id`, because a 401 there means
+renews it for ChatGPT, Kimi, Grok, GitHub Copilot, Meta and OpenRouter. Your app still stores the
+token and shows the sign-in screens. Give one its own `id`, because a 401 there means
 _sign in again_, not _bad API key_, and a ledger that cannot tell them apart will retry the one
 that no amount of retrying fixes.
 
