@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.18.0] - 2026-10-01
+
+### Added
+
+- **`serviceTier`: ask for the fast or the cheap tier.** Set `serviceTier: "priority"` (faster, costs more) or `"flex"` (slower, costs less) on a call or on a provider, and the OpenAI and Responses shapes send it as `service_tier`. A value on the call wins. Anthropic and Gemini refuse it with an `invalid` error instead of dropping it: Anthropic's own `service_tier` means something else, and Gemini has no such switch. A preset on either shape throws if you set it in the config.
+
 ## [0.17.2] - 2026-10-01
 
 ### Fixed

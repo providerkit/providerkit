@@ -320,6 +320,13 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         generationConfig.responseJsonSchema = toGeminiToolSchema(opts.json.schema);
       }
 
+      if (opts.serviceTier) {
+        throw new ProviderError(
+          id,
+          "invalid",
+          `${id}: Gemini has no service tier switch. Leave serviceTier unset for Gemini models.`,
+        );
+      }
       const request: Record<string, unknown> = { contents, generationConfig };
       // A Content, not the bare string the SDK accepts — REST rejects a string.
       // The prompt-carried schema rides as a second part, after the caller's

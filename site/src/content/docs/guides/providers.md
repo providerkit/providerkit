@@ -125,8 +125,14 @@ interface StreamOptions {
   signal?: AbortSignal;
   toolChoice?: ToolChoice;
   json?: JsonOutput;
+  serviceTier?: "priority" | "flex"; // OpenAI and Responses shapes only
 }
 ```
+
+`serviceTier` is sent as `service_tier`: `priority` is faster and costs more, `flex` is slower and
+costs less. You can also set it once on a provider, and a per-call value wins. Anthropic and Gemini
+refuse it with an `invalid` error. Anthropic's own `service_tier` means something else, and Gemini
+has no such switch.
 
 `effort` is mapped, not passed through. On OpenAI-shape it becomes `reasoning_effort`. On
 Anthropic-shape it depends on the model id:

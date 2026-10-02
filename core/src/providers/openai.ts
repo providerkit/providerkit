@@ -14,6 +14,7 @@ import type {
   JsonWithTools,
   Provider,
   ProviderChunk,
+  ServiceTier,
   StreamOptions,
   ToolDefinition,
 } from "../types.ts";
@@ -104,6 +105,8 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    *  no sessionId, the provider's own per-instance id rides instead, so the
    *  gateway never sees a call without one. */
   sessionHeader?: string;
+  /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
+  serviceTier?: ServiceTier;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -487,6 +490,8 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
       if (opts.topP !== undefined) request.top_p = opts.topP;
       if (opts.stopSequences?.length) request.stop = opts.stopSequences;
+      const serviceTier = opts.serviceTier ?? config.serviceTier;
+      if (serviceTier) request.service_tier = serviceTier;
       Object.assign(request, effortParams(config.effortDialect ?? dialectFor(id), effort, model));
       if (tools.length > 0) {
         request.tools = tools.map((tool) => ({

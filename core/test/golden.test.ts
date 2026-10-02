@@ -228,6 +228,9 @@ interface Vendor {
   /** Whether this wire carries a file part (a PDF, audio, video). Only
    *  Gemini's does; the other three must refuse one, never drop it. */
   takesFiles: boolean;
+  /** Whether this wire has a service tier to send. Anthropic and Gemini do not,
+   *  and must refuse one, never drop it. */
+  takesServiceTier: boolean;
 }
 
 const VENDORS: Vendor[] = [
@@ -239,6 +242,7 @@ const VENDORS: Vendor[] = [
     throttleSays: "rate limit exceeded",
     refusesThinking: (body) => at(body, "reasoning_effort") === "none",
     takesFiles: false,
+    takesServiceTier: true,
   },
   {
     name: "anthropic",
@@ -252,6 +256,7 @@ const VENDORS: Vendor[] = [
     // none differently, and providers.test.ts pins each.
     refusesThinking: (body) => at(body, "thinking", "type") === "disabled",
     takesFiles: false,
+    takesServiceTier: false,
   },
   {
     name: "gemini",
@@ -264,6 +269,7 @@ const VENDORS: Vendor[] = [
       at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL" ||
       at(body, "generationConfig", "thinkingConfig", "thinkingBudget") === 0,
     takesFiles: true,
+    takesServiceTier: false,
   },
   {
     name: "responses",
@@ -273,6 +279,7 @@ const VENDORS: Vendor[] = [
     throttleSays: "Rate limit reached",
     refusesThinking: (body) => at(body, "reasoning", "effort") === "none",
     takesFiles: false,
+    takesServiceTier: true,
   },
 ];
 
@@ -396,6 +403,22 @@ describe.each(VENDORS)("$name", (vendor) => {
     const silence = recording(vendor.turn);
     await assemble(ask(vendor.create(silence.fetchImpl)));
     expect(vendor.refusesThinking(silence.sent[0]!)).toBe(false);
+  });
+
+  it("sends a service tier or refuses it before any request, and never drops it", async () => {
+    const tier = recording(vendor.turn);
+    const stream = ask(vendor.create(tier.fetchImpl), { serviceTier: "priority" });
+    if (vendor.takesServiceTier) {
+      await assemble(stream);
+      expect(tier.sent[0]).toMatchObject({ service_tier: "priority" });
+    } else {
+      expect(await thrownBy(stream)).toMatchObject({ kind: "invalid" });
+      expect(tier.sent).toHaveLength(0);
+    }
+    // Silence sends nothing, on every wire.
+    const silence = recording(vendor.turn);
+    await assemble(ask(vendor.create(silence.fetchImpl)));
+    expect(silence.sent[0]).not.toHaveProperty("service_tier");
   });
 
   it("sends a file part or refuses it before any request, and never drops it", async () => {

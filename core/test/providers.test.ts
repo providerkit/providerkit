@@ -1397,6 +1397,30 @@ describe("one tool call per turn", () => {
     expect(await sent(false, [])).toBeUndefined();
   });
 
+  it("sends service_tier on the OpenAI shape from the config or the call", async () => {
+    const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+    const bound = createOpenAIProvider({
+      apiKey: "k",
+      model: "gpt-5.6",
+      serviceTier: "flex",
+      fetchImpl,
+    });
+    await collect(bound.createStream(HI, []));
+    await collect(bound.createStream(HI, [], { serviceTier: "priority" }));
+    await collect(
+      createOpenAIProvider({ apiKey: "k", model: "gpt-5.6", fetchImpl }).createStream(HI, []),
+    );
+    expect(seen[0]!.body.service_tier).toBe("flex");
+    expect(seen[1]!.body.service_tier).toBe("priority");
+    expect(seen[2]!.body).not.toHaveProperty("service_tier");
+  });
+
+  it("refuses a service tier on a preset whose shape has none", () => {
+    expect(() => createPresetProvider("claude", { apiKey: "k", serviceTier: "priority" })).toThrow(
+      /no service tier/,
+    );
+  });
+
   it("reports the thinking share of the output on the OpenAI shape", async () => {
     const { fetchImpl } = recorder([
       j({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }),

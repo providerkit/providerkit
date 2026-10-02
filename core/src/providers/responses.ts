@@ -20,6 +20,7 @@ import type {
   ImagePart,
   Provider,
   ProviderChunk,
+  ServiceTier,
   StreamOptions,
   ToolDefinition,
 } from "../types.ts";
@@ -56,6 +57,8 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   /** What this backend accepts as an image. Each image it would refuse is
    *  replaced by a note naming the reason, instead of failing the request. */
   imageLimits?: ImageLimits;
+  /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
+  serviceTier?: ServiceTier;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -386,6 +389,8 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       // The cache affinity key. Without one the backend spreads a
       // conversation's turns across cache shards, and a re-sent prefix misses.
       if (opts.sessionId) request.prompt_cache_key = opts.sessionId;
+      const serviceTier = opts.serviceTier ?? config.serviceTier;
+      if (serviceTier) request.service_tier = serviceTier;
       // Muse Contributor accepts only `auto`. `none` has an exact wire-level
       // equivalent: send no tools. Required/named choices stay explicit and let
       // the endpoint refuse a promise it cannot keep.

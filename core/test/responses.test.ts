@@ -819,6 +819,20 @@ describe("responses request", () => {
     expect(seen[1]!.body).not.toHaveProperty("parallel_tool_calls");
   });
 
+  it("sends service_tier from the config, and a per-call tier wins", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(provider({ fetchImpl, serviceTier: "flex" }).createStream(hi, []));
+    await collect(
+      provider({ fetchImpl, serviceTier: "flex" }).createStream(hi, [], {
+        serviceTier: "priority",
+      }),
+    );
+    await collect(provider({ fetchImpl }).createStream(hi, []));
+    expect(seen[0]!.body.service_tier).toBe("flex");
+    expect(seen[1]!.body.service_tier).toBe("priority");
+    expect(seen[2]!.body).not.toHaveProperty("service_tier");
+  });
+
   it("lets a per-call model and effort override the bound ones", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
     await collect(
