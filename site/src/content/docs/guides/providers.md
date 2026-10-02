@@ -112,6 +112,14 @@ contract: opaque, provider-owned. `drainStream` keeps it on the `Completion`; `s
 drops it along with `reasoning`, because a thinking-off turn must not carry either half of the
 record.
 
+`reasoningItems` is the ChatGPT backend's version: its encrypted reasoning items, sent once at the
+end of a turn as `{ provider, items }`. The `chatgpt` preset asks for them
+(`include: ["reasoning.encrypted_content"]`) and sends them back on the next turn, newest first, up
+to 8 MiB. Only the provider that made them gets them back. After a fallback to another provider they
+are dropped, because another vendor would reject them. Keep them on the assistant message, like
+`reasoningDetails`. `stripReasoning` drops them too. Go and Grok don't ask for them, because they
+may refuse `include`.
+
 ## Options
 
 ```ts
@@ -225,7 +233,7 @@ terse, and "sometimes forgets its tools" is a prompt problem, not a wire shape o
 | ------------------------- | ----------------------- | -------------------------------------------------------------------------------------- |
 | `createAnthropicProvider` | Anthropic Messages      | any compatible endpoint via `baseUrl`; `bearer: true` moves the key to `Authorization` |
 | `createOpenAIProvider`    | OpenAI Chat Completions | any compatible endpoint via `baseUrl`; `providerOrder` and `pinHost` route pins        |
-| `createResponsesProvider` | OpenAI Responses        | reasoning items replay across turns; also serves the ChatGPT subscription backend      |
+| `createResponsesProvider` | OpenAI Responses        | `replayReasoning` sends encrypted reasoning back; also serves the ChatGPT backend      |
 | `createGeminiProvider`    | Gemini REST             | no SDK; thought signatures survive tool turns, thoughts bill as output, Gemini 3 dials |
 
 On the OpenAI-shape adapter, `effortDialect` names which spelling of _think this hard_ the endpoint

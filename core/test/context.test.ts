@@ -23,6 +23,19 @@ describe("estimateTokens", () => {
 });
 
 describe("messageTokens", () => {
+  it("counts encrypted reasoning by cc-proxy's estimate, not its base64 length", () => {
+    const blob = "A".repeat(10_000);
+    const withItems: ChatMessage = {
+      role: "assistant",
+      content: "",
+      reasoningItems: {
+        provider: "chatgpt",
+        items: [{ type: "reasoning", encrypted_content: blob }],
+      },
+    };
+    expect(messageTokens(withItems)).toBe(Math.ceil(((10_000 * 3) / 4 - 650) / 4));
+  });
+
   it("counts an assistant turn's reasoning and tool arguments too", () => {
     // All three are re-sent, so all three cost.
     const plain = messageTokens(assistant("hello"));

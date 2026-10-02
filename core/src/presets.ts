@@ -76,6 +76,10 @@ export interface ProviderPreset {
   /** Responses shape: what the backend accepts as an image, for backends that
    *  fail a whole request over one image they won't take. */
   imageLimits?: ImageLimits;
+  /** Responses shape: ask for the encrypted reasoning items, and send them back
+   *  on the next turn. Only for backends that take `include`; `chatgpt` is the
+   *  one that does, and Go and Grok may refuse it. */
+  replayReasoning?: boolean;
 }
 
 export const PROVIDER_PRESETS = {
@@ -493,6 +497,7 @@ export const PROVIDER_PRESETS = {
       "gpt-5.6-luna",
       "gpt-5.5",
     ],
+    replayReasoning: true,
   },
   /**
    * A Grok subscription (SuperGrok, X Premium) — the backend the Grok CLI

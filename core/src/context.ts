@@ -41,7 +41,22 @@ export function messageTokens(message: ChatMessage): number {
       ? (message.reasoning ?? "") +
         (message.toolCalls?.map((call) => call.name + call.arguments).join("") ?? "")
       : "";
-  return estimateTokens(textOf(message) + extra);
+  return estimateTokens(textOf(message) + extra) + reasoningItemTokens(message);
+}
+
+/**
+ * Encrypted reasoning is base64 of the real thing, so its length says little:
+ * three bytes per four characters, less ~650 bytes of envelope, then four bytes
+ * a token (cc-proxy's estimate).
+ */
+function reasoningItemTokens(message: ChatMessage): number {
+  if (message.role !== "assistant" || !message.reasoningItems) return 0;
+  let tokens = 0;
+  for (const item of message.reasoningItems.items) {
+    const blob = (item as { encrypted_content?: unknown } | null)?.encrypted_content;
+    if (typeof blob === "string") tokens += Math.max(0, ((blob.length * 3) / 4 - 650) / 4);
+  }
+  return Math.ceil(tokens);
 }
 
 export function conversationTokens(messages: readonly ChatMessage[]): number {

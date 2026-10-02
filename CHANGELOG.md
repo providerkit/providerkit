@@ -2,6 +2,16 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.19.0] - 2026-10-01
+
+### Added
+
+- **The `chatgpt` preset keeps the model's reasoning between turns.** It now asks the ChatGPT backend for its encrypted reasoning items and sends them back on the next turn, so the model no longer re-derives its own chain of thought on every step of a tool loop. They arrive once per turn as `reasoningItems` on a chunk, and `drainStream` keeps them on the `Completion`. Put them on the assistant message you store. Only the provider that made them gets them back, so after a fallback they are dropped. At most 8 MiB go back in one request, newest turns first. `messageTokens` counts them, so compaction sees the real size. The `replayReasoning` preset option turns this on for another Responses backend. Go and Grok leave it off, because they may refuse `include`.
+
+### Fixed
+
+- **The docs no longer say reasoning items replay on every Responses provider.** They didn't, and the `chatgpt` preset is the only one that does now.
+
 ## [0.18.0] - 2026-10-01
 
 ### Added

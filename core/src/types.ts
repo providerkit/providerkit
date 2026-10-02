@@ -108,6 +108,14 @@ export type ChatMessage =
        * continuity across a tool round. Absent on every other dialect.
        */
       reasoningDetails?: unknown[];
+      /**
+       * The ChatGPT backend's own reasoning items, encrypted, riding back
+       * UNMODIFIED on the next turn so the model keeps its chain of thought.
+       * Tagged with the provider that made them: only that provider replays
+       * them, because another vendor (after a fallback) would reject them.
+       * Opaque, like `reasoningDetails`.
+       */
+      reasoningItems?: ReasoningItems;
       toolCalls?: ToolCall[];
     }
   | {
@@ -118,6 +126,12 @@ export type ChatMessage =
       /** Images a tool hands back (a screenshot, a rendered chart). */
       images?: ImagePart[];
     };
+
+/** Provider-owned reasoning items and the id of the provider that made them. */
+export interface ReasoningItems {
+  provider: string;
+  items: unknown[];
+}
 
 /** JSON Schema for an object — what every provider's tool contract wants. */
 export interface JsonObjectSchema {
@@ -192,6 +206,8 @@ export interface ProviderChunk {
   /** OpenRouter's normalized reasoning payload — hand it back on the next
    *  turn's assistant message verbatim. See ChatMessage.reasoningDetails. */
   reasoningDetails?: unknown[];
+  /** Once per turn, where a provider replays its reasoning. See ChatMessage.reasoningItems. */
+  reasoningItems?: ReasoningItems;
   toolCalls?: ToolCallDelta[];
   usage?: TokenUsage;
   finishReason?: FinishReason;
@@ -417,6 +433,8 @@ export interface Completion {
   reasoning: string;
   /** Present only where the provider sent one. See ChatMessage.reasoningDetails. */
   reasoningDetails?: unknown[];
+  /** Present only where the provider sent them. See ChatMessage.reasoningItems. */
+  reasoningItems?: ReasoningItems;
   usage: TokenUsage;
   finishReason: FinishReason | null;
   model: string;
@@ -435,6 +453,7 @@ export async function drainStream(
   // a drained turn replays only half its own reasoning on the next round —
   // which is the failure `reasoningDetails` exists to prevent.
   let reasoningDetails: unknown[] | undefined;
+  let reasoningItems: ReasoningItems | undefined;
   let usage: TokenUsage = EMPTY_USAGE;
   let finishReason: FinishReason | null = null;
   let source: ProviderChunk["source"];
@@ -444,6 +463,7 @@ export async function drainStream(
       if (chunk.content) text += chunk.content;
       if (chunk.reasoning) reasoning += chunk.reasoning;
       if (chunk.reasoningDetails?.length) reasoningDetails = chunk.reasoningDetails;
+      if (chunk.reasoningItems?.items.length) reasoningItems = chunk.reasoningItems;
     } else if (chunk.type === "usage" && chunk.usage) {
       usage = chunk.usage;
     } else if (chunk.type === "finish" && chunk.finishReason) {
@@ -454,6 +474,7 @@ export async function drainStream(
     text,
     reasoning,
     ...(reasoningDetails ? { reasoningDetails } : {}),
+    ...(reasoningItems ? { reasoningItems } : {}),
     usage,
     finishReason,
     model: source?.model ?? model,
@@ -476,11 +497,23 @@ export async function drainStream(
 export function stripReasoning(messages: readonly ChatMessage[]): ChatMessage[] {
   return messages.map((message) => {
     if (message.role !== "assistant") return message;
-    if (message.reasoning === undefined && message.reasoningDetails === undefined) return message;
-    // Both halves go. `reasoningDetails` is the same chain of thought in the
-    // provider's own words, so leaving it behind carries into a thinking-off
-    // turn exactly what stripping `reasoning` was meant to keep out.
-    const { reasoning: _text, reasoningDetails: _payload, ...rest } = message;
+    if (
+      message.reasoning === undefined &&
+      message.reasoningDetails === undefined &&
+      message.reasoningItems === undefined
+    ) {
+      return message;
+    }
+    // Every half goes. `reasoningDetails` and `reasoningItems` are the same
+    // chain of thought in the provider's own words, so leaving them behind
+    // carries into a thinking-off turn exactly what stripping `reasoning` was
+    // meant to keep out.
+    const {
+      reasoning: _text,
+      reasoningDetails: _payload,
+      reasoningItems: _items,
+      ...rest
+    } = message;
     return rest;
   });
 }
