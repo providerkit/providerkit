@@ -14,7 +14,7 @@
  * `output_config.effort` for current Claude models, where `none` is the lowest
  * effort on a model that cannot stop thinking; and to thinking budgets for
  * Claude 4.5 and older and for every other vendor on that wire.
- * Support varies per model — an unsupported level comes back as a clean 400.
+ * Support varies per model. An unsupported level comes back as a clean 400.
  *
  * Ordered least → most; the type derives from the array so the runtime guard
  * and the union can never drift apart.
@@ -34,7 +34,7 @@ export interface TextPart {
   text: string;
 }
 
-/** An image the model looks at (vision) — bytes as base64, never a URL the
+/** An image the model looks at (vision), with bytes as base64, never a URL the
  *  provider would have to fetch on our behalf. */
 export interface ImagePart {
   type: "image";
@@ -48,7 +48,7 @@ export type FileMimeType =
   `application/${string}` | `audio/${string}` | `video/${string}` | `text/${string}`;
 
 /**
- * A file the model reads — a PDF, a recording, a video — as base64 bytes,
+ * A file the model reads (a PDF, a recording, a video) as base64 bytes,
  * never a URL. Only the Gemini adapter sends one, as `inlineData`, the way it
  * sends an image. Every other adapter refuses it with an `invalid`
  * ProviderError before any request goes out, rather than drop it: a dropped
@@ -94,7 +94,7 @@ export type ChatMessage =
        * OpenAI-shape serializes it as `reasoning_content`; Anthropic-shape
        * drops it, since its thinking blocks carry signatures we never capture.
        *
-       * A turn that DISABLES thinking must not carry it — mixing the two is
+       * A turn that disables thinking must not carry it. Mixing the two is
        * unsupported. `stripReasoning` below is that rule, once.
        */
       reasoning?: string;
@@ -102,7 +102,7 @@ export type ChatMessage =
        * OpenRouter's normalized reasoning payload, arriving on the stream and
        * riding back UNMODIFIED on the next turn's assistant message.
        *
-       * Opaque on purpose — the same contract as Gemini's `thoughtSignature`,
+       * Opaque on purpose, with the same contract as Gemini's `thoughtSignature`,
        * and for the same reason: it is the provider's own record of how it got
        * here, and reading, reshaping or dropping it costs the model its
        * continuity across a tool round. Absent on every other dialect.
@@ -133,7 +133,7 @@ export interface ReasoningItems {
   items: unknown[];
 }
 
-/** JSON Schema for an object — what every provider's tool contract wants. */
+/** JSON Schema for an object, as every provider's tool contract requires. */
 export interface JsonObjectSchema {
   type: "object";
   properties?: Record<string, unknown>;
@@ -161,19 +161,19 @@ export interface ToolCallDelta {
 
 export interface TokenUsage {
   inputTokens: number;
-  /** Cache-HIT subset of `inputTokens` — providers auto-cache repeated
+  /** Cache-hit subset of `inputTokens`. Providers auto-cache repeated
    *  prefixes and bill the hit portion far cheaper, so it must be tracked
    *  separately to cost a turn correctly. 0 when the provider reports none. */
   cachedInputTokens: number;
-  /** Tokens WRITTEN to cache — also a subset of `inputTokens`, so the total
+  /** Tokens written to cache, also a subset of `inputTokens`, so the total
    *  stays the whole prompt the window has to hold. Anthropic bills these
    *  above the input rate; the OpenAI-shape auto-cachers bill them at it.
    *  0 when not reported. */
   cacheWriteTokens?: number;
   outputTokens: number;
   /**
-   * The part of `outputTokens` spent thinking, when the provider reports it —
-   * already INSIDE `outputTokens`, so never add it again. It is the number
+   * The part of `outputTokens` spent thinking, when the provider reports it.
+   * Already inside `outputTokens`, so never add it again. It is the number
    * that explains a turn that came back empty with a length finish: the
    * reasoning ate the budget. Anthropic does not report it; absent there.
    */
@@ -195,7 +195,7 @@ export const EMPTY_USAGE: TokenUsage = {
   outputTokens: 0,
 };
 
-/** Normalized streaming chunk — every provider's shape collapses into this. */
+/** Normalized streaming chunk. Every provider's shape maps to this. */
 export interface ProviderChunk {
   type: "delta" | "usage" | "finish";
   /** The selected endpoint and model when a fallback provider emits this chunk.
@@ -203,7 +203,7 @@ export interface ProviderChunk {
   source?: { provider: string; model: string };
   content?: string;
   reasoning?: string;
-  /** OpenRouter's normalized reasoning payload — hand it back on the next
+  /** OpenRouter's normalized reasoning payload. Hand it back on the next
    *  turn's assistant message verbatim. See ChatMessage.reasoningDetails. */
   reasoningDetails?: unknown[];
   /** Once per turn, where a provider replays its reasoning. See ChatMessage.reasoningItems. */
@@ -213,22 +213,22 @@ export interface ProviderChunk {
   finishReason?: FinishReason;
 }
 
-/** Pin or deny tool use. `{ name }` forces one specific tool — how a run is
+/** Pin or deny tool use. `{ name }` forces one specific tool, so a run is
  *  made to commit an answer at its step budget's edge. */
 export type ToolChoice = "auto" | "none" | "required" | { name: string };
 
 /**
  * Ask for a JSON object matching `schema`. Providers that enforce schemas get
  * it verbatim; the rest get JSON mode plus the schema in the prompt. Either
- * way the CALLER validates — a provider's "guaranteed" JSON is not one.
+ * way the caller validates: a provider's "guaranteed" JSON is not one.
  */
 export interface JsonOutput {
   name: string;
   schema: JsonObjectSchema;
   /**
    * Force OpenAI's strict schema mode on or off. Left unset, the adapters ask
-   * `isStrictSchema` and enforce whenever the schema actually qualifies —
-   * which is what keeps an optional field from turning a working call into a
+   * `isStrictSchema` and enforce whenever the schema actually qualifies.
+   * This keeps an optional field from turning a working call into a
    * 400. Set it only to overrule that reading.
    */
   strict?: boolean;
@@ -339,13 +339,13 @@ function bracketed(text: string): string {
 /**
  * How the schema rides on a call that ALSO carries tools.
  *
- * `"response_format"` sends both — what the shapes document, what most models
+ * `"response_format"` sends both, as the shapes document and most models
  * honour. `"prompt"` leaves the format off that call and sends the schema as
  * prompt instead, which is what the Anthropic shape has always done.
  *
  * It is a setting because a model that cannot serve both never says so: its
  * decoder is pinned to the schema, the tool call has nowhere to go, and it
- * writes the announcement instead — "let me look that up" — and stops. Nothing
+ * writes the announcement instead ("let me look that up") and stops. Nothing
  * is logged, because nothing failed. `probeJsonWithTools` answers it in one
  * call; there is no default that is right for every model.
  */
@@ -361,7 +361,7 @@ export interface StreamOptions {
   maxTokens?: number;
   temperature?: number;
   /**
-   * Nucleus sampling. Set this OR `temperature`, not both — the vendors all
+   * Nucleus sampling. Set this or `temperature`, not both. The vendors all
    * document them as alternatives and some reject the pair outright.
    */
   topP?: number;
@@ -378,7 +378,7 @@ export interface StreamOptions {
   toolChoice?: ToolChoice;
   json?: JsonOutput;
   /**
-   * Overrides the provider's own setting for this call — how `probeJsonWithTools`
+   * Overrides the provider's own setting for this call, so `probeJsonWithTools`
    * asks the same model both ways. See {@link JsonWithTools}.
    */
   jsonWithTools?: JsonWithTools;
@@ -397,7 +397,7 @@ export interface StreamOptions {
    */
   onActivity?: () => void;
   /**
-   * `false` asks for at most one tool call per turn — for tools that must run
+   * `false` asks for at most one tool call per turn, for tools that must run
    * in order, or a backend lane that refuses parallel calls. Absent or `true`
    * is every vendor's default and sends nothing. Gemini has no such switch,
    * so it refuses `false` rather than silently ignore it.
@@ -488,7 +488,7 @@ export async function drainStream(
  *
  * The chain-of-thought belongs only to thinking turns. A provider that
  * requires it replayed while thinking is ON (DeepSeek) rejects it when
- * thinking is OFF — which is exactly the shape of a forced-submit salvage
+ * thinking is off. This is exactly the shape of a forced-submit salvage
  * turn, where a run reasons through its whole investigation and then drops
  * thinking to serialize what it already found.
  *
@@ -518,7 +518,7 @@ export function stripReasoning(messages: readonly ChatMessage[]): ChatMessage[] 
   });
 }
 
-/** `data:` URI for an image part — what the OpenAI dialect wants inline. */
+/** `data:` URI for an image part, as the OpenAI dialect requires inline. */
 export function toDataUri(part: ImagePart): string {
   return `data:${part.mimeType};base64,${part.data}`;
 }

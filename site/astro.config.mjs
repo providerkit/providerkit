@@ -78,7 +78,7 @@ export default defineConfig({
               label: "Guides",
               paths: ["guides/**"],
               description:
-                "the hand-written guides only — errors, retries, streaming, sign-in, tools, context, cost, Jev",
+                "the hand-written guides only: errors, retries, streaming, sign-in, tools, context, cost, Jev",
             },
             {
               label: "API reference",

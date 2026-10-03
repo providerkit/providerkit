@@ -21,7 +21,7 @@ import type {
 export interface AnthropicConfig extends ProviderFallbackConfig {
   apiKey: string;
   model: string;
-  /** Any endpoint speaking the Anthropic Messages dialect — a proxy or gateway.
+  /** Any endpoint speaking the Anthropic Messages dialect, including a proxy or gateway.
    *  Defaults to Anthropic itself. */
   baseUrl?: string;
   /** Names the provider in errors and logs. The subscription backend is the
@@ -38,7 +38,7 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
    *  headers, and a gateway in front usually wants one of its own. */
   headers?: Record<string, string>;
   /**
-   * App attribution for OpenRouter's rankings — the site URL rides as
+   * App attribution for OpenRouter's rankings. The site URL rides as
    * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent
    * whenever set (other vendors ignore unknown headers); an explicit entry
    * in `headers` always wins. Covers OpenRouter's Anthropic-dialect endpoint.
@@ -48,15 +48,15 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
    * App name for OpenRouter's rankings, sent as `X-Title`. See `siteUrl`.
    */
   siteName?: string;
-  /** Send the key as a Bearer instead of `x-api-key` — what a subscription
-   *  access token needs. */
+  /** Send the key as a Bearer instead of `x-api-key`, as a subscription
+   *  access token requires. */
   bearer?: boolean;
   /** Header that carries `StreamOptions.sessionId`. When set and a call has no
    *  sessionId, one stable id for this provider instance rides instead. */
   sessionHeader?: string;
   /** Say "no thinking" with an explicit `thinking: { type: "disabled" }` when
    *  effort resolves to none, instead of omitting the field. For endpoints
-   *  where an absent field means the MODEL's default, not off — Z.ai's coding
+   *  where an absent field means the model's default, not off. Z.ai's coding
    *  endpoint reads silence as thinking ON for reasoning-mandatory models like
    *  GLM 5.3 Flash (measured 2026-09-13: omit → thinking block; disabled →
    *  none), and it accepts the marker natively. Ignored for a Claude id that
@@ -72,9 +72,9 @@ const DEFAULT_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 8_192;
 
 /**
- * Thinking budgets, in output tokens, for extended thinking — Claude 4.5 and
+ * Thinking budgets, in output tokens, for extended thinking on Claude 4.5 and
  * older, and every non-Claude endpoint on this wire. Thinking and the answer
- * SHARE `max_tokens`, so a budget is always left below the ceiling — a budget
+ * share `max_tokens`, so a budget is always left below the ceiling. A budget
  * at or above it leaves no room to answer, and the turn ends mid-thought.
  */
 const THINKING_BUDGET: Record<Exclude<Effort, "none">, number> = {
@@ -102,8 +102,8 @@ const LATEST: ClaudeThinking = { ...ALWAYS_ON, forcedTool: false };
 
 /**
  * Claude models that take adaptive thinking, keyed by id. A graded effort is
- * said the same way on all of them — `thinking: { type: "adaptive" }` plus
- * `output_config.effort` — which every one accepts, and which the docs say to
+ * said the same way on all of them: `thinking: { type: "adaptive" }` plus
+ * `output_config.effort`, which every one accepts, and which the docs say to
  * use wherever a model also takes `budget_tokens`. What differs is `none`,
  * because what each model does when told nothing differs. Documented (Anthropic per-model table, read
  * 2026-09-27: platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting);
@@ -233,13 +233,13 @@ function partsToAnthropic(content: string | ContentPart[], provider: string): un
 
 /**
  * Anthropic takes `system` at the top level and expects tool RESULTS as user
- * turns carrying `tool_result` blocks — not as a role of their own. Consecutive
+ * turns carrying `tool_result` blocks, not as a role of their own. Consecutive
  * tool results are merged into one user turn, which the API requires.
  */
 /**
  * The system prompt as ONE cached block.
  *
- * Anthropic's prompt caching is opt-in PER BLOCK — a plain string system prompt
+ * Anthropic's prompt caching is opt-in per block. A plain string system prompt
  * is never cached, however many times it is re-sent. An agent loop re-sends this
  * every single turn, and it is the largest stable prefix in the request, so
  * without the breakpoint the whole thing bills at the full input rate on every
@@ -247,14 +247,14 @@ function partsToAnthropic(content: string | ContentPart[], provider: string): un
  *
  * Unconditional. Below the model's minimum cacheable length the field is
  * ignored rather than rejected, and above it the one-time 1.25× write is repaid
- * by the second turn — which, in the loop this package sits under, always comes.
+ * by the second turn, which always comes in the loop this package sits under.
  */
 function systemBlocks(text: string): unknown[] | undefined {
   return text ? [{ type: "text", text, cache_control: { type: "ephemeral" } }] : undefined;
 }
 
 /**
- * The schema, as an extra system block — Anthropic has no native schema mode,
+ * The schema, as an extra system block. Anthropic has no native schema mode,
  * and the seam promises that a provider without one gets the schema in the
  * prompt instead. Without this an `opts.json` request went out carrying
  * nothing at all: the model answered in prose, the caller's `JSON.parse` threw,
@@ -263,7 +263,7 @@ function systemBlocks(text: string): unknown[] | undefined {
  * It rides AFTER the cached block, and that order is load-bearing. A cache
  * breakpoint caches everything before it, so folding a per-call schema into the
  * cached block would change the cached prefix on every turn whose schema
- * differs and throw the whole system prompt's cache away — paying for the
+ * differs and throw the whole system prompt's cache away, paying for the
  * schema with the most expensive thing in an agent loop.
  */
 function jsonBlock(json: JsonOutput): unknown {

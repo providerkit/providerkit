@@ -12,8 +12,8 @@ import type { JsonObjectSchema } from "./types.ts";
  * A zod schema as the JSON Schema every provider's tool contract wants.
  *
  * `$schema` is dropped. zod emits the dialect URI at the root, and a provider
- * validating a tool's `parameters` against its own supported subset — OpenAI
- * under `strict: true`, Gemini's `parametersJsonSchema` — rejects the whole
+ * validating a tool's `parameters` against its own supported subset (OpenAI
+ * under `strict: true`, Gemini's `parametersJsonSchema`) rejects the whole
  * tool over that one key, with a message that names neither zod nor the field.
  */
 export function toJsonObjectSchema(schema: z.ZodType, label = "schema"): JsonObjectSchema {
@@ -46,14 +46,14 @@ export interface ZodToolSpec<I, O> {
    * rejecting the call. Worth it for a TERMINAL tool, which gets no second
    * chance: a forced-submit salvage turn runs exactly once, and discarding an
    * otherwise-valid answer over a few extra characters loses the whole run.
-   * Off by default — an ordinary tool can simply be called again.
+   * Off by default: an ordinary tool can simply be called again.
    */
   clampOverflow?: boolean;
 }
 
 /**
  * A tool whose arguments are validated by zod, with the failure reported to
- * the MODEL in words it can act on — `topic: expected string, received number`
+ * the model in words it can act on. `topic: expected string, received number`
  * beats a stack trace it cannot read.
  */
 export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O> {

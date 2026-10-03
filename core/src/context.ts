@@ -9,13 +9,13 @@ import type { ChatMessage } from "./types.ts";
  * What the answer needs after the prompt: an output budget, plus the tools'
  * own schemas, plus the slack no provider documents.
  *
- * Absolute rather than a percentage on purpose — a 1M window does not need a
+ * Absolute rather than a percentage on purpose: a 1M window does not need a
  * 100k cushion, and a 128k window needs more than 12k.
  */
 export const CONTEXT_RESERVE_TOKENS = 32_000;
 
 /**
- * Four characters per token — the rule of thumb every provider's own
+ * Four characters per token is the rule of thumb every provider's own
  * calculator agrees with to within a fifth, which is all the precision this
  * needs. It decides WHEN to fold: folding one turn early costs a cheap model
  * call, folding one turn late costs the whole turn.
@@ -64,7 +64,7 @@ export function conversationTokens(messages: readonly ChatMessage[]): number {
 }
 
 /**
- * The provider's own input count says the wall is close — fold before the next
+ * The provider's own input count says the limit is close. Fold before the next
  * step rather than after the 400.
  *
  * Takes the REPORTED count, not an estimate, because it is the only figure
@@ -99,7 +99,7 @@ export function historyBudgetTokens(contextWindow: number): number {
  *
  *  1. Never split a tool call from its result. Every provider rejects a tool
  *     result whose call is missing, so a cut landing between them produces a
- *     400 on the very next turn — the failure compaction was called to avoid.
+ *     400 on the very next turn, the failure compaction was called to avoid.
  *  2. Never cut into the system prompt. It is not history.
  *
  * Returns the index the kept tail starts at, or 0 when everything already fits.

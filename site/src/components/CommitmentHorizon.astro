@@ -95,29 +95,27 @@ const CHUNKS = Array.from({ length: 9 }, (_, i) => HORIZON_X + i * 34);
       {/* The request, and the witness line the early retry returns to. */}
       <line class="fig-tick" x1={START_X} y1={AXIS_Y - 8} x2={START_X} y2={AXIS_Y + 8} />
       <line class="fig-witness" x1={START_X} y1={AXIS_Y + 8} x2={START_X} y2={RETURN_Y + 6} />
-      <text class="fig-note" x={START_X} y={AXIS_Y - 16} text-anchor="middle">request</text>
+      <text class="fig-note" x={START_X} y={AXIS_Y - 16} text-anchor="middle">
+        request
+      </text>
 
       {/* Output. Evenly spaced because what matters is that it is flowing. */}
       <g class="fig-chunks">
-        {
-          CHUNKS.map((x) => (
-            <line x1={x} y1={AXIS_Y - 6} x2={x} y2={AXIS_Y + 6} />
-          ))
-        }
+        {CHUNKS.map((x) => (
+          <line x1={x} y1={AXIS_Y - 6} x2={x} y2={AXIS_Y + 6} />
+        ))}
       </g>
 
       {/* Two identical failures. Everything that differs, differs downstream. */}
-      {
-        [FAIL_EARLY_X, FAIL_LATE_X].map((x) => (
-          <g class="fig-fail">
-            <line x1={x - 5} y1={AXIS_Y - 5} x2={x + 5} y2={AXIS_Y + 5} />
-            <line x1={x + 5} y1={AXIS_Y - 5} x2={x - 5} y2={AXIS_Y + 5} />
-            <text class="fig-note" x={x} y={AXIS_Y - 16} text-anchor="middle">
-              the stream drops
-            </text>
-          </g>
-        ))
-      }
+      {[FAIL_EARLY_X, FAIL_LATE_X].map((x) => (
+        <g class="fig-fail">
+          <line x1={x - 5} y1={AXIS_Y - 5} x2={x + 5} y2={AXIS_Y + 5} />
+          <line x1={x + 5} y1={AXIS_Y - 5} x2={x - 5} y2={AXIS_Y + 5} />
+          <text class="fig-note" x={x} y={AXIS_Y - 16} text-anchor="middle">
+            the stream drops
+          </text>
+        </g>
+      ))}
 
       {/* Left: the return path completes. */}
       <path
@@ -142,14 +140,14 @@ const CHUNKS = Array.from({ length: 9 }, (_, i) => HORIZON_X + i * 34);
         y2={RETURN_Y + 12}
       />
       <text class="fig-outcome blocked" x={(HORIZON_X + FAIL_LATE_X) / 2} y={RETURN_Y + 24}>
-        no way back — it propagates
+        no way back, it propagates
       </text>
     </svg>
   </div>
-  <p class="bench-hint">Wider than this screen — scroll the figure sideways.</p>
+  <p class="bench-hint">Wider than this screen. Scroll the figure sideways.</p>
   <figcaption class="leader">
     <span>
-      Fig. — the same failure, twice. <code>withStreamRetry</code> retries only to the left of the
+      Fig. The same failure, twice. <code>withStreamRetry</code> retries only to the left of the
       horizon; past it a retry would replay tokens the reader has already seen, so the error is
       handed to the caller instead.
     </span>

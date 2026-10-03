@@ -346,10 +346,10 @@ export default function OpticalBench() {
             </g>
           </svg>
         </div>
-        <p className="bench-hint">Wider than this screen — scroll the plate sideways.</p>
+        <p className="bench-hint">Wider than this screen. Scroll the plate sideways.</p>
         <figcaption className="leader">
           <span>
-            Fig. 1 — the real classifier from the package, running in your browser. Click a ray, or
+            Fig. 1: the real classifier from the package, running in your browser. Click a ray, or
             paste your own failure below.
           </span>
         </figcaption>
@@ -361,7 +361,7 @@ export default function OpticalBench() {
             <span>Input</span>
           </p>
           <div className="field">
-            <label htmlFor={`${uid}-status`}>HTTP status — leave blank if it never got one</label>
+            <label htmlFor={`${uid}-status`}>HTTP status (leave blank if it never got one)</label>
             <input
               id={`${uid}-status`}
               type="text"
@@ -381,7 +381,7 @@ export default function OpticalBench() {
             />
           </div>
           <p className="field-note">
-            Paste a real one. Nothing is sent anywhere — this is the package running locally.
+            Paste a real one. Nothing is sent anywhere. This is the package running locally.
           </p>
         </div>
 
@@ -396,7 +396,7 @@ export default function OpticalBench() {
             <span className="verdict-mark" />
             {verdict.kind}
             <span className="verdict-band">
-              {band.label.toLowerCase()} — {band.note}
+              {band.label.toLowerCase()}: {band.note}
             </span>
           </p>
           <p className="verdict-fix">{verdict.fix}</p>
@@ -411,7 +411,7 @@ export default function OpticalBench() {
             </div>
             <div>
               <dt>retryAfterMs</dt>
-              <dd>{err.retryAfterMs ?? "—"}</dd>
+              <dd>{err.retryAfterMs ?? "-"}</dd>
             </div>
             <div>
               <dt>status</dt>

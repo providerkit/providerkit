@@ -13,8 +13,8 @@ export type ZaiCodingConfig = Omit<AnthropicConfig, "baseUrl" | "id" | "bearer">
  *  adapter.
  *
  *  Dialect notes, measured 2026-09-13 against the live endpoint on
- *  `glm-5.3-flash`: an absent thinking field means the MODEL's default —
- *  thinking ON — so `effort: "none"` is sent as an explicit
+ *  `glm-5.3-flash`: an absent thinking field means the model's default
+ *  (thinking on), so `effort: "none"` is sent as an explicit
  *  `thinking: { type: "disabled" }`; `low`–`max` ride the standard thinking
  *  budgets, which the endpoint accepts. Images force a thinking block even
  *  under `disabled` (the model's choice, billed as output). */

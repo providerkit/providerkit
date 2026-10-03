@@ -15,7 +15,7 @@ import type { FilePart } from "./types.ts";
 
 /** What kind of failure this is, named by what actually fixes it. */
 export type ErrorKind =
-  /** Our own cancel — the caller pressed Stop. Never retried. */
+  /** Our own cancel: the caller pressed Stop. Never retried. */
   | "aborted"
   /** Our own deadline, or the provider's 408. Retry. */
   | "timeout"
@@ -24,13 +24,13 @@ export type ErrorKind =
   /** Theirs, and temporary: 5xx, Anthropic's 529, "overloaded". Retry, and
    *  worth trying a different model. */
   | "overload"
-  /** 429 per-minute throttle. Wait — or rotate to another key or model. */
+  /** 429 per-minute throttle. Wait, or rotate to another key or model. */
   | "rate"
   /** Balance or usage window exhausted. Waiting minutes will not fix it. */
   | "quota"
   /** The plan never included this API. Neither a new key nor a top-up fixes it. */
   | "entitlement"
-  /** 401/403 — the key is wrong, not the request. */
+  /** 401/403: the key is wrong, not the request. */
   | "auth"
   /** The model id does not exist or is not served here. */
   | "model"
@@ -38,7 +38,7 @@ export type ErrorKind =
   | "context"
   /** Safety filter or refusal. */
   | "content"
-  /** Any other 4xx — a bug in what we sent. */
+  /** Any other 4xx: a bug in what we sent. */
   | "invalid"
   | "unknown";
 
@@ -81,7 +81,7 @@ export function isBackupEligible(kind: ErrorKind): boolean {
  * 1. Caller aborts are never retryable.
  * 2. An explicit `shouldRetry` directive on ProviderError (e.g. from server `x-should-retry`)
  * 3. Non-retryable kinds (quota, context, model, entitlement, content, invalid) return false.
- * 4. Excessive retry-after waits (exceeding `maxWaitMs`) return false — long waits belong to fallbacks.
+ * 4. Excessive retry-after waits (exceeding `maxWaitMs`) return false. Long waits belong to fallbacks.
  * 5. Transient kinds (rate, overload, network, timeout) return true.
  * 6. Transport-level network faults (fetch failed, connection lost, SSL blips) return true.
  */
@@ -115,7 +115,7 @@ export class ProviderError extends Error {
   readonly window?: RateLimitWindow;
   /** Explicit server directive (`x-should-retry`), overriding default classification. */
   readonly shouldRetry?: boolean;
-  /** The provider's own response body, truncated — the actual reason, which is
+  /** The provider's own response body, truncated. It carries the actual reason,
    *  otherwise lost behind "400 status code (no body)". */
   readonly body?: string;
 
@@ -213,7 +213,7 @@ export function messageOf(err: unknown): string {
  * Everything readable about the failure as one searchable string: the message
  * plus the parsed provider body. SDKs park the parsed body on `.error`, and
  * that is where the real reason lives ("max_tokens too large", the quotaId,
- * `"type": "billing_error"`). Scanned as TEXT — the error-type strings
+ * `"type": "billing_error"`). Scanned as text: the error-type strings
  * serialize into it, so no JSON walking is needed.
  */
 function bodyTextOf(err: unknown): string {
@@ -293,7 +293,7 @@ function isAbort(err: unknown): boolean {
  * A transport fault: the socket died before or during the response, so there
  * is NO status and no body for the patterns below to read.
  *
- * The chain is walked because the useful code is rarely on the thrown error —
+ * The chain is walked because the useful code is rarely on the thrown error:
  * it sits on `cause`, sometimes several wrappers deep. Without this walk every
  * network blip classifies as permanent, and a long run dies on its first
  * hiccup, which is the single likeliest way to lose a minutes-long job.
@@ -455,7 +455,7 @@ const CONTENT_PATTERNS: readonly RegExp[] = [
  * A throttle said in words rather than in a 429.
  *
  * Every other kind has body evidence; rate had only the status, which is
- * exactly the evidence an in-band failure lacks — an SSE response is already
+ * exactly the evidence an in-band failure lacks. An SSE response is already
  * 200 when the throttle lands, so the reason arrives as a payload with no
  * status line at all. Checked below the status branches, so it only ever
  * catches what would otherwise fall through to "unknown".
@@ -501,18 +501,18 @@ const matches = (patterns: readonly RegExp[], text: string): boolean =>
  * The kind of failure, from whatever was thrown.
  *
  * Body patterns outrank status for the 4xx family; within them, context beats
- * entitlement beats quota beats auth — each earlier category's fix is useless
+ * entitlement beats quota beats auth. Each earlier category's fix is useless
  * for the later ones.
  */
 /**
- * The kind of a failure that arrived as an HTTP response — a status and a body,
+ * The kind of a failure that arrived as an HTTP response: a status and a body,
  * with nothing thrown.
  *
  * `classify` below is for a caught error, and it reads `status` and the body
  * text off that error when they are not passed separately. A response has no
  * error object, so callers were inventing one to fill the slot: a bare body
  * string, the same text twice, a `{ status, error }` literal. All three are
- * inert — nothing on them can satisfy `isAbort` or `isTransportFailure` — so
+ * inert (nothing on them can satisfy `isAbort` or `isTransportFailure`), so
  * they were three spellings of `undefined`.
  */
 export function classifyHttp(status: number | undefined, body: string): ErrorKind {
@@ -568,7 +568,7 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
 /**
  * How long the provider asked us to wait, in ms. Two dialects: Gemini's
  * RetryInfo (`"retryDelay": "52s"`, inside the body) and the `Retry-After`
- * header, which SDKs keep on the error. Honouring it beats guessing — a
+ * header, which SDKs keep on the error. Honouring it beats guessing: a
  * backoff shorter than the window just burns an attempt.
  */
 export function parseRetryAfterMs(err: unknown, body?: string): number | undefined {
@@ -664,14 +664,14 @@ export function parseContextOverflow(err: unknown, body?: string): ContextOverfl
  * completion: retry sees nothing to retry, and a key pool never rotates off an
  * exhausted key.
  *
- * `error` is the vendor's own payload, whatever shape it came in — the numeric
+ * `error` is the vendor's own payload, whatever shape it came in: the numeric
  * HTTP `code` Gemini and OpenRouter use, the slug OpenAI and Anthropic put in
  * `code`/`type`, the canonical `status` name. The whole thing serializes into
  * the searchable body, so RetryInfo's `retryDelay` is honoured wherever it sits.
  *
  * `unknown` is floored to "overload" rather than kept: a stream that dies after
  * its headers is by construction a transient upstream fault, and "unknown" is
- * never retried. Everything the body DOES name keeps its own kind — which is
+ * never retried. Everything the body does name keeps its own kind, which is
  * what tells the caller to wait, rotate a key, or compact instead of retrying
  * a failure that will repeat.
  */
@@ -697,7 +697,7 @@ export function streamError(provider: string, error: unknown): ProviderError {
 }
 
 /** The reset a stream error carries: the body's clock, plus the rate-limit
- *  headers the ChatGPT backend mirrors INTO its error frame — the only place a
+ *  headers the ChatGPT backend mirrors into its error frame, the only place a
  *  failure after the 200 can say which window ran out. */
 function readReset(error: unknown, body: string) {
   const raw =
@@ -720,7 +720,7 @@ function readReset(error: unknown, body: string) {
  * read it: a caller that never checks the finish keeps half an answer as if it
  * were the whole one, the ledger records a billed turn as free, and no pool
  * learns the endpoint is dropping streams. cc-proxy shipped the same fix
- * (0.1.39) for the same reason — "instead of marking affected streamed
+ * (0.1.39) for the same reason: "instead of marking affected streamed
  * responses as successful".
  *
  * `network`, because that is what it is: the same failure as a socket that
@@ -736,7 +736,7 @@ export function streamCut(provider: string): ProviderError {
   );
 }
 
-/** The loggable surface of a failure — so a dead run never reads
+/** The failure details you can log, so a dead run never reads
  *  "400 status code (no body)". */
 export function describeProviderError(err: unknown): Record<string, unknown> {
   if (err instanceof ProviderError) {

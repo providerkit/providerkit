@@ -18,12 +18,12 @@
 
 import type { JsonWithTools, Provider } from "./types.ts";
 
-/** Nothing a model can answer from memory — so a tool call is the only correct
- *  turn, and NOT making one is a real signal rather than a judgement call. */
+/** A question the model cannot answer from memory, so a tool call is the only
+ *  correct turn. Not making one is a real signal rather than a judgement call. */
 const PROBE_TOOL = {
   name: "get_current_time",
   description:
-    "The only source of the current time. You cannot know the time without calling this — never answer a time question from memory or guess.",
+    "The only source of the current time. You cannot know the time without calling this. Never answer a time question from memory or guess.",
   inputSchema: {
     type: "object" as const,
     properties: { timezone: { type: "string", description: "IANA timezone, e.g. Asia/Tokyo" } },
@@ -46,7 +46,7 @@ const SHAPES: JsonWithTools[] = ["response_format", "prompt"];
 export interface JsonWithToolsProbe {
   /**
    * The shape to configure, or `null` when neither called the tool on every
-   * sample — that model cannot be trusted with tools and a schema together,
+   * sample. That model cannot be trusted with tools and a schema together,
    * whichever way the schema rides, and the honest fix is a different model.
    */
   use: JsonWithTools | null;
@@ -58,8 +58,8 @@ export interface JsonWithToolsProbe {
 
 export interface ProbeOptions {
   /**
-   * Samples per shape. Above one because the interesting failures are partial —
-   * `gemini-3.8-flash` called its tool 3/10 — and a single sample reports a
+   * Samples per shape. Above one because the interesting failures are partial:
+   * `gemini-3.8-flash` called its tool 3/10. A single sample reports a
    * coin flip as a capability. A shape passes only when EVERY sample calls.
    */
   samples?: number;
@@ -95,12 +95,12 @@ async function callsTool(
 
 /**
  * Ask a model, on the wire, which {@link JsonWithTools} shape it actually
- * serves — then configure the provider with `probe.use`.
+ * serves. Then configure the provider with `probe.use`.
  *
  * Both shapes are always tried, because a result you can read beats a result
  * you have to trust: `calls` is the table to log, and "0/3 and 3/3" is what
  * makes a later regression obvious. It costs `samples × 2` short calls, made
- * one after another, once, at whatever moment the app decides to ask — boot is
+ * one after another, once, at whatever moment the app decides to ask. Boot is
  * the usual one.
  *
  * Probe each provider on its own, never a fallback chain: the shape is a fact
@@ -117,8 +117,8 @@ async function callsTool(
  * report "this model cannot call tools", which is a much worse thing to
  * believe than "the call failed".
  *
- * What it catches is the structural failure — the model that CANNOT emit the
- * call, every time, on the easiest question there is. A model that is merely
+ * It catches a structural failure: a model that cannot emit the call, every
+ * time, on the easiest question there is. A model that is merely
  * unreliable will pass: `gemini-3.8-flash` answers this probe 3/3 and a real
  * sales turn 3/10. That is the right line to draw. A harder probe would start
  * failing good models for being terse, and "sometimes forgets its tools" is a
@@ -226,8 +226,8 @@ function normalizeId(id: string): string {
  * - `deepseek/deepseek-v4.1-flash` matches `deepseek-v4.1-flash`
  * - `accounts/fireworks/models/glm-5p3-flash` matches `glm-5.3-flash`
  *
- * Never throws — if the catalog cannot be retrieved or the model is unknown,
- * returns `undefined` so capability lookups never break caller execution.
+ * Never throws. If the catalog cannot be retrieved or the model is unknown,
+ * it returns `undefined` so capability lookups never break caller execution.
  */
 export async function resolveModelCapabilities(
   modelId: string,

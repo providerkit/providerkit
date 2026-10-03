@@ -16,7 +16,7 @@ export interface ImageLimits {
   minSide: number;
   /** Smallest area, in square pixels. */
   minArea: number;
-  /** Largest decoded size — width × height × bytes per pixel — in bytes. */
+  /** Largest decoded size in bytes (width × height × bytes per pixel). */
   maxDecodedBytes: number;
   /** Most images in one request. The newest win; older ones become notes. */
   maxImages: number;

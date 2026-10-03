@@ -82,7 +82,7 @@ export function ogCardSvg(input: OgCardInput = {}): string {
   const title = input.title ?? "The layer under your agent loop.";
   const subtitle =
     input.subtitle ??
-    "One seam for every LLM provider — plus the failure handling you only learn in production.";
+    "One seam for every LLM provider, plus the failure handling you only learn in production.";
 
   const titleSize = title.length <= 34 ? 64 : 54;
   const titleLines = wrap(title, titleSize, BOLD_ADVANCE, 2);

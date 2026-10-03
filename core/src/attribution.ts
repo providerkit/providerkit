@@ -9,9 +9,9 @@
 // HTTP header names are case-insensitive but this seam carries them as a
 // plain record, so `http-referer` and `HTTP-Referer` must mean the same opt-out.
 export interface Attribution {
-  /** Site URL, sent as `HTTP-Referer` — e.g. "https://your.app". */
+  /** Site URL, sent as `HTTP-Referer` (e.g. "https://your.app"). */
   siteUrl?: string;
-  /** App name, sent as `X-Title` — e.g. "Your App". */
+  /** App name, sent as `X-Title` (e.g. "Your App"). */
   siteName?: string;
 }
 

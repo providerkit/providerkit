@@ -9,7 +9,7 @@ handling you only learn in production.
 bun add @providerkit/core   # npm / pnpm / yarn all fine
 ```
 
-Zero runtime dependencies. `fetch` only — no vendor SDKs, no Node built-ins — so the same
+Zero runtime dependencies. `fetch` only, with no vendor SDKs and no Node built-ins, so the same
 build runs in Node 22+, Bun, Deno, Cloudflare Workers and a Chrome MV3 service worker.
 
 ## What this is
@@ -20,12 +20,12 @@ not where the time goes. The time goes here:
 - a stream that opens, sends nothing, and never ends
 - a socket that dies four `cause` levels down, with no HTTP status to read
 - quota exhaustion arriving as `429` from one vendor, `402` from another, `403` from a
-  third and `400` from a fourth — with "retry" being the wrong advice for all of them
+  third and `400` from a fourth, and "retry" is the wrong advice for all of them
 - a `429` that is really a context overflow, where waiting fixes nothing and compaction
   fixes everything
 - a plan that never included the API, which neither a new key nor a top-up will fix
 - Anthropic reporting cache tokens _outside_ the input count while OpenAI reports them
-  _inside_ it — so the same conversation costs two different things
+  _inside_ it, so the same conversation costs two different things
 - `reasoning_content` that must be replayed on tool-call turns, and must _not_ be sent
   when thinking is off
 - a tool call's JSON truncated mid-argument, throwing away an answer that was right there
@@ -117,7 +117,7 @@ calls, so it remembers which models are spent.
 Go also asks each client to send its own user agent, not the runtime's default. Pass
 `headers: { "user-agent": "my-app" }`, and add it to each Go entry in `fallbacks` too.
 
-**Full documentation lives at [providerkit.dev](https://providerkit.dev)** — it is the single
+**Full documentation lives at [providerkit.dev](https://providerkit.dev)**. It is the single
 source of truth for usage, and this README deliberately stays a front door so the two cannot
 drift.
 
@@ -140,7 +140,7 @@ cannot drift either.
 ## Origin
 
 This was extracted from five production codebases that had each independently grown the same
-layer — about 9,100 lines solving one ~2,000-line problem. They had three separate
+layer: about 9,100 lines solving one ~2,000-line problem. They had three separate
 60-second idle watchdogs, identical down to the constant. On one day in September 2026, two
 of them shipped the same five fixes independently.
 
@@ -155,7 +155,7 @@ ever saw. That is the part worth having.
 ## In production
 
 This is not a plan, it already happened. Four of the five codebases serve production traffic
-through this package today, and the migrations that put it there were net-negative every time —
+through this package today, and the migrations that put it there were net-negative every time:
 **−452, −1,621 and −197 lines** in the first three. The last one, `@falai/agent` v3, trades three
 vendor SDKs for this package (−5,033 more) and ships with the release that carries this section.
 
@@ -163,7 +163,7 @@ vendor SDKs for this package (−5,033 more) and ships with the release that car
 
 ```
 core/     the npm package `@providerkit/core`
-site/     providerkit.dev — Astro + Starlight, also open source
+site/     providerkit.dev (Astro + Starlight), also open source
 brand/    the mark, the OG card, and the generator for both
 ```
 

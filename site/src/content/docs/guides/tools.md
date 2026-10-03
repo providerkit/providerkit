@@ -29,14 +29,14 @@ const readFile = defineTool({
 });
 ```
 
-The flags are metadata your loop reads — the kernel does not enforce policy:
+The flags are metadata your loop reads. The kernel does not enforce policy:
 
 | Flag                | Meaning                                      |
 | ------------------- | -------------------------------------------- |
 | `isReadOnly`        | Changes nothing; safe to run without asking. |
 | `needsApproval`     | The loop should gate this behind the user.   |
 | `isConcurrencySafe` | May run in parallel with other tools.        |
-| `isTerminal`        | Ends the turn — a submit or a final answer.  |
+| `isTerminal`        | Ends the turn: a submit or a final answer.   |
 
 ## Wire repairs and schema sanitization
 
@@ -69,7 +69,7 @@ if (outcome.ok) {
 ```
 
 `invoke` never throws. A tool that throws, times out, or receives arguments that fail validation
-comes back as a structured `ToolOutcome` — because in an agent loop a thrown tool is not an
+comes back as a structured `ToolOutcome`, because in an agent loop a thrown tool is not an
 exception, it is a _result the model needs to see and react to_. Crashing the loop instead robs
 the model of the chance to correct itself.
 
@@ -106,8 +106,8 @@ const search = zodTool({
 });
 ```
 
-zod is an **optional peer dependency**. The kernel never imports it, so a project without zod —
-a Chrome MV3 extension, say — pays nothing for its existence.
+zod is an **optional peer dependency**. The kernel never imports it, so a project without zod
+(a Chrome MV3 extension, say) pays nothing for its existence.
 
 `clampOverflow` is worth knowing about for terminal tools: when a model's output exceeds a
 schema's limits, clamping to the limit and submitting beats rejecting and losing the whole turn.

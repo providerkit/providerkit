@@ -42,7 +42,7 @@ import type {
  *  stream is dead. */
 export const STREAM_IDLE_MS = 60_000;
 
-/** No chunk for this long — the wait for the response to start included —
+/** No chunk for this long, including the wait for the response to start,
  *  and the stream is going nowhere, keep-alives or not. */
 export const STREAM_PROGRESS_MS = 300_000;
 
@@ -51,17 +51,17 @@ export interface StreamWatch {
   readonly signal: AbortSignal;
   /** A chunk arrived: re-arm both deadlines, and mark TTFT if it was the first. */
   sawByte(): void;
-  /** The response showed life without a chunk — its headers, a keep-alive, a
+  /** The response showed life without a chunk: its headers, a keep-alive, a
    *  partial frame. Starts or re-arms the idle deadline only. */
   sawActivity(): void;
   /**
-   * Milliseconds from the call opening to its first chunk of any kind — the
+   * Milliseconds from the call opening to its first chunk of any kind. The
    * wait a person actually experiences, and the number a prompt-cache pin
    * exists to shrink. Null until something arrives.
    */
   firstChunkMs(): number | null;
   /**
-   * Re-issue a provider failure as the timeout when — and only when — it was
+   * Re-issue a provider failure as the timeout only when it was
    * one of our deadlines that aborted. A caller's Stop passes through untouched.
    */
   classify(err: unknown): unknown;
@@ -148,7 +148,7 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
 
 /**
  * Wrap a stream so every chunk re-arms `watch`, and a failure is re-classified
- * through it. Disposes on any exit — completion, throw, or the consumer
+ * through it. Disposes on any exit: completion, throw, or the consumer
  * breaking out of the loop.
  */
 export async function* watchChunks<T>(
@@ -173,7 +173,7 @@ export async function* watchChunks<T>(
  * A stream that ends with no text and no tool call is a failure wearing a
  * success's clothes: `stop_reason: end_turn` with zero content blocks, which
  * the vendors emit under load, or a thinking block that ate the whole
- * `max_tokens`. Nothing throws, so nothing retries — the caller simply shows a
+ * `max_tokens`. Nothing throws, so nothing retries. The caller simply shows a
  * person an empty answer, and the only trace is a bill.
  *
  * Reasoning is not an answer. It still streams the moment it arrives, so a
@@ -185,12 +185,12 @@ export async function* watchChunks<T>(
  *
  * Classified by what fixes it. A `length` finish is the caller's own cap:
  * `invalid`, so nothing retries it into the same cap and no backup model is
- * cooled down for it — the fix is a larger `maxTokens` or a lower effort. Any
+ * cooled down for it. The fix is a larger `maxTokens` or a lower effort. Any
  * other empty turn is `overload`, because that is both true and useful: it is
  * theirs and temporary, so it is transient (the same model, retried, usually
  * answers) and backup-eligible (a model that keeps doing it should be walked
  * away from). Until something streams, the empty frames are held back, so the
- * retry rule that matters — retry only while nothing was emitted — still holds.
+ * retry rule still holds: retry only while nothing was emitted.
  */
 export async function* requireContent<T extends ProviderChunk>(
   provider: string,
@@ -240,7 +240,7 @@ export async function* requireContent<T extends ProviderChunk>(
     throw new ProviderError(
       provider,
       "invalid",
-      `${provider}: the output cap ran out before any answer${spent} — raise maxTokens or lower effort`,
+      `${provider}: the output cap ran out before any answer${spent}. Raise maxTokens or lower effort.`,
     );
   }
   throw new ProviderError(provider, "overload", `${provider}: completed with no content`);
@@ -267,8 +267,8 @@ export interface WatchdogOptions {
  * A provider with both silent failures already handled.
  *
  * Every consumer of this package wrote the same three lines around every
- * `createStream` — build a watch, hand the provider the WATCH's signal, wrap
- * the chunks — and the middle one is the trap. Pass the caller's signal
+ * `createStream`: build a watch, hand the provider the watch's signal, wrap
+ * the chunks. The middle one is the trap. Pass the caller's signal
  * instead and everything still compiles, still streams, still passes the
  * tests: the watchdog simply never aborts anything, because the request it was
  * meant to cancel was never told about it. The failure has no symptom until
@@ -276,8 +276,8 @@ export interface WatchdogOptions {
  *
  * So the composition belongs here rather than in a docs snippet each app
  * copies. The result is still a `Provider`, so it composes unchanged with
- * `withStreamRetry` and `streamWithBackupModels` — and both of the failures it
- * catches are transient, which is what makes wrapping it in a retry correct.
+ * `withStreamRetry` and `streamWithBackupModels`. Timeouts and empty turns
+ * without a `length` finish are transient, so wrapping it in a retry is safe.
  */
 export function withWatchdog(provider: Provider, opts: WatchdogOptions = {}): Provider {
   return {

@@ -16,7 +16,7 @@ interface TokenUsage {
 ```
 
 `inputTokens` is every token the request put in the window. That is what "context size" means
-everywhere else — the gauge, the compaction threshold — so it is what the field means here.
+everywhere else (the gauge, the compaction threshold), so it is what the field means here.
 
 This needs reconciling because the vendors disagree:
 
@@ -75,7 +75,7 @@ answered.
   in a `UsageTracker`.
 
 `cacheSavingsUsd` is the number worth putting on a dashboard: it is the difference between what
-the cached tokens cost and what they would have cost at the full input rate — the direct measure
+the cached tokens cost and what they would have cost at the full input rate. It is the direct measure
 of whether your caching strategy is earning anything.
 
 ## Rollbacks and speculative turns

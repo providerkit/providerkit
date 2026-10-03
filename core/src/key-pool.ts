@@ -25,10 +25,10 @@ import type {
 
 /** A per-minute throttle: the window it names is the next one. */
 const RATE_COOLDOWN_MS = 60_000;
-/** A balance or a daily window — minutes will not bring it back. */
+/** A balance or a daily window. Minutes will not bring it back. */
 const QUOTA_COOLDOWN_MS = 60 * 60_000;
 const AUTH_COOLDOWN_MS = 12 * 60 * 60_000;
-/** The vendor's bad time, not the key's — benched only long enough for the
+/** The vendor's bad time, not the key's. Benched only long enough for the
  *  next call to land somewhere else. */
 const TRANSIENT_COOLDOWN_MS = 60_000;
 const MIN_EVICTION_MS = 1_000;
@@ -47,7 +47,7 @@ export interface KeyPoolOptions {
   /** Free-tier keys, walked round-robin before the paid one. */
   keys: readonly string[];
   paidKey?: string | null;
-  /** Fires whenever a key is benched — the pool's only report, in place of a
+  /** Fires whenever a key is benched. The pool's only report, in place of a
    *  logger a zero-dependency package has no business owning. */
   onEvict?: (info: { tier: KeyTier; kind: ErrorKind; forMs: number }) => void;
   /** Injected in tests, so an expiry can be exercised without waiting out a
@@ -96,7 +96,7 @@ export class KeyPool {
   /**
    * Run `fn` with the next available key, rotating on key-specific and
    * transient failures. Everything else (a bad request, a content block) throws
-   * straight through — it would fail identically on every key, and spending the
+   * straight through: it would fail identically on every key, and spending the
    * pool on it only turns one bad request into an outage.
    */
   async with<T>(fn: (apiKey: string, tier: KeyTier) => Promise<T>): Promise<T> {
@@ -146,7 +146,7 @@ export class KeyPool {
 
 /**
  * How long to bench a key for this failure, or null when the failure is not the
- * key's fault — nothing is gained by rotating, and benching would spend the
+ * key's fault. Nothing is gained by rotating, and benching would spend the
  * pool on a request that fails the same way everywhere.
  */
 function cooldownFor(err: unknown): { kind: ErrorKind; forMs: number } | null {
@@ -179,8 +179,8 @@ function cooldownFor(err: unknown): { kind: ErrorKind; forMs: number } | null {
  * Give any provider a rotating pool of keys.
  *
  * The subtlety is the seam's shape. `createStream` is an async generator, so
- * CALLING it performs no I/O: the POST — and the 429 that should rotate the key
- * — happens on the first `next()`, long after a `pool.with` wrapped around the
+ * calling it performs no I/O. The POST and the 429 that should rotate the key
+ * happen on the first `next()`, long after a `pool.with` wrapped around the
  * call itself would have returned, with nothing left to rotate. So the first
  * chunk is pulled INSIDE the pool and only the rest of the stream is consumed
  * outside it.

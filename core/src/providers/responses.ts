@@ -39,7 +39,7 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   effort?: Effort;
   maxTokens?: number;
   fetchImpl?: typeof fetch;
-  /** Extra request headers — where a subscription backend's account id goes
+  /** Extra request headers, where a subscription backend's account id goes
    *  (`ChatGPT-Account-Id`), which those backends reject the request without. */
   headers?: Record<string, string>;
   /** Header that carries `StreamOptions.sessionId`. When set and a call has no
@@ -50,7 +50,7 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
    * The ChatGPT subscription surface serves it at `/backend-api/codex/responses`
    * with no version segment, so that backend needs
    * `{ baseUrl: "https://chatgpt.com/backend-api/codex", path: "/responses" }`.
-   * Without the override the POST 404s, and a 404 classifies as "model" — the
+   * Without the override the POST 404s, and a 404 classifies as "model". The
    * user is told the model id does not exist when the path was the problem.
    */
   path?: string;
@@ -141,8 +141,8 @@ function partsToResponses(
   });
 }
 
-/** A tool result is a bare string unless it carried images — then the content-
- *  array form, the only way to hand this shape a screenshot back. */
+/** A tool result is a bare string unless it carried images. Then it uses the
+ *  content-array form, the only way to hand this shape a screenshot back. */
 function toolOutput(
   content: string,
   images: readonly ImagePart[],
@@ -157,7 +157,7 @@ function toolOutput(
 /**
  * Flatten a history into `instructions` plus the input item list.
  *
- * This shape has no system ROLE — the system prompt is a top-level
+ * This shape has no system role. The system prompt is a top-level
  * `instructions` string, and everything else is items. One assistant turn can
  * become several items (its text, then one `function_call` per tool it asked
  * for), which is why a message maps to a list rather than to one item.
@@ -244,7 +244,7 @@ interface ResponsesUsage {
 
 interface ResponsesItem {
   type?: string;
-  /** The output item's own id (`fc_…`) — what the argument deltas reference. */
+  /** The output item's own id (`fc_…`), which the argument deltas reference. */
   id?: string;
   /** The id a `function_call_output` must quote on the next turn. */
   call_id?: string;
@@ -263,7 +263,7 @@ interface ResponsesEvent {
   arguments?: string;
   item?: ResponsesItem;
   response?: {
-    /** `completed`, `incomplete` or `failed` — stated on the terminal event,
+    /** `completed`, `incomplete` or `failed`, stated on the terminal event,
      *  and not always the one its `type` implies. */
     status?: string;
     usage?: ResponsesUsage;
@@ -297,8 +297,8 @@ interface CodexRateLimits {
 /**
  * The quota wall a `codex.rate_limits` snapshot reports, if it is one.
  *
- * The snapshot rides ahead of the first output on every turn and is telemetry
- * — a full window the account's credits cover, or that the backend still
+ * The snapshot rides ahead of the first output on every turn and is telemetry.
+ * A full window the account's credits cover, or that the backend still
  * `allowed`, lets the turn proceed. It is only the reason when the stream then
  * closes without a response: that close is a spent window, not a dropped
  * socket, and retrying it walks every backup into the same wall. The fuller
@@ -336,8 +336,8 @@ function usageChunk(usage: ResponsesUsage): ProviderChunk {
   };
 }
 
-/** What has already gone out for one in-flight function call — identity and
- *  arguments both — so the authoritative snapshot on `.done` can be diffed
+/** What has already gone out for one in-flight function call (identity and
+ *  arguments), so the authoritative snapshot on `.done` can be diffed
  *  against it instead of duplicated. */
 interface PendingCall {
   index: number;
