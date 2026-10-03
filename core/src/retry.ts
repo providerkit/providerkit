@@ -93,8 +93,8 @@ function delayFor(err: unknown, attempt: number, opts: RetryOptions): number | n
 const defaultShouldRetry = (err: unknown, _attempt: number): boolean => isRetryable(err);
 
 /**
- * Run `fn`, retrying transient failures with backoff. For one-shot calls —
- * a title, a summary, a compaction pass.
+ * Run `fn`, retrying transient failures with backoff. For one-shot calls such
+ * as a title, a summary or a compaction pass.
  */
 export async function withRetry<T>(
   fn: (attempt: number) => Promise<T>,
@@ -124,7 +124,7 @@ export async function withRetry<T>(
 }
 
 /**
- * The streaming twin — with the rule that makes it safe: a retry happens only
+ * The streaming twin of `withRetry`. A retry happens only
  * while NOTHING has been yielded yet.
  *
  * `factory` is re-invoked per attempt and gets a fresh signal, so an abandoned
@@ -182,7 +182,7 @@ export interface BackupModelOptions {
   models: string[];
   /**
    * Whether a failure may fall through to the remaining models. Default:
-   * overload and rate limits only — those are per-model-endpoint, and nothing
+   * overload and rate limits only. Those are per-model-endpoint, and nothing
    * else on the list is. An auth failure or an invalid request would land
    * identically on every backup.
    */
@@ -226,7 +226,7 @@ export async function withBackupModels<T>(
 }
 
 /**
- * The streaming twin — carrying the same commitment rule as `withStreamRetry`.
+ * The streaming twin of `withBackupModels`, with the same commitment rule as `withStreamRetry`.
  *
  * This is the correction worth naming: walking to a backup model AFTER chunks
  * have already reached the consumer replays the answer from the top, in a

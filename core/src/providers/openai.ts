@@ -31,7 +31,7 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    *  /chat/completions when the base already includes the API version, such as
    *  a gateway using /v4 rather than /v1. */
   path?: string;
-  /** Names the provider in errors and logs — "openrouter", "deepseek", … It
+  /** Names the provider in errors and logs ("openrouter", "deepseek", …). It
    *  also picks the effort dialect below, unless `effortDialect` overrides. */
   id?: string;
   effort?: Effort;
@@ -50,7 +50,7 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   /**
    * How a json request rides when the SAME call also carries tools.
    *
-   * `response_format` — the default — sends both, which is what the shape
+   * `response_format` (the default) sends both, which is what the shape
    * documents and what most models honour. `prompt` drops the response format
    * from those calls only and sends the schema as prompt instead: the shape the
    * Anthropic adapter has always used, and the reason this failure cannot
@@ -58,7 +58,7 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    *
    * It needs a knob because a model that cannot serve both does not say so. Its
    * decoder is pinned to the schema, the tool call has nowhere to go, and the
-   * model writes the announcement instead — "let me look that up for you" — and
+   * model writes the announcement instead ("let me look that up for you") and
    * the turn ends looking like a model with no initiative rather than a request
    * that made the call impossible. Nothing is logged, because nothing failed.
    *
@@ -70,7 +70,7 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    * No default is right for everyone, which is why this stays a setting rather
    * than becoming a rule: the same run put `qwen3.8-flash` at 1/6 with the
    * schema in the prompt against 6/6 with the response format. Don't guess it
-   * from the model card — `probeJsonWithTools` asks the model itself, in one
+   * from the model card. `probeJsonWithTools` asks the model itself, in one
    * call. `StreamOptions.jsonWithTools` overrides this per call.
    */
   jsonWithTools?: JsonWithTools;
@@ -78,7 +78,7 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   fetchImpl?: typeof fetch;
   headers?: Record<string, string>;
   /**
-   * App attribution for OpenRouter's rankings — the site URL rides as
+   * App attribution for OpenRouter's rankings. The site URL rides as
    * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent
    * whenever set (other vendors ignore unknown headers); an explicit entry
    * in `headers` always wins.
@@ -91,7 +91,7 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   /**
    * Pin OpenRouter to preferred upstream hosts so the PROMPT CACHE stays warm
    * across rounds. The cache lives on the upstream host's account and default
-   * routing hops between them, and every hop is a cold cache — worse latency
+   * routing hops between them. Every hop is a cold cache, with worse latency
    * and higher effective input cost. Fallbacks stay on: this is a preference,
    * not a lock.
    */
@@ -215,14 +215,14 @@ const OPENROUTER_NONE: ReadonlyMap<string, "low" | "minimal" | "none"> = new Map
  *   MiMo v2.6 Flash takes one, and DeepSeek V4 Flash thinks at `low` and not
  *   with the field omitted. So `none` is said per model, from
  *   `OPENROUTER_NONE`, which also says why an unlisted model gets nothing.
- *   Naming a level raises it — the accepted values are `low`, `high` and
+ *   Naming a level raises it. The accepted values are `low`, `high` and
  *   `max` (`medium` and `xhigh` are accepted too, but our vocabulary has no
  *   use for them).
  * - **DeepSeek V4 defaults thinking ON** on its own API, so `none` has to be an
  *   explicit refusal there. The same word is a different request on each
  *   dialect, and on OpenRouter on each model: the spelling belongs to the
  *   endpoint, never to the caller.
- * - **OpenAI** takes `reasoning_effort`, and `none` is one of its values — not
+ * - **OpenAI** takes `reasoning_effort`, and `none` is one of its values, not
  *   the absence of the field. GPT-5.1 both accepted `none` and made it the
  *   default; everything from GPT-5 back still defaults to `medium`. So sending
  *   nothing is NOT a way to say "do not think": on every model released before
@@ -351,7 +351,7 @@ function partsToOpenAI(content: string | ContentPart[], provider: string): unkno
 }
 
 /**
- * Assistant turns carry `reasoning_content` when the history has it — thinking
+ * Assistant turns carry `reasoning_content` when the history has it. Thinking
  * providers require the prior turn's chain-of-thought replayed on a turn that
  * made a tool call. A caller running a turn with thinking OFF must strip it
  * first (`stripReasoning`); the two cannot be mixed.
@@ -454,7 +454,7 @@ interface OpenAIChunk {
     is_byok?: boolean;
     cost_details?: { upstream_inference_cost?: unknown } | null;
   } | null;
-  /** Present only on the in-band failure below — never beside a choice.
+  /** Present only on the in-band failure below. Never beside a choice.
    *  `code` is the numeric HTTP status on the gateways, a slug on OpenAI. */
   error?: { message?: string; code?: string | number; type?: string };
 }

@@ -34,7 +34,7 @@ export type JevInstructions = string | Record<string, unknown> | readonly unknow
 export interface ChoiceQuestion<Option extends string = string> {
   type: "choice";
   instructions?: JevInstructions;
-  /** Each option, mapped to what it means — `null` when its name says it all.
+  /** Each option, mapped to what it means. Use `null` when its name says it all.
    *  TypeSafe takes up to 255. */
   criteria: Record<Option, unknown>;
 }
@@ -64,7 +64,7 @@ export interface ChoiceAnswer<Option extends string = string> {
    *  because a caller acting on it needs more than the pick: the runner-up,
    *  P(yes) when the pick was no, a joint probability across two questions. */
   probabilities: Record<Option, number>;
-  /** How peaked `probabilities` is, 0 to 1 — NOT the probability of the pick.
+  /** How peaked `probabilities` is, from 0 to 1. Not the probability of the pick.
    *  TypeSafe's own example spreads 0.57 / 0.43 and reports 0.35, so reading
    *  it as P(pick) would put the pick below the option it beat. Null when the
    *  host sent none. */
@@ -90,7 +90,7 @@ export interface ScoreAnswer {
 
 export type JevAnswer = ChoiceAnswer | NoulAnswer | ScoreAnswer;
 
-/** The answer type a question gets back — a choice's options carry through. */
+/** The answer type a question gets back. A choice's options carry through. */
 export type AnswerTo<Q> =
   Q extends ChoiceQuestion<infer Option extends string>
     ? ChoiceAnswer<Option>
@@ -101,12 +101,12 @@ export type AnswerTo<Q> =
         : never;
 
 export interface JevReply<Q extends Record<string, JevQuestion>> {
-  /** One per question — `null` when that answer did not pass the checks in
+  /** One per question. `null` when that answer did not pass the checks in
    *  `readAnswer`. Each fails alone: in a fan-out, a malformed answer to a
    *  question the caller never acts on must not cost the one it does. */
   answers: { [Id in keyof Q]: AnswerTo<Q[Id]> | null };
   usage: TokenUsage;
-  /** The model that answered, as the host names it — `jev-1.13.0` on
+  /** The model that answered, as the host names it: `jev-1.13.0` on
    *  TypeSafe, `typesafe/jev-1.13-20260917` on OpenRouter. */
   model: string;
 }
@@ -139,8 +139,8 @@ export interface JevClient {
   ): Promise<JevReply<Q>>;
   /** Proves the key, the account and the model work, with one real question:
    *  about 40 input tokens, a few millionths of a dollar. A free read (a
-   *  model list, a balance) proves only the key — not that this account can
-   *  run this model — and Vercel has none. Throws the classified failure. */
+   *  model list, a balance) proves only the key, not that this account can
+   *  run this model. Vercel has no such free read. Throws the classified failure. */
   checkKey(opts?: { signal?: AbortSignal }): Promise<void>;
 }
 
@@ -158,7 +158,7 @@ interface HostRow {
   url(config: JevConfig): string;
   headers(config: JevConfig, model: string): Record<string, string>;
   body(model: string, state: unknown, questions: Record<string, JevQuestion>): unknown;
-  /** The reply in TypeSafe's own shape — `{ model, answers, usage }` —
+  /** The reply in TypeSafe's own shape (`{ model, answers, usage }`),
    *  whatever the host wrapped it in. */
   unwrap(json: unknown): Record<string, unknown> | undefined;
 }
@@ -228,7 +228,7 @@ const HOSTS: Record<JevHost, HostRow> = {
  * `providerMetadata.typesafe.confidence`, and usage is camelCase.
  *
  * ponytail: read from @jkudish/jev-agent-tools' adapter, not from a recorded
- * reply — no Vercel key has run it here. If a real reply disagrees, this
+ * reply. No Vercel key has run it here. If a real reply disagrees, this
  * function is the whole fix.
  */
 function fromVercel(json: unknown): Record<string, unknown> | undefined {
@@ -282,7 +282,7 @@ function distribution(value: unknown, keys: readonly string[]): Record<string, n
 }
 
 /**
- * One answer, checked against the question that asked it — or null.
+ * One answer, checked against the question that asked it, or null.
  *
  * A Jev answer usually becomes an action (a click, a label, a route), so it is
  * read fail-closed: the right type; for a choice, a pick among the offered
@@ -291,7 +291,7 @@ function distribution(value: unknown, keys: readonly string[]): Record<string, n
  * the pick.
  *
  * `ask` runs this on every answer. It is exported for the app that has to
- * keep its own request — its own error copy, its own auth refresh — and can
+ * keep its own request (its own error copy, its own auth refresh) and can
  * still take the checks.
  */
 export function readAnswer<Q extends JevQuestion>(question: Q, raw: unknown): AnswerTo<Q> | null;

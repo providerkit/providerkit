@@ -26,7 +26,7 @@ import type {
 export interface GeminiConfig extends ProviderFallbackConfig {
   apiKey: string;
   model: string;
-  /** Any endpoint speaking the Generative Language REST dialect — a proxy or
+  /** Any endpoint speaking the Generative Language REST dialect, including a proxy or
    *  gateway. Defaults to the Generative Language API.
    *
    *  Not Vertex: it serves `/v1/projects/…/locations/…/publishers/google/models`
@@ -39,7 +39,7 @@ export interface GeminiConfig extends ProviderFallbackConfig {
   effort?: Effort;
   /**
    * How the schema rides on a call that also carries tools. See
-   * {@link JsonWithTools} — and note that it is the MODEL's answer, not the
+   * {@link JsonWithTools}. Note that it is the model's answer, not the
    * endpoint's: measured 2026-09-07, `gemini-3.5-flash` and
    * `gemini-3.5-flash-lite` called their tool under `responseJsonSchema` every
    * time, while `gemini-3.8-flash` managed 3/10. `probeJsonWithTools` asks the
@@ -95,7 +95,7 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 /**
  * Tool-call arguments as the OBJECT Gemini's `functionCall.args` requires.
  *
- * A bare JSON scalar or array is wrapped rather than rejected — the shared
+ * A bare JSON scalar or array is wrapped rather than rejected. The shared
  * `parseToolArgs` drops a non-object as a protocol violation, which is right
  * for reading a fresh tool call and wrong here, where replaying `{}` deletes an
  * argument the model did send. Everything else defers to it, so a truncated or
@@ -205,7 +205,7 @@ export function toGeminiContents(messages: readonly ChatMessage[]): {
 
 /**
  * `auto` and an absent choice are Gemini's own default, so the field is omitted
- * rather than sent as AUTO. `required` and a pinned tool are both mode ANY —
+ * rather than sent as AUTO. `required` and a pinned tool are both mode ANY:
  * the pin is the allow-list, not the mode.
  */
 function toToolConfig(choice: ToolChoice | undefined): unknown {
@@ -236,7 +236,7 @@ interface GeminiPart {
 }
 
 /** Google's `google.rpc.Status`: an HTTP `code`, the canonical `status` name,
- *  and `details` — which is where RetryInfo's `retryDelay` rides. */
+ *  and `details`, which is where RetryInfo's `retryDelay` rides. */
 interface GeminiStatus {
   code?: number;
   message?: string;
@@ -255,7 +255,7 @@ interface GeminiResponse {
     thoughtsTokenCount?: number;
     cachedContentTokenCount?: number;
   };
-  /** Present only on the in-band failure below — never on a real candidate. */
+  /** Present only on the in-band failure below. Never on a real candidate. */
   error?: GeminiStatus;
   /** A prompt Gemini refused outright: no candidate at all, just the reason. */
   promptFeedback?: { blockReason?: string };

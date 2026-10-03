@@ -70,19 +70,19 @@ export function clampToSchema(value: unknown, node: unknown): unknown {
  * Whether OpenAI's `strict` schema mode will accept this schema.
  *
  * Strict is the only JSON mode that actually guarantees the shape, so it is
- * worth having — but it demands more than JSON Schema does: every property an
+ * worth having, but it demands more than JSON Schema does: every property an
  * object lists must ALSO be required, and every object must close itself with
  * `additionalProperties: false`, all the way down. A schema with one optional
  * field is not "mostly strict"; it is a flat 400 naming a nested path rather
  * than the rule it broke.
  *
  * That trap is the reason this exists. An agent's response schema grows
- * optional fields naturally — a `data` block only some flows fill, the fields
- * one step collects — and a caller who adds one wants their answer, not a
+ * optional fields naturally (a `data` block only some flows fill, the fields
+ * one step collects). A caller who adds one wants their answer, not a
  * lecture about a mode they never asked for. So the OpenAI-shape adapters ask
  * this and drop to plain (unenforced) schema mode instead of failing the turn.
  *
- * Anything it cannot verify — a `$ref`, a composed `allOf` — answers false:
+ * Anything it cannot verify (a `$ref`, a composed `allOf`) answers false:
  * the cost of guessing wrong that way is unenforced output, and the cost of
  * guessing wrong the other way is a request that cannot succeed at all.
  */
@@ -97,7 +97,7 @@ export function clampToSchema(value: unknown, node: unknown): unknown {
  *
  * Two shapes need it, which is why the wording lives here rather than in one of
  * them. Anthropic has never had a schema mode. The OpenAI dialect falls back to
- * plain JSON mode on every gateway — `json_object` asks for valid JSON and says
+ * plain JSON mode on every gateway: `json_object` asks for valid JSON and says
  * nothing whatsoever about its shape.
  */
 export function schemaPrompt(schema: unknown): string {
@@ -134,8 +134,8 @@ export function isStrictSchema(node: unknown): boolean {
   );
 }
 
-/** Keywords whose value is a schema, a list of schemas, or a map of them —
- *  the only places a `pattern` can mean a regex. Everything else (`default`,
+/** Keywords whose value is a schema, a list of schemas, or a map of them.
+ *  These are the only places a `pattern` can mean a regex. Everything else (`default`,
  *  `examples`, `enum`, property NAMES) is data and is left alone. */
 const SCHEMA_SLOTS = [
   "items",
@@ -156,7 +156,7 @@ const SCHEMA_MAPS = ["properties", "patternProperties", "$defs", "definitions", 
  * A tool schema with every `pattern` constraint removed.
  *
  * The ChatGPT backend compiles tool schemas with OpenAI's own regex dialect and
- * answers a pattern it cannot read with a 400 for the WHOLE request — strict
+ * answers a pattern it cannot read with a 400 for the whole request, strict
  * or not. Claude Code's Artifact tool carries one, and every request that
  * offered it failed (cc-proxy #141/#142). Losing the constraint costs a
  * validation the caller's tool runner repeats anyway; the 400 costs the turn.

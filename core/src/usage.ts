@@ -15,14 +15,14 @@
 import type { TokenUsage } from "./types.ts";
 import { EMPTY_USAGE } from "./types.ts";
 
-/** USD per MILLION tokens — how every vendor prints its price sheet, so a row
+/** USD per million tokens, as every vendor prints its price sheet, so a row
  *  can be checked against one without arithmetic. */
 export interface ModelRate {
   /** Cache-MISS input: fresh tokens the provider had to read. */
   input: number;
   output: number;
   /** Cache-HIT input. Providers auto-cache repeated prefixes and bill the hit
-   *  portion far cheaper — 0.1× on Anthropic, ~0.1× on Gemini, 0.5× on some
+   *  portion far cheaper: 0.1× on Anthropic, ~0.1× on Gemini, 0.5× on some
    *  OpenAI models. In an agent loop the re-sent context is overwhelmingly
    *  hits, so billing it at the miss rate overcounts by up to 10×. */
   cacheRead: number;
@@ -95,14 +95,14 @@ export function costUsd(usage: TokenUsage, rate: ModelRate): number {
 }
 
 /** What one call adds to a run: its reported cost, else its rate, else
- *  nothing — an unpriced call still counts its tokens. */
+ *  nothing. An unpriced call still counts its tokens. */
 function callCost(usage: TokenUsage, rate: ModelRate | undefined): number {
   return rate ? costUsd(usage, rate) : (usage.reportedCostUsd ?? 0);
 }
 
 /**
  * Accumulates usage and cost across the calls of one run, pricing each with
- * the rate in effect for the model that served it — so a run that switches to
+ * the rate in effect for the model that served it, so a run that switches to
  * a backup model, or spans a time-of-day price boundary, still bills correctly.
  * A call that carries a reported cost is billed that, with or without a rate.
  */
@@ -110,7 +110,7 @@ export class UsageTracker {
   private usage: TokenUsage = { ...EMPTY_USAGE, cacheWriteTokens: 0 };
   private cost = 0;
   /** USD the cache hits saved, versus billing them all as misses.
-   *  Observability only — never billed. */
+   *  Observability only. Never billed. */
   private saved = 0;
 
   add(usage: TokenUsage, rate?: ModelRate): void {

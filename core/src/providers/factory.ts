@@ -47,7 +47,7 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    *  preset's static protocol headers. */
   headers?: Record<string, string>;
   /**
-   * App attribution for OpenRouter's rankings — the site URL rides as
+   * App attribution for OpenRouter's rankings. The site URL rides as
    * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent on
    * the OpenAI-compatible and Anthropic shapes (OpenRouter reads them for app
    * attribution); the Gemini and Responses shapes ignore them. An explicit
@@ -60,7 +60,7 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   siteName?: string;
   /** OpenRouter-only: preferred upstream hosts, in order. OpenRouter's cache
    *  lives on the upstream host's account and default routing hops hosts
-   *  between rounds — pinning keeps a conversation's rounds (and their cache)
+   *  between rounds. Pinning keeps a conversation's rounds (and their cache)
    *  on one host. Empty/absent = default routing. */
   providerOrder?: string[];
   /** Default `service_tier` for every call on the OpenAI and Responses shapes;

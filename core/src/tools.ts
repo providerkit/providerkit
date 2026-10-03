@@ -13,7 +13,7 @@ import type { JsonObjectSchema, ToolDefinition } from "./types.ts";
 import { messageOf } from "./errors.ts";
 
 export interface ToolContext {
-  /** The model's own call id when there is one — the event, any approval row
+  /** The model's own call id when there is one. The event, any approval row
    *  and the tool message must all key on what the provider expects back. */
   callId?: string;
   signal?: AbortSignal;
@@ -29,7 +29,7 @@ export type ToolOutcome<O> =
       ok: false;
       callId: string;
       kind: ToolFailure;
-      /** Fed back to the model verbatim — so it must read as an instruction to
+      /** Fed back to the model verbatim, so it must read as an instruction to
        *  a reader who cannot see our stack trace. */
       error: string;
       durationMs: number;
@@ -83,7 +83,7 @@ export class ToolTimeoutError extends Error {
   }
 }
 
-/** Rejects when `signal` aborts — races a `run` that ignores its own signal. */
+/** Rejects when `signal` aborts. Races a `run` that ignores its own signal. */
 function abortion(signal: AbortSignal): Promise<never> {
   return new Promise((_resolve, reject) => {
     if (signal.aborted) reject(signal.reason);
@@ -220,7 +220,7 @@ export class ToolRegistry {
   }
 
   /**
-   * Definitions for an allow-list, in the order given — which is the order the
+   * Definitions for an allow-list, in the order given. This is the order the
    * model reads them in, and it is part of the cached prompt prefix. Reordering
    * or appending mid-conversation invalidates that prefix, so a caller that
    * cares should freeze the list when the session opens.

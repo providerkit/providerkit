@@ -32,7 +32,7 @@ export type RateLimitWindow = "5h" | "weekly" | "monthly";
 export interface RateLimitReset {
   /** Absolute time the binding window resets, when any header disclosed it. */
   resetAtMs?: number;
-  /** Server-requested wait (`retry-after`) — what a retry policy honours. */
+  /** Server-requested wait (`retry-after`), which a retry policy honours. */
   retryAfterMs?: number;
   /** Which subscription window bound, when it could be named at all. */
   window?: RateLimitWindow;
@@ -58,7 +58,7 @@ const RESET_HEADERS = [
 ];
 
 /**
- * The ChatGPT backend's two windows. Both ride every response — the slots are
+ * The ChatGPT backend's two windows. Both ride every response. The slots are
  * "primary" and "secondary", NOT "5h" and "weekly", so the window is named by
  * its own `-window-minutes` (300 and 10080 in every capture), and its
  * `-used-percent` says which one is full. Recorded by cc-proxy off a live turn
@@ -154,7 +154,7 @@ function parseRetryAfter(value: string | null, now: number): number | undefined 
  * Anthropic's `anthropic-ratelimit-unified-*` pair rides on every OAuth
  * response, so both windows are always reported and only one of them is the
  * reason for this 429. API-key accounts get the `anthropic-ratelimit-*-reset`
- * RFC 3339 timestamps instead. Everything is optional — an unrecognized shape
+ * RFC 3339 timestamps instead. Everything is optional: an unrecognized shape
  * yields an empty result, and the caller falls back to its generic message.
  */
 export function parseRateLimitReset(headers: Headers, now = Date.now()): RateLimitReset {
@@ -270,7 +270,7 @@ function parseProseRetryMs(text: string): number | undefined {
  * Other providers and gateways (LiteLLM, Cloudflare, Ollama) report countdowns in prose:
  * `Rate limit exceeded. Try again in 20s.`
  * The window name is inferred from the wait itself, and only past the floor
- * above — a sub-minute retry is a throttle, not a subscription window.
+ * above. A sub-minute retry is a throttle, not a subscription window.
  */
 export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLimitReset {
   let body: unknown;

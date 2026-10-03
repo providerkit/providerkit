@@ -1,9 +1,9 @@
 /**
- * Provider presets — hand-curated, wire-level facts only.
+ * Provider presets: hand-curated, wire-level facts only.
  *
  * A preset is everything `createPresetProvider` needs to speak to one
  * endpoint: which adapter shape it speaks, its API root, how the credential
- * rides, and what it is called. Deliberately absent: prices (invariant 9 —
+ * rides, and what it is called. Deliberately absent: prices (invariant 9;
  * they drift on a vendor's schedule and a wrong number in a library is a
  * wrong number in everyone's ledger), icons, colors, marketing names, and
  * sign-in flows (an `oauth` preset expects the CALLER to hand over an access
@@ -11,12 +11,12 @@
  *
  * Sources: the coding-plan endpoints and auth quirks are measured
  * (tabrunner's extension + this repo's adopters, 2026-09); the model lists
- * are representative, not exhaustive — every adapter takes a per-call model,
+ * are representative, not exhaustive. Every adapter takes a per-call model,
  * so a missing id costs nothing.
  *
  * Azure is deliberately ABSENT: its base URL is per-deployment
- * (`https://<resource>.openai.azure.com`), so no static preset can carry it —
- * point createOpenAIProvider's baseUrl at your resource instead.
+ * (`https://<resource>.openai.azure.com`), so no static preset can carry it.
+ * Point createOpenAIProvider's baseUrl at your resource instead.
  */
 import type { ImageLimits } from "./image.ts";
 
@@ -27,7 +27,7 @@ export type PresetShape = "anthropic" | "openai" | "responses" | "gemini";
  * - `key`: the vendor's native key header (Anthropic reads `x-api-key`,
  *   Gemini `x-goog-api-key`); the OpenAI shapes have only Bearer, so they
  *   never use this.
- * - `bearer`: `Authorization: Bearer` — the OpenAI shapes' only mode, and the
+ * - `bearer`: `Authorization: Bearer`, the OpenAI shapes' only mode, and the
  *   coding-plan gateways' mode on the Anthropic wire (measured: Z.ai's coding
  *   endpoint ignores `x-api-key` and reads Bearer).
  * - `oauth`: same wire as `bearer`, but the token is a short-lived access
@@ -54,7 +54,7 @@ export interface PresetRoute {
 export interface ProviderPreset {
   /** Adapter wire format. */
   shape: PresetShape;
-  /** API root — if it ends with /v1, /v4 or another version segment, the
+  /** API root. If it ends with /v1, /v4 or another version segment, the
    *  adapter automatically routes to /chat/completions instead of /v1/chat/completions. */
   baseUrl: string;
   /** Explicit path override when a gateway has custom routing. */
@@ -71,8 +71,8 @@ export interface ProviderPreset {
   textOnly?: boolean;
   /** Anthropic-shape dialect: say "no thinking" with an explicit
    *  `thinking: { type: "disabled" }` marker when effort is none. For
-   *  endpoints where an ABSENT field means the model's default — thinking ON
-   *  for reasoning-mandatory models (measured on Z.ai's coding endpoint:
+   *  endpoints where an absent field means the model's default, with thinking
+   *  on for reasoning-mandatory models (measured on Z.ai's coding endpoint:
    *  omit → thinking block; disabled → none). Leave it unset for native
    *  Anthropic: the adapter spells none per Claude model, and ignores this
    *  flag for every Claude from 4.6 on. */
@@ -82,7 +82,7 @@ export interface ProviderPreset {
    *  neither text nor a tool call. */
   maxTokens?: number;
   /** Header that carries `StreamOptions.sessionId`, for gateways that route
-   *  and cache per conversation — and refuse a call without it (OpenCode Go:
+   *  and cache per conversation and refuse a call without it (OpenCode Go:
    *  `MissingSessionID`, measured 2026-09-27). */
   sessionHeader?: string;
   /** Wires for model ids that don't use the preset's own `shape`. The first
@@ -130,7 +130,7 @@ export const PROVIDER_PRESETS = {
     defaultModel: "gemini-3.1-pro-preview",
     models: ["gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-flash-latest"],
   },
-  /** Gemini behind its OpenAI-compatible route — the drop-in for codebases
+  /** Gemini behind its OpenAI-compatible route, for codebases
    *  that only speak the openai shape. */
   "google-openai": {
     shape: "openai",
@@ -357,7 +357,7 @@ export const PROVIDER_PRESETS = {
     models: ["glm-5.3-flash", "glm-5.3", "glm-5.2"],
   },
   /**
-   * OpenCode Go — one $10/month key across many open models, each with its own
+   * OpenCode Go: one $10/month key across many open models, each with its own
    * monthly dollar limit (5h = 20%, week = 50%). Chain several models as
    * `fallbacks` so a spent one hands over to the next.
    *
@@ -431,7 +431,7 @@ export const PROVIDER_PRESETS = {
     defaultModel: "kimi-k2.7-code",
     models: ["kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k3"],
   },
-  /** Alibaba's dashscope coding plan — OpenAI-compatible per its registry. */
+  /** Alibaba's DashScope coding plan, OpenAI-compatible per its registry. */
   "alibaba-coding-plan": {
     shape: "openai",
     baseUrl: "https://coding-intl.dashscope.aliyuncs.com/v1",
@@ -439,7 +439,7 @@ export const PROVIDER_PRESETS = {
     defaultModel: "qwen3.5-plus",
     models: ["qwen3.5-plus", "qwen3-coder-next", "glm-5"],
   },
-  /** QwenCloud's token plan — Anthropic wire (measured by tabrunner). */
+  /** QwenCloud's token plan on the Anthropic wire (measured by tabrunner). */
   qwen: {
     shape: "anthropic",
     baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
@@ -447,7 +447,7 @@ export const PROVIDER_PRESETS = {
     defaultModel: "qwen3.8-max",
     models: ["qwen3.8-max", "qwen3.8-flash", "qwen3.6-flash"],
   },
-  /** QwenCloud's token plan — OpenAI-compatible endpoint. */
+  /** QwenCloud's token plan on an OpenAI-compatible endpoint. */
   "qwen-token-plan-openai": {
     shape: "openai",
     baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
@@ -455,7 +455,7 @@ export const PROVIDER_PRESETS = {
     defaultModel: "qwen3.8-max",
     models: ["qwen3.8-max", "qwen3.8-flash", "qwen3.6-flash"],
   },
-  /** Alibaba DashScope Platform API — standard pay-as-you-go API key. */
+  /** Alibaba DashScope Platform API, with a standard pay-as-you-go API key. */
   alibaba: {
     shape: "openai",
     baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
@@ -501,8 +501,8 @@ export const PROVIDER_PRESETS = {
     headers: { "anthropic-beta": "claude-code-20250219,oauth-2025-04-20" },
   },
   /**
-   * The Codex backend behind a ChatGPT sign-in — Responses wire, no public
-   * model list, so these ids are the list.
+   * The Codex backend behind a ChatGPT sign-in, on the Responses wire. It has no
+   * public model list, so these ids are the list.
    *
    * The endpoint is `/backend-api/codex/responses`, with no version segment.
    * Without the `path` the adapter appends `/v1/responses`, the POST 404s, and
@@ -540,8 +540,8 @@ export const PROVIDER_PRESETS = {
     replayReasoning: true,
   },
   /**
-   * A Grok subscription (SuperGrok, X Premium) — the backend the Grok CLI
-   * talks to, Responses wire. Distinct from `xai`, which is the keyed API and
+   * A Grok subscription (SuperGrok, X Premium), on the backend the Grok CLI
+   * talks to, using the Responses wire. Distinct from `xai`, which is the keyed API and
    * bills per token.
    *
    * The two `x-…` headers are what switch the backend into CLI-token mode;
@@ -568,7 +568,7 @@ export const PROVIDER_PRESETS = {
     imageLimits: { minSide: 8, minArea: 512, maxDecodedBytes: 5 * 1024 * 1024, maxImages: 4 },
   },
   /** Kimi's coding endpoint reached with a subscription token instead of a
-   *  key — Kimi bills the two separately. */
+   *  key. Kimi bills the two separately. */
   "kimi-plan": {
     shape: "anthropic",
     baseUrl: "https://api.kimi.ai/coding",
@@ -607,5 +607,5 @@ export const PROVIDER_PRESETS = {
 
 export type ProviderPresetId = keyof typeof PROVIDER_PRESETS;
 
-/** Every valid preset id — the factory's unknown-id error lists these. */
+/** Every valid preset id. The factory's unknown-id error lists these. */
 export const PRESET_IDS = Object.keys(PROVIDER_PRESETS) as ProviderPresetId[];

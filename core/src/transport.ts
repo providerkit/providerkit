@@ -16,7 +16,7 @@ export interface RequestInit_ {
   signal?: AbortSignal;
   /** Swapped in tests, or to route through a proxy. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
-  /** Called when the response headers arrive and on every body read after —
+  /** Called when the response headers arrive and on every body read after,
    *  keep-alives included. What the watchdog's idle clock runs on. */
   onActivity?: () => void;
   /** Called when the body states `[DONE]`. See `SseHooks.onDone`. */
@@ -41,8 +41,8 @@ export interface SseHooks {
 
 /**
  * One frame larger than this is not a frame. Without a cap a malformed or
- * runaway upstream grows the buffer until the runtime dies — an MV3 worker
- * first. cc-proxy caps the ChatGPT backend at the same 8 MiB.
+ * runaway upstream grows the buffer until the runtime dies, starting with an
+ * MV3 worker. cc-proxy caps the ChatGPT backend at the same 8 MiB.
  */
 export const MAX_SSE_FRAME_CHARS = 8 * 1024 * 1024;
 
@@ -53,7 +53,7 @@ export function apiUrl(baseUrl: string, path: string): string {
 
 /**
  * How long the provider says to wait, read from the RESPONSE rather than from
- * a thrown error. Headers are authoritative — `Retry-After` first, then the
+ * a thrown error. Headers are authoritative: `Retry-After` first, then the
  * vendor reset headers that name a subscription window rather than a
  * per-minute throttle, because "try again in a moment" is a lie for those.
  */
@@ -168,21 +168,21 @@ function payloadOf(frame: string): string | null {
 }
 
 /**
- * Yield each `data:` payload of an SSE body, trimmed — plus the bare JSON
+ * Yield each `data:` payload of an SSE body, trimmed, plus the bare JSON
  * object a vendor appends outside the framing, which is only ever an error
  * (see `payloadOf`).
  *
  * Frames are split on the blank line the spec requires, so a payload containing
  * a bare newline survives; `[DONE]` is swallowed here rather than in every
  * adapter, and reported through `hooks.onDone`. CRLF and bare CR are
- * normalized — some gateways send them, and a `\r` left on the end of a JSON
+ * normalized: some gateways send them, and a `\r` left on the end of a JSON
  * payload is a parse error nobody enjoys debugging.
  *
  * Exported apart from `streamSse` because the envelope above it is the half an
  * adopting app most often cannot take: an app with its own translated error
  * copy, its own log levels, or its own auth refresh has to keep building the
  * request and reading the failure itself. Framing is the half nobody should
- * write twice — hand it a `res.body` and keep your own envelope.
+ * write twice. Hand it a `res.body` and keep your own envelope.
  */
 export async function* parseSseStream(
   body: ReadableStream<Uint8Array>,

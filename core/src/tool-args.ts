@@ -58,7 +58,7 @@ function unescapeJson(text: string): string {
 /**
  * Best-effort recovery of `"key": "value"` string fields from truncated JSON.
  *
- * Only strings: they are what a summary field — the one worth rescuing — is
+ * Only strings: they are what a summary field (the one worth rescuing) is
  * made of, and a closing quote is the single reliable boundary in a partial
  * stream. Numbers, booleans and objects are dropped, because a salvaged
  * half-value is worse than none.
@@ -151,7 +151,7 @@ export function parseToolArgs(raw: string): Record<string, unknown> {
   return healArgs(isRecord(parsed) ? parsed : {});
 }
 
-/** Whether `raw` parses at all — how a caller tells a truncated tool call from
+/** Whether `raw` parses at all. Lets a caller tell a truncated tool call from
  *  an intact one, since `parseToolArgs` deliberately never throws. */
 export function isCompleteJson(raw: string): boolean {
   if (!raw.trim()) return false;
