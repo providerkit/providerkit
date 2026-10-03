@@ -76,8 +76,8 @@ policy, the loop) is unchanged. A key that fails is benched for a period matched
 | `auth`          | 12 hours    | Durable, but key-specific. One dead key must not sink the pool.          |
 | transient (5xx) | 1 minute    | The vendor's bad time, not the key's; a sibling key may route elsewhere. |
 
-When every key is benched, `with()` throws `NoAvailableKeyError` carrying `retryAtMs`, when the
-soonest one comes back, so the caller can say something better than "try again later".
+When every key is benched, `with()` throws `NoAvailableKeyError`. Its `retryAtMs` says when the
+soonest key comes back, so the caller can say something better than "try again later".
 
 :::danger[One key is not a pool]
 With a single key there is nothing to rotate to, so **nothing is evicted** and the error
