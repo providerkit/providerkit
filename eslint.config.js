@@ -2,14 +2,14 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
-/** No em dash in user-facing text: it gives away AI-written copy. Every string, template
- *  piece and JSX text in the shipped sources is checked; comments are not nodes, so they
- *  stay free, and tests are exempt. The README, changelog, docs, Astro components and
- *  package descriptions are covered by core/scripts/check-no-em-dash.ts. The regex uses a
- *  unicode escape so this file does not contain the character itself. */
+/** Check runtime strings and JSX in shipped sources. TSDoc, Markdown, Astro,
+ *  config and package descriptions are covered by core/scripts/check-no-em-dash.ts.
+ *  Internal implementation comments and tests are exempt. Unicode escapes keep
+ *  the prohibited character out of this config. */
 const NO_EM_DASH = [
   "Literal[value=/\\u2014/]",
   "TemplateElement[value.raw=/\\u2014/]",
+  "TemplateElement[value.cooked=/\\u2014/]",
   "JSXText[value=/\\u2014/]",
 ].map((selector) => ({
   selector,
