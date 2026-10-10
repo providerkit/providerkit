@@ -127,8 +127,8 @@ interface StreamOptions {
   model?: string; // override the bound model for this call
   effort?: Effort; // "none" | "low" | "medium" | "high" | "max"
   maxTokens?: number; // thinking and the answer SHARE this ceiling
-  temperature?: number;
-  topP?: number; // set this OR temperature, not both
+  temperature?: number; // not sent to Gemini, which fixes its own sampling
+  topP?: number; // set this OR temperature, not both; not sent to Gemini
   stopSequences?: string[]; // no equivalent field on the Responses shape
   signal?: AbortSignal;
   toolChoice?: ToolChoice;

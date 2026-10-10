@@ -70,9 +70,10 @@ const THINKING_LEVEL: Record<Effort, string> = {
 };
 
 /**
- * Gemini 2.x thinking budget dial (tokens).
- * Gemini 2.5 uses `thinkingBudget` (0 disables thinking), while Gemini 3+ uses
- * `thinkingLevel` (MINIMAL, LOW, MEDIUM, HIGH).
+ * Gemini 2.x thinking budget dial (tokens). Gemini 2.5 takes `thinkingBudget`
+ * (0 disables thinking) and has no level. Every newer model takes
+ * `thinkingLevel`, and Google has said the next ones answer a budget with a
+ * 400 instead of remapping it.
  */
 const GEMINI_2_THINKING_BUDGET: Record<Effort, number> = {
   none: 0,
@@ -283,21 +284,23 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // learn about a prefix.
       const model = (opts.model ?? config.model).replace(/^models\//, "");
       const isGemini3 = /gemini-3/i.test(model);
+      // Not `!isGemini3`: `gemini-flash-latest` and models newer than 3 are not
+      // Gemini 3 either, and they must get a level.
+      const isGemini2 = /gemini-2/i.test(model);
 
       const generationConfig: Record<string, unknown> = {};
       if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
-      if (opts.temperature !== undefined) generationConfig.temperature = opts.temperature;
-      if (opts.topP !== undefined) generationConfig.topP = opts.topP;
+      // `temperature` and `topP` are never sent: Gemini 3.6 Flash and later ignore
+      // them and the next models reject them. Dropping them, rather than refusing,
+      // keeps a fallback chain that shares one set of options working.
       if (opts.stopSequences?.length) generationConfig.stopSequences = opts.stopSequences;
       // No effort means the model's own dynamic thinking. Sending MINIMAL / 0 here
       // would switch that off for a caller who never asked, which is the whole
       // reason the seam treats an absent effort as "never sent".
-      // Gemini 3 uses thinkingLevel (MINIMAL..HIGH), while Gemini 2.5 uses
-      // thinkingBudget (0 tokens disables thinking, positive numbers set budget).
       if (effort) {
-        generationConfig.thinkingConfig = isGemini3
-          ? { thinkingLevel: THINKING_LEVEL[effort] }
-          : { thinkingBudget: GEMINI_2_THINKING_BUDGET[effort] };
+        generationConfig.thinkingConfig = isGemini2
+          ? { thinkingBudget: GEMINI_2_THINKING_BUDGET[effort] }
+          : { thinkingLevel: THINKING_LEVEL[effort] };
       }
       // A schema that shares its call with tools pins the decoder, and a pinned
       // decoder cannot emit a functionCall — the model narrates the call it

@@ -319,18 +319,42 @@ describe("gemini adapter", () => {
     expect(await levelFor()).toBeUndefined();
   });
 
+  it("sends a budget to Gemini 2 and a level to every other model", async () => {
+    const thinkingFor = async (model: string) => {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await collect(provider(fetchImpl, { model }).createStream(HI, [], { effort: "low" }));
+      return (seen[0]!.body.generationConfig as { thinkingConfig: unknown }).thinkingConfig;
+    };
+
+    expect(await thinkingFor("gemini-2.5-flash")).toEqual({ thinkingBudget: 1024 });
+    // Google answers a budget from the next models with a 400, so a model this
+    // adapter can't name, such as an alias or one released later, gets a level.
+    for (const model of ["gemini-3.8-flash", "gemini-flash-latest", "gemini-4-pro"]) {
+      expect(await thinkingFor(model)).toEqual({ thinkingLevel: "LOW" });
+    }
+  });
+
+  it("never sends temperature or topP", async () => {
+    // Gemini 3.6 Flash and later ignore them, and the next models reject them.
+    for (const model of ["gemini-2.5-flash", "gemini-3.8-flash"]) {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await collect(
+        provider(fetchImpl, { model }).createStream(HI, [], { temperature: 0.2, topP: 0.9 }),
+      );
+      expect(seen[0]!.body.generationConfig).toEqual({});
+    }
+  });
+
   it("sends the JSON schema and the ceiling in generationConfig", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
     await collect(
       provider(fetchImpl, { maxTokens: 4_000 }).createStream(HI, [], {
-        temperature: 0.2,
         json: { name: "answer", schema: { type: "object", properties: { a: { type: "string" } } } },
       }),
     );
 
     expect(seen[0]!.body.generationConfig).toEqual({
       maxOutputTokens: 4_000,
-      temperature: 0.2,
       responseMimeType: "application/json",
       responseJsonSchema: { type: "object", properties: { a: { type: "string" } } },
     });

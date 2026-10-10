@@ -359,6 +359,7 @@ export interface StreamOptions {
    *  task emitting a large artifact must raise it or the tool-call JSON is
    *  silently truncated mid-argument. */
   maxTokens?: number;
+  /** Not sent to Gemini, which fixes its own sampling. Same for `topP`. */
   temperature?: number;
   /**
    * Nucleus sampling. Set this or `temperature`, not both. The vendors all
