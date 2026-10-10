@@ -103,6 +103,9 @@ export interface ProviderPreset {
   /** OpenAI shape: send `X-Initiator` (`user` or `agent`) on every call. GitHub
    *  Copilot bills a premium request per `user` turn. */
   initiatorHeader?: boolean;
+  /** OpenAI shape: never send `temperature` or `top_p`, for an endpoint that
+   *  fixes its own sampling and answers the fields with an error. */
+  noSampling?: boolean;
 }
 
 export const PROVIDER_PRESETS = {
@@ -136,6 +139,7 @@ export const PROVIDER_PRESETS = {
     shape: "openai",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     auth: "key",
+    noSampling: true,
     defaultModel: "gemini-3.1-pro-preview",
     models: ["gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-flash-latest"],
   },

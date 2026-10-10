@@ -109,6 +109,9 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    *  `agent`. GitHub Copilot bills a premium request per `user` turn and lets
    *  the agent's own follow-ups (tool results) ride free. */
   initiatorHeader?: boolean;
+  /** Never send `temperature` or `top_p`. For an endpoint that fixes its own
+   *  sampling and rejects the fields (Gemini's OpenAI-compatible route). */
+  noSampling?: boolean;
   /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
   serviceTier?: ServiceTier;
 }
@@ -527,8 +530,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       };
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) request.max_tokens = maxTokens;
-      if (opts.temperature !== undefined) request.temperature = opts.temperature;
-      if (opts.topP !== undefined) request.top_p = opts.topP;
+      if (!config.noSampling) {
+        if (opts.temperature !== undefined) request.temperature = opts.temperature;
+        if (opts.topP !== undefined) request.top_p = opts.topP;
+      }
       if (opts.stopSequences?.length) request.stop = opts.stopSequences;
       const serviceTier = opts.serviceTier ?? config.serviceTier;
       if (serviceTier) request.service_tier = serviceTier;

@@ -6,7 +6,7 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 ### Fixed
 
-- **Gemini calls no longer send fields Google is about to reject.** Google has said its next models answer `thinking_budget`, `temperature`, `top_p` and `top_k` with a 400. The Gemini adapter now sends a thinking level to every model except Gemini 2, which has no level and keeps its token budget. Before, only ids that contain `gemini-3` got a level, so `gemini-flash-latest`, a model in the `google` preset, got a budget. It also never sends `temperature` or `topP`. Google already ignores them on Gemini 3.6 Flash and later, so the values changed nothing there. On Gemini 2 they did work, and a call that set them now runs at the model's own sampling. The `google-openai` preset is not changed.
+- **Gemini calls no longer send fields Google is about to reject.** Google has said its next models answer `thinking_budget`, `temperature`, `top_p` and `top_k` with a 400. The Gemini adapter now sends a thinking level to every model except Gemini 2, which has no level and keeps its token budget. Before, only ids that contain `gemini-3` got a level, so `gemini-flash-latest`, a model in the `google` preset, got a budget. It also never sends `temperature` or `topP`. Google already ignores them on Gemini 3.6 Flash and later, so the values changed nothing there. On Gemini 2 they did work, and a call that set them now runs at the model's own sampling. The `google-openai` preset drops them too, through a new `noSampling` preset option.
 
 ## [0.21.1] - 2026-10-02
 
