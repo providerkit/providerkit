@@ -149,6 +149,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
         ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         ...(preset.initiatorHeader ? { initiatorHeader: true } : {}),
+        ...(preset.noSampling ? { noSampling: true } : {}),
         fetchImpl: config.fetchImpl,
       });
       break;

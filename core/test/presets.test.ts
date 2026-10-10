@@ -332,6 +332,25 @@ describe("opencode-go — the session header", () => {
     );
   });
 
+  it("google-openai drops temperature and top_p, and openai still sends them", async () => {
+    const bodyFor = async (id: "google-openai" | "openai") => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider(id, { apiKey: "k", fetchImpl });
+      await drain(
+        provider.createStream([{ role: "user", content: "hi" }], [], {
+          temperature: 0.2,
+          topP: 0.9,
+        }),
+      );
+      return JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body));
+    };
+
+    // Gemini's next models answer these fields with an error.
+    expect(await bodyFor("google-openai")).not.toHaveProperty("temperature");
+    expect(await bodyFor("google-openai")).not.toHaveProperty("top_p");
+    expect(await bodyFor("openai")).toMatchObject({ temperature: 0.2, top_p: 0.9 });
+  });
+
   it("grok reaches the CLI backend with the headers that admit a subscription token", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
     const provider = createPresetProvider("grok", { apiKey: "tok", fetchImpl });

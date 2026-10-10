@@ -127,8 +127,8 @@ interface StreamOptions {
   model?: string; // override the bound model for this call
   effort?: Effort; // "none" | "low" | "medium" | "high" | "max"
   maxTokens?: number; // thinking and the answer SHARE this ceiling
-  temperature?: number;
-  topP?: number; // set this OR temperature, not both
+  temperature?: number; // not sent to Gemini, which fixes its own sampling
+  topP?: number; // set this OR temperature, not both; not sent to Gemini
   stopSequences?: string[]; // no equivalent field on the Responses shape
   signal?: AbortSignal;
   toolChoice?: ToolChoice;
@@ -274,13 +274,15 @@ const deepseek = createPresetProvider("deepseek", { apiKey: process.env.DEEPSEEK
 Endpoints supporting both Anthropic (`/v1/messages`) and OpenAI (`/v1/chat/completions`) wires are
 explicitly distinguished (e.g. `zai` vs `zai-openai`, `qwen` token plan vs `qwen-token-plan-openai`).
 
-Three preset options cover what a vendor needs beyond a key:
+Four preset options cover what a vendor needs beyond a key:
 
 - `baseUrl` replaces the preset's API root, for a vendor that gives each account its own host.
 - `replayReasoning` sends the model's encrypted reasoning back on the next turn. Only `chatgpt` turns
   it on. Go and Grok may refuse the `include` field it needs.
 - `initiatorHeader` sends `X-Initiator` (`user` or `agent`) on every call. Only `github-copilot`
   uses it, because GitHub bills a premium request per `user` turn.
+- `noSampling` drops `temperature` and `top_p` from every call. Only `google-openai` uses it,
+  because Gemini fixes its own sampling and its next models answer those fields with an error.
 
 ### Subscription presets
 
