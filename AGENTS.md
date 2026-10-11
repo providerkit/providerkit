@@ -8,14 +8,12 @@ prompts, no memory, no graph — those are where a product lives and they stay i
 
 MIT · open source · `providerkit.dev`
 
-> **Before touching anything under `site/`, read
-> [`site/.impeccable/surfaces/site-src-content-docs-index-mdx.md`](site/.impeccable/surfaces/site-src-content-docs-index-mdx.md).**
+> **Before touching anything under `site/`, read [`site/DESIGN.md`](site/DESIGN.md).**
 >
-> The site rebuild has landed. That brief holds the committed direction, the palette, the
-> list of what must **not** survive, and the agent-channel decisions; `site/DESIGN.md` (with
-> its `site/.impeccable/design.json` sidecar) is the built design system, written from the
-> shipped pages rather than ahead of them. Read the brief
-> for _why_ a rule exists and DESIGN.md for _what_ the rule is.
+> It is the built design system, written from the shipped pages rather than ahead of them. Its
+> last two sections, Landing and Decisions behind the site, hold the committed direction, what
+> must **not** come back, and the agent-channel decisions: read them for _why_ a rule exists,
+> and the rest for _what_ the rule is.
 
 ## Why it exists
 
