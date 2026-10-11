@@ -491,3 +491,97 @@ hand-written guide is explicitly not extended to them.
   reader types or pastes; labels are Archivo.
 - **Don't** ship a near-black ground with one bright accent. Dark is a lab bench under work
   light, not a void.
+
+## Landing
+
+providerkit.dev, all of it. The landing page is Persuade; every guide and reference page is Read
+and keeps the same world in a quieter register. One world, two registers, not two designs. The
+Optical Bench above is the landing page's first screen.
+
+Spine: one optical bench, where seven real vendor failures enter as scattered rays, pass one element, and leave parallel and named.
+Driver: the reader's own edits. Changing the status or the body re-traces the ray through the real classifier.
+Motion: the ray redraws in place, and its entering angle, exit lane and wavelength follow the verdict.
+
+Who it's for: a TypeScript developer who is either weighing a provider layer, or is mid-incident
+at 2am with a status code that is lying to them. On the landing page, the action is to believe
+the taxonomy is real and go read a guide. On a docs page, the job is to find the one paragraph
+that says what to do about the failure in front of them, fast, and to keep reading comfortably
+for an hour.
+
+The story: the reader sees seven real vendor failures enter as scattered rays, pass one element,
+and leave parallel and named. They understand the seam and the taxonomy in one image, believe it
+because the diagram runs the real package, and go read the guide for their failure.
+
+First screen: a horizontal optical axis across the page, and the live classifier is that
+diagram, not a widget beside it. Title and install sit under the axis, left-aligned. No hero
+card, no gradient.
+
+Proof on hand: five pooled production codebases (~9,100 lines), three independently derived
+identical 60s watchdogs, two of them shipping the same five fixes on the same day, 380 tests, 13
+error kinds, one migration that deleted 634 lines from an MV3 extension, and a classifier that
+runs the real published package in the reader's browser. Nothing beyond that list: no
+testimonials, no benchmarks, no download counts. None may be invented, and none may be implied.
+
+The other ideas, and the rule each one left in this world:
+
+- Struck cathode gauze (a close second): every alternative shown at once as an unlit ghost, the
+  chosen one struck forward; no boxes, rules or dividers, grouping by density and depth instead.
+- Accretion-disk threshold (a close second): an irreversible threshold drawn as a place. It
+  became the retries guide's commitment horizon.
+- Night instrument six-pack: show trend as well as value. The classifier shows a verdict's
+  neighbours, not only its verdict.
+- Riley moiré gallery: contrast from line frequency, not from adding a hue.
+- Colour-chord counterpoint: every failure family readable without hue.
+- Push Pin poster: one emblematic figure anchors a section. The finish narrowed it to the two
+  guides with something spatial to show.
+
+## Decisions behind the site
+
+What the rebuild removed, and what must not come back: `site/src/styles/brand.css` with every
+`--pk-*` token and the whole `pk-` class family; the `.pk-eyebrow` tracked ALL-CAPS label above
+a heading (drafting labels use a leader line or a dimensioned callout instead); the `.pk-meta`
+middle-dot string (`A · B · C`); the `.pk-grid` / `.pk-cell` / `.pk-stats` / `.pk-stat` cards
+with one shared radius and a hairline gap; `--pk-radius: 10px` on every surface.
+
+What stayed, because it is product truth or a brand commitment, not visual habit: all copy and
+content, the collimator mark and its geometry, the teal as the collimated beam, the
+failure-family semantics (retry / account / context / ours / inert), the classifier's logic in
+`Classifier.tsx`, Astro + Starlight, and every route.
+
+Fonts: Archivo Variable and Commit Mono, both OFL-1.1, self-hosted from Fontsource. One 32 KB
+latin variable file covers weights 100–900 for Archivo.
+
+The rays are not the buttons. A diagonal line's bounding box covers a huge part of the plate,
+and seven of them overlap, so the label strip is the button and the rays are drawn separately
+with `pointer-events: none`. Found by driving the page, not by reading it.
+
+One design document per surface: this file holds both what was built and why. Do not start a
+second one at the repo root. There was briefly one there.
+
+### For agents reading the site
+
+Agents read this site as much as people do, and they never render the visual world: they want
+the markdown underneath. (`AGENTS.md` speaks to agents working _on_ providerkit; this part is
+for agents _using_ it.)
+
+- `starlight-llms-txt` serves `/llms.txt`, `/llms-full.txt` and `/llms-small.txt`. 8 guides plus
+  ~85 generated TypeDoc pages is too much for one context file, so `llms-small.txt` covers the
+  guides and `llms-full.txt` carries guides plus reference. The plugin does **not** emit
+  per-page markdown.
+- Per-page `.md`, Bun-style: `providerkit.dev/guides/errors.md` returns `text/markdown` from a
+  small Astro endpoint over the content collection. Agents use this one most: `llms.txt` says
+  the page exists, and the `.md` fetches it without spending tokens on HTML chrome.
+- `llms.txt` points at the API reference explicitly. Coding agents write code _against_ this
+  library, so the exact signatures matter more than the prose. The shipped `.d.ts` is the
+  precise contract; the generated reference is its readable form.
+- `kinds.json`: the 13 kinds as `{kind, fix, isTransient, isBackupEligible}`. The `fix` prose
+  lives on the site, the flags come from the package's own `isTransient` / `isBackupEligible`,
+  and one `Record<ErrorKind, …>` makes the list exhaustive by compilation. It is the most-asked
+  fact about the package, and an agent mid-incident wants it as data.
+- "Copy page as Markdown" (above) is the human half of the same feature.
+
+Do not build an MCP server. MCP exposes capability; it is not a way to ship text. The site is
+static on Cloudflare Pages with nothing running to host one, it needs per-user client setup
+where a URL needs none, and it cannot be crawled or cached. The only version worth having would
+expose the classifier as a tool, and `bun add @providerkit/core` already puts the real
+classifier in the agent's own process, which beats a network round trip for pure computation.
