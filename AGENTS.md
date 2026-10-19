@@ -117,6 +117,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend             |
 | `providers/gemini.ts`    | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output    |
 | `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator        |
+| `registry.ts`            | providers and keys set up once; `get(ref)` builds gated, watched chains    |
 | `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets |
 | `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                       |
 | `jev.ts`                 | `@providerkit/core/jev` — TypeSafe's decision model on its four hosts      |
