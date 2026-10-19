@@ -151,10 +151,17 @@ describe("responses adapter", () => {
     expect(chunks.map((c) => c.content).join("")).toBe("Hello");
   });
 
-  it("skips a frame that is not JSON", async () => {
-    const { fetchImpl } = recorder(["not json at all", ...TEXT_TURN]);
-    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
-    expect(chunks.filter((c) => c.content)).toHaveLength(2);
+  it("fails a frame that is not JSON rather than skipping it", async () => {
+    // Keep-alives never reach the adapter, so a frame that does not parse is a
+    // lost event. Skipped, the turn read as whole with a delta missing.
+    const { fetchImpl } = recorder([...TEXT_TURN.slice(0, 3), "not json at all", ...TEXT_TURN]);
+    const seen: ProviderChunk[] = [];
+    const err = await (async () => {
+      for await (const chunk of provider({ fetchImpl }).createStream(hi, [])) seen.push(chunk);
+    })().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ kind: "network", body: "not json at all" });
+    expect(seen.map((c) => c.content).join("")).toBe("Hel");
   });
 });
 

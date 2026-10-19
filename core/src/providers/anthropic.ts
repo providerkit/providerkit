@@ -3,7 +3,7 @@ import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
-import { streamSse, apiUrl } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
@@ -545,12 +545,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
         ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
       })) {
-        let event: AnthropicEvent;
-        try {
-          event = JSON.parse(data) as AnthropicEvent;
-        } catch {
-          continue; // a keep-alive or a frame we do not model
-        }
+        const event = parseFrame<AnthropicEvent>(data, id);
 
         switch (event.type) {
           // A failure the backend reports after its headers went out. Classified

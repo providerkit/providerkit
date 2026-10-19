@@ -1466,3 +1466,49 @@ describe("one tool call per turn", () => {
     });
   });
 });
+
+// ── what the two readers refuse to read past ─────────────────────────────
+
+const SHAPES = [
+  {
+    name: "openai",
+    create: (fetchImpl: typeof fetch) =>
+      createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl }),
+  },
+  {
+    name: "anthropic",
+    create: (fetchImpl: typeof fetch) =>
+      createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", fetchImpl }),
+  },
+];
+
+const ASK: ChatMessage[] = [{ role: "user", content: "hi" }];
+
+/** Every chunk a stream delivered, then the error it ended with. */
+async function settle(stream: AsyncIterable<ProviderChunk>) {
+  const chunks: ProviderChunk[] = [];
+  try {
+    for await (const chunk of stream) chunks.push(chunk);
+  } catch (error) {
+    return { chunks, error };
+  }
+  return { chunks, error: undefined };
+}
+
+describe.each(SHAPES)("the $name reader", ({ name, create }) => {
+  const text = (delta: string) =>
+    name === "openai"
+      ? j({ choices: [{ delta: { content: delta } }] })
+      : j({ type: "content_block_delta", delta: { type: "text_delta", text: delta } });
+
+  it("fails a frame that is not JSON as network, after what came before it", async () => {
+    // Keep-alives are comments, dropped before the adapter. A frame that does
+    // not parse is a lost delta, call or finish, and skipping it read the turn
+    // as whole.
+    const { fetchImpl } = recorder([text("Hel"), "not json at all", text("lo")]);
+    const { chunks, error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "network", body: "not json at all" });
+    expect(chunks.map((c) => c.content ?? "").join("")).toBe("Hel");
+  });
+});

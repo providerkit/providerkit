@@ -5,7 +5,7 @@
 // Their divergences are small and named where they appear.
 import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
-import { streamSse, apiUrl } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
   ChatMessage,
@@ -650,12 +650,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           ended = true;
         },
       })) {
-        let chunk: OpenAIChunk;
-        try {
-          chunk = JSON.parse(data) as OpenAIChunk;
-        } catch {
-          continue;
-        }
+        const chunk = parseFrame<OpenAIChunk>(data, id);
 
         // A failure the backend reports after its headers went out. The
         // gateways speaking this dialect — OpenRouter above all — report a

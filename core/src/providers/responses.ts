@@ -12,7 +12,7 @@
 // adapter reads `type` — which is what survives, and what gateways agree on.
 import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
-import { streamSse, apiUrl } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
 import type {
   ChatMessage,
@@ -523,12 +523,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
         ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
       })) {
-        let event: ResponsesEvent;
-        try {
-          event = JSON.parse(data) as ResponsesEvent;
-        } catch {
-          continue; // a keep-alive or a frame we do not model
-        }
+        const event = parseFrame<ResponsesEvent>(data, id);
         if (event.type?.endsWith(".delta") || event.type === "response.output_item.added") {
           produced = true;
         }
