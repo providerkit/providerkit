@@ -19,8 +19,8 @@ import {
   type ToolCall,
 } from "./types.ts";
 
-/** One drained turn: the message a loop appends, the calls it runs (on the
- *  message), and what it bills. */
+/** One drained turn: the message a loop appends, whose `toolCalls` are the
+ *  calls it runs, and what the turn cost. */
 export interface Turn {
   /** Ready to append to history as it is. `toolCalls` holds the calls to run,
    *  in the order the provider indexed them, and is absent when there are none. */
@@ -74,7 +74,10 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
       // Identity is the last value STATED, so an empty one never erases a real
       // one: Anthropic opens a call with `""` for what it lacks, and the
       // ChatGPT backend states the real call_id and name only on the call's
-      // closing event. Arguments are fragments, joined in arrival order.
+      // closing event. A call that never states an id keeps `""`: one made up
+      // here would differ per adapter (invariant 10), while `repairHistory`
+      // gives it the same id on every send. Arguments are fragments, joined in
+      // arrival order.
       if (delta.id) call.id = delta.id;
       if (delta.name) call.name = delta.name;
       if (delta.thoughtSignature) call.thoughtSignature = delta.thoughtSignature;
@@ -95,14 +98,12 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
     // vendor's frame was not. A retry may well get a whole call, and another
     // model is a fair next try if this one keeps doing it. `invalid` would
     // blame our request and stop the run over a fault that is not ours.
-    //
-    // No id is made up for a call that lacks one, though: an empty id stays
-    // empty and `repairHistory` gives it the same id on every send.
     const provider = source?.provider ?? "turn";
+    const which = call.id || `at index ${index}`;
     throw new ProviderError(
       provider,
       "overload",
-      `${provider}: tool call ${call.id || `at index ${index}`} ended with no name, so there is no tool to run`,
+      `${provider}: tool call ${which} ended with no name, so there is no tool to run`,
     );
   }
   const toolCalls = indexed.map(([, call]) => call);
