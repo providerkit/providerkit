@@ -78,7 +78,7 @@ export default defineConfig({
               label: "Guides",
               paths: ["guides/**"],
               description:
-                "the hand-written guides only: errors, retries, streaming, sign-in, tools, context, cost, Jev",
+                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, cost, Jev",
             },
             {
               label: "API reference",
@@ -121,6 +121,7 @@ export default defineConfig({
           items: [
             { label: "Getting started", slug: "guides/getting-started" },
             { label: "The provider seam", slug: "guides/providers" },
+            { label: "Set up providers once", slug: "guides/registry" },
           ],
         },
         {
