@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProviderError } from "../src/errors.ts";
+import { classify, isRetryable, ProviderError } from "../src/errors.ts";
 import {
   apiUrl,
   parseSseStream,
@@ -223,6 +223,45 @@ describe("streamSse", () => {
     const err = (await collect(streamSse(opts(failing))).catch((e) => e)) as ProviderError;
     expect(err).toBeInstanceOf(ProviderError);
     expect(err.kind).toBe("network");
+  });
+
+  it("reads a rejection in wording nobody listed as network too", async () => {
+    // Each runtime words a dead socket its own way, and a list of wordings is
+    // always one short. A rejection that is not the caller's Stop means no
+    // response came back, which is a transport failure.
+    const odd = new Error("error sending request for url (https://api.example.com/v1/messages)");
+    const failing = (async () => {
+      throw odd;
+    }) as unknown as typeof fetch;
+    const err = (await collect(streamSse(opts(failing))).catch((e) => e)) as ProviderError;
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.kind).toBe("network");
+    expect(err.cause).toBe(odd);
+    expect(isRetryable(err)).toBe(true);
+  });
+
+  it("keeps a body that cannot become JSON as our own bug, not a network blip", async () => {
+    const body: Record<string, unknown> = {};
+    body.self = body;
+    const fetchImpl = (async () => new Response("{}")) as unknown as typeof fetch;
+    const err = await collect(streamSse({ ...opts(fetchImpl), body })).catch((e) => e);
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err).not.toBeInstanceOf(ProviderError);
+  });
+
+  it("keeps the caller's abort an abort, never a retried network failure", async () => {
+    // The real shape: fetch rejects with the signal's reason, a DOMException.
+    const controller = new AbortController();
+    controller.abort();
+    const failing = (async (_url: string, init: RequestInit) => {
+      throw init.signal?.reason;
+    }) as unknown as typeof fetch;
+    const err = await collect(streamSse({ ...opts(failing), signal: controller.signal })).catch(
+      (e) => e,
+    );
+    expect(err).not.toBeInstanceOf(ProviderError);
+    expect(classify(err)).toBe("aborted");
+    expect(isRetryable(err)).toBe(false);
   });
 
   it("lets a caller's Stop through untouched rather than dressing it as network", async () => {

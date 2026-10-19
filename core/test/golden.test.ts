@@ -213,6 +213,23 @@ const RESPONSES_THROTTLED = wire(
   'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for this model"}}}',
 );
 
+// A request the backend refuses AFTER committing to 200, in words no pattern
+// knows. Three dialects name it only by type, with no status; Google states
+// its status, as it always does.
+const REFUSED = "messages.1: unexpected field 'cache_hint'";
+const OPENAI_REFUSED = wire(
+  `data: {"error":{"message":"${REFUSED}","type":"invalid_request_error","param":null,"code":null}}`,
+);
+const ANTHROPIC_REFUSED = wire(
+  `event: error\ndata: {"type":"error","error":{"type":"invalid_request_error","message":"${REFUSED}"}}`,
+);
+const GEMINI_REFUSED = wire(
+  `data: {"error":{"code":400,"message":"${REFUSED}","status":"INVALID_ARGUMENT"}}`,
+);
+const RESPONSES_REFUSED = wire(
+  `event: error\ndata: {"type":"error","error":{"type":"invalid_request_error","code":null,"message":"${REFUSED}","param":null}}`,
+);
+
 // ── the history that went out, four ways ──────────────────────────────────
 //
 // What a request carries, in the order it carries it, with each wire's nesting
@@ -373,6 +390,8 @@ interface Vendor {
   throttled: string;
   /** What that backend says when it throttles, in its own words. */
   throttleSays: string;
+  /** An invalid request it reports inside the 200, in words no pattern knows. */
+  refused: string;
   /** How this wire says "do not think", read off the request that went out. */
   refusesThinking(body: Record<string, unknown>): boolean;
   /** Whether this wire carries a file part (a PDF, audio, video). Only
@@ -395,6 +414,7 @@ const VENDORS: Vendor[] = [
     turn: OPENAI_TURN,
     throttled: OPENAI_THROTTLED,
     throttleSays: "rate limit exceeded",
+    refused: OPENAI_REFUSED,
     refusesThinking: (body) => at(body, "reasoning_effort") === "none",
     takesFiles: false,
     takesServiceTier: true,
@@ -408,6 +428,7 @@ const VENDORS: Vendor[] = [
     turn: ANTHROPIC_TURN,
     throttled: ANTHROPIC_THROTTLED,
     throttleSays: "exceeded your rate limit",
+    refused: ANTHROPIC_REFUSED,
     // Sonnet 5 thinks by default and accepts an explicit off. Documented
     // (Anthropic per-model table, read 2026-09-27); other Claude models spell
     // none differently, and providers.test.ts pins each.
@@ -424,6 +445,7 @@ const VENDORS: Vendor[] = [
     turn: GEMINI_TURN,
     throttled: GEMINI_THROTTLED,
     throttleSays: "RESOURCE_EXHAUSTED",
+    refused: GEMINI_REFUSED,
     refusesThinking: (body) =>
       at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL" ||
       at(body, "generationConfig", "thinkingConfig", "thinkingBudget") === 0,
@@ -438,6 +460,7 @@ const VENDORS: Vendor[] = [
     turn: RESPONSES_TURN,
     throttled: RESPONSES_THROTTLED,
     throttleSays: "Rate limit reached",
+    refused: RESPONSES_REFUSED,
     refusesThinking: (body) => at(body, "reasoning", "effort") === "none",
     takesFiles: false,
     takesServiceTier: true,
@@ -845,6 +868,14 @@ describe.each(VENDORS)("$name", (vendor) => {
     // in — a classified kind is what the run branches on, and the body is the
     // only thing that says which of the four backends said it.
     expect(provider.body).toContain(vendor.throttleSays);
+  });
+
+  it("reports a refused request that lands after the headers as invalid, never overload", async () => {
+    // Its type is the only evidence. Floored to overload, it was retried and
+    // walked every backup, cooling each, on a request they all refuse alike.
+    const err = await thrownBy(ask(vendor.create(serving(vendor.refused))));
+    expect(err).toBeInstanceOf(ProviderError);
+    expect((err as ProviderError).kind).toBe("invalid");
   });
 
   it("gives up on a stream that goes quiet, and never on one that is talking", async () => {

@@ -84,13 +84,26 @@ function reasoningEffort(model: string, effort: Effort): string {
 }
 
 /**
- * `response.incomplete` means the turn was cut short, and the seam has one word
- * for that: "length". `content_filter` is the only other reason this shape
- * documents; anything new stays on "length" rather than reporting a clean stop,
- * because a caller that believes a truncated answer finished will act on it.
+ * The finish an `incomplete` turn stands for. This shape documents two
+ * reasons, and each has its own finish: `max_output_tokens` is the output cap
+ * (`length`) and `content_filter` the filter.
+ *
+ * Any other reason, or none, says only that the turn did not end on purpose.
+ * It used to read as `length`, so an empty turn was told to raise a maxTokens
+ * it never hit. It is thrown as `overload` instead, the transient fault
+ * cc-proxy answers it with (a 503). Nothing about the request is wrong, so it
+ * is retried if nothing was emitted yet; if something was, the error reaches
+ * the caller after it (invariant 1). It is read before reasoning and usage go
+ * out, like a failed terminal, so that retry stays open.
  */
-function mapIncompleteReason(reason: string | undefined): FinishReason {
-  return reason === "content_filter" ? "content_filter" : "length";
+function incompleteFinish(provider: string, reason: string | undefined): FinishReason {
+  if (reason === "max_output_tokens") return "length";
+  if (reason === "content_filter") return "content_filter";
+  throw new ProviderError(
+    provider,
+    "overload",
+    `${provider}: the turn stopped early, reason: ${reason ?? "none given"}`,
+  );
 }
 
 // ── input items ───────────────────────────────────────────────────────────
@@ -662,16 +675,13 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             if (response?.status === "failed" || response?.error) {
               throw streamError(id, response.error ?? { message: "response failed" });
             }
+            let finishReason: FinishReason = sawToolCall ? "tool_calls" : "stop";
+            if (response?.status === "incomplete") {
+              finishReason = incompleteFinish(id, response.incomplete_details?.reason);
+            }
             yield* reasoningChunk();
             if (response?.usage) yield usageChunk(response.usage);
-            if (response?.status === "incomplete") {
-              yield {
-                type: "finish",
-                finishReason: mapIncompleteReason(response.incomplete_details?.reason),
-              };
-              return;
-            }
-            yield { type: "finish", finishReason: sawToolCall ? "tool_calls" : "stop" };
+            yield { type: "finish", finishReason };
             return;
           }
 
@@ -682,13 +692,11 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           case "response.incomplete": {
             // A turn that ran out of output tokens still billed for its input,
             // and this event carries usage in the same shape as `completed`.
+            const finishReason = incompleteFinish(id, event.response?.incomplete_details?.reason);
             yield* reasoningChunk();
             const usage = event.response?.usage;
             if (usage) yield usageChunk(usage);
-            yield {
-              type: "finish",
-              finishReason: mapIncompleteReason(event.response?.incomplete_details?.reason),
-            };
+            yield { type: "finish", finishReason };
             return;
           }
 

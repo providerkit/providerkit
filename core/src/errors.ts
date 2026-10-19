@@ -343,6 +343,12 @@ const CONTEXT_PATTERNS: readonly RegExp[] = [
   // "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
   /input length and `?max_tokens`? exceed context limit/i,
   /exceed(?:s|ed)? (?:the )?context limit/i,
+  // GitHub Copilot: "prompt token count of 270000 exceeds the limit of 128000",
+  // code `model_max_prompt_tokens_exceeded`. No other wording here reads it,
+  // so it landed on `invalid` and the conversation never compacted. cc-proxy
+  // shipped the same two patterns for the same reason (0.1.51).
+  /model_max_prompt_tokens_exceeded/i,
+  /prompt token count of \d+ exceeds the limit/i,
   // Scoped to the thing that overflowed: a bare "exceeds the maximum" also
   // covers image counts and per-minute token rates, which compaction can't fix.
   /exceeds? the (?:model'?s? )?maximum (?:input |prompt |context )?(?:tokens?|length|context)/i,
@@ -653,6 +659,25 @@ export function parseContextOverflow(err: unknown, body?: string): ContextOverfl
 }
 
 /**
+ * The HTTP status an in-band error's type stands for when it states none:
+ * Anthropic's types, then OpenAI's, read from `type` and then from a slug
+ * `code`. cc-proxy's table. A Map, so a type named after an Object method
+ * finds nothing rather than a function.
+ */
+const STATUS_BY_TYPE: ReadonlyMap<string, number> = new Map([
+  ["invalid_request_error", 400],
+  ["authentication_error", 401],
+  ["permission_error", 403],
+  ["not_found_error", 404],
+  ["request_too_large", 413],
+  ["rate_limit_error", 429],
+  ["api_error", 500],
+  ["server_error", 500],
+  ["internal_server_error", 500],
+  ["overloaded_error", 529],
+]);
+
+/**
  * A failure the backend reports INSIDE an already-200 stream.
  *
  * The transport classified everything that failed before the body opened; this
@@ -669,19 +694,34 @@ export function parseContextOverflow(err: unknown, body?: string): ContextOverfl
  * `code`/`type`, the canonical `status` name. The whole thing serializes into
  * the searchable body, so RetryInfo's `retryDelay` is honoured wherever it sits.
  *
+ * A number is a status only from 400 to 599. Vendors put their own codes in
+ * the same field: Z.ai's 1113 is an empty balance, and read as a status it was
+ * past 500, which skips the 4xx body patterns that name it quota and lands on
+ * overload. With no status stated, the error's type says which one it stands
+ * for (`STATUS_BY_TYPE`), and the body still outranks it (invariant 3).
+ *
  * `unknown` is floored to "overload" rather than kept: a stream that dies after
  * its headers is by construction a transient upstream fault, and "unknown" is
- * never retried. Everything the body does name keeps its own kind, which is
- * what tells the caller to wait, rotate a key, or compact instead of retrying
- * a failure that will repeat.
+ * never retried. Only an error with no status and no type it knows gets there.
+ * Before the type was read, one `invalid_request_error` in words no pattern
+ * knew was floored too: retried, then walked across every backup, cooling each
+ * for 30s, on a request that fails the same way everywhere. Everything the
+ * body does name keeps its own kind, which is what tells the caller to wait,
+ * rotate a key, or compact instead of retrying a failure that will repeat.
  */
 export function streamError(provider: string, error: unknown): ProviderError {
   const body = JSON.stringify(error ?? {}) ?? "";
-  const status =
-    readNumber(error, "code") ?? readNumber(error, "status") ?? readNumber(error, "status_code");
+  const status = [
+    readNumber(error, "code"),
+    readNumber(error, "status"),
+    readNumber(error, "status_code"),
+  ].find((value) => value !== undefined && value >= 400 && value < 600);
   const code =
     readString(error, "code") ?? readString(error, "status") ?? readString(error, "type");
-  const kind = classifyHttp(status, body);
+  const typeStatus =
+    STATUS_BY_TYPE.get(readString(error, "type") ?? "") ??
+    STATUS_BY_TYPE.get(readString(error, "code") ?? "");
+  const kind = classifyHttp(status ?? typeStatus, body);
   return new ProviderError(
     provider,
     kind === "unknown" ? "overload" : kind,

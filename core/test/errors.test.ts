@@ -16,6 +16,7 @@ import {
   parseContextOverflow,
   parseRetryAfterMs,
   ProviderError,
+  streamError,
   type ErrorKind,
 } from "../src/errors.ts";
 
@@ -335,8 +336,16 @@ describe("context overflow is not a rate limit", () => {
     "context_length_exceeded",
     "Please reduce the length of the messages",
     "input is too long for requested model",
+    // GitHub Copilot, which no other wording here reads.
+    "prompt token count of 270000 exceeds the limit of 128000",
   ])("%s", (message) => {
     expect(kindOf(apiError(400, { message }))).toBe("context");
+  });
+
+  it("reads Copilot's overflow by its code alone", () => {
+    expect(
+      classifyHttp(400, '{"error":{"message":"","code":"model_max_prompt_tokens_exceeded"}}'),
+    ).toBe("context");
   });
 
   it("a 429 whose body names the WINDOW is context, not rate", () => {
@@ -617,5 +626,102 @@ describe("parseContextOverflow", () => {
   it("returns undefined for non-overflow errors", () => {
     expect(parseContextOverflow(new Error("Rate limit exceeded"))).toBeUndefined();
     expect(parseContextOverflow(new Error("Invalid API key"))).toBeUndefined();
+  });
+});
+
+describe("streamError: a failure inside a 200", () => {
+  const inBand = (error: Record<string, unknown>) => streamError("test", error);
+  const unrecognized = "something nobody wrote a pattern for";
+
+  it("reads Z.ai's 1113 as its vendor code, not a status, and lands on quota", () => {
+    // Read as a status, 1113 was past 500: the 4xx body patterns that name an
+    // empty balance were skipped, and the run retried into an empty account.
+    const err = inBand({ code: 1113, message: "余额不足或无可用资源包,请充值。" });
+    expect(err.kind).toBe("quota");
+    expect(err.status).toBeUndefined();
+  });
+
+  it.each([
+    [399, "overload", undefined],
+    [400, "invalid", 400],
+    [404, "model", 404],
+    [429, "rate", 429],
+    [599, "overload", 599],
+    [600, "overload", undefined],
+  ] as const)("counts code %i as a status only from 400 to 599", (code, kind, status) => {
+    const err = inBand({ code, message: unrecognized });
+    expect(err.kind).toBe(kind);
+    expect(err.status).toBe(status);
+  });
+
+  it("finds the stated status beside a vendor code", () => {
+    // The ChatGPT backend's error frame states its status in `status_code`.
+    expect(inBand({ code: 1234, status_code: 429, message: "slow down" })).toMatchObject({
+      kind: "rate",
+      status: 429,
+    });
+  });
+
+  it.each([
+    ["invalid_request_error", "invalid"],
+    ["authentication_error", "auth"],
+    ["permission_error", "auth"],
+    ["not_found_error", "model"],
+    ["request_too_large", "invalid"],
+    ["rate_limit_error", "rate"],
+    ["api_error", "overload"],
+    ["server_error", "overload"],
+    ["internal_server_error", "overload"],
+    ["overloaded_error", "overload"],
+  ] as const)("reads type %s as the status it stands for", (type, kind) => {
+    expect(inBand({ type, message: unrecognized }).kind).toBe(kind);
+  });
+
+  it("reads the type from a slug code when there is no type field", () => {
+    // OpenAI's Responses failures carry the slug in `code`.
+    expect(inBand({ code: "invalid_request_error", message: unrecognized }).kind).toBe("invalid");
+    expect(inBand({ code: "server_error", message: unrecognized }).kind).toBe("overload");
+  });
+
+  it("never retries an invalid request it has no words for", () => {
+    // Floored to overload, this one call was retried and walked every backup,
+    // cooling each for 30s, on a request every backup refuses the same way.
+    const err = inBand({ type: "invalid_request_error", message: "messages.3: unexpected field" });
+    expect(err.kind).toBe("invalid");
+    expect(isRetryable(err)).toBe(false);
+    expect(err.isBackupEligible).toBe(false);
+  });
+
+  it("does not invent a status from the type", () => {
+    // The type decides the kind; `status` stays what the vendor stated.
+    const err = inBand({ type: "invalid_request_error", message: unrecognized });
+    expect(err.status).toBeUndefined();
+    expect(err.code).toBe("invalid_request_error");
+  });
+
+  it("floors only an error with no status and no type it knows to overload", () => {
+    expect(inBand({ message: "stream reset" }).kind).toBe("overload");
+    expect(inBand({ type: "mystery_error", message: "stream reset" }).kind).toBe("overload");
+    // An Object method's name, which a plain-object table would have "found".
+    expect(inBand({ type: "constructor", message: "stream reset" }).kind).toBe("overload");
+  });
+
+  it("keeps body over type, in invariant 3's order", () => {
+    // A type is a status in other words, so the body outranks it the same
+    // way, and within the body context, then entitlement, quota, auth.
+    const words = [
+      "prompt is too long",
+      "plan does not include this",
+      "insufficient_quota",
+      "invalid api key",
+    ];
+    const kinds = ["context", "entitlement", "quota", "auth"] as const;
+    kinds.forEach((kind, i) => {
+      const message = words.slice(i).join("; ");
+      expect(inBand({ type: "invalid_request_error", message }).kind).toBe(kind);
+    });
+    expect(inBand({ type: "rate_limit_error", message: "insufficient balance" }).kind).toBe(
+      "quota",
+    );
   });
 });

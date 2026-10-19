@@ -4,7 +4,7 @@
 //
 // Adapters keep only their per-event mapping; everything about being an HTTP
 // client lives here once.
-import { classifyHttp, isTransportFailure, parseRetryAfterMs, ProviderError } from "./errors.ts";
+import { classifyHttp, parseRetryAfterMs, ProviderError } from "./errors.ts";
 import {
   parseRateLimitReset,
   parseRateLimitResponse,
@@ -127,18 +127,25 @@ async function errorFor(provider: string, res: Response): Promise<ProviderError>
 
 async function send(opts: RequestInit_): Promise<Response> {
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
+  // Serialized outside the catch below: a body that cannot become JSON is a
+  // bug of ours, and must not be dressed as a network blip and retried.
+  const body = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
   try {
     return await doFetch(opts.url, {
       method: "POST",
       headers: { "content-type": "application/json", ...opts.headers },
-      body: typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body),
+      body,
       signal: opts.signal,
     });
   } catch (err) {
-    // A stopped run rejects here too, and that is not a failure — let it pass
-    // through untouched. Anything that is not a recognizable transport
-    // rejection is a bug of ours and keeps its own loud shape.
-    if (opts.signal?.aborted || !isTransportFailure(err)) throw err;
+    // An aborted signal passes through untouched: the caller's Stop stays
+    // `aborted`, and the watchdog re-issues its own abort as `timeout`
+    // (invariant 2). Every other rejection means no response came back, so it
+    // is a transport failure whatever its wording. Matching known wordings
+    // missed each runtime's next one, and a missed one was never retried: a
+    // long run died on its first blip. cc-proxy reads every failed send the
+    // same way.
+    if (opts.signal?.aborted) throw err;
     throw new ProviderError(opts.provider, "network", `no response from ${opts.url}`, {
       cause: err,
     });
