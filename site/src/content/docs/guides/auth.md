@@ -19,7 +19,7 @@ To sign in the first time, your app supplies the two things a package can't do: 
 page and catching a redirect. It also decides where tokens are stored.
 
 ```ts
-import { createAuthFlow, tokenSource, type AuthHost } from "@providerkit/core/auth";
+import { createAuthFlow, tokenSource, withToken, type AuthHost } from "@providerkit/core/auth";
 import { createPresetProvider } from "@providerkit/core";
 
 const host: AuthHost = {
@@ -37,9 +37,14 @@ await save(credential);
 
 // Every call: a token that works now.
 const token = tokenSource({ load, save, refresh: flow.refresh });
-const { accessToken, baseUrl } = await token.getToken();
-const provider = createPresetProvider("github-copilot", { apiKey: accessToken, baseUrl });
+const provider = withToken(token, (auth) => createPresetProvider("github-copilot", auth));
 ```
+
+`withToken` gets a token for each call and hands it to the preset as `apiKey`, along with the
+host the sign-in named (`baseUrl`) and ChatGPT's `ChatGPT-Account-Id` header. If the server
+answers 401 before any output, it renews the token and sends the call once more. A second 401 is
+thrown as an `auth` error. To add headers of your own, merge them with `auth.headers` instead of
+replacing them.
 
 `createAuthFlow` takes `chatgpt`, `kimi-plan`, `grok`, `github-copilot`, `meta` or `openrouter`.
 ChatGPT and OpenRouter send the user through a redirect, so they call your `captureRedirect`. The
@@ -52,6 +57,11 @@ others show a code and call your `openUrl` with the approval page.
   a newer token in the meantime, it uses that one. Otherwise it throws.
 - A network failure keeps the credential and rethrows the network error. The user is not told to
   sign in again because their wifi dropped.
+- A server can refuse a token before it expires. Pass that token as
+  `getToken({ rejected: accessToken })` and it is renewed anyway. `withToken` does this for you.
+- Each request to a sign-in server gives up after 30 seconds, so a server that never answers
+  can't hold every call that waits on the refresh. Set `timeoutMs` on the host to change it. A
+  timeout keeps the credential, like a network failure.
 
 Read the stored credential in `load` every time. These tokens rotate when they are used, and a
 copy you kept in memory may hold one that is already spent.
@@ -79,7 +89,7 @@ Show your own text for each code. The package's messages are English and meant f
 Copilot's device sign-in ends in a GitHub token that the Copilot API doesn't take. The flow trades
 it for a Copilot token that lasts about 25 minutes. Trading again is the refresh, so
 `getToken` handles it. The credential also carries `baseUrl`, because each plan has its own host.
-Pass it to the preset, as above.
+`withToken` passes it to the preset, as above.
 
 The preset sends `X-Initiator: user` when the last message is the user's and `agent` after a tool
 result. GitHub bills one premium request per `user` turn, so this decides what the run costs. To
