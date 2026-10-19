@@ -28,6 +28,8 @@ export interface RequestInit_ {
   /** Called when the response headers report how full a subscription window
    *  is. See `StreamOptions.onRateLimit`. */
   onRateLimit?: (reading: RateLimitReading) => void;
+  /** Whether the turn already stated its finish. See `SseHooks.finished`. */
+  finished?: () => boolean;
 }
 
 export interface SseHooks {
@@ -40,6 +42,18 @@ export interface SseHooks {
    * was not simply cut off.
    */
   onDone?: () => void;
+  /**
+   * Whether the turn already stated its finish, so only trailing frames (the
+   * usage record, `[DONE]`) are left. Once this says true, a read that fails
+   * ends the stream instead of throwing. Kimi, GLM and OpenCode Go drop the
+   * socket there, and the failure threw away an answer the reader had already
+   * been shown (cc-proxy, measured on live traffic). The usage may be lost;
+   * the answer is not.
+   */
+  finished?: () => boolean;
+  /** The request's signal. A caller's Stop is never swallowed, finished or not:
+   *  a loop that sees a clean end goes on to run the turn's tools. */
+  signal?: AbortSignal;
   /** Largest partial frame held before giving up. Defaults to 8 MiB. */
   maxFrameChars?: number;
   /** Names the provider on the oversized-frame error. */
@@ -187,10 +201,11 @@ function payloadOf(frame: string): string | null {
  * (see `payloadOf`).
  *
  * Frames are split on the blank line the spec requires, so a payload containing
- * a bare newline survives; `[DONE]` is swallowed here rather than in every
- * adapter, and reported through `hooks.onDone`. CRLF and bare CR are
- * normalized: some gateways send them, and a `\r` left on the end of a JSON
- * payload is a parse error nobody enjoys debugging.
+ * a bare newline survives. `[DONE]` is swallowed here rather than in every
+ * adapter, reported through `hooks.onDone`, and ends the stream: it is the
+ * body's last word, and a read after it can only fail a finished turn. CRLF and
+ * bare CR are normalized: some gateways send them, and a `\r` left on the end
+ * of a JSON payload is a parse error nobody enjoys debugging.
  *
  * Exported apart from `streamSse` because the envelope above it is the half an
  * adopting app most often cannot take: an app with its own translated error
@@ -209,17 +224,36 @@ export async function* parseSseStream(
   // A CR at the very end of a read may be the first half of a CRLF; it waits
   // for the next read before it is turned into a line break.
   let heldCR = false;
+  // Whether the body was read to its end. Any other exit (`[DONE]`, a failed
+  // read, a consumer that stopped at its own terminal event) cancels it, so the
+  // connection is let go now rather than whenever the body is collected.
+  let drained = false;
 
-  function* emit(frame: string): Generator<string> {
+  /** Yields the frame's payload, and returns true when the frame was `[DONE]`. */
+  function* emit(frame: string): Generator<string, boolean> {
     const payload = payloadOf(frame);
-    if (payload === "[DONE]") hooks.onDone?.();
-    else if (payload !== null) yield payload;
+    if (payload === "[DONE]") {
+      hooks.onDone?.();
+      return true;
+    }
+    if (payload !== null) yield payload;
+    return false;
   }
 
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      let read: ReadableStreamReadResult<Uint8Array>;
+      try {
+        read = await reader.read();
+      } catch (err) {
+        if (hooks.finished?.() && !hooks.signal?.aborted) return;
+        throw err;
+      }
+      const { done, value } = read;
+      if (done) {
+        drained = true;
+        break;
+      }
       hooks.onActivity?.();
       let text: string = (heldCR ? "\r" : "") + decoder.decode(value, { stream: true });
       heldCR = text.endsWith("\r");
@@ -236,7 +270,7 @@ export async function* parseSseStream(
 
       let boundary = buffer.indexOf("\n\n", from);
       while (boundary !== -1) {
-        yield* emit(buffer.slice(0, boundary));
+        if (yield* emit(buffer.slice(0, boundary))) return;
         buffer = buffer.slice(boundary + 2);
         from = 0;
         boundary = buffer.indexOf("\n\n");
@@ -254,7 +288,29 @@ export async function* parseSseStream(
     // hand — dropping it loses the last delta, or the usage record.
     yield* emit(buffer + decoder.decode() + (heldCR ? "\n" : ""));
   } finally {
+    if (!drained) reader.cancel().catch(() => {});
     reader.releaseLock();
+  }
+}
+
+/**
+ * Parse one SSE payload as the JSON event it must be.
+ *
+ * A frame that is not JSON used to be skipped as "a keep-alive or a frame we do
+ * not model". But `parseSseStream` already drops comments and empty frames,
+ * which is every keep-alive the vendors send, so what reaches here unparsable
+ * is a broken stream: a delta, a tool call or the finish itself, gone, with the
+ * turn still reading as whole. It fails as `network`, the same as a socket that
+ * dies mid-read (cc-proxy fails these too).
+ */
+export function parseFrame<T>(data: string, provider: string): T {
+  try {
+    return JSON.parse(data) as T;
+  } catch (err) {
+    throw new ProviderError(provider, "network", `${provider}: a stream frame was not JSON`, {
+      body: data.slice(0, 2_000),
+      cause: err,
+    });
   }
 }
 

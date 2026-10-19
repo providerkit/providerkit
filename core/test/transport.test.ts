@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { classify, isRetryable, ProviderError } from "../src/errors.ts";
 import {
   apiUrl,
+  parseFrame,
   parseSseStream,
   postJson,
   retryAfterFromHeaders,
@@ -18,6 +19,20 @@ function sseResponse(chunks: string[], init: ResponseInit = {}): Response {
     },
   });
   return new Response(body, { status: 200, ...init });
+}
+
+/** A body that delivers `chunks`, then fails its next read the way undici
+ *  does when the other side closes. */
+function dyingBody(chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const queue = [...chunks];
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const next = queue.shift();
+      if (next === undefined) return controller.error(new TypeError("terminated"));
+      controller.enqueue(encoder.encode(next));
+    },
+  });
 }
 
 const fetchReturning = (res: Response | (() => Response | Promise<Response>)): typeof fetch =>
@@ -65,6 +80,79 @@ describe("parseSseStream", () => {
     // A held lock would make this throw — the `finally` is what prevents a
     // leaked reader on every aborted turn.
     expect(() => body.getReader()).not.toThrow();
+  });
+
+  it("stops at [DONE], so a socket that dies after it costs nothing", async () => {
+    // Kimi, GLM and OpenCode Go: the answer and its `[DONE]` arrive, then the
+    // read after them fails. Reading on threw away a turn the reader had
+    // already been shown.
+    const body = dyingBody(['data: {"a":1}\n\n', "data: [DONE]\n\n"]);
+    expect(await collect(parseSseStream(body))).toEqual(['{"a":1}']);
+  });
+
+  it("lets the connection go at [DONE] rather than holding it open", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"a":1}\n\ndata: [DONE]\n\n'));
+        // Never closed: a server that keeps the socket after its last word.
+      },
+      cancel: () => {
+        cancelled = true;
+      },
+    });
+    expect(await collect(parseSseStream(body))).toEqual(['{"a":1}']);
+    expect(cancelled).toBe(true);
+  });
+
+  it("keeps a finished turn when the read after its finish fails", async () => {
+    const body = dyingBody(['data: {"finish":"stop"}\n\n']);
+    expect(await collect(parseSseStream(body, { finished: () => true }))).toEqual([
+      '{"finish":"stop"}',
+    ]);
+  });
+
+  it("still fails a read that dies before the finish", async () => {
+    const body = dyingBody(['data: {"a":1}\n\n']);
+    await expect(collect(parseSseStream(body, { finished: () => false }))).rejects.toThrow(
+      "terminated",
+    );
+  });
+
+  it("never swallows a Stop, even after the finish", async () => {
+    // A loop handed a clean end goes on to run the turn's tools.
+    const controller = new AbortController();
+    const stop = new Error("stopped");
+    const body = new ReadableStream<Uint8Array>({
+      start(source) {
+        source.enqueue(new TextEncoder().encode('data: {"finish":"stop"}\n\n'));
+        controller.signal.addEventListener("abort", () => source.error(stop));
+      },
+    });
+    const stream = parseSseStream(body, { finished: () => true, signal: controller.signal });
+    expect(await stream.next()).toEqual({ done: false, value: '{"finish":"stop"}' });
+    controller.abort(stop);
+    await expect(stream.next()).rejects.toBe(stop);
+  });
+});
+
+describe("parseFrame", () => {
+  it("parses a JSON event", () => {
+    expect(parseFrame('{"a":1}', "p")).toEqual({ a: 1 });
+  });
+
+  it("fails a frame that is not JSON as network, with the frame kept", () => {
+    // Keep-alives never get here (comments and empty frames are dropped
+    // upstream), so what does is a delta, a tool call or a finish, lost.
+    let err: unknown;
+    try {
+      parseFrame('{"choices":[{"delta":{"content":"hel', "p");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ provider: "p", kind: "network" });
+    expect((err as ProviderError).body).toContain('"content":"hel');
   });
 });
 
