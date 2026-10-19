@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createResponsesProvider, toResponsesInput } from "../src/providers/responses.ts";
 import { ProviderError } from "../src/errors.ts";
 import type { RateLimitReading } from "../src/rate-limit.ts";
+import { collectTurn } from "../src/turn.ts";
 import type { ChatMessage, ProviderChunk, ToolDefinition } from "../src/types.ts";
 
 /**
@@ -44,25 +45,17 @@ async function collect(stream: AsyncIterable<ProviderChunk>): Promise<ProviderCh
 }
 
 /**
- * What a caller does with the fragments: the last STATED id or name wins and
- * arguments concatenate. The seam's assembly contract, spelled out here so the
- * tests below assert the ToolCall a loop actually ends up dispatching.
+ * What a loop ends up dispatching: the calls `collectTurn` assembles from the
+ * fragments, in index order. The tests below assert the ToolCall a loop
+ * actually runs, not just the deltas that make it up.
  */
-function assemble(chunks: ProviderChunk[]) {
-  const calls = new Map<number, { index: number; id: string; name: string; arguments: string }>();
-  for (const fragment of chunks.flatMap((c) => c.toolCalls ?? [])) {
-    const call = calls.get(fragment.index) ?? {
-      index: fragment.index,
-      id: "",
-      name: "",
-      arguments: "",
-    };
-    if (fragment.id) call.id = fragment.id;
-    if (fragment.name) call.name = fragment.name;
-    call.arguments += fragment.arguments ?? "";
-    calls.set(fragment.index, call);
-  }
-  return [...calls.values()];
+async function assemble(chunks: ProviderChunk[]) {
+  const { message } = await collectTurn(
+    (async function* () {
+      yield* chunks;
+    })(),
+  );
+  return message.toolCalls ?? [];
 }
 
 const j = (o: unknown) => JSON.stringify(o);
@@ -321,8 +314,8 @@ describe("responses tool calls", () => {
       { index: 0, arguments: '{"q":"x"}' },
       { index: 0, id: "call_real", name: "search" },
     ]);
-    expect(assemble(chunks)).toEqual([
-      { index: 0, id: "call_real", name: "search", arguments: '{"q":"x"}' },
+    expect(await assemble(chunks)).toEqual([
+      { id: "call_real", name: "search", arguments: '{"q":"x"}' },
     ]);
   });
 
@@ -344,8 +337,8 @@ describe("responses tool calls", () => {
       }),
       j({ type: "response.completed", response: { usage: USAGE } }),
     ]);
-    expect(assemble(await collect(provider({ fetchImpl }).createStream(hi, [])))).toEqual([
-      { index: 0, id: "call_final", name: "search", arguments: "{}" },
+    expect(await assemble(await collect(provider({ fetchImpl }).createStream(hi, [])))).toEqual([
+      { id: "call_final", name: "search", arguments: "{}" },
     ]);
   });
 
@@ -427,10 +420,10 @@ describe("responses tool calls", () => {
       j({ type: "response.completed", response: { usage: USAGE } }),
     ]);
     const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
-    expect(assemble(chunks)).toEqual([
-      { index: 0, id: "call_1", name: "lookup", arguments: '{"q":1}' },
-      { index: 1, id: "call_2", name: "read", arguments: '{"p":"/a"}' },
-      { index: 2, id: "call_3", name: "ls", arguments: "{}" },
+    expect(await assemble(chunks)).toEqual([
+      { id: "call_1", name: "lookup", arguments: '{"q":1}' },
+      { id: "call_2", name: "read", arguments: '{"p":"/a"}' },
+      { id: "call_3", name: "ls", arguments: "{}" },
     ]);
     expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
   });

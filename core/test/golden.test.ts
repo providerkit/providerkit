@@ -21,6 +21,7 @@ import { createAnthropicProvider } from "../src/providers/anthropic.ts";
 import { createGeminiProvider } from "../src/providers/gemini.ts";
 import { createOpenAIProvider } from "../src/providers/openai.ts";
 import { createResponsesProvider } from "../src/providers/responses.ts";
+import { collectTurn } from "../src/turn.ts";
 import type {
   ChatMessage,
   FinishReason,
@@ -520,40 +521,34 @@ const theTurn = (vendor: Vendor): Turn => ({
 });
 
 async function assemble(stream: AsyncIterable<ProviderChunk>): Promise<Turn> {
-  const calls = new Map<number, { id: string; name: string; arguments: string }>();
-  let text = "";
-  let reasoning = "";
-  let usage = NO_USAGE;
-  let finishReason: FinishReason | null = null;
+  let finished = false;
   let afterFinish = 0;
-
-  for await (const chunk of stream) {
-    if (chunk.type === "delta") {
-      if (finishReason) afterFinish += 1;
-      text += chunk.content ?? "";
-      reasoning += chunk.reasoning ?? "";
-      for (const delta of chunk.toolCalls ?? []) {
-        const call = calls.get(delta.index) ?? { id: "", name: "", arguments: "" };
-        // Last stated wins for identity, concatenated for arguments — the rule
-        // every shape's fragments are written against.
-        if (delta.id) call.id = delta.id;
-        if (delta.name) call.name = delta.name;
-        call.arguments += delta.arguments ?? "";
-        calls.set(delta.index, call);
+  const { message, usage, finishReason } = await collectTurn(
+    (async function* () {
+      for await (const chunk of stream) {
+        if (chunk.type === "delta" && finished) afterFinish += 1;
+        if (chunk.type === "finish" && chunk.finishReason) finished = true;
+        yield chunk;
       }
-    } else if (chunk.type === "usage" && chunk.usage) {
-      // Only the Anthropic shape reports cache WRITES separately; absent means
-      // none were written, not that the field is unknown.
-      usage = { ...chunk.usage, cacheWriteTokens: chunk.usage.cacheWriteTokens ?? 0 };
-    } else if (chunk.type === "finish" && chunk.finishReason) {
-      finishReason = chunk.finishReason;
-    }
-  }
+    })(),
+  );
 
   // A UI closes the message on `finish`. A delta after it renders into a turn
   // that is already sealed, or into nothing at all.
   expect(afterFinish, "a delta arrived after the finish chunk").toBe(0);
-  return { text, reasoning, toolCalls: [...calls.values()], usage, finishReason };
+  return {
+    text: message.content,
+    reasoning: message.reasoning ?? "",
+    toolCalls: (message.toolCalls ?? []).map(({ id, name, arguments: args }) => ({
+      id,
+      name,
+      arguments: args,
+    })),
+    // Only the Anthropic shape reports cache WRITES separately; absent means
+    // none were written, not that the field is unknown.
+    usage: { ...usage, cacheWriteTokens: usage.cacheWriteTokens ?? 0 },
+    finishReason,
+  };
 }
 
 /** The three fields a caller branches on, compared whole so a divergence in
@@ -702,6 +697,31 @@ describe.each(VENDORS)("$name", (vendor) => {
       { result: id, text: "3 cats" },
       { call: `${id}_2`, name: "search" },
       { result: `${id}_2`, text: "2 dogs" },
+    ]);
+  });
+
+  it("takes its own turn back as history, exactly as collectTurn assembled it", async () => {
+    // The loop's whole job between two requests: append the message, answer
+    // its calls, send. A message only one wire can read back breaks the app
+    // the day a chain hands the next turn to another adapter.
+    const { message } = await collectTurn(ask(vendor.create(serving(vendor.turn))));
+    const { raw, fetchImpl } = recording(vendor.turn);
+    const results: ChatMessage[] = (message.toolCalls ?? []).map((call) => ({
+      role: "tool",
+      toolCallId: call.id,
+      name: call.name,
+      content: "3 cats",
+    }));
+    await assemble(
+      vendor
+        .create(fetchImpl)
+        .createStream([{ role: "user", content: "find cats" }, message, ...results], TOOLS),
+    );
+    expect(vendor.history(raw[0]!)).toEqual([
+      { user: "find cats" },
+      { assistant: "Hello there" },
+      { call: "call_1", name: "search" },
+      { result: "call_1", text: "3 cats" },
     ]);
   });
 
