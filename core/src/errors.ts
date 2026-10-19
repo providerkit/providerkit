@@ -343,6 +343,12 @@ const CONTEXT_PATTERNS: readonly RegExp[] = [
   // "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
   /input length and `?max_tokens`? exceed context limit/i,
   /exceed(?:s|ed)? (?:the )?context limit/i,
+  // GitHub Copilot: "prompt token count of 270000 exceeds the limit of 128000",
+  // code `model_max_prompt_tokens_exceeded`. No other wording here reads it,
+  // so it landed on `invalid` and the conversation never compacted. cc-proxy
+  // shipped the same two patterns for the same reason (0.1.51).
+  /model_max_prompt_tokens_exceeded/i,
+  /prompt token count of \d+ exceeds the limit/i,
   // Scoped to the thing that overflowed: a bare "exceeds the maximum" also
   // covers image counts and per-minute token rates, which compaction can't fix.
   /exceeds? the (?:model'?s? )?maximum (?:input |prompt |context )?(?:tokens?|length|context)/i,

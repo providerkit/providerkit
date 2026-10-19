@@ -335,8 +335,16 @@ describe("context overflow is not a rate limit", () => {
     "context_length_exceeded",
     "Please reduce the length of the messages",
     "input is too long for requested model",
+    // GitHub Copilot, which no other wording here reads.
+    "prompt token count of 270000 exceeds the limit of 128000",
   ])("%s", (message) => {
     expect(kindOf(apiError(400, { message }))).toBe("context");
+  });
+
+  it("reads Copilot's overflow by its code alone", () => {
+    expect(
+      classifyHttp(400, '{"error":{"message":"","code":"model_max_prompt_tokens_exceeded"}}'),
+    ).toBe("context");
   });
 
   it("a 429 whose body names the WINDOW is context, not rate", () => {
