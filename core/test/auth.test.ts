@@ -404,4 +404,20 @@ describe("tokenSource", () => {
       tokenSource({ ...store(undefined), refresh: vi.fn() }).getToken(),
     ).rejects.toMatchObject({ code: "refresh_dead" });
   });
+
+  it("gives up on a token POST that never answers, and keeps the stored credential", async () => {
+    // Real timers: the deadline is the platform's own AbortSignal.timeout.
+    const hang: typeof fetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      });
+    const s = store(stale);
+    const flow = createAuthFlow("kimi-plan", hostWith(hang, { timeoutMs: 20 }));
+    const error = await tokenSource({ ...s, refresh: flow.refresh })
+      .getToken()
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: "TimeoutError" });
+    expect(s.save).not.toHaveBeenCalled();
+    expect(await s.load()).toBe(stale);
+  });
 });

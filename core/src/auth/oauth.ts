@@ -25,6 +25,8 @@ export interface AuthHost {
   }): Promise<string>;
   /** Replaces `fetch`, for tests. */
   fetchImpl?: typeof fetch;
+  /** How long one request to a sign-in server may take, in ms. Default 30 s. */
+  timeoutMs?: number;
 }
 
 /** The stored result of a sign-in. */
@@ -76,6 +78,26 @@ export function authError(
 /** Refresh this long before the server's own expiry. */
 export const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
+/** The deadline cc-proxy puts on its own token requests. */
+const AUTH_TIMEOUT_MS = 30_000;
+
+/**
+ * `fetch` with a deadline, for every request in `auth/`.
+ *
+ * A sign-in server that accepts the connection and never answers would hold
+ * the one shared refresh forever, and every call waiting on it with it. No
+ * clock above this one cuts it: the watchdog only starts once the model request
+ * is sent. The timeout rejects with a `TimeoutError`, which is not a refusal,
+ * so `tokenSource` keeps the stored credential.
+ */
+export function authFetch(host: AuthHost, url: string, init: RequestInit = {}): Promise<Response> {
+  const deadline = AbortSignal.timeout(host.timeoutMs ?? AUTH_TIMEOUT_MS);
+  return (host.fetchImpl ?? fetch)(url, {
+    ...init,
+    signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+  });
+}
+
 export const str = (value: unknown): string | undefined =>
   typeof value === "string" && value.length > 0 ? value : undefined;
 
@@ -119,7 +141,7 @@ export async function postToken(
   opts: { encode: "json" | "form"; allowErrorBody?: boolean },
 ): Promise<Record<string, unknown>> {
   const json = opts.encode === "json";
-  const res = await (host.fetchImpl ?? fetch)(url, {
+  const res = await authFetch(host, url, {
     method: "POST",
     headers: {
       "Content-Type": json ? "application/json" : "application/x-www-form-urlencoded",

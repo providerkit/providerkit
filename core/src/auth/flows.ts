@@ -8,6 +8,7 @@ import {
   accountFromToken,
   asRecord,
   authError,
+  authFetch,
   generatePKCE,
   jwtClaims,
   num,
@@ -308,7 +309,7 @@ export function copilotHeaders(appName: string, turn: "user" | "agent"): Record<
 }
 
 async function mintCopilotToken(host: AuthHost, githubToken: string): Promise<Credential> {
-  const res = await (host.fetchImpl ?? fetch)(COPILOT_TOKEN_URL, {
+  const res = await authFetch(host, COPILOT_TOKEN_URL, {
     headers: {
       Accept: "application/json",
       Authorization: `Bearer ${githubToken}`,
@@ -361,7 +362,7 @@ async function refreshCopilot(host: AuthHost, credential: Credential): Promise<C
  *  lookup did, so any failure means no name. */
 async function githubLogin(host: AuthHost, githubToken: string): Promise<string | undefined> {
   try {
-    const res = await (host.fetchImpl ?? fetch)(GITHUB_USER_URL, {
+    const res = await authFetch(host, GITHUB_USER_URL, {
       headers: { Accept: "application/json", Authorization: `Bearer ${githubToken}` },
     });
     return res.ok ? str(asRecord(await res.json()).login) : undefined;
@@ -405,7 +406,7 @@ const META_KEY_URL = "https://api.meta.ai/muse-code/key";
 const META_KEY_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 async function mintMetaKey(host: AuthHost, identityToken: string): Promise<Credential> {
-  const res = await (host.fetchImpl ?? fetch)(META_KEY_URL, {
+  const res = await authFetch(host, META_KEY_URL, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -494,7 +495,7 @@ function openrouterFlow(host: AuthHost): AuthFlow {
         redirectUri: OPENROUTER.redirectUri,
         signal,
       });
-      const res = await (host.fetchImpl ?? fetch)(OPENROUTER.keysUrl, {
+      const res = await authFetch(host, OPENROUTER.keysUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ code, code_verifier: verifier, code_challenge_method: "S256" }),
