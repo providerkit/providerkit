@@ -57,7 +57,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 763 tests
+bun run test                 # vitest, 956 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -96,7 +96,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 ## State
 
-**Built, tested, green** (763 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (956 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
@@ -104,6 +104,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them              |
 | `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker        |
 | `watchdog.ts`            | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                 |
+| `gate.ts`                | at most N calls at once per connection, first in first out; `withGate`     |
 | `usage.ts`               | cost arithmetic (rates stay with the caller)                               |
 | `transport.ts`           | fetch + the error envelope, and `parseSseStream` on its own                |
 | `tool-args.ts`           | truncation salvage + double-escape healing                                 |
@@ -211,6 +212,12 @@ un-learned.
     `normalizeToolId`'s random fallback, and why a reused id is renamed against the ids before
     it, never the ones after. `golden.test.ts` sends one broken history twice on all four wires
     and wants the same bytes both times.
+15. **A gate slot is taken on the first read and released exactly once**, when the stream ends,
+    throws or is returned, or when its signal aborts. A slot leaked by an abandoned stream starves
+    its connection for the life of the process, with no error anywhere: it serves one call fewer,
+    then none. The abort is the case a `finally` cannot cover, because a consumer that holds a
+    stream and stops reading never reaches it. Released twice, a slot lets one call in past the
+    cap. `gate.test.ts` ends a stream every way a stream can end and checks the count after each.
 
 ## Next
 
