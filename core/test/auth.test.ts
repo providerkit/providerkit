@@ -8,10 +8,15 @@ import {
   requestDeviceCode,
   SignInError,
   tokenSource,
+  withToken,
   type AuthHost,
   type Credential,
+  type TokenAuth,
 } from "../src/auth/index.ts";
 import { ProviderError } from "../src/errors.ts";
+import { withFallbackProviders } from "../src/fallback.ts";
+import { createPresetProvider } from "../src/providers/factory.ts";
+import type { ChatMessage, Provider, ProviderChunk } from "../src/types.ts";
 
 type Reply = Response | Error;
 interface Call {
@@ -367,6 +372,39 @@ describe("tokenSource", () => {
     expect([a, b]).toEqual([fresh, fresh]);
   });
 
+  it("renews a refused token before it expires, and only the token that was refused", async () => {
+    const s = store(fresh);
+    const renewed: Credential = { ...fresh, accessToken: "newer", refreshToken: "r3" };
+    const refresh = vi.fn(async () => renewed);
+    const source = tokenSource({ ...s, refresh });
+    // Refused on a token the store has already moved past: nothing to renew.
+    expect(await source.getToken({ rejected: "old" })).toBe(fresh);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(await source.getToken({ rejected: "new" })).toBe(renewed);
+    expect(refresh).toHaveBeenCalledWith(fresh);
+    expect(s.save).toHaveBeenCalledWith(renewed);
+  });
+
+  it("never spends a refresh token twice when a read races a refresh that just saved", async () => {
+    const s = store(fresh);
+    const slowRead = Promise.withResolvers<void>();
+    let reads = 0;
+    const load = vi.fn(async () => {
+      const seen = await s.load();
+      if (++reads === 1) await slowRead.promise; // this caller read "new", then stalls
+      return seen;
+    });
+    const renewed: Credential = { ...fresh, accessToken: "newer", refreshToken: "r3" };
+    const refresh = vi.fn(async () => renewed);
+    const source = tokenSource({ load, save: s.save, refresh });
+
+    const late = source.getToken({ rejected: "new" });
+    expect(await source.getToken({ rejected: "new" })).toBe(renewed);
+    slowRead.resolve(); // its read is stale now, and the refresh it joined is gone
+    expect(await late).toBe(renewed);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("adopts a newer stored token when the refresh is rejected", async () => {
     const s = store(stale);
     const refresh = vi.fn(async () => {
@@ -403,5 +441,172 @@ describe("tokenSource", () => {
     await expect(
       tokenSource({ ...store(undefined), refresh: vi.fn() }).getToken(),
     ).rejects.toMatchObject({ code: "refresh_dead" });
+  });
+
+  it("gives up on a token POST that never answers, and keeps the stored credential", async () => {
+    // Real timers: the deadline is the platform's own AbortSignal.timeout.
+    const hang: typeof fetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      });
+    const s = store(stale);
+    const flow = createAuthFlow("kimi-plan", hostWith(hang, { timeoutMs: 20 }));
+    const error = await tokenSource({ ...s, refresh: flow.refresh })
+      .getToken()
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: "TimeoutError" });
+    expect(s.save).not.toHaveBeenCalled();
+    expect(await s.load()).toBe(stale);
+  });
+});
+
+describe("withToken", () => {
+  const T1: Credential = {
+    accessToken: "T1",
+    refreshToken: "r1",
+    expiresAt: Date.now() + 3_600_000,
+  };
+  const T2: Credential = { ...T1, accessToken: "T2", refreshToken: "r2" };
+  const hi: ChatMessage[] = [{ role: "user", content: "hi" }];
+
+  function signedIn(initial: Credential, renew: () => Promise<Credential>) {
+    let stored = initial;
+    const save = vi.fn(async (credential: Credential) => {
+      stored = credential;
+    });
+    const refresh = vi.fn(renew);
+    return { source: tokenSource({ load: async () => stored, save, refresh }), save, refresh };
+  }
+
+  const unauthorized = () => new ProviderError("fake", "auth", "fake 401", { status: 401 });
+
+  /** Refuses T1 with a 401, and answers with the token it was built with. */
+  function fake(auth: TokenAuth): Provider {
+    return {
+      id: "fake",
+      model: "m",
+      async *createStream() {
+        if (auth.apiKey === "T1") throw unauthorized();
+        yield { type: "delta", content: auth.apiKey };
+      },
+    };
+  }
+
+  async function text(stream: AsyncIterable<ProviderChunk>): Promise<string> {
+    let out = "";
+    for await (const chunk of stream) out += chunk.content ?? "";
+    return out;
+  }
+
+  it("renews once for five calls refused on one token, replays all five, and benches nothing", async () => {
+    // The refresh outlasts the five 401s, so every call is waiting on it at once.
+    const { source, refresh } = signedIn(T1, () => new Promise((r) => setTimeout(r, 10, T2)));
+    const built: string[] = [];
+    const pool = withFallbackProviders([
+      withToken(source, (auth) => {
+        built.push(auth.apiKey);
+        return fake(auth);
+      }),
+    ]);
+
+    const answers = await Promise.all(
+      Array.from({ length: 5 }, () => text(pool.createStream(hi, []))),
+    );
+    expect(answers).toEqual(["T2", "T2", "T2", "T2", "T2"]);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(built.filter((key) => key === "T1")).toHaveLength(5);
+    expect(built.filter((key) => key === "T2")).toHaveLength(5);
+    const [entry] = pool.fallbacks.status();
+    expect(entry?.retryAtMs).toBe(0);
+    expect(entry?.kind).toBeUndefined();
+  });
+
+  it("never replays a 401 that lands after output", async () => {
+    const { source, refresh } = signedIn(T1, async () => T2);
+    const provider = withToken(source, () => ({
+      id: "fake",
+      model: "m",
+      async *createStream() {
+        yield { type: "delta", content: "partial" };
+        throw unauthorized();
+      },
+    }));
+    const seen: ProviderChunk[] = [];
+    const error = await (async () => {
+      for await (const chunk of provider.createStream(hi, [])) seen.push(chunk);
+    })().catch((e: unknown) => e);
+    expect(seen).toEqual([{ type: "delta", content: "partial" }]);
+    expect(error).toMatchObject({ status: 401 });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("sends the account header on each attempt, and lets a second 401 through as auth", async () => {
+    const { source, refresh } = signedIn({ ...T1, chatgptAccountId: "acct_1" }, async () => ({
+      ...T2,
+      chatgptAccountId: "acct_2",
+    }));
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => new Response("Unauthorized", { status: 401 }));
+    const provider = withToken(source, (auth) =>
+      createPresetProvider("chatgpt", { ...auth, fetchImpl }),
+    );
+
+    const error = await text(provider.createStream(hi, [])).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "auth", status: 401 });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    const sent = fetchImpl.mock.calls.map(([, init]) => new Headers(init?.headers));
+    expect(sent.map((h) => [h.get("authorization"), h.get("chatgpt-account-id")])).toEqual([
+      ["Bearer T1", "acct_1"],
+      ["Bearer T2", "acct_2"],
+    ]);
+  });
+
+  it("posts to the host the credential names and replays there on the renewed token", async () => {
+    const host = "https://api.business.githubcopilot.com";
+    const { source } = signedIn({ ...T1, baseUrl: host }, async () => ({ ...T2, baseUrl: host }));
+    const sse = [
+      '{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}',
+      "[DONE]",
+    ]
+      .map((payload) => `data: ${payload}\n\n`)
+      .join("");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (_url, init) =>
+        new Headers(init?.headers).get("authorization") === "Bearer T1"
+          ? new Response("Unauthorized", { status: 401 })
+          : new Response(sse),
+      );
+    const provider = withToken(source, (auth) =>
+      createPresetProvider("github-copilot", { ...auth, fetchImpl }),
+    );
+
+    expect(await text(provider.createStream(hi, []))).toBe("hi");
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      `${host}/chat/completions`,
+      `${host}/chat/completions`,
+    ]);
+  });
+
+  it("lets a caller stop while a refresh is out, and the refresh still lands and saves", async () => {
+    const renewal = Promise.withResolvers<Credential>();
+    const { source, refresh, save } = signedIn(T1, () => renewal.promise);
+    const provider = withToken(source, fake);
+
+    const stop = new AbortController();
+    const stopped = text(provider.createStream(hi, [], { signal: stop.signal })).catch(
+      (e: unknown) => e,
+    );
+    const patient = text(provider.createStream(hi, []));
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
+    stop.abort();
+    // Rejected while the refresh is still out: the caller did not wait for it.
+    expect(await stopped).toMatchObject({ name: "AbortError" });
+
+    renewal.resolve(T2);
+    expect(await patient).toBe("T2");
+    expect(save).toHaveBeenCalledWith(T2);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });
