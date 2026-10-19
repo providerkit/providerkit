@@ -201,6 +201,9 @@ describe("opencode-go — the session header", () => {
       ["qwen3.8-flash", "https://opencode.ai/zen/go/v1/messages"],
       ["gpt-6-luna", "https://opencode.ai/zen/go/v1/responses"],
       ["grok-4.7", "https://opencode.ai/zen/go/v1/responses"],
+      ["grok-4.6", "https://opencode.ai/zen/go/v1/responses"],
+      // The family's exception, which only works because its route comes first.
+      ["grok-4.5", "https://opencode.ai/zen/go/v1/chat/completions"],
       ["muse-spark-1.3-contributor", "https://opencode.ai/zen/go/v1/responses"],
     ])("sends %s to %s", async (model, url) => {
       const sent = await call(model);
