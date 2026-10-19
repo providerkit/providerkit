@@ -670,9 +670,18 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             if (response?.status === "failed" || response?.error) {
               throw streamError(id, response.error ?? { message: "response failed" });
             }
+            // Any other status (`cancelled`, `queued`, one added later) says
+            // nothing about the answer being whole. Read as a clean stop, it
+            // was a finished turn nobody retried. Theirs, so `overload`.
+            const status = response?.status;
+            if (status !== undefined && status !== "completed" && status !== "incomplete") {
+              throw new ProviderError(id, "overload", `${id} ended the turn as "${status}"`, {
+                code: status,
+              });
+            }
             let finishReason: FinishReason = sawToolCall ? "tool_calls" : "stop";
-            if (response?.status === "incomplete") {
-              finishReason = incompleteFinish(id, response.incomplete_details?.reason);
+            if (status === "incomplete") {
+              finishReason = incompleteFinish(id, response?.incomplete_details?.reason);
             }
             yield* reasoningChunk();
             if (response?.usage) yield usageChunk(response.usage);

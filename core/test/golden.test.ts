@@ -493,6 +493,14 @@ const NO_USAGE = {
   outputTokens: 0,
 };
 
+/** A transcript with one of `swaps` applied, failing loudly when none matched,
+ *  so a fixture that drifts cannot turn a check into a no-op. */
+function rewrite(turn: string, swaps: [string, string][], mustChange = true): string {
+  const out = swaps.reduce((body, [from, to]) => body.replace(from, to), turn);
+  expect(out !== turn, "no swap matched this transcript").toBe(mustChange);
+  return out;
+}
+
 /** The one turn every vendor's transcript must assemble into. */
 const theTurn = (vendor: Vendor): Turn => ({
   text: "Hello there",
@@ -781,6 +789,25 @@ describe.each(VENDORS)("$name", (vendor) => {
       // Lost with the frame that carried it. Anthropic's came in `message_delta`.
       ...(vendor.name === "openai" ? { usage: NO_USAGE } : {}),
     });
+  });
+
+  it("throws a retryable error on a finish it does not know", async () => {
+    // DeepSeek's `insufficient_system_resource`, Gemini's `OTHER`: each ended
+    // the stream as a clean success once, a turn the backend gave up on read
+    // as an answer. Each wire states its finish in its own place; one of these
+    // swaps lands on each.
+    const unknown = rewrite(vendor.turn, [
+      ['"finish_reason":"tool_calls"', '"finish_reason":"mystery"'],
+      ['"stop_reason":"tool_use"', '"stop_reason":"mystery"'],
+      ['"finishReason":"STOP"', '"finishReason":"MYSTERY"'],
+      [
+        '"type":"response.completed","response":{',
+        '"type":"response.completed","response":{"status":"mystery",',
+      ],
+    ]);
+    const err = await thrownBy(ask(vendor.create(serving(unknown))));
+    expect(failure(err)).toMatchObject({ kind: "overload" });
+    expect((err as ProviderError).isTransient).toBe(true);
   });
 
   it("fails a frame that is not JSON on the JSON wires, after what came before it", async () => {

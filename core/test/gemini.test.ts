@@ -2,6 +2,7 @@
 // replayed through it, asserting the normalized chunks and the request it
 // builds. Same shape as providers.test.ts, plus the signal the fetch must see.
 import { describe, expect, it } from "vitest";
+import { ProviderError } from "../src/errors.ts";
 import { createGeminiProvider, toGeminiContents } from "../src/providers/gemini.ts";
 import type {
   ChatMessage,
@@ -205,19 +206,66 @@ describe("gemini adapter", () => {
     expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
   });
 
-  it("maps each finish reason", async () => {
+  it("maps each finish reason Gemini documents", async () => {
     const cases: [string, string][] = [
+      ["STOP", "stop"],
       ["MAX_TOKENS", "length"],
+      ["CONTINUATION", "length"],
       ["SAFETY", "content_filter"],
       ["PROHIBITED_CONTENT", "content_filter"],
-      ["STOP", "stop"],
-      ["OTHER", "stop"],
+      ["BLOCKLIST", "content_filter"],
+      ["SPII", "content_filter"],
+      ["RECITATION", "content_filter"],
+      ["LANGUAGE", "content_filter"],
+      ["ESCALATION", "content_filter"],
+      ["IMAGE_SAFETY", "content_filter"],
+      ["IMAGE_PROHIBITED_CONTENT", "content_filter"],
+      ["IMAGE_RECITATION", "content_filter"],
     ];
     for (const [reason, expected] of cases) {
       const { fetchImpl } = recorder([candidate([{ text: "x" }], reason)]);
       const chunks = await collect(provider(fetchImpl).createStream(HI, []));
-      expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe(expected);
+      expect(chunks.find((c) => c.type === "finish")?.finishReason, reason).toBe(expected);
     }
+  });
+
+  it("throws on a finish that does not say the answer is whole", async () => {
+    // Each of these read as `stop` once. After a tool result an empty `stop`
+    // passes as the model choosing to say nothing, so a botched call was
+    // never retried.
+    const cases: [string, string][] = [
+      ["MALFORMED_FUNCTION_CALL", "overload"],
+      ["UNEXPECTED_TOOL_CALL", "overload"],
+      ["TOO_MANY_TOOL_CALLS", "overload"],
+      ["MALFORMED_RESPONSE", "overload"],
+      ["NO_IMAGE", "overload"],
+      ["OTHER", "overload"],
+      ["IMAGE_OTHER", "overload"],
+      ["FINISH_REASON_UNSPECIFIED", "overload"],
+      ["A_REASON_ADDED_NEXT_YEAR", "overload"],
+      // The same request fails the same way, so nothing retries it.
+      ["MISSING_THOUGHT_SIGNATURE", "invalid"],
+      // The account, not the request: a key pool benches the key.
+      ["PUP_LIMITED_DISABLED", "auth"],
+    ];
+    for (const [reason, kind] of cases) {
+      const { fetchImpl } = recorder([candidate([], reason)]);
+      const err = await collect(provider(fetchImpl).createStream(HI, [])).catch((e: unknown) => e);
+      expect(err, reason).toBeInstanceOf(ProviderError);
+      expect(err, reason).toMatchObject({ kind, code: reason, provider: "gemini" });
+    }
+  });
+
+  it("does not dress a botched call as tool_calls", async () => {
+    // A call arrived, then the model botched the next one. Promoting the
+    // finish would run half a turn as if it were the whole one.
+    const { fetchImpl } = recorder([
+      candidate([{ functionCall: { id: "fc_1", name: "search", args: {} } }]),
+      candidate([], "MALFORMED_FUNCTION_CALL"),
+    ]);
+    await expect(collect(provider(fetchImpl).createStream(HI, []))).rejects.toMatchObject({
+      kind: "overload",
+    });
   });
 
   it("posts to the streamGenerateContent URL with the api-key header", async () => {

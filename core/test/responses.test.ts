@@ -163,6 +163,18 @@ describe("responses adapter", () => {
     expect(err).toMatchObject({ kind: "network", body: "not json at all" });
     expect(seen.map((c) => c.content).join("")).toBe("Hel");
   });
+
+  it("throws on a terminal status that does not say the turn finished", async () => {
+    // A `completed` event that says `cancelled` read as a clean stop.
+    const { fetchImpl } = recorder([
+      j({ type: "response.completed", response: { status: "cancelled", usage: USAGE } }),
+    ]);
+    const err = await collect(provider({ fetchImpl }).createStream(hi, [])).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ kind: "overload", code: "cancelled" });
+  });
 });
 
 // ── tool calls, assembled across output_item events ───────────────────────

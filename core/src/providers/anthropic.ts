@@ -192,19 +192,32 @@ function continuesToolLoop(messages: readonly ChatMessage[]): boolean {
   return false;
 }
 
-function mapStopReason(reason: string | undefined): FinishReason | undefined {
+/**
+ * A stated stop, or a throw for one this adapter does not know. An unknown
+ * reason used to end the stream as a clean success with no finish at all.
+ * Nothing says the answer ended on purpose, so it is `overload`: theirs, and
+ * worth a retry (cc-proxy answers it the same way). `pause_turn` lands there
+ * too: it is a server-tool turn waiting to be sent back, which this adapter
+ * never asks for, and a half answer is not a finished one.
+ */
+function mapStopReason(provider: string, reason: string): FinishReason {
   switch (reason) {
     case "end_turn":
     case "stop_sequence":
       return "stop";
     case "tool_use":
       return "tool_calls";
+    // `model_context_window_exceeded`: the context window filled before the
+    // answer did. Cut short, and a retry fills it the same way.
     case "max_tokens":
+    case "model_context_window_exceeded":
       return "length";
     case "refusal":
       return "content_filter";
     default:
-      return undefined;
+      throw new ProviderError(provider, "overload", `${provider} stopped the turn on "${reason}"`, {
+        code: reason,
+      });
   }
 }
 
@@ -608,9 +621,11 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             cachedInputTokens = event.usage?.cache_read_input_tokens ?? cachedInputTokens;
             cacheWriteTokens = event.usage?.cache_creation_input_tokens ?? cacheWriteTokens;
             outputTokens = event.usage?.output_tokens ?? outputTokens;
-            if (event.delta?.stop_reason) stopped = true;
-            const finishReason = mapStopReason(event.delta?.stop_reason);
-            if (finishReason) yield { type: "finish", finishReason };
+            if (event.delta?.stop_reason) {
+              const finishReason = mapStopReason(id, event.delta.stop_reason);
+              stopped = true;
+              yield { type: "finish", finishReason };
+            }
             break;
           }
 

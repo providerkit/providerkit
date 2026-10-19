@@ -1500,6 +1500,33 @@ describe.each(SHAPES)("the $name reader", ({ name, create }) => {
     name === "openai"
       ? j({ choices: [{ delta: { content: delta } }] })
       : j({ type: "content_block_delta", delta: { type: "text_delta", text: delta } });
+  const finish = (reason: string) =>
+    name === "openai"
+      ? [j({ choices: [{ delta: {}, finish_reason: reason }] })]
+      : [
+          j({ type: "message_delta", delta: { stop_reason: reason }, usage: { output_tokens: 1 } }),
+          j({ type: "message_stop" }),
+        ];
+
+  it("throws a retryable error on a finish it does not know", async () => {
+    // DeepSeek's `insufficient_system_resource` ended the stream as a clean
+    // success with no finish at all, so a turn the backend gave up on read as
+    // an answer.
+    const { fetchImpl } = recorder([...finish("insufficient_system_resource")]);
+    const { error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "overload", code: "insufficient_system_resource" });
+    expect((error as ProviderError).isTransient).toBe(true);
+  });
+
+  it("reads a context window that filled mid-answer as a length cut", async () => {
+    // Z.ai's chat dialect and Anthropic's both name it. Retried, it fills the
+    // same window again.
+    const { fetchImpl } = recorder([text("Hel"), ...finish("model_context_window_exceeded")]);
+    const { chunks, error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeUndefined();
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("length");
+  });
 
   it("fails a frame that is not JSON as network, after what came before it", async () => {
     // Keep-alives are comments, dropped before the adapter. A frame that does
@@ -1510,5 +1537,15 @@ describe.each(SHAPES)("the $name reader", ({ name, create }) => {
     expect(error).toBeInstanceOf(ProviderError);
     expect(error).toMatchObject({ kind: "network", body: "not json at all" });
     expect(chunks.map((c) => c.content ?? "").join("")).toBe("Hel");
+  });
+});
+
+describe("the openai reader, on Z.ai's finish names", () => {
+  it("reads `sensitive` as Z.ai's safety stop, not as a failure to retry", async () => {
+    const { fetchImpl } = recorder([j({ choices: [{ delta: {}, finish_reason: "sensitive" }] })]);
+    const chunks = await collect(
+      createOpenAIProvider({ apiKey: "k", model: "glm-5.3", fetchImpl }).createStream(ASK, []),
+    );
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("content_filter");
   });
 });

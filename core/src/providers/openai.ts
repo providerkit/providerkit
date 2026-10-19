@@ -329,19 +329,35 @@ function dialectFor(id: string): EffortDialect {
   return "openai";
 }
 
-function mapFinishReason(reason: string | null | undefined): FinishReason | undefined {
+/**
+ * A stated finish, or a throw for one this dialect does not document. An
+ * unknown reason used to end the stream as a clean success with no finish at
+ * all, so DeepSeek's `insufficient_system_resource`, Z.ai's `network_error` and
+ * OpenRouter's `error` each read as a finished answer. Nothing says the answer
+ * ended on purpose, so it is `overload`: theirs, and worth a retry (cc-proxy
+ * answers it the same way).
+ */
+function mapFinishReason(provider: string, reason: string): FinishReason {
   switch (reason) {
     case "stop":
       return "stop";
+    // Z.ai's `model_context_window_exceeded`: the context window filled before
+    // the answer did. Cut short, and a retry fills it the same way.
     case "length":
+    case "model_context_window_exceeded":
       return "length";
     case "tool_calls":
     case "function_call":
       return "tool_calls";
+    // `sensitive` is Z.ai's name for its safety stop. A retry meets the same
+    // filter.
     case "content_filter":
+    case "sensitive":
       return "content_filter";
     default:
-      return undefined;
+      throw new ProviderError(provider, "overload", `${provider} ended the turn on "${reason}"`, {
+        code: reason,
+      });
   }
 }
 
@@ -731,9 +747,11 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           if (has) yield out;
         }
 
-        if (choice.finish_reason) ended = true;
-        const finishReason = mapFinishReason(choice.finish_reason);
-        if (finishReason) yield { type: "finish", finishReason };
+        if (choice.finish_reason) {
+          const finishReason = mapFinishReason(id, choice.finish_reason);
+          ended = true;
+          yield { type: "finish", finishReason };
+        }
       }
       // Either proof will do: some gateways send `[DONE]` with no finish, and
       // some a finish with no `[DONE]`. Neither means the socket closed early.
