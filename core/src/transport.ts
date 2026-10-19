@@ -5,7 +5,11 @@
 // Adapters keep only their per-event mapping; everything about being an HTTP
 // client lives here once.
 import { classifyHttp, isTransportFailure, parseRetryAfterMs, ProviderError } from "./errors.ts";
-import { parseRateLimitReset, parseRateLimitResponse } from "./rate-limit.ts";
+import {
+  parseRateLimitReset,
+  parseRateLimitResponse,
+  type RateLimitReading,
+} from "./rate-limit.ts";
 
 export interface RequestInit_ {
   url: string;
@@ -21,6 +25,9 @@ export interface RequestInit_ {
   onActivity?: () => void;
   /** Called when the body states `[DONE]`. See `SseHooks.onDone`. */
   onDone?: () => void;
+  /** Called when the response headers report how full a subscription window
+   *  is. See `StreamOptions.onRateLimit`. */
+  onRateLimit?: (reading: RateLimitReading) => void;
 }
 
 export interface SseHooks {
@@ -254,6 +261,16 @@ export async function* streamSse(opts: RequestInit_): AsyncGenerator<string> {
   // the POST: a backend that withholds them until its first output token (the
   // ChatGPT backend does, for minutes on a large high-effort turn) is working.
   opts.onActivity?.();
+  // The window's fill rides every response, the ones that go through too.
+  // Read only off a refusal, a caller learns the window was filling once it
+  // is already full.
+  if (opts.onRateLimit) {
+    const reading = parseRateLimitReset(res.headers);
+    const { utilization, resetAtMs } = reading;
+    if (utilization !== undefined && resetAtMs !== undefined) {
+      opts.onRateLimit({ ...reading, utilization, resetAtMs });
+    }
+  }
   if (!res.ok) throw await errorFor(opts.provider, res);
   // A 2xx with no body at all is an upstream anomaly, not a request we got
   // wrong — worth the same retry a 5xx gets.

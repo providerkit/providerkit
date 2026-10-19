@@ -504,6 +504,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         ...(opts.signal ? { signal: opts.signal } : {}),
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
+        ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
       })) {
         let event: ResponsesEvent;
         try {

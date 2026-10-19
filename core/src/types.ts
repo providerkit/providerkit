@@ -6,6 +6,7 @@
 // the lingua franca forces the other adapters to round-trip through a dialect
 // that isn't theirs, and every quirk of that dialect then leaks into callers
 // who never asked for it.
+import type { RateLimitReading } from "./rate-limit.ts";
 
 /**
  * How hard the model thinks before answering. Absent = the provider's own
@@ -397,6 +398,18 @@ export interface StreamOptions {
    * works, on the watchdog's progress clock alone.
    */
   onActivity?: () => void;
+  /**
+   * Called once per response whose headers report how full a subscription
+   * window is, whatever its status: `utilization` (1 is full), `resetAtMs`,
+   * and `window` when the headers name it. A caller sees the window fill
+   * turn by turn, instead of learning about it from the 429 that ends a run.
+   *
+   * Every adapter forwards it. Two backends send the headers today: Claude
+   * subscriptions (Anthropic's unified 5h/7d headers) and the ChatGPT backend
+   * (`x-codex-*`). A response that reports no window never calls it, which
+   * covers API-key accounts on every vendor and all of Gemini.
+   */
+  onRateLimit?: (reading: RateLimitReading) => void;
   /**
    * `false` asks for at most one tool call per turn, for tools that must run
    * in order, or a backend lane that refuses parallel calls. Absent or `true`

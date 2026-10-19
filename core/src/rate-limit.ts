@@ -36,7 +36,15 @@ export interface RateLimitReset {
   retryAfterMs?: number;
   /** Which subscription window bound, when it could be named at all. */
   window?: RateLimitWindow;
+  /** How full the binding window is, as the headers report it (1 is full).
+   *  Set only when a window's fill rode the response: Anthropic's unified
+   *  5h/7d headers, or the ChatGPT backend's `x-codex-*` ones. */
+  utilization?: number;
 }
+
+/** A window's fill off a response that reported one: what
+ *  `StreamOptions.onRateLimit` receives. */
+export type RateLimitReading = RateLimitReset & { utilization: number; resetAtMs: number };
 
 const RETRY_AFTER = "retry-after";
 const RETRY_AFTER_MS = "retry-after-ms";
@@ -208,6 +216,7 @@ export function parseRateLimitReset(headers: Headers, now = Date.now()): RateLim
   const binding = windows.sort((a, b) => a.utilization - b.utilization || a.reset - b.reset).at(-1);
   if (binding) {
     if (binding.window) result.window = binding.window;
+    result.utilization = binding.utilization;
     // The window's own reset outranks retry-after: it names the real horizon,
     // where retry-after names the next polite attempt.
     if (binding.reset !== undefined) result.resetAtMs = binding.reset;

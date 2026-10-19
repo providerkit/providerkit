@@ -542,6 +542,24 @@ describe.each(VENDORS)("$name", (vendor) => {
     expect(failure(err)).toEqual({ kind: "rate", status: 429, retryAfterMs: 30_000 });
   });
 
+  it("hands over a window's fill from the headers of a turn that went through", async () => {
+    // `onRateLimit` is on the seam, so every wire answers it the same way: a
+    // caller watching a Claude or ChatGPT subscription fill must not go blind
+    // the day a chain hands the turn to another adapter.
+    const resetAt = Math.floor(Date.now() / 1000) + 3 * 86_400;
+    const headers = {
+      "anthropic-ratelimit-unified-5h-utilization": "0.2",
+      "anthropic-ratelimit-unified-5h-reset": String(resetAt - 86_400),
+      "anthropic-ratelimit-unified-7d-utilization": "0.91",
+      "anthropic-ratelimit-unified-7d-reset": String(resetAt),
+    };
+    const stamped: typeof fetch = async () =>
+      new Response(socketBody(vendor.turn), { status: 200, headers });
+    const readings: unknown[] = [];
+    await assemble(ask(vendor.create(stamped), { onRateLimit: (r) => readings.push(r) }));
+    expect(readings).toEqual([{ window: "weekly", utilization: 0.91, resetAtMs: resetAt * 1000 }]);
+  });
+
   it("classifies an oversized prompt as context, not as a bad request", async () => {
     // The distinction the whole 4xx ordering exists for: `invalid` is a bug in
     // our request and stops the run, `context` is a prompt the caller can
