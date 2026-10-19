@@ -101,6 +101,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
 | `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`                |
+| `turn.ts`                | `collectTurn`: a stream into the message to append; `drainStream` on it    |
 | `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them              |
 | `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker        |
 | `watchdog.ts`            | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                 |
