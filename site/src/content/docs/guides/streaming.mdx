@@ -45,6 +45,11 @@ The watch runs two clocks, because "silent" means two different things:
   the wait for the response to start. Some backends think before they send a single byte: the
   ChatGPT backend can stay silent for minutes on a large prompt at high effort, and that turn is
   healthy. If you set a longer `idleMs` and leave `progressMs` out, progress waits as long as idle.
+  When this clock runs out before the response started, the timeout carries
+  `shouldRetry: false`, so `withStreamRetry` does not send the same prompt again: a retry would
+  wait the same five minutes and pay for the thinking twice. It is still a `timeout`, so a
+  fallback pool moves on to the next provider. The watch learns the response started from
+  `sawActivity` (the headers) or the first chunk.
 
 `watchChunks` calls `sawByte()` for you on each chunk, which resets both. When either runs out,
 `watch.signal` aborts, and `watch.classify(err)` turns the abort into a `timeout`. That is how you

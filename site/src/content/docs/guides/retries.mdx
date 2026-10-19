@@ -14,6 +14,7 @@ const result = await withRetry((attempt) => callProvider(attempt), {
   maxAttempts: 3,
   baseDelayMs: 1_000,
   maxDelayMs: 30_000,
+  budgetMs: 60_000,
   signal,
   onRetry: ({ attempt, delayMs, error }) => log.warn({ attempt, delayMs, error }),
 });
@@ -25,6 +26,12 @@ every client that failed at the same moment into retrying at the same moment, wh
 provider blip turns into a self-inflicted thundering herd.
 
 A server-requested `retryAfterMs` always wins over the computed delay.
+
+`budgetMs` caps how long the retries go on: 60 seconds, counted from the first failure. A new
+attempt starts only if it would start inside that window, wait included. An attempt that is
+already running is never cut. Without it, three stalled streams at the watchdog's five minutes
+each kept a caller waiting a quarter of an hour. Raise it for long jobs, or pass `Infinity` to
+turn it off. `withStreamRetry` takes the same option.
 
 By default only transient kinds are retried, and `sleep` is abortable: a caller pressing Stop
 during a backoff wait returns immediately rather than after the delay.

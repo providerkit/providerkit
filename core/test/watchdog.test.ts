@@ -9,7 +9,7 @@ import {
   withWatchdog,
 } from "../src/watchdog.ts";
 import { withStreamRetry } from "../src/retry.ts";
-import { classify, isTransient } from "../src/errors.ts";
+import { classify, isRetryable, isTransient } from "../src/errors.ts";
 import type { ChatMessage, Provider, ProviderChunk, StreamOptions } from "../src/types.ts";
 
 beforeEach(() => vi.useFakeTimers());
@@ -68,6 +68,8 @@ describe("streamWatch", () => {
     vi.advanceTimersByTime(100);
     expect(watch.signal.aborted).toBe(true);
     expect(String((watch.signal.reason as ProviderError).message)).toContain("without a chunk");
+    // The response had started, so this one is still worth a replay.
+    expect(isRetryable(watch.classify(new Error("aborted")))).toBe(true);
     watch.dispose();
   });
 
@@ -346,7 +348,11 @@ describe("an error this package classified stays classified", () => {
 
 describe("withWatchdog", () => {
   /** A provider recording the options it was handed, streaming what it is told. */
-  function stub(chunks: ProviderChunk[], hold = 0): Provider & { seen: StreamOptions[] } {
+  function stub(
+    chunks: ProviderChunk[],
+    hold = 0,
+    headers = true,
+  ): Provider & { seen: StreamOptions[] } {
     const seen: StreamOptions[] = [];
     return {
       id: "stub",
@@ -354,7 +360,7 @@ describe("withWatchdog", () => {
       seen,
       async *createStream(_m: ChatMessage[], _t, opts: StreamOptions = {}) {
         seen.push(opts);
-        opts.onActivity?.(); // the headers, as every adapter reports them
+        if (headers) opts.onActivity?.(); // the headers, as every adapter reports them
         for (const chunk of chunks) {
           // A real request dies when its signal aborts. A stub that ignores it
           // would pass whether or not the wrapper wired the signal at all.
@@ -372,11 +378,19 @@ describe("withWatchdog", () => {
       },
     };
   }
-  const drain = async (provider: Provider, messages: ChatMessage[] = []) => {
+  const read = async (chunks: AsyncIterable<ProviderChunk>) => {
     const out: ProviderChunk[] = [];
-    for await (const chunk of provider.createStream(messages, [])) out.push(chunk);
+    for await (const chunk of chunks) out.push(chunk);
     return out;
   };
+  const drain = (provider: Provider, messages: ChatMessage[] = []) =>
+    read(provider.createStream(messages, []));
+  /** Each attempt a fresh guarded stream, the way an app composes the two. */
+  const retried = (provider: Provider, maxAttempts = 3) =>
+    withStreamRetry<ProviderChunk>((signal) => provider.createStream([], [], { signal }), {
+      maxAttempts,
+      sleep: async () => undefined,
+    });
 
   it("hands the provider the WATCH's signal, never the caller's", async () => {
     const caller = new AbortController();
@@ -398,6 +412,31 @@ describe("withWatchdog", () => {
     const done = expect(drain(guarded)).rejects.toMatchObject({ kind: "timeout" });
     await vi.advanceTimersByTimeAsync(STREAM_IDLE_MS);
     await done;
+  });
+
+  // The ChatGPT backend holds its headers while it thinks. A replay sends the
+  // same prompt into the same 300s and pays for the reasoning again, up to
+  // three times; cc-proxy never replays slow headers.
+  it("does not replay a timeout that fired before the response started", async () => {
+    const inner = stub([{ type: "delta", content: "a" }], STREAM_PROGRESS_MS * 2, false);
+    const failed = read(retried(withWatchdog(inner))).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(STREAM_PROGRESS_MS * 2);
+    const err = await failed;
+
+    expect(inner.seen).toHaveLength(1);
+    // Still a timeout, so a fallback pool cools this candidate and moves on.
+    expect(classify(err)).toBe("timeout");
+    expect(isRetryable(err)).toBe(false);
+  });
+
+  it("still replays a timeout once the response had started", async () => {
+    // A socket that dies after its headers is what the retry is for.
+    const inner = stub([{ type: "delta", content: "a" }], STREAM_IDLE_MS * 2);
+    const failed = read(retried(withWatchdog(inner), 2)).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_MS * 2);
+
+    expect(inner.seen).toHaveLength(2);
+    expect(await failed).toMatchObject({ kind: "timeout" });
   });
 
   it("rejects a turn that completed having said nothing", async () => {

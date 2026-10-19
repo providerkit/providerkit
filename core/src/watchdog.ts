@@ -24,10 +24,14 @@
 //   scratch, which re-ran the reasoning into the same deadline.
 //
 // When either fires, the watchdog aborts ITS OWN controller and the caller's
-// signal is only bridged in — which is what keeps a person's Stop
-// distinguishable from our timeout. One is their cancel and is never retried;
-// the other is ours, is transient, and fires while nothing has streamed yet,
-// so the retry is always safe.
+// signal is only bridged in, which is what keeps a person's Stop
+// distinguishable from our timeout. One is their cancel and is never retried.
+// The other is ours and transient, with one exception: a progress timeout
+// before the response started carries `shouldRetry: false`. That wait was a
+// backend thinking with its headers held back, and a replay sends the same
+// prompt into the same 300s and pays for the reasoning again, up to three
+// times (cc-proxy never replays slow headers). Its kind stays `timeout`, so a
+// fallback pool still moves on to its next candidate.
 import { ProviderError } from "./errors.ts";
 import type {
   ChatMessage,
@@ -91,6 +95,9 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
   let firstChunk: number | null = null;
   let fired: ProviderError | null = null;
   let disposed = false;
+  // The first sign of life (the headers, a keep-alive, a chunk). The idle
+  // clock waits for it, and a timeout that fires before it is not replayed.
+  let responded = false;
 
   // The bridge is structural rather than an event listener: AbortSignal.any
   // aborts synchronously when an input is ALREADY aborted, which is the race
@@ -101,7 +108,13 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
 
   function deadline(ms: number, what: string): ReturnType<typeof setTimeout> {
     const timer = setTimeout(() => {
-      fired = new ProviderError(provider, "timeout", `stream went ${ms / 1000}s without ${what}`);
+      // Only the progress clock runs before the response starts, so this is
+      // the backend that thinks with its headers held back (see the header).
+      fired = responded
+        ? new ProviderError(provider, "timeout", `stream went ${ms / 1000}s without ${what}`)
+        : new ProviderError(provider, "timeout", `no response in ${ms / 1000}s`, {
+            shouldRetry: false,
+          });
       timeout.abort(fired);
     }, ms);
     // An orphaned watch — its consumer gone, dispose never called — must not
@@ -117,6 +130,7 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
   const live = () => !disposed && !signal.aborted;
 
   function sawActivity() {
+    responded = true;
     clearTimeout(idle);
     if (live()) idle = deadline(idleMs, "a byte");
   }
@@ -134,7 +148,10 @@ export function streamWatch(opts: StreamWatchOptions = {}): StreamWatch {
     classify(err: unknown) {
       // Our deadline, not theirs — and not the caller's Stop.
       if (fired && !(callerSignal?.aborted ?? false)) {
-        return new ProviderError(fired.provider, "timeout", fired.message, { cause: err });
+        return new ProviderError(fired.provider, "timeout", fired.message, {
+          shouldRetry: fired.shouldRetry,
+          cause: err,
+        });
       }
       return err;
     },
@@ -278,6 +295,8 @@ export interface WatchdogOptions {
  * copies. The result is still a `Provider`, so it composes unchanged with
  * `withStreamRetry` and `streamWithBackupModels`. Timeouts and empty turns
  * without a `length` finish are transient, so wrapping it in a retry is safe.
+ * The one timeout a replay would make worse, no response at all within the
+ * progress window, says so itself with `shouldRetry: false`.
  */
 export function withWatchdog(provider: Provider, opts: WatchdogOptions = {}): Provider {
   return {

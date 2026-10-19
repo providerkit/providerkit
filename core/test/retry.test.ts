@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   backoffMs,
   sleep,
@@ -6,6 +6,7 @@ import {
   withBackupModels,
   withRetry,
   withStreamRetry,
+  type RetryOptions,
 } from "../src/retry.ts";
 
 /** An SDK-shaped error the classifier can read. */
@@ -219,6 +220,94 @@ describe("withStreamRetry — the commitment rule", () => {
     });
     for await (const _chunk of stream) break;
     expect(captured?.aborted).toBe(true);
+  });
+});
+
+// Without a budget the worst case was every attempt in full plus every wait:
+// three stalled streams at the watchdog's 300s, a quarter of an hour of retries.
+// Pinned on both helpers, each running the same attempt body.
+type Run = (
+  body: (signal?: AbortSignal) => Promise<string>,
+  opts: RetryOptions,
+) => Promise<string | undefined>;
+const runners: Record<string, Run> = {
+  withRetry: (body, opts) => withRetry(() => body(), opts),
+  withStreamRetry: async (body, opts) => {
+    const [first] = await collect(
+      withStreamRetry(async function* (signal) {
+        yield await body(signal);
+      }, opts),
+    );
+    return first;
+  },
+};
+
+describe.each(Object.entries(runners))("the recovery budget, on %s", (_name, run) => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** A throttle that names its wait, so the schedule is exact, not jittered. */
+  const throttled = () => apiError(429, { retryDelay: "20s" });
+  /** Attempt start times, relative to the first. */
+  const relative = (starts: number[]) => starts.map((at) => at - starts[0]!);
+
+  it("stops a chain of failures once the next start would pass the budget", async () => {
+    const starts: number[] = [];
+    const thrown: unknown[] = [];
+    const settled = run(
+      async () => {
+        starts.push(Date.now());
+        const err = throttled();
+        thrown.push(err);
+        throw err;
+      },
+      { maxAttempts: 10 },
+    ).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    // The first failure starts the 60s. Starts at 20s and 40s fit in it; the
+    // 20s wait after the third failure would start a fourth at 60s, which does not.
+    expect(relative(starts)).toEqual([0, 20_000, 40_000]);
+    expect(await settled).toBe(thrown.at(-1)); // the last error, unchanged
+  });
+
+  it("never cuts an attempt that runs past the budget", async () => {
+    let attempts = 0;
+    const settled = run(async (signal) => {
+      if (++attempts === 1) throw throttled();
+      // Started at 20s, inside the budget, and still going at 110s.
+      await sleep(90_000, signal);
+      return "late";
+    }, {});
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(await settled).toBe("late");
+  });
+
+  it("can be raised", async () => {
+    const starts: number[] = [];
+    const settled = run(
+      async () => {
+        starts.push(Date.now());
+        throw throttled();
+      },
+      { maxAttempts: 10, budgetMs: 120_000 },
+    ).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(240_000);
+    await settled;
+    expect(relative(starts)).toEqual([0, 20_000, 40_000, 60_000, 80_000, 100_000]);
+  });
+
+  it("does not start an attempt whose wait woke up past the budget", async () => {
+    // A suspended worker or a throttled tab fires a timer long after it was due.
+    let attempts = 0;
+    await run(
+      async () => {
+        attempts++;
+        throw throttled();
+      },
+      { sleep: async (ms) => void vi.advanceTimersByTime(ms + 60_000) },
+    ).catch(() => undefined);
+    expect(attempts).toBe(1);
   });
 });
 
