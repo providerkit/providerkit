@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FallbackPool,
   NoAvailableProviderError,
+  type Cooldown,
   withConfiguredFallbacks,
   withFallbackProviders,
 } from "../src/fallback.ts";
@@ -181,6 +182,33 @@ describe("fallback cooldowns", () => {
     expect(() => new FallbackPool([])).toThrow(/primary/);
     expect(() => new FallbackPool(["a", "a"])).toThrow(/once/);
     expect(() => new FallbackPool(["a"], { cooldownMs: { rate: -1 } })).toThrow(/non-negative/);
+  });
+});
+
+describe("a cooldown store shared by several pools", () => {
+  it("benches a candidate in every chain that holds it, and reset() clears only its own", async () => {
+    const store = new Map<string, Cooldown>();
+    const left = new FallbackPool(["shared", "left"], { cooldowns: store, now: () => NOW });
+    const right = new FallbackPool(["shared", "right"], { cooldowns: store, now: () => NOW });
+
+    expect(
+      await left.with(async (id) => {
+        if (id === "shared") throw failure("quota", DAY);
+        return id;
+      }),
+    ).toBe("left");
+    // The lockout the left chain learned costs the right chain no call at all.
+    const call = vi.fn(async (id: string) => id);
+    expect(await right.with(call)).toBe("right");
+    expect(call.mock.calls.map(([id]) => id)).toEqual(["right"]);
+
+    await expect(
+      right.with(async () => {
+        throw failure("rate", DAY);
+      }),
+    ).rejects.toMatchObject({ kind: "rate" });
+    left.reset();
+    expect(right.status().map((entry) => entry.retryAtMs)).toEqual([0, NOW + DAY]);
   });
 });
 

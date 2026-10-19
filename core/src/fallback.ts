@@ -30,6 +30,14 @@ export interface FallbackOptions<T> {
     retryAtMs: number;
     window?: RateLimitWindow;
   }) => void;
+  /** Where cooldowns live; a private Map when omitted. Hand one store to every
+   *  pool that holds the same candidate and a lockout learned in one chain
+   *  benches it in all of them, instead of each chain spending a call to find
+   *  the same weekly wall. Pools sharing a store must share `cooldownMs` too: a
+   *  bench set by one pool is honoured by the others, so a kind one of them
+   *  turned off (`null`) would still divert its calls whenever another pool
+   *  benched the candidate for it. */
+  cooldowns?: CooldownStore<T>;
   /** Inject a clock for deterministic tests. */
   now?: () => number;
 }
@@ -93,11 +101,20 @@ export function withConfiguredFallbacks(
   );
 }
 
-interface Cooldown {
+/** One candidate's bench, as a pool records it. */
+export interface Cooldown {
   retryAtMs: number;
   kind: ErrorKind;
   window?: RateLimitWindow;
   probing: boolean;
+}
+
+/** Where a pool keeps its benches. A `Map` fits, and so does a `WeakMap` keyed
+ *  by providers, which lets a bench go when its provider does. */
+export interface CooldownStore<T> {
+  get(candidate: T): Cooldown | undefined;
+  set(candidate: T, cooldown: Cooldown): void;
+  delete(candidate: T): unknown;
 }
 
 /** The whole chain is unavailable. Fail promptly instead of holding a request
@@ -126,7 +143,7 @@ export class NoAvailableProviderError extends ProviderError {
  *  a background timer, vendor SDK, database or global singleton. */
 export class FallbackPool<T> {
   private readonly candidates: readonly T[];
-  private readonly cooldowns = new Map<T, Cooldown>();
+  private readonly cooldowns: CooldownStore<T>;
   private readonly now: () => number;
 
   constructor(
@@ -146,14 +163,17 @@ export class FallbackPool<T> {
       }
     }
     this.candidates = [...candidates];
+    this.cooldowns = options.cooldowns ?? new Map();
     this.now = options.now ?? Date.now;
   }
 
   /** Clear a cooldown after replacing a key or fixing configuration. Omit the
-   *  candidate to clear all. Does not interrupt calls already in flight. */
+   *  candidate to clear all of this pool's own; a shared store keeps the benches
+   *  of candidates only other pools hold. Does not interrupt calls in flight. */
   reset(...selection: [] | [T]): void {
-    if (selection.length === 0) this.cooldowns.clear();
-    else this.cooldowns.delete(selection[0]);
+    for (const candidate of selection.length === 0 ? this.candidates : selection) {
+      this.cooldowns.delete(candidate);
+    }
   }
 
   status(): Array<{
