@@ -385,9 +385,10 @@ export interface StreamOptions {
    */
   jsonWithTools?: JsonWithTools;
   /**
-   * Stable id for the conversation or job this call belongs to. Sent only to
-   * endpoints whose preset names a `sessionHeader` (OpenCode Go routes and
-   * caches by it); every other endpoint ignores it.
+   * Stable id for the conversation or job this call belongs to. Sent in the
+   * `sessionHeader` of endpoints that name one (OpenCode Go routes and caches
+   * by it), and as `prompt_cache_key` on the Responses shape. A call without
+   * one sends the provider's `instanceSessionId` in that header instead.
    */
   sessionId?: string;
   /**

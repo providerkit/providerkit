@@ -55,6 +55,13 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
   /** Header that carries `StreamOptions.sessionId`. When set and a call has no
    *  sessionId, one stable id for this provider instance rides instead. */
   sessionHeader?: string;
+  /** The id `sessionHeader` carries when a call has no `sessionId`. Absent, the
+   *  adapter mints one when it is built. Pass one when something rebuilds the
+   *  adapter (`withKeyPool` and `withToken` build one per attempt): each build
+   *  mints a new id, and a gateway that pins a session to one upstream host
+   *  then treats every call as a new session, re-routes it and misses its
+   *  prompt cache. Ignored without `sessionHeader`. */
+  instanceSessionId?: string;
   /** Say "no thinking" with an explicit `thinking: { type: "disabled" }` when
    *  effort resolves to none, instead of omitting the field. For endpoints
    *  where an absent field means the model's default, not off. Z.ai's coding
@@ -402,7 +409,9 @@ interface AnthropicEvent {
 export function createAnthropicProvider(config: AnthropicConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "anthropic";
-  const instanceSessionId = config.sessionHeader ? crypto.randomUUID() : undefined;
+  const instanceSessionId = config.sessionHeader
+    ? (config.instanceSessionId ?? crypto.randomUUID())
+    : undefined;
 
   const provider: Provider = {
     id,

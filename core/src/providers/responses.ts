@@ -48,6 +48,17 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   /** Header that carries `StreamOptions.sessionId`. When set and a call has no
    *  sessionId, one stable id for this provider instance rides instead. */
   sessionHeader?: string;
+  /** The id `sessionHeader` carries when a call has no `sessionId`. Absent, the
+   *  adapter mints one when it is built. Pass one when something rebuilds the
+   *  adapter (`withKeyPool` and `withToken` build one per attempt): each build
+   *  mints a new id, and a gateway that pins a session to one upstream host
+   *  then treats every call as a new session, re-routes it and misses its
+   *  prompt cache. Ignored without `sessionHeader`.
+   *
+   *  It is not sent as `prompt_cache_key`, which stays the per-call
+   *  `sessionId`'s: this id names the adapter, so it is shared by every
+   *  conversation the adapter serves, and a minted one never was a cache key. */
+  instanceSessionId?: string;
   /**
    * Where this backend serves the endpoint, when it is not `/v1/responses`.
    * The ChatGPT subscription surface serves it at `/backend-api/codex/responses`
@@ -395,7 +406,9 @@ function unsentTail(snapshot: string, streamed: string): string {
 export function createResponsesProvider(config: ResponsesConfig): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "openai-responses";
-  const instanceSessionId = config.sessionHeader ? crypto.randomUUID() : undefined;
+  const instanceSessionId = config.sessionHeader
+    ? (config.instanceSessionId ?? crypto.randomUUID())
+    : undefined;
 
   const provider: Provider = {
     id,
