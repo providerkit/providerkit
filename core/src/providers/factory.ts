@@ -47,6 +47,17 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    *  preset's static protocol headers. */
   headers?: Record<string, string>;
   /**
+   * The session id for a call without `StreamOptions.sessionId`, on a preset
+   * that sends one (`opencode-go`, `chatgpt`). Absent, the provider mints its
+   * own when it is built. Pass one when you build the provider per attempt
+   * (`withKeyPool`, `withToken`): each build would mint a new id, and a gateway
+   * that pins a session to one upstream host then treats every call as a new
+   * session, re-routes it and misses its prompt cache. Every model in a chain
+   * sends the same one. A preset without a session header has nowhere to put
+   * it and ignores it.
+   */
+  instanceSessionId?: string;
+  /**
    * App attribution for OpenRouter's rankings. The site URL rides as
    * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent on
    * the OpenAI-compatible and Anthropic shapes (OpenRouter reads them for app

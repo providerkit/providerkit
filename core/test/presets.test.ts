@@ -179,6 +179,32 @@ describe("opencode-go — the session header", () => {
     },
   );
 
+  it.each(["mimo-v2.6-flash", "muse-spark-1.3-contributor", "minimax-m3"])(
+    "%s keeps the instanceSessionId it is given across rebuilt providers",
+    async (model) => {
+      // A key pool or `withToken` builds a provider per attempt. Each one must
+      // send the same session, or Go treats every call as a new one.
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const build = () =>
+        createPresetProvider("opencode-go", {
+          apiKey: "k",
+          model,
+          instanceSessionId: "conn-1",
+          fetchImpl,
+        });
+      const ask = (opts = {}) =>
+        drain(build().createStream([{ role: "user", content: "hi" }], [], opts)).catch(() => {});
+      await ask();
+      await ask();
+      await ask({ sessionId: "conv-1" });
+
+      const sent = fetchImpl.mock.calls.map(([, init]) =>
+        new Headers(init?.headers).get("x-opencode-session"),
+      );
+      expect(sent).toEqual(["conn-1", "conn-1", "conv-1"]);
+    },
+  );
+
   describe("opencode-go routes", () => {
     const hi = [{ role: "user" as const, content: "hi" }];
     const call = async (model: string, opts = {}) => {
