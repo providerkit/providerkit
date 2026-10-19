@@ -9,6 +9,7 @@ import {
 import { ProviderError, parseRetryAfterMs, streamError } from "../src/errors.ts";
 import { drainStream, type Provider, type ProviderChunk } from "../src/types.ts";
 import { postJson } from "../src/transport.ts";
+import { STREAM_PROGRESS_MS } from "../src/watchdog.ts";
 
 const NOW = 1_800_000_000_000;
 const DAY = 86_400_000;
@@ -121,6 +122,46 @@ describe("fallback cooldowns", () => {
     expect(await pool.with(async (id) => id)).toBe("a");
   });
 
+  it("replaces a probe that never answers, and the stale one cannot free its successor", async () => {
+    let now = NOW;
+    const pool = new FallbackPool(["a", "b"], { now: () => now });
+    await pool.with(async (id) => {
+      if (id === "a") throw failure("rate", 100);
+      return id;
+    });
+    now += 100;
+    const calls: string[] = [];
+    const answer = async (id: string) => {
+      calls.push(id);
+      return id;
+    };
+    const stop = new AbortController();
+    const hung = pool.with((id, signal) => {
+      calls.push(id);
+      return new Promise<string>((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+    }, stop.signal);
+    expect(await pool.with(answer)).toBe("b");
+
+    // Past the progress clock the hung probe is presumed dead and replaced.
+    now += STREAM_PROGRESS_MS;
+    const recovery = Promise.withResolvers<string>();
+    const replacement = pool.with((id) => {
+      calls.push(id);
+      return recovery.promise;
+    });
+    // The stale probe ending late must not release the probe that replaced it.
+    stop.abort(new Error("stopped"));
+    await expect(hung).rejects.toThrow("stopped");
+    expect(await pool.with(answer)).toBe("b");
+
+    recovery.resolve("a");
+    expect(await replacement).toBe("a");
+    expect(calls).toEqual(["a", "b", "a", "b"]);
+    expect(pool.status()[0]).toMatchObject({ retryAtMs: 0, probing: false });
+  });
+
   it("does not erase a newer cooldown when an older in-flight request succeeds", async () => {
     const pool = new FallbackPool(["a", "b"], { now: () => NOW });
     const old = Promise.withResolvers<string>();
@@ -206,6 +247,7 @@ describe("fallback cooldowns", () => {
     expect(() => new FallbackPool([])).toThrow(/primary/);
     expect(() => new FallbackPool(["a", "a"])).toThrow(/once/);
     expect(() => new FallbackPool(["a"], { cooldownMs: { rate: -1 } })).toThrow(/non-negative/);
+    expect(() => new FallbackPool(["a"], { probeStaleMs: Infinity })).toThrow(/probeStaleMs/);
   });
 });
 
