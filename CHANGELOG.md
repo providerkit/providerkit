@@ -2,6 +2,45 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.23.0] - 2026-10-19
+
+### Fixed
+
+- **A turn whose answer arrived is kept when the connection drops after it.** The SSE reader stops at `[DONE]` and the Messages reader at `message_stop`. A read that fails after the finish now ends the stream instead of throwing. Kimi, GLM and OpenCode Go drop the socket there, and you used to get a network error after the whole answer. The usage that comes after the finish may be lost. A Stop still throws.
+- **A turn that did not really finish now fails, so it can be retried.** A finish reason the library does not know, like DeepSeek's `insufficient_system_resource` or Gemini's `OTHER` and `MALFORMED_FUNCTION_CALL`, throws a retryable `overload` error. Before, it passed as a normal stop. Every reason Gemini documents is now mapped one by one, and its safety and policy stops read as `content_filter`. Other servers' names for a normal end still read as `stop` (Together's `eos`, Hugging Face TGI's `eos_token` and `stop_sequence`). A context window that filled reads as `length` (Z.ai's `model_context_window_exceeded`, Mistral's `model_length`).
+- **A turn that called a tool but ended on `stop` now finishes as `tool_calls`, on every wire,** so your loop runs the tool. A length cut or a filter keeps its own reason, because it may be what broke the call.
+- **A stream event that is not JSON fails the stream as `network`.** Before, it was skipped. Keep-alives are dropped before that point, so what failed to parse was a lost delta, tool call or finish.
+- **A tool call with no name fails as `overload`, and one with no id gets one,** so its result can be sent back. Responses calls with no `call_id` used to be dropped.
+- **A saved or interrupted history no longer comes back a 400.** Every adapter now repairs the history before it sends it. A call with no result gets one saying it was interrupted. A result whose call is missing becomes a user note, and its images stay with it. An id that a later reply reuses gets `_2`, `_3`, and so on, for the call and its result together. Kimi and Gemini restart their ids every reply, so that happened on every second tool turn. The Anthropic adapter also changes characters its ids don't allow, like the `.` and `:` in Kimi's `functions.search:0`, to `_`. The Gemini adapter sends all the results for one turn's parallel calls together. Repair never changes an earlier byte, so the prompt cache still hits.
+- **A turn that never got a response is no longer sent again.** When the 300 s progress clock ran out before any response headers arrived, `withStreamRetry` sent the same prompt again. The ChatGPT backend holds its headers while the model thinks, so each retry paid for the thinking again and waited another five minutes, up to three times. That timeout now carries `shouldRetry: false`. It is still a `timeout`, so a fallback pool moves on to the next provider.
+- **Callers wait for a recovery probe instead of failing.** While one call tested a candidate whose cooldown had ended, every other call failed with `NoAvailableProviderError` and a 0 ms retry, and `withRetry` spent its attempts at once. They now wait until the probe answers or fails, at most twice, and their own signal can stop the wait. A free backup is still used first.
+- **A probe that hangs no longer holds its candidate forever.** After `probeStaleMs` (new, 300 s by default), another call can replace it. Only the call that opened a probe can release it, so two probes can't run at once.
+- **One stray 401 no longer benches a busy provider for an hour.** When a call that was already running answers, it clears any cooldown set while it ran. Rate and quota cooldowns stay, because a call that started before a throttle says nothing about the window.
+- **`NoAvailableKeyError` carries its deadline.** It is now a `ProviderError` of kind `rate` with `resetAtMs` and `retryAfterMs`, so a key pool inside a fallback chain is benched until its soonest key returns, not for a fixed minute. Its constructor takes `now` as a third argument. A key whose quota is spent is benched until the window resets, not for the Retry-After sent with it.
+- **A sign-in server that never answers no longer stalls every call.** Token requests had no timeout, and every call that needed a token waited on the one shared refresh. Each request in `auth/` now gives up after 30 s. The stored credential is kept, so the next call tries again.
+- **A refresh no longer spends a refresh token twice.** A call that read the store just before another refresh saved could start a second refresh with a token the first had already used. The refresh now reads the store again before it starts.
+- **A GitHub Copilot context overflow now reads as `context`.** Copilot words it "prompt token count of N exceeds the limit of M" (code `model_max_prompt_tokens_exceeded`). It read as `invalid`, so the run stopped instead of compacting.
+- **An error inside a 200 stream reads its status only from 400 to 599, and otherwise from its type.** A vendor code such as Z.ai's 1113 (an empty balance) read as a 5xx and landed on `overload`. Now it reads as `quota`. When the error states no status, its `type` decides: `invalid_request_error` is `invalid`, `rate_limit_error` is `rate`, `overloaded_error` is `overload`, and so on. Only an error with no status and no known type is still `overload`.
+- **A Responses turn that ends `incomplete` for a reason other than `max_output_tokens` or `content_filter` now throws a retryable `overload`.** It finished as `length`, so an empty turn was told to raise a `maxTokens` it never hit.
+- **Any fetch rejection that is not your abort is now `network`, so it is retried.** Before, only rejections in a known wording were, and an unknown one ended the run. A request body that can't be turned into JSON still throws its own `TypeError`.
+- **When both subscription windows are full, the later reset is the one reported.** `parseRateLimitReset` and the ChatGPT quota wall used to report the 5-hour reset while the weekly window still blocked every request.
+- **The ChatGPT quota wall says which window ran out.** Its `quota` error now sets `window` (`5h`, `weekly` or `monthly`) and names it in the message.
+- **`grok-4.5` on `opencode-go` goes to chat completions.** Go serves it there, unlike Grok 4.6 and 4.7, which stay on Responses.
+
+### Changed
+
+- **Retries stop 60 seconds after the first failure.** `withRetry` and `withStreamRetry` take a new `budgetMs` option, 60 000 by default. A retry starts only if it would start within that time, its wait included. An attempt that is already running is never cut. Before, three stalled streams could keep a caller waiting about 15 minutes. Pass a larger `budgetMs` for long jobs, or `Infinity` to turn it off.
+- **`reset()` with no argument clears only the pool's own candidates,** so it leaves the cooldowns of other pools that share its store alone.
+
+### Added
+
+- **`repairHistory(messages, { isReadOnly })`** returns the repaired history and the calls that were interrupted. Call it yourself to learn which calls never returned. Pass `isReadOnly` to tell the model which of them are safe to call again.
+- **Fallback pools can share their cooldowns.** Pass one `cooldowns` store (a `Map` or a `WeakMap`) to several pools, and a lockout one chain learns benches that candidate in every chain that holds it. Pools that share a store must share `cooldownMs` too. `Cooldown` and `CooldownStore` are exported.
+- **`withToken(source, build)` signs every call with the stored sign-in.** It gets a token for each call and passes it to `build` as `apiKey`, with the credential's `baseUrl` and its `ChatGPT-Account-Id` header, so `build` can hand it straight to `createPresetProvider`. If the server answers 401 before any output, it renews the token and sends the call once more. Import it from `@providerkit/core/auth`.
+- **`getToken({ rejected })` renews a token the server refused, even before it expires.** Pass the access token that got the 401. If the store already holds a newer token, you get that one with no extra refresh.
+- **`AuthHost.timeoutMs`** sets how long a request to a sign-in server may take. The default is 30 s.
+- **`onRateLimit` reports how full a subscription window is on every response.** Pass it in `StreamOptions` and it receives `{ utilization, resetAtMs, window }` whenever the response headers report a window, including on turns that succeed. Claude subscriptions and the ChatGPT backend send these headers. API-key accounts and Gemini don't, so it never fires for them. `parseRateLimitReset` also returns `utilization` now.
+
 ## [0.22.0] - 2026-10-10
 
 ### Fixed
