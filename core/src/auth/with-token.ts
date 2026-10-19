@@ -24,7 +24,10 @@ export type TokenAuth = Pick<PresetProviderConfig, "apiKey" | "baseUrl" | "heade
  * factory. It gets the access token as `apiKey`, the credential's own host as
  * `baseUrl` (Copilot gives each plan its own) and its `ChatGPT-Account-Id`
  * header, which the Codex backend refuses the request without. To add headers
- * of your own, merge them with `auth.headers` rather than replacing them.
+ * of your own, merge them with `auth.headers` rather than replacing them. On
+ * a preset that sends a session id (`chatgpt`), pass `instanceSessionId` too:
+ * a provider built per call mints a new id per call, and the backend's prompt
+ * cache misses on every one.
  *
  * A 401 before any output renews the token and replays the call once: a token
  * can be refused before its expiry, and without this the caller sees an auth

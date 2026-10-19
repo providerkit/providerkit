@@ -942,6 +942,47 @@ describe("responses request", () => {
     expect(seen[1]!.body).not.toHaveProperty("parallel_tool_calls");
   });
 
+  describe("the session id a call without one sends", () => {
+    // `withKeyPool` and `withToken` build an adapter per attempt. A session id
+    // minted per build makes a sticky gateway treat every call as a new session.
+    /** One adapter per call, as a key pool builds them: [instanceSessionId, sessionId]. */
+    const sessionsSent = async (calls: [string?, string?][]) => {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      for (const [instanceSessionId, sessionId] of calls) {
+        const built = provider({
+          fetchImpl,
+          sessionHeader: "session-id",
+          ...(instanceSessionId ? { instanceSessionId } : {}),
+        });
+        await collect(built.createStream(hi, [], sessionId ? { sessionId } : {}));
+      }
+      return seen;
+    };
+    const headerOf = (seen: { headers: Headers }[]) =>
+      seen.map((request) => request.headers.get("session-id"));
+
+    it("two adapters given the same id send it, and not as the cache key", async () => {
+      const seen = await sessionsSent([["conn-1"], ["conn-1"]]);
+      expect(headerOf(seen)).toEqual(["conn-1", "conn-1"]);
+      // The cache key stays the conversation's: this id is shared by every
+      // conversation the adapter serves.
+      expect(seen[0]!.body).not.toHaveProperty("prompt_cache_key");
+    });
+
+    it("the call's own sessionId still wins", async () => {
+      const seen = await sessionsSent([["conn-1", "conv-9"]]);
+      expect(headerOf(seen)).toEqual(["conv-9"]);
+      expect(seen[0]!.body.prompt_cache_key).toBe("conv-9");
+    });
+
+    it("without one, each adapter mints its own", async () => {
+      const [first, second] = headerOf(await sessionsSent([[], []]));
+      expect(first).toMatch(/^[0-9a-f-]{36}$/);
+      expect(second).toMatch(/^[0-9a-f-]{36}$/);
+      expect(second).not.toBe(first);
+    });
+  });
+
   it("sends service_tier from the config, and a per-call tier wins", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
     await collect(provider({ fetchImpl, serviceTier: "flex" }).createStream(hi, []));

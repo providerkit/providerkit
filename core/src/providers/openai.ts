@@ -107,6 +107,13 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    *  no sessionId, the provider's own per-instance id rides instead, so the
    *  gateway never sees a call without one. */
   sessionHeader?: string;
+  /** The id `sessionHeader` carries when a call has no `sessionId`. Absent, the
+   *  adapter mints one when it is built. Pass one when something rebuilds the
+   *  adapter (`withKeyPool` and `withToken` build one per attempt): each build
+   *  mints a new id, and a gateway that pins a session to one upstream host
+   *  then treats every call as a new session, re-routes it and misses its
+   *  prompt cache. Ignored without `sessionHeader`. */
+  instanceSessionId?: string;
   /** Send `X-Initiator`: `user` when the last message is the user's, else
    *  `agent`. GitHub Copilot bills a premium request per `user` turn and lets
    *  the agent's own follow-ups (tool results) ride free. */
@@ -531,7 +538,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
   // `usage.cost` is its field in its unit. Another gateway that sends a
   // `cost` has not said what it means.
   const reportsCost = isOpenRouter(baseUrl);
-  const instanceSessionId = config.sessionHeader ? crypto.randomUUID() : undefined;
+  const instanceSessionId = config.sessionHeader
+    ? (config.instanceSessionId ?? crypto.randomUUID())
+    : undefined;
 
   const provider: Provider = {
     id,

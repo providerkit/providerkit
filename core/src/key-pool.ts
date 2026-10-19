@@ -206,6 +206,10 @@ function cooldownFor(err: unknown, now: number): { kind: ErrorKind; forMs: numbe
  * committed to one key, exactly as a retry is committed past its first chunk
  * (retry.ts, rule 2): a mid-stream 429 evicts nothing and rotates nothing,
  * because there is no way to resume a half-rendered answer on another key.
+ *
+ * The factory runs once per attempt. An adapter with a session header mints
+ * its id when it is built, so give the factory an `instanceSessionId`, or each
+ * attempt opens a new session on a gateway that pins sessions to one host.
  */
 export function withKeyPool(pool: KeyPool, factory: (apiKey: string) => Provider): Provider {
   // The identity every key shares. Building an adapter performs no I/O — it

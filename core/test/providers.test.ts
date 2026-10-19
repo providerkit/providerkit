@@ -11,6 +11,7 @@ import {
   type ChatMessage,
   type Effort,
   type ImagePart,
+  type Provider,
   type ProviderChunk,
   type ToolChoice,
   type ToolDefinition,
@@ -1644,5 +1645,53 @@ describe("the openai reader, on other servers' finish names", () => {
       createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl }).createStream(ASK, []),
     );
     expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe(expected);
+  });
+});
+
+describe("the session id a call without one sends", () => {
+  // `withKeyPool` and `withToken` build an adapter per attempt. A session id
+  // minted per build makes a sticky gateway treat every call as a new session.
+  type Build = (config: { instanceSessionId?: string; fetchImpl: typeof fetch }) => Provider;
+  const shapes: [string, string[], Build][] = [
+    [
+      "anthropic",
+      ANTHROPIC_TEXT_TURN,
+      (config) =>
+        createAnthropicProvider({ apiKey: "k", model: "m", sessionHeader: "x-session", ...config }),
+    ],
+    [
+      "openai",
+      OPENAI_TEXT_TURN,
+      (config) =>
+        createOpenAIProvider({ apiKey: "k", model: "m", sessionHeader: "x-session", ...config }),
+    ],
+  ];
+  const hi: ChatMessage[] = [{ role: "user", content: "hi" }];
+  /** One adapter per call, as a key pool builds them: [instanceSessionId, sessionId]. */
+  const sessionsSent = async (frames: string[], build: Build, calls: [string?, string?][]) => {
+    const { seen, fetchImpl } = recorder(frames);
+    for (const [instanceSessionId, sessionId] of calls) {
+      const provider = build({ fetchImpl, ...(instanceSessionId ? { instanceSessionId } : {}) });
+      await collect(provider.createStream(hi, [], sessionId ? { sessionId } : {}));
+    }
+    return seen.map((request) => request.headers.get("x-session"));
+  };
+
+  it.each(shapes)("%s: two adapters given the same id send it", async (_, frames, build) => {
+    expect(await sessionsSent(frames, build, [["conn-1"], ["conn-1"]])).toEqual([
+      "conn-1",
+      "conn-1",
+    ]);
+  });
+
+  it.each(shapes)("%s: the call's own sessionId still wins", async (_, frames, build) => {
+    expect(await sessionsSent(frames, build, [["conn-1", "conv-9"]])).toEqual(["conv-9"]);
+  });
+
+  it.each(shapes)("%s: without one, each adapter mints its own", async (_, frames, build) => {
+    const [first, second] = await sessionsSent(frames, build, [[], []]);
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second).not.toBe(first);
   });
 });
