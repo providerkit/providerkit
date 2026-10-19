@@ -66,11 +66,23 @@ const RESET_HEADERS = [
  */
 const CODEX_SLOTS = ["primary", "secondary"] as const;
 
+/** One window as a response reports it: how full, and when it resets. */
+interface WindowReading {
+  window?: RateLimitWindow;
+  utilization?: number;
+  reset?: number;
+}
+type Dated = WindowReading & { utilization: number; reset: number };
+
 function windowForMinutes(minutes: number | undefined): RateLimitWindow | undefined {
   return minutes !== undefined && minutes > 0 ? windowForMs(minutes * 60_000) : undefined;
 }
 
-function codexWindow(headers: Headers, slot: (typeof CODEX_SLOTS)[number], now: number) {
+function codexWindow(
+  headers: Headers,
+  slot: (typeof CODEX_SLOTS)[number],
+  now: number,
+): WindowReading {
   const name = (suffix: string) => headers.get(`x-codex-${slot}-${suffix}`);
   const percent = numeric(name("used-percent"));
   const after = numeric(name("reset-after-seconds"));
@@ -185,8 +197,15 @@ export function parseRateLimitReset(headers: Headers, now = Date.now()): RateLim
       reset: unixSecondsToMs(headers.get(`${UNIFIED_7D}reset`)),
     },
     ...CODEX_SLOTS.map((slot) => codexWindow(headers, slot, now)),
-  ].filter((w) => w.utilization !== undefined && w.reset !== undefined && w.reset > now);
-  const binding = windows.sort((a, b) => (b.utilization ?? 0) - (a.utilization ?? 0))[0];
+  ].filter(
+    (w): w is Dated => w.utilization !== undefined && w.reset !== undefined && w.reset > now,
+  );
+  // The fuller window binds. Between two as full as each other (both spent,
+  // usually) the later reset does: the request passes only once both have
+  // cleared, and waiting out the earlier one walks into the other wall. On a
+  // dead heat the later slot wins (the sort is stable), as cc-proxy's `max_by`
+  // does.
+  const binding = windows.sort((a, b) => a.utilization - b.utilization || a.reset - b.reset).at(-1);
   if (binding) {
     if (binding.window) result.window = binding.window;
     // The window's own reset outranks retry-after: it names the real horizon,

@@ -86,6 +86,21 @@ describe("parseRateLimitReset", () => {
     });
   });
 
+  it("names the window that resets later when both are full", () => {
+    // The request passes only once BOTH have cleared. Naming the 5-hour reset
+    // sends the user back in two hours, into the weekly wall.
+    const headers = new Headers({
+      "anthropic-ratelimit-unified-5h-utilization": "1",
+      "anthropic-ratelimit-unified-5h-reset": inSeconds(2 * HOUR),
+      "anthropic-ratelimit-unified-7d-utilization": "1",
+      "anthropic-ratelimit-unified-7d-reset": inSeconds(3 * DAY),
+    });
+    expect(parseRateLimitReset(headers, NOW)).toMatchObject({
+      window: "weekly",
+      resetAtMs: NOW + 3 * DAY,
+    });
+  });
+
   it("lets the window's reset outrank retry-after", () => {
     // The whole point: 60 seconds is the correct sleep and the wrong horizon.
     const headers = new Headers({
@@ -207,6 +222,27 @@ describe("the ChatGPT backend's x-codex-* windows", () => {
   it("names the weekly window, and its days-away reset, when that one is full", () => {
     // A short Retry-After beside it is not evidence the week has lifted.
     expect(parseRateLimitReset(codex(40, 100), NOW)).toEqual({
+      window: "weekly",
+      resetAtMs: NOW + 3 * DAY,
+    });
+  });
+
+  it("names the later reset when both windows are spent, whichever slot holds it", () => {
+    expect(parseRateLimitReset(codex(100, 100), NOW)).toMatchObject({
+      window: "weekly",
+      resetAtMs: NOW + 3 * DAY,
+    });
+    // A Pro plan reports its weekly window in the PRIMARY slot, so the slot
+    // order says nothing about which one lifts last.
+    const pro = new Headers({
+      "x-codex-primary-used-percent": "100",
+      "x-codex-primary-window-minutes": "10080",
+      "x-codex-primary-reset-at": inSeconds(3 * DAY),
+      "x-codex-secondary-used-percent": "100",
+      "x-codex-secondary-window-minutes": "300",
+      "x-codex-secondary-reset-after-seconds": String((4 * HOUR) / 1000),
+    });
+    expect(parseRateLimitReset(pro, NOW)).toMatchObject({
       window: "weekly",
       resetAtMs: NOW + 3 * DAY,
     });
