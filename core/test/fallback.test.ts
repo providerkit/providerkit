@@ -134,6 +134,30 @@ describe("fallback cooldowns", () => {
     expect(await pool.with(async (id) => id)).toBe("b");
   });
 
+  // One stray 401 used to bench a busy primary for an hour, even after a call
+  // that was already running on it answered. A throttle stays benched: a call
+  // that started before it proves nothing about the window.
+  it.each([
+    ["auth", "a"],
+    ["rate", "b"],
+  ] as const)(
+    "a long call that answers after a sibling's %s failure sends the next call to %s",
+    async (kind, next) => {
+      const pool = new FallbackPool(["a", "b"], { now: () => NOW });
+      const long = Promise.withResolvers<string>();
+      const pending = pool.with(() => long.promise);
+      expect(
+        await pool.with(async (id) => {
+          if (id === "a") throw failure(kind);
+          return id;
+        }),
+      ).toBe("b");
+      long.resolve("a");
+      expect(await pending).toBe("a");
+      expect(await pool.with(async (id) => id)).toBe(next);
+    },
+  );
+
   it("cools a mid-stream failure for future calls without replaying this answer", async () => {
     const pool = new FallbackPool(["a", "b"], { now: () => NOW });
     const seen: string[] = [];

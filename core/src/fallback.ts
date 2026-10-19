@@ -223,22 +223,15 @@ export class FallbackPool<T> {
       const inner = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
       let emitted = false;
       let attemptFailed = false;
-      const startedWithCooldown = previous !== undefined;
       try {
         for await (const chunk of attempt(candidate, inner)) {
           inner.throwIfAborted();
+          if (!emitted) this.recovered(candidate, previous);
           emitted = true;
-          // Only a call that was admitted as a recovery probe (started while on cooldown)
-          // is authorized to clear that cooldown upon succeeding.
-          if (startedWithCooldown && this.cooldowns.get(candidate) === previous) {
-            this.cooldowns.delete(candidate);
-          }
           yield chunk;
         }
         inner.throwIfAborted();
-        if (startedWithCooldown && this.cooldowns.get(candidate) === previous) {
-          this.cooldowns.delete(candidate);
-        }
+        if (!emitted) this.recovered(candidate, previous);
         return;
       } catch (error) {
         signal?.throwIfAborted();
@@ -280,6 +273,20 @@ export class FallbackPool<T> {
       ...this.status().map((entry) => Math.max(this.now(), entry.retryAtMs)),
     );
     throw new NoAvailableProviderError(retryAtMs, this.now());
+  }
+
+  /** An answer proves the candidate serves again. It lifts the bench this call
+   *  was admitted under as the probe, and any bench a sibling set while it ran:
+   *  a call that started before one stray 401 and then answered used to leave
+   *  a busy primary benched for an hour. Rate and quota stay. A call that
+   *  started before the throttle proves nothing about the window, and lifting
+   *  it walks every caller back into the 429. */
+  private recovered(candidate: T, admittedUnder: Cooldown | undefined): void {
+    const current = this.cooldowns.get(candidate);
+    if (!current) return;
+    if (current === admittedUnder || (current.kind !== "rate" && current.kind !== "quota")) {
+      this.cooldowns.delete(candidate);
+    }
   }
 }
 
