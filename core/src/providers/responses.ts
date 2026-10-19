@@ -14,6 +14,7 @@ import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
+import { settleToolCalls } from "../tool-args.ts";
 import type {
   ChatMessage,
   ContentPart,
@@ -496,9 +497,10 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       const pendingFor = (itemId?: string, callId?: string) =>
         (itemId ? pending.get(itemId) : undefined) ?? (callId ? pending.get(callId) : undefined);
       let nextIndex = 0;
-      // This shape never states a stop reason on a clean finish, so it is
-      // inferred from whether the turn produced a function call.
-      let sawToolCall = false;
+      // Every call the turn opened, kept past its `.done`. This shape never
+      // states a stop reason on a clean finish, so it is inferred from whether
+      // there are any, and the terminal event checks each one can run.
+      const calls: PendingCall[] = [];
       let wall: ProviderError | undefined;
       let produced = false;
       const reasoningItems: unknown[] = [];
@@ -550,7 +552,6 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             // turn came back as a nameless call with empty arguments.
             const key = item.id ?? item.call_id;
             if (!key) break;
-            sawToolCall = true;
             const index = nextIndex++;
             // Normally empty here, but a backend that already has the whole
             // call sends it in the skeleton.
@@ -561,6 +562,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
               name: item.name ?? "",
               streamed: seeded,
             };
+            calls.push(call);
             pending.set(key, call);
             if (item.call_id) pending.set(item.call_id, call);
             // Only the fields the skeleton actually states. An empty `id` here
@@ -617,20 +619,24 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
             if (!known) {
               // A backend that emits neither the skeleton nor the deltas — the
-              // whole call arrives here or not at all. Without a `call_id`
-              // there is nothing to answer it with: the caller's
-              // `function_call_output` would quote `""` and take a 400 reading
-              // "No tool output found for function call" one turn later, so the
-              // call is dropped rather than handed over unrunnable. Dropping is
-              // only possible here, where nothing has been streamed for it yet.
-              if (!item.call_id) break;
-              sawToolCall = true;
+              // whole call arrives here or not at all. A call with no `call_id`
+              // used to be dropped, because the caller's `function_call_output`
+              // would quote `""` and take a 400 one turn later. Dropped, the
+              // model's call silently never happened. It gets an id at the
+              // terminal event instead (`settleToolCalls`).
+              const call: PendingCall = {
+                index: nextIndex++,
+                id: item.call_id ?? "",
+                name: item.name ?? "",
+                streamed: snapshot,
+              };
+              calls.push(call);
               yield {
                 type: "delta",
                 toolCalls: [
                   {
-                    index: nextIndex++,
-                    id: item.call_id,
+                    index: call.index,
+                    ...(item.call_id ? { id: item.call_id } : {}),
                     ...(item.name ? { name: item.name } : {}),
                     arguments: snapshot,
                   },
@@ -652,6 +658,8 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
               ...(item.name && item.name !== known.name ? { name: item.name } : {}),
               ...(tail ? { arguments: tail } : {}),
             };
+            known.id = item.call_id || known.id;
+            known.name = item.name || known.name;
             if (Object.keys(restated).length > 0) {
               yield { type: "delta", toolCalls: [{ index: known.index, ...restated }] };
             }
@@ -679,9 +687,14 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
                 code: status,
               });
             }
-            let finishReason: FinishReason = sawToolCall ? "tool_calls" : "stop";
+            let finishReason: FinishReason = calls.length > 0 ? "tool_calls" : "stop";
             if (status === "incomplete") {
               finishReason = incompleteFinish(id, response?.incomplete_details?.reason);
+            } else {
+              // Checked on a whole turn only: a cut one may have lost a call's
+              // name to the cut, and nobody runs a cut turn's calls.
+              const minted = settleToolCalls(id, calls);
+              if (minted.length > 0) yield { type: "delta", toolCalls: minted };
             }
             yield* reasoningChunk();
             if (response?.usage) yield usageChunk(response.usage);

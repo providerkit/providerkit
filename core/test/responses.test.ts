@@ -349,10 +349,11 @@ describe("responses tool calls", () => {
     ]);
   });
 
-  it("drops a done-only call with no call_id instead of handing one over unrunnable", async () => {
-    // Nothing was streamed for it, so it can still be dropped — and a turn
-    // whose only call vanished must not finish as tool_calls, or the loop
-    // goes looking for a call that is not there.
+  it("gives a call with no call_id an id instead of dropping it", async () => {
+    // It used to be dropped, so the result would not quote `""` and take a
+    // 400 a turn later. Dropped, the model's call silently never happened. An
+    // id made here is sent back on both the call and its result, so the pair
+    // still matches.
     const { fetchImpl } = recorder([
       j({
         type: "response.output_item.done",
@@ -362,8 +363,26 @@ describe("responses tool calls", () => {
     ]);
     const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
 
-    expect(chunks.flatMap((c) => c.toolCalls ?? [])).toEqual([]);
-    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("stop");
+    const [call] = assemble(chunks);
+    expect(call).toMatchObject({ index: 0, name: "search", arguments: '{"q":"x"}' });
+    expect(call!.id).toMatch(/^call_pk_\w+$/);
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
+  });
+
+  it("fails a call that never states its name", async () => {
+    // Nothing can dispatch it. Passed on, the loop failed one step later with
+    // nothing to say why.
+    const { fetchImpl } = recorder([
+      j({ type: "response.output_item.added", item: { type: "function_call", id: "fc_1" } }),
+      j({
+        type: "response.output_item.done",
+        item: { type: "function_call", id: "fc_1", call_id: "call_1", arguments: "{}" },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ]);
+    await expect(collect(provider({ fetchImpl }).createStream(hi, []))).rejects.toMatchObject({
+      kind: "overload",
+    });
   });
 
   it("says nothing on a done that restates exactly what already streamed", async () => {

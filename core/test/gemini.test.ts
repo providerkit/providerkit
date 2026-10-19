@@ -179,7 +179,9 @@ describe("gemini adapter", () => {
     );
 
     expect(calls.map((c) => c.index)).toEqual([0, 1, 2]);
-    expect(calls.map((c) => c.id)).toEqual(["call_0", "call_1", "call_2"]);
+    const ids = calls.map((c) => c.id ?? "");
+    expect(ids.every((id) => /^call_pk_\w+$/.test(id))).toBe(true);
+    expect(new Set(ids).size).toBe(3);
     // An absent `args` is an empty object, never `undefined` in the JSON.
     expect(calls.map((c) => c.arguments)).toEqual(["{}", "{}", "{}"]);
   });

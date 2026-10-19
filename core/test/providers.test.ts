@@ -1519,6 +1519,83 @@ describe.each(SHAPES)("the $name reader", ({ name, create }) => {
     expect((error as ProviderError).isTransient).toBe(true);
   });
 
+  const call = (id: string | undefined, toolName: string | undefined) =>
+    name === "openai"
+      ? [
+          j({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      ...(id ? { id } : {}),
+                      function: { ...(toolName ? { name: toolName } : {}), arguments: "{}" },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        ]
+      : [
+          j({
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              ...(id ? { id } : {}),
+              ...(toolName ? { name: toolName } : {}),
+            },
+          }),
+          j({
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: "{}" },
+          }),
+          j({ type: "content_block_stop", index: 0 }),
+        ];
+  const stop = name === "openai" ? "stop" : "end_turn";
+  const cap = name === "openai" ? "length" : "max_tokens";
+  const calls = (chunks: ProviderChunk[]) => chunks.flatMap((c) => c.toolCalls ?? []);
+
+  it("finishes a turn that called a tool as tool_calls when it says stop", async () => {
+    // A caller reading `stop` as done never runs the tool.
+    const { fetchImpl } = recorder([...call("call_1", "search"), ...finish(stop)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
+  });
+
+  it("keeps a length cut a length cut, calls or not", async () => {
+    // The cut may be what broke the call's arguments, so it outranks them.
+    const { fetchImpl } = recorder([...call("call_1", "search"), ...finish(cap)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("length");
+  });
+
+  it("fails a tool call that has no name", async () => {
+    const { fetchImpl } = recorder([...call("call_1", undefined), ...finish(stop)]);
+    const { error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "overload" });
+  });
+
+  it("gives a tool call with no id one, before the finish", async () => {
+    const { fetchImpl } = recorder([...call(undefined, "search"), ...finish(stop)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    const ids = calls(chunks).flatMap((c) => (c.id ? [c.id] : []));
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).toMatch(/^call_pk_\w+$/);
+    const finishAt = chunks.findIndex((c) => c.type === "finish");
+    expect(chunks.findIndex((c) => c.toolCalls?.some((t) => t.id))).toBeLessThan(finishAt);
+  });
+
+  it("never rewrites an id the vendor sent, however long", async () => {
+    const long = `toolu_${"x".repeat(80)}`;
+    const { fetchImpl } = recorder([...call(long, "search"), ...finish(stop)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    expect(calls(chunks).flatMap((c) => (c.id ? [c.id] : []))).toEqual([long]);
+  });
+
   it("reads a context window that filled mid-answer as a length cut", async () => {
     // Z.ai's chat dialect and Anthropic's both name it. Retried, it fills the
     // same window again.

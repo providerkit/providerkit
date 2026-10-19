@@ -12,6 +12,8 @@
 //     `\uXXXX`, which JSON.parse decodes correctly. Some escape it twice and
 //     emit `\\u00e7`, so even a clean parse leaves six literal characters
 //     standing and a Portuguese answer reaches the user as `atenção`.
+import { ProviderError } from "./errors.ts";
+import type { ToolCallDelta } from "./types.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -127,6 +129,48 @@ export function normalizeToolId(id: string | undefined | null, prefix = "call_pk
     return `${clean.slice(0, 48)}_${hashHex}`;
   }
   return clean;
+}
+
+/** A tool call's identity as a stream stated it: the last id and name it gave. */
+export interface ToolCallIdentity {
+  index: number;
+  id: string;
+  name: string;
+}
+
+/**
+ * Make a turn's tool calls runnable before its finish goes out, or fail the turn.
+ *
+ * A call with no name can't run: nothing says which tool to dispatch. It used to
+ * pass through (the Messages reader wrote `""` for both fields), and the loop
+ * failed one step later with nothing to say why. It throws `overload` now, a
+ * broken turn the same request usually does not repeat; cc-proxy answers it
+ * with a 502.
+ *
+ * A call with no id still can run. It gets one from `normalizeToolId`, written
+ * back into `calls` and returned as the deltas to send, so the result has an id
+ * to quote. An id the vendor did send is never rewritten: the four wires must
+ * agree on it (invariant 10), and repeated ids are history repair's job.
+ */
+export function settleToolCalls(
+  provider: string,
+  calls: Iterable<ToolCallIdentity>,
+): ToolCallDelta[] {
+  const minted: ToolCallDelta[] = [];
+  for (const call of calls) {
+    if (!call.name.trim()) {
+      throw new ProviderError(
+        provider,
+        "overload",
+        `${provider}: tool call ${call.index} came with no name, so no tool can run it`,
+      );
+    }
+    if (!call.id.trim()) {
+      call.id = normalizeToolId(call.id);
+      minted.push({ index: call.index, id: call.id });
+    }
+  }
+  return minted;
 }
 
 /**

@@ -493,10 +493,11 @@ const NO_USAGE = {
   outputTokens: 0,
 };
 
-/** A transcript with one of `swaps` applied, failing loudly when none matched,
- *  so a fixture that drifts cannot turn a check into a no-op. */
+/** A transcript with every match of `swaps` applied, failing loudly when none
+ *  matched, so a fixture that drifts cannot turn a check into a no-op. Every
+ *  match, because Responses states a call twice: in its skeleton and its `.done`. */
 function rewrite(turn: string, swaps: [string, string][], mustChange = true): string {
-  const out = swaps.reduce((body, [from, to]) => body.replace(from, to), turn);
+  const out = swaps.reduce((body, [from, to]) => body.replaceAll(from, to), turn);
   expect(out !== turn, "no swap matched this transcript").toBe(mustChange);
   return out;
 }
@@ -823,6 +824,45 @@ describe.each(VENDORS)("$name", (vendor) => {
       return;
     }
     expect(failure(await thrownBy(stream))).toMatchObject({ kind: "network" });
+  });
+
+  it("finishes a turn that called a tool as tool_calls, even when it says stop", async () => {
+    // Several gateways end a tool turn on a plain stop, and a caller reading
+    // that as done never runs the tool. Gemini always says STOP and Responses
+    // never states a reason, so only the first two wires need the swap.
+    const saysStop = rewrite(
+      vendor.turn,
+      [
+        ['"finish_reason":"tool_calls"', '"finish_reason":"stop"'],
+        ['"stop_reason":"tool_use"', '"stop_reason":"end_turn"'],
+      ],
+      vendor.name === "openai" || vendor.name === "anthropic",
+    );
+    expect(await assemble(ask(vendor.create(serving(saysStop))))).toEqual(theTurn(vendor));
+  });
+
+  it("fails a tool call that has no name", async () => {
+    // Nothing says which tool to run. Passed on, the loop failed one step
+    // later with nothing to say why.
+    const nameless = rewrite(vendor.turn, [['"name":"search",', ""]]);
+    const err = await thrownBy(ask(vendor.create(serving(nameless))));
+    expect(failure(err)).toMatchObject({ kind: "overload" });
+  });
+
+  it("gives a tool call with no id one, and the same one on every wire", async () => {
+    // The result is paired back to its call by id, so a call without one
+    // can't be answered. Responses names it `call_id`.
+    const noId = rewrite(vendor.turn, [
+      ['"id":"call_1",', ""],
+      ['"call_id":"call_1",', ""],
+    ]);
+    const turn = await assemble(ask(vendor.create(serving(noId))));
+    expect(turn).toEqual({
+      ...theTurn(vendor),
+      toolCalls: [
+        { id: expect.stringMatching(/^call_pk_\w+$/), name: "search", arguments: '{"q":"cats"}' },
+      ],
+    });
   });
 
   it("delivers what arrived, then says the stream was cut", async () => {

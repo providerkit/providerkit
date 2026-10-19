@@ -6,6 +6,7 @@
 import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl, parseFrame } from "../transport.ts";
+import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
   ChatMessage,
@@ -643,6 +644,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         : "/v1/chat/completions";
 
       let ended = false;
+      // Each call as its deltas named it, by index. The finish checks them
+      // before it goes out, and they are what says the turn called a tool.
+      const calls = new Map<number, ToolCallIdentity>();
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
@@ -742,20 +746,35 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
                 ? { arguments: call.function.arguments }
                 : {}),
             }));
+            for (const call of out.toolCalls) {
+              const seen = calls.get(call.index) ?? { index: call.index, id: "", name: "" };
+              if (call.id) seen.id = call.id;
+              if (call.name) seen.name = call.name;
+              calls.set(call.index, seen);
+            }
             has = true;
           }
           if (has) yield out;
         }
 
         if (choice.finish_reason) {
-          const finishReason = mapFinishReason(id, choice.finish_reason);
+          const stated = mapFinishReason(id, choice.finish_reason);
+          const minted = settleToolCalls(id, calls.values());
+          if (minted.length > 0) yield { type: "delta", toolCalls: minted };
           ended = true;
+          // Several gateways end a turn that called a tool on `stop`, and a
+          // caller reading that as done never runs the tool. Only `stop` is
+          // promoted: a length cut or a filter may be what broke the call.
+          const finishReason = stated === "stop" && calls.size > 0 ? "tool_calls" : stated;
           yield { type: "finish", finishReason };
         }
       }
       // Either proof will do: some gateways send `[DONE]` with no finish, and
       // some a finish with no `[DONE]`. Neither means the socket closed early.
       if (!ended) throw streamCut(id);
+      // A `[DONE]` with no finish stated still owes its calls the same check.
+      const minted = settleToolCalls(id, calls.values());
+      if (minted.length > 0) yield { type: "delta", toolCalls: minted };
     },
   };
 

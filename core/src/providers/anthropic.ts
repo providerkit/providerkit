@@ -2,7 +2,7 @@
 import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
-import { parseToolArgs } from "../tool-args.ts";
+import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
@@ -522,7 +522,8 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       let cachedInputTokens = 0;
       let cacheWriteTokens = 0;
       let outputTokens = 0;
-      let toolCall: { index: number; id: string; name: string } | null = null;
+      let toolCall: ToolCallIdentity | null = null;
+      let sawToolCall = false;
       let blockIndex = -1;
       // What proves the turn ended rather than the socket: a stated stop
       // reason, or `message_stop`. See the check after the loop.
@@ -586,6 +587,10 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
                 id: event.content_block.id ?? "",
                 name: event.content_block.name ?? "",
               };
+              // Checked here, because this block is the only place this shape
+              // states a call's id and name.
+              settleToolCalls(id, [toolCall]);
+              sawToolCall = true;
               yield {
                 type: "delta",
                 toolCalls: [{ index: toolCall.index, id: toolCall.id, name: toolCall.name }],
@@ -622,8 +627,13 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             cacheWriteTokens = event.usage?.cache_creation_input_tokens ?? cacheWriteTokens;
             outputTokens = event.usage?.output_tokens ?? outputTokens;
             if (event.delta?.stop_reason) {
-              const finishReason = mapStopReason(id, event.delta.stop_reason);
+              const stated = mapStopReason(id, event.delta.stop_reason);
               stopped = true;
+              // Anthropic-compatible gateways can end a tool turn on
+              // `end_turn`, and a caller reading that as done never runs the
+              // tool. Only `stop` is promoted: a length cut may be what broke
+              // the call.
+              const finishReason = stated === "stop" && sawToolCall ? "tool_calls" : stated;
               yield { type: "finish", finishReason };
             }
             break;

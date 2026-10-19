@@ -8,7 +8,7 @@
 import { repairHistory } from "../context.ts";
 import { ProviderError, streamCut, streamError, type ErrorKind } from "../errors.ts";
 import { schemaPrompt, toGeminiToolSchema } from "../schema.ts";
-import { parseToolArgs } from "../tool-args.ts";
+import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
@@ -511,12 +511,14 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
           const call = part.functionCall;
           if (!call) continue;
           const index = callIndex++;
+          const identity = { index, id: call.id ?? "", name: call.name ?? "" };
+          // The part is the whole call, so it is settled here: one with no
+          // name can't run, and one with no id gets one the way the other
+          // three wires mint it. Gemini omits the id on a single-call turn, and
+          // the seam's consumers pair a result back to its call by id.
+          settleToolCalls(id, [identity]);
           toolCalls.push({
-            index,
-            // Gemini omits the id on a single-call turn, and the seam's
-            // consumers pair a result back to its call by id.
-            id: call.id ?? `call_${index}`,
-            ...(call.name ? { name: call.name } : {}),
+            ...identity,
             // Whole and already assembled — unlike the OpenAI shape, Gemini
             // never fragments an argument object across chunks.
             arguments: JSON.stringify(call.args ?? {}),
