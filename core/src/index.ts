@@ -4,6 +4,7 @@ export * from "./retry.ts";
 export * from "./fallback.ts";
 export * from "./key-pool.ts";
 export * from "./watchdog.ts";
+export * from "./gate.ts";
 export * from "./usage.ts";
 export * from "./transport.ts";
 export * from "./rate-limit.ts";
