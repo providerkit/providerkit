@@ -107,6 +107,15 @@ no `[DONE]`. Every adapter hands over what arrived, then throws a `network` erro
 socket dying mid-read throws. So a half-written answer is never kept as the whole one, and the
 retry and backup walkers see a failure they know how to handle.
 
+A connection that drops after the turn has finished is not a failure. Kimi, GLM and OpenCode Go
+close the socket right there, and the turn is kept. Only the usage sent after the finish may be
+lost.
+
+A finish reason the adapter doesn't know also fails, as a retryable `overload`. DeepSeek's
+`insufficient_system_resource` and Gemini's `OTHER` used to pass as a normal end. Other servers'
+names for a normal end, like Together's `eos`, still read as `stop`, and a full context window
+reads as `length`.
+
 ## Bridging the caller's signal
 
 `streamWatch` composes your signal with its own using `AbortSignal.any`, which is deliberate:

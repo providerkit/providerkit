@@ -104,6 +104,10 @@ looking for the signatures: `ECONNRESET`, `UND_ERR_SOCKET`, `fetch failed`, and 
 Miss that walk and every transient network blip reads as a permanent failure, which is how a run
 dies on a hiccup that a single retry would have cleared.
 
+The adapters don't rely on the walk for a request that got no answer at all. Every `fetch`
+rejection that isn't your own abort is `network`, whatever its wording. Each runtime words that
+failure its own way, and one wording nobody had listed used to end the run.
+
 ## The failure that arrives inside a 200
 
 An SSE response commits to 200 the moment its headers go out. Everything that goes wrong after
@@ -127,9 +131,15 @@ import { streamError } from "@providerkit/core";
 if (payload.error) throw streamError("my-gateway", payload.error);
 ```
 
+A number in that payload counts as an HTTP status only from 400 to 599. Vendors put their own codes
+in the same field: Z.ai's 1113 is an empty balance, and read as a status it landed on `overload`
+instead of `quota`. With no status, the error's `type` stands in for one: `invalid_request_error`
+counts as a 400 and `rate_limit_error` as a 429. The body's own words still come first, as they do
+everywhere else.
+
 `unknown` is floored to `overload` here and nowhere else: a stream that dies after its headers is
-by construction a transient upstream fault, and `unknown` is never retried. Everything the body
-does name keeps its own kind.
+by construction a transient upstream fault, and `unknown` is never retried. Only an error with no
+status and no type it knows gets there. Everything the body does name keeps its own kind.
 
 ## Retry-After
 
