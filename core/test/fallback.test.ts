@@ -7,7 +7,8 @@ import {
   withFallbackProviders,
 } from "../src/fallback.ts";
 import { ProviderError, parseRetryAfterMs, streamError } from "../src/errors.ts";
-import { drainStream, type Provider, type ProviderChunk } from "../src/types.ts";
+import { drainStream } from "../src/turn.ts";
+import type { Provider, ProviderChunk } from "../src/types.ts";
 import { postJson } from "../src/transport.ts";
 import { STREAM_PROGRESS_MS } from "../src/watchdog.ts";
 

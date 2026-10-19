@@ -71,8 +71,9 @@ export type ContentPart = TextPart | ImagePart | FilePart;
 
 /**
  * A tool the model asked to run. `arguments` is the RAW JSON string, not a
- * parsed object: it arrives in fragments and can be truncated mid-stream, so
- * assembly and validation are the consumer's job (see tools/define).
+ * parsed object: it arrives in fragments and can be truncated mid-stream.
+ * `collectTurn` joins the fragments; healing and validating them is the
+ * consumer's job (see tools/define).
  */
 export interface ToolCall {
   id: string;
@@ -151,7 +152,7 @@ export interface ToolDefinition {
 
 export type FinishReason = "stop" | "length" | "tool_calls" | "content_filter";
 
-/** Incremental tool-call fragment, assembled by `index` by the consumer. */
+/** Incremental tool-call fragment, assembled by `index`. `collectTurn` does it. */
 export interface ToolCallDelta {
   index: number;
   id?: string;
@@ -438,62 +439,6 @@ export interface Provider {
     tools: ToolDefinition[],
     opts?: StreamOptions,
   ): AsyncIterable<ProviderChunk>;
-}
-
-export interface Completion {
-  text: string;
-  /** Present when the stream identifies the endpoint that answered. */
-  provider?: string;
-  reasoning: string;
-  /** Present only where the provider sent one. See ChatMessage.reasoningDetails. */
-  reasoningDetails?: unknown[];
-  /** Present only where the provider sent them. See ChatMessage.reasoningItems. */
-  reasoningItems?: ReasoningItems;
-  usage: TokenUsage;
-  finishReason: FinishReason | null;
-  model: string;
-}
-
-/** Drain a no-tools stream into a Completion. Usage chunks are cumulative on
- *  some providers and final-only on others: the LAST one wins. */
-export async function drainStream(
-  stream: AsyncIterable<ProviderChunk>,
-  model: string,
-): Promise<Completion> {
-  let text = "";
-  let reasoning = "";
-  // Not concatenated: this half of the record is a payload the provider owns,
-  // and it arrives whole on one delta rather than in fragments. Dropped here,
-  // a drained turn replays only half its own reasoning on the next round —
-  // which is the failure `reasoningDetails` exists to prevent.
-  let reasoningDetails: unknown[] | undefined;
-  let reasoningItems: ReasoningItems | undefined;
-  let usage: TokenUsage = EMPTY_USAGE;
-  let finishReason: FinishReason | null = null;
-  let source: ProviderChunk["source"];
-  for await (const chunk of stream) {
-    if (chunk.source) source = chunk.source;
-    if (chunk.type === "delta") {
-      if (chunk.content) text += chunk.content;
-      if (chunk.reasoning) reasoning += chunk.reasoning;
-      if (chunk.reasoningDetails?.length) reasoningDetails = chunk.reasoningDetails;
-      if (chunk.reasoningItems?.items.length) reasoningItems = chunk.reasoningItems;
-    } else if (chunk.type === "usage" && chunk.usage) {
-      usage = chunk.usage;
-    } else if (chunk.type === "finish" && chunk.finishReason) {
-      finishReason = chunk.finishReason;
-    }
-  }
-  return {
-    text,
-    reasoning,
-    ...(reasoningDetails ? { reasoningDetails } : {}),
-    ...(reasoningItems ? { reasoningItems } : {}),
-    usage,
-    finishReason,
-    model: source?.model ?? model,
-    ...(source ? { provider: source.provider } : {}),
-  };
 }
 
 /**
