@@ -539,10 +539,11 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
           finished = true;
           yield {
             type: "finish",
-            // A turn that called tools finishes as tool_calls whatever the
-            // candidate says — Gemini routinely reports STOP there, and a
+            // Gemini routinely reports STOP on a turn that called tools, and a
             // caller reading that as "done" drops the tool round entirely.
-            finishReason: sawFunctionCalls ? "tool_calls" : finishReason,
+            // Only STOP is promoted, as on the other three wires: a length cut
+            // or a filter may be what broke the call (invariant 10).
+            finishReason: sawFunctionCalls && finishReason === "stop" ? "tool_calls" : finishReason,
           };
         }
       }

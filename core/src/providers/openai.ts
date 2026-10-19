@@ -340,12 +340,20 @@ function dialectFor(id: string): EffortDialect {
  */
 function mapFinishReason(provider: string, reason: string): FinishReason {
   switch (reason) {
+    // A natural end under another name, from servers on this wire: Together's
+    // `eos`, Hugging Face TGI's `eos_token` and `stop_sequence`. Thrown as
+    // unknown, each would fail an answer that was already whole.
     case "stop":
+    case "eos":
+    case "eos_token":
+    case "stop_sequence":
       return "stop";
-    // Z.ai's `model_context_window_exceeded`: the context window filled before
-    // the answer did. Cut short, and a retry fills it the same way.
+    // Z.ai's `model_context_window_exceeded` and Mistral's `model_length`: the
+    // context window filled before the answer did. Cut short, and a retry fills
+    // it the same way.
     case "length":
     case "model_context_window_exceeded":
+    case "model_length":
       return "length";
     case "tool_calls":
     case "function_call":

@@ -1626,3 +1626,23 @@ describe("the openai reader, on Z.ai's finish names", () => {
     expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("content_filter");
   });
 });
+
+describe("the openai reader, on other servers' finish names", () => {
+  it.each([
+    ["eos", "stop"],
+    ["eos_token", "stop"],
+    ["stop_sequence", "stop"],
+    ["model_length", "length"],
+  ] as const)("reads `%s` as %s, not as a failure to retry", async (stated, expected) => {
+    // Together, Hugging Face TGI and Mistral end whole answers this way. Thrown
+    // as unknown, the answer the reader already showed would fail after it.
+    const { fetchImpl } = recorder([
+      j({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] }),
+      j({ choices: [{ delta: {}, finish_reason: stated }] }),
+    ]);
+    const chunks = await collect(
+      createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl }).createStream(ASK, []),
+    );
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe(expected);
+  });
+});

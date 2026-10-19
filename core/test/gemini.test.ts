@@ -208,6 +208,18 @@ describe("gemini adapter", () => {
     expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
   });
 
+  it("keeps a length cut on a turn that called a tool, as the other wires do", async () => {
+    // The cut may be what broke the call. Dressed as tool_calls, the loop runs
+    // a call whose arguments never finished.
+    const { fetchImpl } = recorder([
+      candidate([{ functionCall: { id: "fc_1", name: "search", args: {} } }]),
+      candidate([], "MAX_TOKENS"),
+    ]);
+    const chunks = await collect(provider(fetchImpl).createStream(HI, []));
+
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("length");
+  });
+
   it("maps each finish reason Gemini documents", async () => {
     const cases: [string, string][] = [
       ["STOP", "stop"],
