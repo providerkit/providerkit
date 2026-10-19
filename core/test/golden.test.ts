@@ -15,12 +15,20 @@
 // is how five hand-written fixtures in the first adopting app turned out not to
 // be SSE at all.
 import { describe, expect, it } from "vitest";
+import { repairHistory } from "../src/context.ts";
 import { ProviderError, classify } from "../src/errors.ts";
 import { createAnthropicProvider } from "../src/providers/anthropic.ts";
 import { createGeminiProvider } from "../src/providers/gemini.ts";
 import { createOpenAIProvider } from "../src/providers/openai.ts";
 import { createResponsesProvider } from "../src/providers/responses.ts";
-import type { FinishReason, Provider, ProviderChunk, StreamOptions } from "../src/types.ts";
+import type {
+  ChatMessage,
+  FinishReason,
+  Provider,
+  ProviderChunk,
+  StreamOptions,
+  ToolDefinition,
+} from "../src/types.ts";
 import { streamWatch, watchChunks } from "../src/watchdog.ts";
 
 const encoder = new TextEncoder();
@@ -205,6 +213,148 @@ const RESPONSES_THROTTLED = wire(
   'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for this model"}}}',
 );
 
+// ── the history that went out, four ways ──────────────────────────────────
+//
+// What a request carries, in the order it carries it, with each wire's nesting
+// read away: OpenAI's tool messages, Anthropic's blocks merged into one user
+// turn, Gemini's parts, Responses' items. Reduced to this, four requests can be
+// held to one expected history.
+
+type Item =
+  | { user: string }
+  | { assistant: string }
+  | { image: string }
+  | { call: string; name: string }
+  | { result: string; text: string };
+
+const said = (role: string, text: string): Item[] =>
+  text ? [role === "user" ? { user: text } : { assistant: text }] : [];
+
+/** The base64 out of a `data:` URI. */
+const dataOf = (uri: string) => uri.slice(uri.indexOf(",") + 1);
+
+interface OpenAIPart {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+}
+
+function openAIHistory(raw: string): Item[] {
+  const {
+    messages,
+  }: {
+    messages: {
+      role: string;
+      content?: string | OpenAIPart[];
+      tool_calls?: { id: string; function: { name: string } }[];
+      tool_call_id?: string;
+    }[];
+  } = JSON.parse(raw);
+  return messages.flatMap((message): Item[] => {
+    if (message.role === "system") return [];
+    if (message.role === "tool") {
+      return [{ result: message.tool_call_id ?? "", text: String(message.content) }];
+    }
+    const parts: OpenAIPart[] =
+      typeof message.content === "string"
+        ? [{ type: "text", text: message.content }]
+        : (message.content ?? []);
+    return [
+      ...parts.flatMap((part): Item[] =>
+        part.image_url
+          ? [{ image: dataOf(part.image_url.url) }]
+          : said(message.role, part.text ?? ""),
+      ),
+      ...(message.tool_calls ?? []).map((call) => ({ call: call.id, name: call.function.name })),
+    ];
+  });
+}
+
+interface AnthropicBlock {
+  type: string;
+  text?: string;
+  source?: { data: string };
+  id?: string;
+  name?: string;
+  tool_use_id?: string;
+  content?: AnthropicBlock[];
+}
+
+function anthropicHistory(raw: string): Item[] {
+  const { messages }: { messages: { role: string; content: AnthropicBlock[] }[] } = JSON.parse(raw);
+  const read =
+    (role: string) =>
+    (block: AnthropicBlock): Item[] => {
+      switch (block.type) {
+        case "text":
+          return said(role, block.text ?? "");
+        case "image":
+          return [{ image: block.source?.data ?? "" }];
+        case "tool_use":
+          return [{ call: block.id ?? "", name: block.name ?? "" }];
+        case "tool_result": {
+          const [text, ...images] = block.content ?? [];
+          return [
+            { result: block.tool_use_id ?? "", text: text?.text ?? "" },
+            ...images.flatMap(read(role)),
+          ];
+        }
+        default:
+          return [];
+      }
+    };
+  return messages.flatMap((message) => message.content.flatMap(read(message.role)));
+}
+
+function geminiHistory(raw: string): Item[] {
+  const {
+    contents,
+  }: {
+    contents: {
+      role: string;
+      parts: {
+        text?: string;
+        inlineData?: { data: string };
+        functionCall?: { id: string; name: string };
+        functionResponse?: { id: string; response: { output?: unknown } };
+      }[];
+    }[];
+  } = JSON.parse(raw);
+  return contents.flatMap((content) =>
+    content.parts.flatMap((part): Item[] => {
+      const { functionCall: call, functionResponse: result } = part;
+      if (call) return [{ call: call.id, name: call.name }];
+      if (result) return [{ result: result.id, text: String(result.response.output) }];
+      if (part.inlineData) return [{ image: part.inlineData.data }];
+      return said(content.role, part.text ?? "");
+    }),
+  );
+}
+
+function responsesHistory(raw: string): Item[] {
+  const {
+    input,
+  }: {
+    input: {
+      type: string;
+      role?: string;
+      content?: { type: string; text?: string; image_url?: string }[];
+      call_id?: string;
+      name?: string;
+      output?: unknown;
+    }[];
+  } = JSON.parse(raw);
+  return input.flatMap((item): Item[] => {
+    if (item.type === "function_call") return [{ call: item.call_id ?? "", name: item.name ?? "" }];
+    if (item.type === "function_call_output") {
+      return [{ result: item.call_id ?? "", text: String(item.output) }];
+    }
+    return (item.content ?? []).flatMap((part): Item[] =>
+      part.image_url ? [{ image: dataOf(part.image_url) }] : said(item.role ?? "", part.text ?? ""),
+    );
+  });
+}
+
 /** Walks a request body without asserting its shape — each wire nests its
  *  thinking dial somewhere different. */
 function at(body: unknown, ...path: string[]): unknown {
@@ -231,6 +381,11 @@ interface Vendor {
   /** Whether this wire has a service tier to send. Anthropic and Gemini do not,
    *  and must refuse one, never drop it. */
   takesServiceTier: boolean;
+  /** The history a request body carries, read off the bytes that went out. */
+  history(raw: string): Item[];
+  /** How this wire spells Kimi's `functions.search:0`. Anthropic's id pattern
+   *  takes only [A-Za-z0-9_-]. */
+  kimiId: string;
 }
 
 const VENDORS: Vendor[] = [
@@ -243,6 +398,8 @@ const VENDORS: Vendor[] = [
     refusesThinking: (body) => at(body, "reasoning_effort") === "none",
     takesFiles: false,
     takesServiceTier: true,
+    history: openAIHistory,
+    kimiId: "functions.search:0",
   },
   {
     name: "anthropic",
@@ -257,6 +414,8 @@ const VENDORS: Vendor[] = [
     refusesThinking: (body) => at(body, "thinking", "type") === "disabled",
     takesFiles: false,
     takesServiceTier: false,
+    history: anthropicHistory,
+    kimiId: "functions_search_0",
   },
   {
     name: "gemini",
@@ -270,6 +429,8 @@ const VENDORS: Vendor[] = [
       at(body, "generationConfig", "thinkingConfig", "thinkingBudget") === 0,
     takesFiles: true,
     takesServiceTier: false,
+    history: geminiHistory,
+    kimiId: "functions.search:0",
   },
   {
     name: "responses",
@@ -280,6 +441,8 @@ const VENDORS: Vendor[] = [
     refusesThinking: (body) => at(body, "reasoning", "effort") === "none",
     takesFiles: false,
     takesServiceTier: true,
+    history: responsesHistory,
+    kimiId: "functions.search:0",
   },
 ];
 
@@ -372,12 +535,67 @@ const ask = (provider: Provider, opts?: StreamOptions) =>
  *  what went OUT rather than what came back. */
 function recording(body: string) {
   const sent: Record<string, unknown>[] = [];
+  const raw: string[] = [];
   const fetchImpl = (async (_url: string, init: RequestInit) => {
+    raw.push(init.body as string);
     sent.push(JSON.parse(init.body as string));
     return new Response(socketBody(body), { status: 200 });
   }) as unknown as typeof fetch;
-  return { sent, fetchImpl };
+  return { sent, raw, fetchImpl };
 }
+
+// A resumed run, broken the two ways a saved history breaks: call_2 never
+// returned, and call_9's result answers a call this history does not hold.
+const PNG = { type: "image", mimeType: "image/png", data: "iVBORw0K" } as const;
+const TOOLS: ToolDefinition[] = [
+  { name: "search", description: "search", inputSchema: { type: "object" } },
+  { name: "fetch", description: "fetch", inputSchema: { type: "object" } },
+];
+const BROKEN: ChatMessage[] = [
+  { role: "user", content: "find cats" },
+  {
+    role: "assistant",
+    content: "",
+    toolCalls: [
+      { id: "call_1", name: "search", arguments: '{"q":"cats"}' },
+      { id: "call_2", name: "fetch", arguments: '{"url":"cats.example"}' },
+    ],
+  },
+  { role: "tool", toolCallId: "call_1", name: "search", content: "3 cats" },
+  { role: "tool", toolCallId: "call_9", name: "fetch", content: "a page", images: [PNG] },
+  { role: "user", content: "go on" },
+];
+const REPAIRED: Item[] = [
+  { user: "find cats" },
+  { call: "call_1", name: "search" },
+  { call: "call_2", name: "fetch" },
+  { result: "call_1", text: "3 cats" },
+  {
+    result: "call_2",
+    text: "This call was interrupted before it returned. It may have partly run, so check its effect before calling it again.",
+  },
+  { user: "[Tool result for call_9; the tool call is missing or already has a result]\na page" },
+  { image: "iVBORw0K" },
+  { user: "go on" },
+];
+
+/** Two replies from a model that restarts its call ids every reply, as Kimi
+ *  does: both ask for `functions.search:0`. */
+const KIMI_TWICE: ChatMessage[] = [
+  { role: "user", content: "find cats, then dogs" },
+  {
+    role: "assistant",
+    content: "",
+    toolCalls: [{ id: "functions.search:0", name: "search", arguments: '{"q":"cats"}' }],
+  },
+  { role: "tool", toolCallId: "functions.search:0", name: "search", content: "3 cats" },
+  {
+    role: "assistant",
+    content: "",
+    toolCalls: [{ id: "functions.search:0", name: "search", arguments: '{"q":"dogs"}' }],
+  },
+  { role: "tool", toolCallId: "functions.search:0", name: "search", content: "2 dogs" },
+];
 
 describe.each(VENDORS)("$name", (vendor) => {
   it("says 'do not think' out loud — `none` is never the same request as silence", async () => {
@@ -403,6 +621,39 @@ describe.each(VENDORS)("$name", (vendor) => {
     const silence = recording(vendor.turn);
     await assemble(ask(vendor.create(silence.fetchImpl)));
     expect(vendor.refusesThinking(silence.sent[0]!)).toBe(false);
+  });
+
+  it("sends a broken history repaired, the same way on every wire and every time", async () => {
+    // Sent as it was, this history is a 400 on all four wires, and the turn is
+    // lost. Repaired, the missing result is answered as interrupted and the
+    // stray one is kept as a note the model can still read, png included.
+    const { raw, fetchImpl } = recording(vendor.turn);
+    const provider = vendor.create(fetchImpl);
+    const once = repairHistory(BROKEN).messages;
+    for (const history of [BROKEN, BROKEN, once]) {
+      await assemble(provider.createStream(history, TOOLS));
+    }
+    expect(vendor.history(raw[0]!)).toEqual(REPAIRED);
+    // Byte for byte, twice and from an already repaired copy. One byte that
+    // moves between sends and the prompt cache misses from there on.
+    expect(raw[1]).toBe(raw[0]);
+    expect(raw[2]).toBe(raw[0]);
+    expect(repairHistory(once).messages).toEqual(once);
+  });
+
+  it("renames an id the next reply reuses, call and result together", async () => {
+    // Anthropic and Responses reject a second `functions.search:0`, and the
+    // turn after a Kimi reply on a rotation can land on either.
+    const { raw, fetchImpl } = recording(vendor.turn);
+    await assemble(vendor.create(fetchImpl).createStream(KIMI_TWICE, TOOLS));
+    const id = vendor.kimiId;
+    const pairs = vendor.history(raw[0]!).filter((item) => "call" in item || "result" in item);
+    expect(pairs).toEqual([
+      { call: id, name: "search" },
+      { result: id, text: "3 cats" },
+      { call: `${id}_2`, name: "search" },
+      { result: `${id}_2`, text: "2 dogs" },
+    ]);
   });
 
   it("sends a service tier or refuses it before any request, and never drops it", async () => {

@@ -1,4 +1,5 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
+import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
@@ -270,6 +271,34 @@ function jsonBlock(json: JsonOutput): unknown {
   return { type: "text", text: schemaPrompt(json.schema) };
 }
 
+/**
+ * Tool ids as this wire accepts them: `[A-Za-z0-9_-]` only. Kimi's
+ * `functions.search:0` is a 400 here, and an opencode-go rotation hands a
+ * history from chat completions to Messages mid-conversation, so a Kimi id
+ * does arrive. Each other character becomes `_`, and a result follows its call
+ * because both go through the same map.
+ *
+ * Collision-safe in one forward pass: an id whose cleaned form is already
+ * taken gets `_2`, `_3`…, judged only against ids seen before it, so an earlier
+ * id never changes because of a later one and the prompt cache keeps its
+ * prefix. A history whose ids are already clean comes out byte for byte.
+ */
+function anthropicIds(): (id: string) => string {
+  const sent = new Map<string, string>();
+  const taken = new Set<string>();
+  return (id) => {
+    let wire = sent.get(id);
+    if (wire === undefined) {
+      const clean = id.replace(/[^A-Za-z0-9_-]/g, "_");
+      wire = clean;
+      for (let k = 2; taken.has(wire); k++) wire = `${clean}_${k}`;
+      sent.set(id, wire);
+      taken.add(wire);
+    }
+    return wire;
+  };
+}
+
 export function toAnthropicMessages(
   messages: readonly ChatMessage[],
   provider = "anthropic",
@@ -277,6 +306,7 @@ export function toAnthropicMessages(
   system?: unknown[];
   messages: unknown[];
 } {
+  const wireId = anthropicIds();
   const system = messages
     .filter((m) => m.role === "system")
     .map((m) => m.content)
@@ -299,7 +329,7 @@ export function toAnthropicMessages(
       pushBlocks("user", [
         {
           type: "tool_result",
-          tool_use_id: message.toolCallId,
+          tool_use_id: wireId(message.toolCallId),
           content: [
             { type: "text", text: message.content },
             ...(message.images ?? []).map((image) => ({
@@ -319,7 +349,7 @@ export function toAnthropicMessages(
     for (const call of message.toolCalls ?? []) {
       blocks.push({
         type: "tool_use",
-        id: call.id,
+        id: wireId(call.id),
         name: call.name,
         input: parseToolArgs(call.arguments),
       });
@@ -373,7 +403,10 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       const model = opts.model ?? config.model;
       const maxTokens = opts.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
       const effort = opts.effort ?? config.effort;
-      const { system, messages: body } = toAnthropicMessages(messages, id);
+      // Repaired first: a result with no call, a call with no result, or an id
+      // used twice is a 400 that loses the turn. See repairHistory.
+      const sent = repairHistory(messages).messages;
+      const { system, messages: body } = toAnthropicMessages(sent, id);
 
       // Anthropic's own `service_tier` means auto or standard_only, not this.
       if (opts.serviceTier) {
@@ -438,7 +471,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       // ponytail: every loop step after the first goes unthought on these
       // models. The upgrade is replaying the signed thinking blocks.
       const unthought =
-        !claude && model.startsWith("claude-") && (forcesTool || continuesToolLoop(messages));
+        !claude && model.startsWith("claude-") && (forcesTool || continuesToolLoop(sent));
       if (claude) {
         // An effort the caller never set sends nothing: the model keeps its own
         // default, which on most of these is thinking ON.
