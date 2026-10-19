@@ -401,12 +401,12 @@ describe("responses tool calls", () => {
 // ── finish reasons and failures ───────────────────────────────────────────
 
 describe("responses finish reasons", () => {
-  const incomplete = (reason: string) =>
+  const incomplete = (reason?: string, text = "half an ans") =>
     recorder([
-      j({ type: "response.output_text.delta", delta: "half an ans" }),
+      ...(text ? [j({ type: "response.output_text.delta", delta: text })] : []),
       j({
         type: "response.incomplete",
-        response: { incomplete_details: { reason }, usage: USAGE },
+        response: { incomplete_details: reason ? { reason } : {}, usage: USAGE },
       }),
     ]);
 
@@ -422,11 +422,53 @@ describe("responses finish reasons", () => {
       provider({ fetchImpl: incomplete("content_filter").fetchImpl }).createStream(hi, []),
     );
     expect(filtered.find((c) => c.type === "finish")?.finishReason).toBe("content_filter");
+  });
 
-    const unknown = await collect(
-      provider({ fetchImpl: incomplete("something_new").fetchImpl }).createStream(hi, []),
+  it.each([["interrupted"], ["something_new"], [undefined]])(
+    "never reads incomplete + %s as length: it throws a retryable overload",
+    async (reason) => {
+      // Read as length, an empty turn was told to raise a maxTokens it never
+      // hit. Nothing says this turn ended on purpose, so it is a transient
+      // fault, as cc-proxy answers it.
+      const err = await collect(
+        provider({ fetchImpl: incomplete(reason).fetchImpl }).createStream(hi, []),
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ProviderError);
+      expect(err).toMatchObject({ kind: "overload" });
+      expect(String(err)).toContain(reason ?? "none given");
+    },
+  );
+
+  it("throws an unknown incomplete before anything goes out, so a retry stays open", async () => {
+    // Any chunk commits the stream (invariant 1), usage included. The reasons
+    // it knows keep their usage; this one must not spend the retry on it.
+    const seen: ProviderChunk[] = [];
+    const err = await (async () => {
+      for await (const chunk of provider({
+        fetchImpl: incomplete("interrupted", "").fetchImpl,
+      }).createStream(hi, [])) {
+        seen.push(chunk);
+      }
+    })().catch((e: unknown) => e);
+    expect(err).toMatchObject({ kind: "overload" });
+    expect(seen).toEqual([]);
+  });
+
+  it("maps each reason the same way when `completed` states incomplete", async () => {
+    const completedAs = (reason: string) =>
+      recorder([
+        j({
+          type: "response.completed",
+          response: { status: "incomplete", incomplete_details: { reason }, usage: USAGE },
+        }),
+      ]).fetchImpl;
+    const filtered = await collect(
+      provider({ fetchImpl: completedAs("content_filter") }).createStream(hi, []),
     );
-    expect(unknown.find((c) => c.type === "finish")?.finishReason).toBe("length");
+    expect(filtered.find((c) => c.type === "finish")?.finishReason).toBe("content_filter");
+    await expect(
+      collect(provider({ fetchImpl: completedAs("interrupted") }).createStream(hi, [])),
+    ).rejects.toMatchObject({ kind: "overload" });
   });
 
   it("classifies a mid-stream failure from its own body", async () => {
