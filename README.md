@@ -111,8 +111,9 @@ Pass `watchdog: { idleMs: 60_000 }` to time each model separately, so a model th
 connection and then goes silent rotates too. Do not wrap the returned pool with
 `withWatchdog`: that timeout cancels the whole chain. Go refuses a call without a session
 id, so pass `sessionId` with each call (the conversation or job id). A call without one
-uses a random id the provider keeps for its whole life. Keep one provider alive across
-calls, so it remembers which models are spent.
+uses a random id the provider keeps for its whole life. If you build a new provider per call
+(`withKeyPool` and `withToken` do), pass `instanceSessionId` so each one sends the same id.
+Keep one provider alive across calls, so it remembers which models are spent.
 
 Go also asks each client to send its own user agent, not the runtime's default. Pass
 `headers: { "user-agent": "my-app" }`, and add it to each Go entry in `fallbacks` too.

@@ -46,6 +46,11 @@ answers 401 before any output, it renews the token and sends the call once more.
 thrown as an `auth` error. To add headers of your own, merge them with `auth.headers` instead of
 replacing them.
 
+`withToken` builds a new provider for every call. The `chatgpt` preset sends a session id, and
+each new provider makes up its own, so the backend sees every call as a new session and its
+prompt cache misses. Pick one id and pass it each time:
+`createPresetProvider("chatgpt", { ...auth, instanceSessionId })`.
+
 `createAuthFlow` takes `chatgpt`, `kimi-plan`, `grok`, `github-copilot`, `meta` or `openrouter`.
 ChatGPT and OpenRouter send the user through a redirect, so they call your `captureRedirect`. The
 others show a code and call your `openUrl` with the approval page.
