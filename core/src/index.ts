@@ -23,3 +23,4 @@ export * from "./providers/responses.ts";
 export * from "./providers/gemini.ts";
 export * from "./providers/zai.ts";
 export * from "./providers/factory.ts";
+export * from "./registry.ts";

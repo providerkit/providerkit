@@ -80,15 +80,15 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   fetchImpl?: typeof fetch;
 }
 
+/** What one adapter for one model takes: a `PresetProviderConfig` without the
+ *  chain (`models`) and without the layers that go around an adapter. */
+export type PresetAdapterConfig = Omit<
+  PresetProviderConfig,
+  "models" | keyof ProviderFallbackConfig
+>;
+
 export function createPresetProvider(id: ProviderPresetId, config: PresetProviderConfig): Provider {
-  // The table is closed (`satisfies`), but a caller may hold an id as a plain
-  // string — validate rather than index into undefined.
-  if (!(id in PROVIDER_PRESETS)) {
-    throw new Error(
-      `[providerkit] Unknown provider preset "${id}". Valid ids: ${PRESET_IDS.join(", ")}`,
-    );
-  }
-  const preset: ProviderPreset = PROVIDER_PRESETS[id];
+  const preset = presetFor(id);
   const chain = config.models?.length ? config.models : config.model ? undefined : preset.rotation;
   if (chain && chain.length > 1) {
     const { models: _models, fallbacks = [], ...single } = config;
@@ -101,7 +101,27 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
       ],
     });
   }
-  const model = chain?.[0] ?? config.model ?? preset.defaultModel;
+  const { models: _models, ...single } = config;
+  return withConfiguredFallbacks(
+    presetAdapter(id, { ...single, model: chain?.[0] ?? config.model }),
+    config,
+  );
+}
+
+/**
+ * The bare adapter for one preset and one model: the wire that serves the
+ * model, its auth style and the preset's quirks, and nothing around them. No
+ * fallbacks, no watchdog, no `models` chain. A registry builds one per
+ * (connection, model) and puts those layers around all of them once; calling
+ * `createPresetProvider` per model would nest a second pool and a second
+ * watchdog inside its own.
+ *
+ * The adapter's `id` is the preset id, because the OpenAI shape reads its
+ * effort dialect from it (`opencode-go`, `openrouter`, `deepseek`).
+ */
+export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig): Provider {
+  const preset = presetFor(id);
+  const model = config.model ?? preset.defaultModel;
   if (!model) {
     throw new Error(`[providerkit] Preset "${id}" has no defaultModel. Pass a model.`);
   }
@@ -115,14 +135,16 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
   const headers = { ...preset.headers, ...config.headers };
   const baseUrl = config.baseUrl ?? wire.baseUrl;
   const maxTokens = config.maxTokens ?? preset.maxTokens;
-
-  const {
-    fallbacks: _fallbacks,
-    fallbackOptions: _fallbackOptions,
-    watchdog: _watchdog,
-    models: _models,
-    ...baseConfig
-  } = config;
+  // Every adapter builds its own pool and watchdog from these. The type leaves
+  // them out, but a wider object (a whole `PresetProviderConfig` in a variable)
+  // can still carry them, and the adapter would nest a second pool and a
+  // second watchdog inside the caller's. Cleared, it stays bare.
+  const baseConfig = {
+    ...config,
+    fallbacks: undefined,
+    fallbackOptions: undefined,
+    watchdog: undefined,
+  };
 
   let provider: Provider;
   switch (wire.shape) {
@@ -195,10 +217,22 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
       break;
   }
 
-  return withConfiguredFallbacks(
-    preset.routes ? refuseOtherWires(provider, preset, wire) : provider,
-    config,
-  );
+  // Here rather than in `createPresetProvider`: the wire is resolved here, and
+  // the bare adapter is exported, so it must refuse on its own a per-call model
+  // it would post to the wrong endpoint. That 404 reads as an unknown model,
+  // and a pool benches the model for an hour.
+  return preset.routes ? refuseOtherWires(provider, preset, wire) : provider;
+}
+
+/** The table is closed (`satisfies`), but a caller may hold an id as a plain
+ *  string. Validate rather than index into undefined. */
+function presetFor(id: ProviderPresetId): ProviderPreset {
+  if (!(id in PROVIDER_PRESETS)) {
+    throw new Error(
+      `[providerkit] Unknown provider preset "${id}". Valid ids: ${PRESET_IDS.join(", ")}`,
+    );
+  }
+  return PROVIDER_PRESETS[id];
 }
 
 /** The endpoint a model is served from: its route when the preset has one for
