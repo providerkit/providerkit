@@ -193,11 +193,12 @@ the invariants worth not regressing, and what is left to build.
 
 ## Status
 
-Working and tested (416 tests): the seam, the error classifier, retry and backup-model
-fallback, the idle watchdog and its wrapper, structured output on all four shapes, cost math,
-the fetch/SSE transport, tool-argument salvage, the Anthropic, OpenAI-shape, Responses and
-Gemini adapters, the multi-key rotation pool, rate-limit reset windows, the tool kernel, schema
-clamping, and the compaction decisions.
+Working and tested (1,077 tests): the seam, the error classifier, retry and backup-model
+fallback, the watchdog and its wrapper, structured output on all four shapes, cost math, the
+fetch/SSE transport, tool-argument salvage, the Anthropic, OpenAI-shape, Responses and Gemini
+adapters, the multi-key rotation pool, rate-limit reset windows, the tool kernel, schema
+clamping, the compaction decisions, history repair, `collectTurn`, the gate on calls at once,
+the registry, and subscription sign-in (`@providerkit/core/auth`).
 
 That is the whole extraction, and the claim it rests on is that an adopting codebase gets
 **smaller**. Four migrations in, it has held every time. If a repo grows on adopting this, the

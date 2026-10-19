@@ -32,10 +32,14 @@ for await (const chunk of stream) {
 same [`ProviderChunk`](/guides/providers/) sequence, so nothing downstream of it knows which
 vendor answered.
 
-If you only want the finished answer, `drainStream` collects one:
+If you only want the finished answer, `drainStream` collects one. Give it a new stream: the one
+above was already read, and a stream can be read only once.
 
 ```ts
-const { text, toolCalls, usage, finishReason } = await drainStream(stream, "claude-sonnet-5");
+const { text, toolCalls, usage, finishReason } = await drainStream(
+  provider.createStream([{ role: "user", content: "Say hi." }], []),
+  "claude-sonnet-5",
+);
 ```
 
 `toolCalls` holds the calls the model asked for, put back together and in order, and is empty when
