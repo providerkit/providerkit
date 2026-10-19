@@ -18,7 +18,8 @@ Only the headers tell them apart, and only some vendors send them.
 import { parseRateLimitReset, parseUsageLimitBody } from "@providerkit/core";
 
 const reset = parseRateLimitReset(res.headers, Date.now());
-// { resetAtMs?: number, retryAfterMs?: number, window?: "5h" | "weekly" | "monthly" }
+// { resetAtMs?: number, retryAfterMs?: number, window?: "5h" | "weekly" | "monthly",
+//   utilization?: number }
 
 if (reset.window) {
   // A subscription window. Say when it lifts; do not sleep on it.
@@ -30,6 +31,9 @@ if (reset.window) {
 
 `window` is only ever set when something in the response actually named or implied one. Absent
 means "no evidence". Treat it as an ordinary throttle rather than assuming the short case.
+
+When both windows are full, the one that resets later is named: the request only goes through
+once both have cleared.
 
 Some backends put the reset in the body instead of the headers; OpenAI's ChatGPT-subscription
 backend carries `resets_at` only on the 429 body. `parseUsageLimitBody` reads that shape. Headers
@@ -43,6 +47,23 @@ back?_, where the window's reset **outranks** `Retry-After`. Anthropic sends `re
 next to a weekly window that lifts in three days. Sixty seconds is the correct sleep and the
 wrong horizon.
 :::
+
+## Watching a window fill
+
+Claude subscriptions and the ChatGPT backend report how full each window is on every response,
+not just on the 429. Pass `onRateLimit` to see it on the turns that go through:
+
+```ts
+const stream = provider.createStream(messages, tools, {
+  onRateLimit: (reading) => {
+    // { utilization: 0.91, resetAtMs: 1788765936000, window: "weekly" }
+    if (reading.utilization >= 0.9) warnUser(reading);
+  },
+});
+```
+
+`utilization` is a fraction: 1 means full. The call comes once per response, and only when the
+headers report a window, so an API-key account never triggers it.
 
 Rendering `resetAtMs` as "in 4 hours (6:47 PM)" is deliberately **not** here. Relative-time
 wording is locale work, and a library that ships it either drags in an i18n dependency or

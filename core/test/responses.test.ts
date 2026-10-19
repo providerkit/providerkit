@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { createResponsesProvider, toResponsesInput } from "../src/providers/responses.ts";
 import { ProviderError } from "../src/errors.ts";
+import type { RateLimitReading } from "../src/rate-limit.ts";
 import type { ChatMessage, ProviderChunk, ToolDefinition } from "../src/types.ts";
 
 /**
@@ -10,7 +11,7 @@ import type { ChatMessage, ProviderChunk, ToolDefinition } from "../src/types.ts
  * `event:` line the API really sends — the adapter must key off the payload's
  * own `type`, since that is the half the SSE reader hands on.
  */
-function recorder(frames: string[], status = 200) {
+function recorder(frames: string[], status = 200, headers: Record<string, string> = {}) {
   const seen: { url: string; body: Record<string, unknown>; headers: Headers }[] = [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
     seen.push({
@@ -30,7 +31,7 @@ function recorder(frames: string[], status = 200) {
           controller.close();
         },
       }),
-      { status: 200 },
+      { status: 200, headers },
     );
   }) as unknown as typeof fetch;
   return { seen, fetchImpl };
@@ -494,14 +495,18 @@ describe("responses finish reasons", () => {
   it("names a spent window when the backend's last word was a quota snapshot", async () => {
     // The snapshot is telemetry on a healthy turn. Followed by a close with no
     // response, it is the reason — and the fuller window binds.
-    const wall = (extra: Record<string, unknown> = {}) =>
+    const wall = (extra: Record<string, unknown> = {}, primaryPercent = 40) =>
       recorder([
         j({
           type: "codex.rate_limits",
           rate_limits: {
             limit_reached: true,
-            primary: { used_percent: 40, reset_after_seconds: 3_600 },
-            secondary: { used_percent: 100, reset_after_seconds: 400_000 },
+            primary: {
+              used_percent: primaryPercent,
+              window_minutes: 300,
+              reset_after_seconds: 3_600,
+            },
+            secondary: { used_percent: 100, window_minutes: 10_080, reset_after_seconds: 400_000 },
           },
           ...extra,
         }),
@@ -509,7 +514,15 @@ describe("responses finish reasons", () => {
     const err = (await collect(
       provider({ fetchImpl: wall().fetchImpl }).createStream(hi, []),
     ).catch((e: unknown) => e)) as ProviderError;
-    expect(err).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000 });
+    expect(err).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000, window: "weekly" });
+    expect(err.message).toContain("weekly window");
+
+    // Both spent: the later reset binds, since the turn passes only once both
+    // have cleared. The primary's hour would send the caller into the week.
+    const both = (await collect(
+      provider({ fetchImpl: wall({}, 100).fetchImpl }).createStream(hi, []),
+    ).catch((e: unknown) => e)) as ProviderError;
+    expect(both).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000, window: "weekly" });
 
     // Credits cover the window: not a wall, so the close is a plain cut.
     const covered = await collect(
@@ -518,6 +531,36 @@ describe("responses finish reasons", () => {
       }).createStream(hi, []),
     ).catch((e: unknown) => e);
     expect(covered).toMatchObject({ kind: "network" });
+  });
+
+  it("hands the caller a window's fill off a turn that went through", async () => {
+    // The ChatGPT backend stamps both windows on every response. Read only off
+    // a refusal, the caller learns the week was filling once it is full.
+    const resetAt = Math.floor(Date.now() / 1000) + 3 * 86_400;
+    const { fetchImpl } = recorder(TEXT_TURN, 200, {
+      "x-codex-primary-used-percent": "12",
+      "x-codex-primary-window-minutes": "300",
+      "x-codex-primary-reset-after-seconds": "9000",
+      "x-codex-secondary-used-percent": "91",
+      "x-codex-secondary-window-minutes": "10080",
+      "x-codex-secondary-reset-at": String(resetAt),
+    });
+    const readings: RateLimitReading[] = [];
+    const chunks = await collect(
+      provider({ fetchImpl }).createStream(hi, [], { onRateLimit: (r) => readings.push(r) }),
+    );
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("stop");
+    expect(readings).toEqual([{ window: "weekly", utilization: 0.91, resetAtMs: resetAt * 1000 }]);
+
+    // A per-minute throttle's reset is not a window, so it is not reported.
+    const silent: RateLimitReading[] = [];
+    const throttle = recorder(TEXT_TURN, 200, { "x-ratelimit-reset-requests": "1s" });
+    await collect(
+      provider({ fetchImpl: throttle.fetchImpl }).createStream(hi, [], {
+        onRateLimit: (r) => silent.push(r),
+      }),
+    );
+    expect(silent).toEqual([]);
   });
 
   it("reads a spent Codex window as quota, with its clock and its window", async () => {

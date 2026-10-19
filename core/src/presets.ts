@@ -373,8 +373,9 @@ export const PROVIDER_PRESETS = {
    * Go serves three wires, and `routes` picks one from the model id (cc-proxy's
    * table, from Go's own docs): `minimax-` and `qwen` on Anthropic /messages
    * (key in `x-api-key`), `gpt-`, `grok-` and `muse-spark-` on /responses, and
-   * everything else on chat completions. Each model in a chain resolves its
-   * own route, so one preset serves a chain that crosses wires.
+   * everything else on chat completions, `grok-4.5` included. Each model in a
+   * chain resolves its own route, so one preset serves a chain that crosses
+   * wires.
    *
    * Muse Contributor, measured 2026-09-28 on /responses: text, images, strict
    * JSON Schema, parallel tools and tool-result round trips all passed. It
@@ -407,6 +408,15 @@ export const PROVIDER_PRESETS = {
         shape: "anthropic",
         baseUrl: "https://opencode.ai/zen/go",
         auth: "key",
+      },
+      {
+        // The one Grok Go serves on chat completions, while 4.6 and 4.7 are on
+        // /responses: cc-proxy's catalog pins it there as an override of the
+        // family rule. It sits above the `grok-` route because the first match
+        // wins.
+        prefixes: ["grok-4.5"],
+        shape: "openai",
+        baseUrl: "https://opencode.ai/zen/go/v1",
       },
       {
         prefixes: ["gpt-", "grok-", "muse-spark-"],

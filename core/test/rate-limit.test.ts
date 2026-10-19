@@ -60,13 +60,14 @@ describe("parseRateLimitReset", () => {
 
   it("names the unified 5h window when it is the more utilized one", () => {
     const headers = new Headers({
-      "anthropic-ratelimit-unified-5h-utilization": "97",
+      "anthropic-ratelimit-unified-5h-utilization": "0.97",
       "anthropic-ratelimit-unified-5h-reset": inSeconds(4 * HOUR),
-      "anthropic-ratelimit-unified-7d-utilization": "12",
+      "anthropic-ratelimit-unified-7d-utilization": "0.12",
       "anthropic-ratelimit-unified-7d-reset": inSeconds(6 * DAY),
     });
     expect(parseRateLimitReset(headers, NOW)).toEqual({
       window: "5h",
+      utilization: 0.97,
       resetAtMs: NOW + 4 * HOUR,
     });
   });
@@ -75,12 +76,28 @@ describe("parseRateLimitReset", () => {
     // Both windows ride on every OAuth response; only the binding one is the
     // reason for this 429.
     const headers = new Headers({
-      "anthropic-ratelimit-unified-5h-utilization": "20",
+      "anthropic-ratelimit-unified-5h-utilization": "0.2",
       "anthropic-ratelimit-unified-5h-reset": inSeconds(HOUR),
-      "anthropic-ratelimit-unified-7d-utilization": "99",
+      "anthropic-ratelimit-unified-7d-utilization": "0.99",
       "anthropic-ratelimit-unified-7d-reset": inSeconds(3 * DAY),
     });
     expect(parseRateLimitReset(headers, NOW)).toEqual({
+      window: "weekly",
+      utilization: 0.99,
+      resetAtMs: NOW + 3 * DAY,
+    });
+  });
+
+  it("names the window that resets later when both are full", () => {
+    // The request passes only once BOTH have cleared. Naming the 5-hour reset
+    // sends the user back in two hours, into the weekly wall.
+    const headers = new Headers({
+      "anthropic-ratelimit-unified-5h-utilization": "1",
+      "anthropic-ratelimit-unified-5h-reset": inSeconds(2 * HOUR),
+      "anthropic-ratelimit-unified-7d-utilization": "1",
+      "anthropic-ratelimit-unified-7d-reset": inSeconds(3 * DAY),
+    });
+    expect(parseRateLimitReset(headers, NOW)).toMatchObject({
       window: "weekly",
       resetAtMs: NOW + 3 * DAY,
     });
@@ -90,11 +107,12 @@ describe("parseRateLimitReset", () => {
     // The whole point: 60 seconds is the correct sleep and the wrong horizon.
     const headers = new Headers({
       "retry-after": "60",
-      "anthropic-ratelimit-unified-7d-utilization": "100",
+      "anthropic-ratelimit-unified-7d-utilization": "1",
       "anthropic-ratelimit-unified-7d-reset": inSeconds(3 * DAY),
     });
     expect(parseRateLimitReset(headers, NOW)).toEqual({
       window: "weekly",
+      utilization: 1,
       retryAfterMs: 60_000,
       resetAtMs: NOW + 3 * DAY,
     });
@@ -105,7 +123,7 @@ describe("parseRateLimitReset", () => {
     // a past time in front of the user.
     const headers = new Headers({
       "retry-after": "30",
-      "anthropic-ratelimit-unified-5h-utilization": "100",
+      "anthropic-ratelimit-unified-5h-utilization": "1",
       "anthropic-ratelimit-unified-5h-reset": inSeconds(-HOUR),
     });
     expect(parseRateLimitReset(headers, NOW)).toEqual({
@@ -200,6 +218,16 @@ describe("the ChatGPT backend's x-codex-* windows", () => {
   it("names the 5-hour window when it is the full one", () => {
     expect(parseRateLimitReset(codex(100, 16), NOW)).toEqual({
       window: "5h",
+      utilization: 1,
+      resetAtMs: NOW + 4 * HOUR,
+    });
+  });
+
+  it("reports how full the binding window is, as a fraction like Anthropic's", () => {
+    // What a caller watches on the turns that go through, before the wall.
+    expect(parseRateLimitReset(codex(83, 16), NOW)).toEqual({
+      window: "5h",
+      utilization: 0.83,
       resetAtMs: NOW + 4 * HOUR,
     });
   });
@@ -207,6 +235,28 @@ describe("the ChatGPT backend's x-codex-* windows", () => {
   it("names the weekly window, and its days-away reset, when that one is full", () => {
     // A short Retry-After beside it is not evidence the week has lifted.
     expect(parseRateLimitReset(codex(40, 100), NOW)).toEqual({
+      window: "weekly",
+      utilization: 1,
+      resetAtMs: NOW + 3 * DAY,
+    });
+  });
+
+  it("names the later reset when both windows are spent, whichever slot holds it", () => {
+    expect(parseRateLimitReset(codex(100, 100), NOW)).toMatchObject({
+      window: "weekly",
+      resetAtMs: NOW + 3 * DAY,
+    });
+    // A Pro plan reports its weekly window in the PRIMARY slot, so the slot
+    // order says nothing about which one lifts last.
+    const pro = new Headers({
+      "x-codex-primary-used-percent": "100",
+      "x-codex-primary-window-minutes": "10080",
+      "x-codex-primary-reset-at": inSeconds(3 * DAY),
+      "x-codex-secondary-used-percent": "100",
+      "x-codex-secondary-window-minutes": "300",
+      "x-codex-secondary-reset-after-seconds": String((4 * HOUR) / 1000),
+    });
+    expect(parseRateLimitReset(pro, NOW)).toMatchObject({
       window: "weekly",
       resetAtMs: NOW + 3 * DAY,
     });
