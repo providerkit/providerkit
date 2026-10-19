@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FallbackPool,
   NoAvailableProviderError,
@@ -275,6 +275,84 @@ describe("a cooldown store shared by several pools", () => {
     ).rejects.toMatchObject({ kind: "rate" });
     left.reset();
     expect(right.status().map((entry) => entry.retryAtMs)).toEqual([0, NOW + DAY]);
+  });
+});
+
+describe("callers that find only a probe", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A one-candidate chain whose cooldown has just run out. */
+  async function recovered(): Promise<FallbackPool<string>> {
+    vi.useFakeTimers({ now: NOW });
+    const pool = new FallbackPool(["only"], { now: () => Date.now() });
+    await expect(
+      pool.with(async () => {
+        throw failure("rate", 1_000);
+      }),
+    ).rejects.toMatchObject({ kind: "rate" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    return pool;
+  }
+
+  it("wait for it: 70 calls after a cooldown make one probe, and all 70 answer", async () => {
+    // Every caller but the probe used to fail at once with a 0 ms retry, which
+    // `withRetry` spent in one burst. cc-proxy measured it at 70 concurrent.
+    const pool = await recovered();
+    let calls = 0;
+    const answers = Promise.allSettled(
+      Array.from({ length: 70 }, () =>
+        pool.with(async (id) => {
+          if (++calls === 1) await new Promise((resolve) => setTimeout(resolve, 5_000));
+          return id;
+        }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const results = await answers;
+    expect(results.map((r) => (r.status === "fulfilled" ? r.value : r.reason))).toEqual(
+      Array(70).fill("only"),
+    );
+    expect(calls).toBe(70);
+    // Seventy waits ended by the probe, and not one of their timers left behind.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a waiter takes over a probe that never answers once it goes stale", async () => {
+    const pool = await recovered();
+    const calls: string[] = [];
+    void pool.with((id) => {
+      calls.push(id);
+      return new Promise<string>(() => {});
+    });
+    await vi.advanceTimersByTimeAsync(100_000);
+    const waiter = pool.with(async (id) => {
+      calls.push(id);
+      return id;
+    });
+    // It wakes when the probe goes stale, not a full probeStaleMs after it began to wait.
+    await vi.advanceTimersByTimeAsync(STREAM_PROGRESS_MS - 100_000 - 1);
+    expect(calls).toEqual(["only"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await waiter).toBe("only");
+    expect(calls).toEqual(["only", "only"]);
+  });
+
+  it("a waiter's Stop rejects at once with its reason and leaves no timer", async () => {
+    const pool = await recovered();
+    const probe = Promise.withResolvers<string>();
+    const probing = pool.with(() => probe.promise);
+    const stop = new AbortController();
+    const waiting = pool.with(async (id) => id, stop.signal);
+    const reason = new Error("stopped");
+    stop.abort(reason);
+    await expect(waiting).rejects.toBe(reason);
+    expect(vi.getTimerCount()).toBe(0);
+    probe.resolve("only");
+    expect(await probing).toBe("only");
   });
 });
 
