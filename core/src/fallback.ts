@@ -1,8 +1,9 @@
 import { classify, parseRetryAfterMs, ProviderError, type ErrorKind } from "./errors.ts";
 import type { RateLimitWindow } from "./rate-limit.ts";
 import type { ProviderPresetId } from "./presets.ts";
+import { sleep } from "./retry.ts";
 import type { Provider, ProviderChunk } from "./types.ts";
-import { withWatchdog, type WatchdogOptions } from "./watchdog.ts";
+import { STREAM_PROGRESS_MS, withWatchdog, type WatchdogOptions } from "./watchdog.ts";
 import { createPresetProvider, type PresetProviderConfig } from "./providers/factory.ts";
 
 /** Retry intervals when the server supplies no deadline, not estimates of when
@@ -30,6 +31,20 @@ export interface FallbackOptions<T> {
     retryAtMs: number;
     window?: RateLimitWindow;
   }) => void;
+  /** Where cooldowns live; a private Map when omitted. Hand one store to every
+   *  pool that holds the same candidate and a lockout learned in one chain
+   *  benches it in all of them, instead of each chain spending a call to find
+   *  the same weekly wall. Pools sharing a store must share `cooldownMs` too: a
+   *  bench set by one pool is honoured by the others, so a kind one of them
+   *  turned off (`null`) would still divert its calls whenever another pool
+   *  benched the candidate for it. */
+  cooldowns?: CooldownStore<T>;
+  /** How long a recovery probe may go without a first chunk before another
+   *  call may replace it. A probe that hung used to hold its candidate out of
+   *  service for good. Defaults to the watchdog's progress clock
+   *  (`STREAM_PROGRESS_MS`): a call silent that long is one the watchdog
+   *  would already have killed. */
+  probeStaleMs?: number;
   /** Inject a clock for deterministic tests. */
   now?: () => number;
 }
@@ -93,11 +108,53 @@ export function withConfiguredFallbacks(
   );
 }
 
-interface Cooldown {
+/** One candidate's bench, as a pool records it. */
+export interface Cooldown {
   retryAtMs: number;
   kind: ErrorKind;
   window?: RateLimitWindow;
-  probing: boolean;
+  /** The one call let through once the bench expired. Only that call clears
+   *  it, and `settled` resolves at its first chunk or its end. */
+  probe?: { since: number; settled: Promise<void>; settle(): void };
+}
+
+/** Where a pool keeps its benches. A `Map` fits, and so does a `WeakMap` keyed
+ *  by providers, which lets a bench go when its provider does. `get` must
+ *  return the very object `set` was given: the probe is tracked on it. */
+export interface CooldownStore<T> {
+  get(candidate: T): Cooldown | undefined;
+  set(candidate: T, cooldown: Cooldown): void;
+  delete(candidate: T): unknown;
+}
+
+function openProbe(since: number): NonNullable<Cooldown["probe"]> {
+  let settle = (): void => {};
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  return { since, settled, settle };
+}
+
+/** How many times a call that found nothing free waits on a probe before it
+ *  fails. The first wait covers a probe that answers or fails. The second
+ *  covers one that ended with neither (its own caller stopped it) and was
+ *  taken over by another waiter. Past that the caller's own retry decides. */
+const PROBE_WAITS = 2;
+
+/** Resolve when any probe settles or `ms` passes. Rejects with the caller's
+ *  reason on abort, and leaves no timer running once a probe wins. */
+async function waitForProbe(
+  settled: readonly Promise<void>[],
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const done = new AbortController();
+  const wake = signal ? AbortSignal.any([signal, done.signal]) : done.signal;
+  try {
+    await Promise.race([...settled, sleep(Math.max(0, ms), wake)]);
+  } finally {
+    done.abort();
+  }
 }
 
 /** The whole chain is unavailable. Fail promptly instead of holding a request
@@ -126,7 +183,8 @@ export class NoAvailableProviderError extends ProviderError {
  *  a background timer, vendor SDK, database or global singleton. */
 export class FallbackPool<T> {
   private readonly candidates: readonly T[];
-  private readonly cooldowns = new Map<T, Cooldown>();
+  private readonly cooldowns: CooldownStore<T>;
+  private readonly probeStaleMs: number;
   private readonly now: () => number;
 
   constructor(
@@ -146,14 +204,21 @@ export class FallbackPool<T> {
       }
     }
     this.candidates = [...candidates];
+    this.cooldowns = options.cooldowns ?? new Map();
+    this.probeStaleMs = options.probeStaleMs ?? STREAM_PROGRESS_MS;
+    if (!Number.isFinite(this.probeStaleMs) || this.probeStaleMs < 0) {
+      throw new Error("providerkit: probeStaleMs must be finite, non-negative milliseconds");
+    }
     this.now = options.now ?? Date.now;
   }
 
   /** Clear a cooldown after replacing a key or fixing configuration. Omit the
-   *  candidate to clear all. Does not interrupt calls already in flight. */
+   *  candidate to clear all of this pool's own; a shared store keeps the benches
+   *  of candidates only other pools hold. Does not interrupt calls in flight. */
   reset(...selection: [] | [T]): void {
-    if (selection.length === 0) this.cooldowns.clear();
-    else this.cooldowns.delete(selection[0]);
+    for (const candidate of selection.length === 0 ? this.candidates : selection) {
+      this.cooldowns.delete(candidate);
+    }
   }
 
   status(): Array<{
@@ -163,12 +228,12 @@ export class FallbackPool<T> {
     kind?: ErrorKind;
     window?: RateLimitWindow;
   }> {
-    return this.candidates.map((candidate) => ({
-      candidate,
-      retryAtMs: 0,
-      probing: false,
-      ...this.cooldowns.get(candidate),
-    }));
+    return this.candidates.map((candidate) => {
+      const cooldown = this.cooldowns.get(candidate);
+      if (!cooldown) return { candidate, retryAtMs: 0, probing: false };
+      const { probe, ...bench } = cooldown;
+      return { candidate, ...bench, probing: probe !== undefined };
+    });
   }
 
   /** Buffered calls only: do not wrap an agent turn that has run side effects. */
@@ -192,74 +257,107 @@ export class FallbackPool<T> {
     signal?.throwIfAborted();
     let hasFailed = false;
     let lastError: unknown;
-    for (const candidate of this.candidates) {
-      signal?.throwIfAborted();
-      const previous = this.cooldowns.get(candidate);
-      if (previous && (previous.retryAtMs > this.now() || previous.probing)) continue;
-      // One recovery probe after expiry. Healthy endpoints still allow normal
-      // concurrency; only a known failed endpoint gets a single probe.
-      if (previous) previous.probing = true;
-      const controller = new AbortController();
-      const inner = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-      let emitted = false;
-      let attemptFailed = false;
-      const startedWithCooldown = previous !== undefined;
-      try {
-        for await (const chunk of attempt(candidate, inner)) {
-          inner.throwIfAborted();
-          emitted = true;
-          // Only a call that was admitted as a recovery probe (started while on cooldown)
-          // is authorized to clear that cooldown upon succeeding.
-          if (startedWithCooldown && this.cooldowns.get(candidate) === previous) {
-            this.cooldowns.delete(candidate);
-          }
-          yield chunk;
-        }
-        inner.throwIfAborted();
-        if (startedWithCooldown && this.cooldowns.get(candidate) === previous) {
-          this.cooldowns.delete(candidate);
-        }
-        return;
-      } catch (error) {
+    for (let round = 0; ; round++) {
+      const probing: Array<NonNullable<Cooldown["probe"]>> = [];
+      for (const candidate of this.candidates) {
         signal?.throwIfAborted();
-        const kind = classify(error);
-        if (kind === "aborted") throw error;
-        const configured = this.options.cooldownMs?.[kind];
-        const interval = configured === undefined ? DEFAULT_FALLBACK_COOLDOWNS[kind] : configured;
-        if (interval === undefined || interval === null) throw error;
-        const now = this.now();
-        const after = parseRetryAfterMs(error);
-        const reset = error instanceof ProviderError ? error.resetAtMs : undefined;
-        const hints = [reset, after === undefined ? undefined : now + after].filter(
-          (value): value is number => value !== undefined && Number.isFinite(value),
-        );
-        const retryAtMs = Math.max(
-          now,
-          ...(hints.length ? hints : [now + interval]),
-          this.cooldowns.get(candidate)?.retryAtMs ?? 0,
-        );
-        const window = error instanceof ProviderError ? error.window : undefined;
-        this.cooldowns.set(candidate, { retryAtMs, kind, window, probing: false });
-        this.options.onCooldown?.({ candidate, error, kind, retryAtMs, window });
-        attemptFailed = true;
-        hasFailed = true;
-        lastError = error;
-        if (emitted) throw error;
-      } finally {
-        controller.abort();
-        const current = this.cooldowns.get(candidate);
-        if (current && current.probing && !attemptFailed) {
-          current.probing = false;
+        const previous = this.cooldowns.get(candidate);
+        if (previous && previous.retryAtMs > this.now()) continue;
+        if (previous?.probe && this.now() - previous.probe.since < this.probeStaleMs) {
+          probing.push(previous.probe);
+          continue;
+        }
+        // One recovery probe after expiry. Healthy endpoints still allow normal
+        // concurrency; only a known failed endpoint gets a single probe. A stale
+        // one is replaced: it hung, and holding the candidate for it is an outage.
+        const probe = previous ? openProbe(this.now()) : undefined;
+        if (previous) previous.probe = probe;
+        const controller = new AbortController();
+        const inner = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+        let emitted = false;
+        try {
+          for await (const chunk of attempt(candidate, inner)) {
+            inner.throwIfAborted();
+            if (!emitted) {
+              this.recovered(candidate, previous);
+              probe?.settle();
+            }
+            emitted = true;
+            yield chunk;
+          }
+          inner.throwIfAborted();
+          if (!emitted) this.recovered(candidate, previous);
+          return;
+        } catch (error) {
+          signal?.throwIfAborted();
+          const kind = classify(error);
+          if (kind === "aborted") throw error;
+          const configured = this.options.cooldownMs?.[kind];
+          const interval = configured === undefined ? DEFAULT_FALLBACK_COOLDOWNS[kind] : configured;
+          if (interval === undefined || interval === null) throw error;
+          const now = this.now();
+          const after = parseRetryAfterMs(error);
+          const reset = error instanceof ProviderError ? error.resetAtMs : undefined;
+          const hints = [reset, after === undefined ? undefined : now + after].filter(
+            (value): value is number => value !== undefined && Number.isFinite(value),
+          );
+          const retryAtMs = Math.max(
+            now,
+            ...(hints.length ? hints : [now + interval]),
+            this.cooldowns.get(candidate)?.retryAtMs ?? 0,
+          );
+          const window = error instanceof ProviderError ? error.window : undefined;
+          this.cooldowns.set(candidate, { retryAtMs, kind, window });
+          this.options.onCooldown?.({ candidate, error, kind, retryAtMs, window });
+          hasFailed = true;
+          lastError = error;
+          if (emitted) throw error;
+        } finally {
+          controller.abort();
+          // Only the owner releases its probe. Clearing whatever probe was set
+          // let a stale probe that ended late free the one that replaced it, and
+          // any call that did not fail let a second probe in.
+          if (probe) {
+            if (previous?.probe === probe) previous.probe = undefined;
+            probe.settle();
+          }
         }
       }
+      if (hasFailed) throw lastError;
+      // Nothing was free, and a probe is deciding whether something will be.
+      // Failing here answered a 0 ms retry, which `withRetry` spent at once: at
+      // 70 concurrent calls every one but the probe failed. Wait for a probe to
+      // answer or end, or until the oldest goes stale, then look again.
+      if (probing.length > 0 && round < PROBE_WAITS) {
+        const staleAt = Math.min(...probing.map((probe) => probe.since + this.probeStaleMs));
+        await waitForProbe(
+          probing.map((probe) => probe.settled),
+          staleAt - this.now(),
+          signal,
+        );
+        continue;
+      }
+      // Every candidate is cooling, or its probe outlasted the waits; a probe
+      // still in flight makes the next opportunity now.
+      const retryAtMs = Math.min(
+        ...this.status().map((entry) => Math.max(this.now(), entry.retryAtMs)),
+      );
+      throw new NoAvailableProviderError(retryAtMs, this.now());
     }
-    if (hasFailed) throw lastError;
-    // If all expired candidates are already being probed, the next opportunity
-    // is now. Other callers need not wait for those probes or start duplicates.
-    const retryAtMs = Math.min(
-      ...this.status().map((entry) => Math.max(this.now(), entry.retryAtMs)),
-    );
-    throw new NoAvailableProviderError(retryAtMs, this.now());
+  }
+
+  /** An answer proves the candidate serves again. It lifts the bench this call
+   *  was admitted under as the probe, and any bench a sibling set while it ran:
+   *  a call that started before one stray 401 and then answered used to leave
+   *  a busy primary benched for an hour. Rate and quota stay. A call that
+   *  started before the throttle proves nothing about the window, and lifting
+   *  it walks every caller back into the 429. */
+  private recovered(candidate: T, admittedUnder: Cooldown | undefined): void {
+    const current = this.cooldowns.get(candidate);
+    if (!current) return;
+    if (current === admittedUnder || (current.kind !== "rate" && current.kind !== "quota")) {
+      this.cooldowns.delete(candidate);
+    }
   }
 }
 

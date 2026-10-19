@@ -1,13 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FallbackPool,
   NoAvailableProviderError,
+  type Cooldown,
   withConfiguredFallbacks,
   withFallbackProviders,
 } from "../src/fallback.ts";
 import { ProviderError, parseRetryAfterMs, streamError } from "../src/errors.ts";
 import { drainStream, type Provider, type ProviderChunk } from "../src/types.ts";
 import { postJson } from "../src/transport.ts";
+import { STREAM_PROGRESS_MS } from "../src/watchdog.ts";
 
 const NOW = 1_800_000_000_000;
 const DAY = 86_400_000;
@@ -120,6 +122,46 @@ describe("fallback cooldowns", () => {
     expect(await pool.with(async (id) => id)).toBe("a");
   });
 
+  it("replaces a probe that never answers, and the stale one cannot free its successor", async () => {
+    let now = NOW;
+    const pool = new FallbackPool(["a", "b"], { now: () => now });
+    await pool.with(async (id) => {
+      if (id === "a") throw failure("rate", 100);
+      return id;
+    });
+    now += 100;
+    const calls: string[] = [];
+    const answer = async (id: string) => {
+      calls.push(id);
+      return id;
+    };
+    const stop = new AbortController();
+    const hung = pool.with((id, signal) => {
+      calls.push(id);
+      return new Promise<string>((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+    }, stop.signal);
+    expect(await pool.with(answer)).toBe("b");
+
+    // Past the progress clock the hung probe is presumed dead and replaced.
+    now += STREAM_PROGRESS_MS;
+    const recovery = Promise.withResolvers<string>();
+    const replacement = pool.with((id) => {
+      calls.push(id);
+      return recovery.promise;
+    });
+    // The stale probe ending late must not release the probe that replaced it.
+    stop.abort(new Error("stopped"));
+    await expect(hung).rejects.toThrow("stopped");
+    expect(await pool.with(answer)).toBe("b");
+
+    recovery.resolve("a");
+    expect(await replacement).toBe("a");
+    expect(calls).toEqual(["a", "b", "a", "b"]);
+    expect(pool.status()[0]).toMatchObject({ retryAtMs: 0, probing: false });
+  });
+
   it("does not erase a newer cooldown when an older in-flight request succeeds", async () => {
     const pool = new FallbackPool(["a", "b"], { now: () => NOW });
     const old = Promise.withResolvers<string>();
@@ -132,6 +174,30 @@ describe("fallback cooldowns", () => {
     await pending;
     expect(await pool.with(async (id) => id)).toBe("b");
   });
+
+  // One stray 401 used to bench a busy primary for an hour, even after a call
+  // that was already running on it answered. A throttle stays benched: a call
+  // that started before it proves nothing about the window.
+  it.each([
+    ["auth", "a"],
+    ["rate", "b"],
+  ] as const)(
+    "a long call that answers after a sibling's %s failure sends the next call to %s",
+    async (kind, next) => {
+      const pool = new FallbackPool(["a", "b"], { now: () => NOW });
+      const long = Promise.withResolvers<string>();
+      const pending = pool.with(() => long.promise);
+      expect(
+        await pool.with(async (id) => {
+          if (id === "a") throw failure(kind);
+          return id;
+        }),
+      ).toBe("b");
+      long.resolve("a");
+      expect(await pending).toBe("a");
+      expect(await pool.with(async (id) => id)).toBe(next);
+    },
+  );
 
   it("cools a mid-stream failure for future calls without replaying this answer", async () => {
     const pool = new FallbackPool(["a", "b"], { now: () => NOW });
@@ -181,6 +247,112 @@ describe("fallback cooldowns", () => {
     expect(() => new FallbackPool([])).toThrow(/primary/);
     expect(() => new FallbackPool(["a", "a"])).toThrow(/once/);
     expect(() => new FallbackPool(["a"], { cooldownMs: { rate: -1 } })).toThrow(/non-negative/);
+    expect(() => new FallbackPool(["a"], { probeStaleMs: Infinity })).toThrow(/probeStaleMs/);
+  });
+});
+
+describe("a cooldown store shared by several pools", () => {
+  it("benches a candidate in every chain that holds it, and reset() clears only its own", async () => {
+    const store = new Map<string, Cooldown>();
+    const left = new FallbackPool(["shared", "left"], { cooldowns: store, now: () => NOW });
+    const right = new FallbackPool(["shared", "right"], { cooldowns: store, now: () => NOW });
+
+    expect(
+      await left.with(async (id) => {
+        if (id === "shared") throw failure("quota", DAY);
+        return id;
+      }),
+    ).toBe("left");
+    // The lockout the left chain learned costs the right chain no call at all.
+    const call = vi.fn(async (id: string) => id);
+    expect(await right.with(call)).toBe("right");
+    expect(call.mock.calls.map(([id]) => id)).toEqual(["right"]);
+
+    await expect(
+      right.with(async () => {
+        throw failure("rate", DAY);
+      }),
+    ).rejects.toMatchObject({ kind: "rate" });
+    left.reset();
+    expect(right.status().map((entry) => entry.retryAtMs)).toEqual([0, NOW + DAY]);
+  });
+});
+
+describe("callers that find only a probe", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A one-candidate chain whose cooldown has just run out. */
+  async function recovered(): Promise<FallbackPool<string>> {
+    vi.useFakeTimers({ now: NOW });
+    const pool = new FallbackPool(["only"], { now: () => Date.now() });
+    await expect(
+      pool.with(async () => {
+        throw failure("rate", 1_000);
+      }),
+    ).rejects.toMatchObject({ kind: "rate" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    return pool;
+  }
+
+  it("wait for it: 70 calls after a cooldown make one probe, and all 70 answer", async () => {
+    // Every caller but the probe used to fail at once with a 0 ms retry, which
+    // `withRetry` spent in one burst. cc-proxy measured it at 70 concurrent.
+    const pool = await recovered();
+    let calls = 0;
+    const answers = Promise.allSettled(
+      Array.from({ length: 70 }, () =>
+        pool.with(async (id) => {
+          if (++calls === 1) await new Promise((resolve) => setTimeout(resolve, 5_000));
+          return id;
+        }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const results = await answers;
+    expect(results.map((r) => (r.status === "fulfilled" ? r.value : r.reason))).toEqual(
+      Array(70).fill("only"),
+    );
+    expect(calls).toBe(70);
+    // Seventy waits ended by the probe, and not one of their timers left behind.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a waiter takes over a probe that never answers once it goes stale", async () => {
+    const pool = await recovered();
+    const calls: string[] = [];
+    void pool.with((id) => {
+      calls.push(id);
+      return new Promise<string>(() => {});
+    });
+    await vi.advanceTimersByTimeAsync(100_000);
+    const waiter = pool.with(async (id) => {
+      calls.push(id);
+      return id;
+    });
+    // It wakes when the probe goes stale, not a full probeStaleMs after it began to wait.
+    await vi.advanceTimersByTimeAsync(STREAM_PROGRESS_MS - 100_000 - 1);
+    expect(calls).toEqual(["only"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await waiter).toBe("only");
+    expect(calls).toEqual(["only", "only"]);
+  });
+
+  it("a waiter's Stop rejects at once with its reason and leaves no timer", async () => {
+    const pool = await recovered();
+    const probe = Promise.withResolvers<string>();
+    const probing = pool.with(() => probe.promise);
+    const stop = new AbortController();
+    const waiting = pool.with(async (id) => id, stop.signal);
+    const reason = new Error("stopped");
+    stop.abort(reason);
+    await expect(waiting).rejects.toBe(reason);
+    expect(vi.getTimerCount()).toBe(0);
+    probe.resolve("only");
+    expect(await probing).toBe("only");
   });
 });
 

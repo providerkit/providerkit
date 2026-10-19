@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { ProviderError } from "../src/errors.ts";
 import type { ErrorKind } from "../src/errors.ts";
+import { FallbackPool } from "../src/fallback.ts";
 import { KeyPool, NoAvailableKeyError, withKeyPool } from "../src/key-pool.ts";
 import type { KeyTier } from "../src/key-pool.ts";
 import type {
@@ -122,6 +123,26 @@ describe("KeyPool — eviction", () => {
     expect(await benchedFor(failure("quota", 7 * 24 * 60 * 60_000))).toBe(12 * 60 * 60_000);
   });
 
+  it("benches a spent quota until the reset it names, not for the Retry-After beside it", async () => {
+    const time = clock();
+    const seen: number[] = [];
+    const pool = new KeyPool("test", {
+      keys: ["a", "b"],
+      now: time.now,
+      onEvict: ({ forMs }) => seen.push(forMs),
+    });
+    await pool.with(async (key) => {
+      if (key === "a") {
+        throw new ProviderError("gemini", "quota", "daily limit", {
+          retryAfterMs: 60_000,
+          resetAtMs: START + 3 * 60 * 60_000,
+        });
+      }
+      return key;
+    });
+    expect(seen).toEqual([3 * 60 * 60_000]);
+  });
+
   it("reports every eviction to onEvict — the pool's only voice", async () => {
     const evictions: { tier: KeyTier; kind: ErrorKind; forMs: number }[] = [];
     const pool = new KeyPool("test", {
@@ -166,10 +187,29 @@ describe("KeyPool — a dark pool", () => {
 
     if (!(err instanceof NoAvailableKeyError)) throw err;
     expect(err.retryAtMs).toBe(START + 20_000);
+    // A classified error, so retry and fallback read the deadline instead of
+    // guessing one from the wording.
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ kind: "rate", resetAtMs: START + 20_000, retryAfterMs: 20_000 });
 
     await expect(pool.with(async (key) => key)).rejects.toBeInstanceOf(NoAvailableKeyError);
     time.advance(20_001);
     await expect(pool.with(async (key) => key)).resolves.toBe("b");
+  });
+
+  it("benches the pool in an outer FallbackPool until its soonest key is back, not for a minute", async () => {
+    const time = clock();
+    const keys = new KeyPool("gemini", { keys: ["a", "b"], now: time.now });
+    const chain = new FallbackPool(["gemini", "backup"], { now: time.now });
+    const answer = await chain.with((id) =>
+      id === "gemini"
+        ? keys.with(async () => {
+            throw rateLimited(10 * 60_000);
+          })
+        : Promise.resolve(id),
+    );
+    expect(answer).toBe("backup");
+    expect(chain.status()[0]).toMatchObject({ kind: "rate", retryAtMs: START + 10 * 60_000 });
   });
 });
 
