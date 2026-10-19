@@ -66,10 +66,8 @@ or tell the user which actions may not have finished.
 For any other: "This call was interrupted before it returned. It may have partly run, so check its
 effect before calling it again." Without `isReadOnly`, every call gets the second one.
 
-:::caution[A tool with no flag counts as read-only]
-`defineTool` sets `isReadOnly` to `true` when you leave it out. Give every tool that writes
-`isReadOnly: false`, or the model is told that a write which may have half run is safe to run again.
-:::
+A tool counts as read-only only when it says so: `defineTool` sets `isReadOnly` to `false` when you
+leave it out. Set `isReadOnly: true` only on a tool that changes nothing.
 
 Send `messages`, the repaired list. Every adapter repairs what it sends anyway, but only your call
 knows `isReadOnly`. Repair gives the same bytes for the same history every time, and repairing a

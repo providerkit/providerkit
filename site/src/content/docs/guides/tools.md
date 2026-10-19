@@ -38,9 +38,8 @@ The flags are metadata your loop reads. The kernel does not enforce policy:
 | `isConcurrencySafe` | May run in parallel with other tools.        |
 | `isTerminal`        | Ends the turn: a submit or a final answer.   |
 
-Left out, `isReadOnly` and `isConcurrencySafe` are `true`, and the other two are `false`. Set
-`isReadOnly: false` on every tool that writes: [resuming a turn](/guides/resume/) tells the model
-a read-only call is safe to run again.
+Left out, all four are `false`. Set `isReadOnly: true` only on a tool that changes nothing:
+[resuming a turn](/guides/resume/) tells the model a read-only call is safe to run again.
 
 ## Wire repairs and schema sanitization
 
