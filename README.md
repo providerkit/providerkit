@@ -118,6 +118,24 @@ Keep one provider alive across calls, so it remembers which models are spent.
 Go also asks each client to send its own user agent, not the runtime's default. Pass
 `headers: { "user-agent": "my-app" }`, and add it to each Go entry in `fallbacks` too.
 
+### Set up providers once
+
+```ts
+import { createRegistry } from "@providerkit/core";
+
+const providers = createRegistry({
+  connections: { go: { preset: "opencode-go", apiKey } },
+});
+
+const provider = providers.get("go");
+```
+
+Name each connection once, with its preset and one credential: an API key, several keys to
+rotate, or a signed-in user's token. `get` hands back a provider that already has the watchdog,
+a fallback chain when the ref names more than one model, and a limit on calls at once when you
+set `maxConcurrent`. Ask for one model with `get("go/glm-5.3-flash")`, or name your own chains
+across connections.
+
 **Full documentation lives at [providerkit.dev](https://providerkit.dev)**. It is the single
 source of truth for usage, and this README deliberately stays a front door so the two cannot
 drift.
@@ -126,11 +144,13 @@ drift.
 | ----------------------------------------------------------------------- | ------------------------------------------------ |
 | [Getting started](https://providerkit.dev/guides/getting-started/)      | Install, first stream, swapping vendors          |
 | [The provider seam](https://providerkit.dev/guides/providers/)          | Message, chunk and tool shapes                   |
+| [Set up providers once](https://providerkit.dev/guides/registry/)       | Name each provider once, then ask by name        |
 | [Errors](https://providerkit.dev/guides/errors/)                        | The thirteen kinds, and why status is not enough |
 | [Retries and fallback](https://providerkit.dev/guides/retries/)         | Backoff, the commitment rule, backup models      |
 | [Streaming and the watchdog](https://providerkit.dev/guides/streaming/) | The stream that stops sending; TTFT              |
 | [Tools](https://providerkit.dev/guides/tools/)                          | Tool kernel, truncated-argument salvage, zod     |
 | [Context and compaction](https://providerkit.dev/guides/context/)       | When to compact, and where to cut                |
+| [Resume after a crash](https://providerkit.dev/guides/resume/)          | Pick a conversation up after the process stops   |
 | [Usage and cost](https://providerkit.dev/guides/usage/)                 | Reconciling cache tokens, cost, savings          |
 | [Sign in to a subscription](https://providerkit.dev/guides/auth/)       | Device code and PKCE sign-in, token refresh      |
 | [Jev decisions](https://providerkit.dev/guides/jev/)                    | TypeSafe's decision model on four hosts          |
