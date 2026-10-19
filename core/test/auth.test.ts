@@ -367,6 +367,39 @@ describe("tokenSource", () => {
     expect([a, b]).toEqual([fresh, fresh]);
   });
 
+  it("renews a refused token before it expires, and only the token that was refused", async () => {
+    const s = store(fresh);
+    const renewed: Credential = { ...fresh, accessToken: "newer", refreshToken: "r3" };
+    const refresh = vi.fn(async () => renewed);
+    const source = tokenSource({ ...s, refresh });
+    // Refused on a token the store has already moved past: nothing to renew.
+    expect(await source.getToken({ rejected: "old" })).toBe(fresh);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(await source.getToken({ rejected: "new" })).toBe(renewed);
+    expect(refresh).toHaveBeenCalledWith(fresh);
+    expect(s.save).toHaveBeenCalledWith(renewed);
+  });
+
+  it("never spends a refresh token twice when a read races a refresh that just saved", async () => {
+    const s = store(fresh);
+    const slowRead = Promise.withResolvers<void>();
+    let reads = 0;
+    const load = vi.fn(async () => {
+      const seen = await s.load();
+      if (++reads === 1) await slowRead.promise; // this caller read "new", then stalls
+      return seen;
+    });
+    const renewed: Credential = { ...fresh, accessToken: "newer", refreshToken: "r3" };
+    const refresh = vi.fn(async () => renewed);
+    const source = tokenSource({ load, save: s.save, refresh });
+
+    const late = source.getToken({ rejected: "new" });
+    expect(await source.getToken({ rejected: "new" })).toBe(renewed);
+    slowRead.resolve(); // its read is stale now, and the refresh it joined is gone
+    expect(await late).toBe(renewed);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("adopts a newer stored token when the refresh is rejected", async () => {
     const s = store(stale);
     const refresh = vi.fn(async () => {

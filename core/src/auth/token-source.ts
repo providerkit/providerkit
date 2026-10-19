@@ -16,12 +16,16 @@ export interface TokenSourceOptions<C extends Credential = Credential> {
 
 export interface TokenSource<C extends Credential = Credential> {
   /** A credential whose `accessToken` is good now. Throws a `ProviderError`
-   *  coded `refresh_dead` when the user must sign in again. */
-  getToken(): Promise<C>;
+   *  coded `refresh_dead` when the user must sign in again.
+   *
+   *  Pass `rejected`, the access token a server just answered 401 to, to renew
+   *  it even though it has not expired. A server can refuse a token early: it
+   *  was revoked, or another client rotated it. */
+  getToken(opts?: { rejected?: string }): Promise<C>;
 }
 
 /**
- * Refresh when the stored credential has expired, and only then.
+ * Refresh when the stored credential has expired or was rejected, and only then.
  *
  * - Concurrent calls share one refresh and the result is saved before use.
  * - When the server rejects the refresh, the stored credential is reloaded. If
@@ -36,7 +40,20 @@ export interface TokenSource<C extends Credential = Credential> {
 export function tokenSource<C extends Credential>(options: TokenSourceOptions<C>): TokenSource<C> {
   let inFlight: Promise<C> | undefined;
 
-  async function refreshStored(stale: C): Promise<C> {
+  async function loadSignedIn(): Promise<C> {
+    const credential = await options.load();
+    if (!credential) throw authError("refresh_dead", "Not signed in. Sign in first.");
+    return credential;
+  }
+
+  async function refreshStored(rejected: string | undefined): Promise<C> {
+    // Read again inside the single flight. A caller whose read raced a refresh
+    // that had just saved would otherwise start a second one with the refresh
+    // token the first already spent. Five calls refused on one token is the
+    // normal case for that race, and a server that rotates refresh tokens may
+    // take a reused one as stolen and end the whole sign-in.
+    const stale = await loadSignedIn();
+    if (isUsable(stale, rejected)) return stale;
     try {
       const fresh = await options.refresh(stale);
       await options.save(fresh);
@@ -50,18 +67,20 @@ export function tokenSource<C extends Credential>(options: TokenSourceOptions<C>
   }
 
   return {
-    async getToken() {
-      const credential = await options.load();
-      if (!credential) {
-        throw authError("refresh_dead", "Not signed in. Sign in first.");
-      }
-      if (Date.now() < credential.expiresAt) return credential;
-      inFlight ??= refreshStored(credential).finally(() => {
+    async getToken({ rejected } = {}) {
+      const credential = await loadSignedIn();
+      if (isUsable(credential, rejected)) return credential;
+      inFlight ??= refreshStored(rejected).finally(() => {
         inFlight = undefined;
       });
       return inFlight;
     },
   };
+}
+
+/** Unexpired, and not the token a server just refused. */
+function isUsable(credential: Credential, rejected: string | undefined): boolean {
+  return Date.now() < credential.expiresAt && credential.accessToken !== rejected;
 }
 
 /** A refresh the server turned down for good, as opposed to one that never
