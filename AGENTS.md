@@ -138,14 +138,20 @@ un-learned.
    backup-model walker (the oldest of the five did _not_ have this, and would restart an answer in
    another model's voice mid-render).
 2. **The watchdog aborts its OWN controller**, bridging the caller's via `AbortSignal.any`.
-   That is what keeps a user's Stop (never retried) distinguishable from our timeout (always
-   retried). `AbortSignal.any` also catches the already-aborted race no listener can. It runs
-   **two clocks**, and neither can stand in for the other: idle (60s) counts any byte once the
-   response started, keep-alives included, so a provider that pings while it buffers a long tool
-   call lives; progress (300s) counts chunks from the POST, so a route that only pings still
-   dies, and a backend that withholds its headers while it thinks (the ChatGPT backend, for
-   minutes) is not re-sent into the same deadline. One clock on chunks killed the first; one
-   clock on bytes never kills the second.
+   That is what keeps a user's Stop (never retried) distinguishable from our timeout (retried,
+   with the one exception below). `AbortSignal.any` also catches the already-aborted race no
+   listener can. It runs **two clocks**, and neither can stand in for the other: idle (60s)
+   counts any byte once the response started, keep-alives included, so a provider that pings
+   while it buffers a long tool call lives; progress (300s) counts chunks from the POST, so a
+   route that only pings still dies, and a backend that withholds its headers while it thinks
+   (the ChatGPT backend, for minutes) is not re-sent into the same deadline. One clock on chunks
+   killed the first; one clock on bytes never kills the second. **A progress timeout that fires
+   before the response started is not replayed**: it carries `shouldRetry: false`. That wait is
+   a backend thinking with its headers held back, so a replay sends the same prompt into the
+   same 300s and pays for the reasoning again, up to three times; cc-proxy never replays slow
+   headers. Its kind stays `timeout`, so a fallback pool still moves on to the next candidate.
+   Once the response started (`sawActivity`: the headers, a keep-alive, a chunk), a timeout is
+   retried as before, while nothing was emitted.
 3. **Body outranks status for the 4xx family**, and within it context › entitlement › quota ›
    auth. Each earlier fix is useless for the later ones. Swap two and the suite fails.
 4. **Anthropic usage must be reconciled.** Its `input_tokens` EXCLUDES cache reads/writes;
