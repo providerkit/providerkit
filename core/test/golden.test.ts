@@ -493,6 +493,23 @@ const NO_USAGE = {
   outputTokens: 0,
 };
 
+/** The one turn every vendor's transcript must assemble into. */
+const theTurn = (vendor: Vendor): Turn => ({
+  text: "Hello there",
+  reasoning: "Let me think.",
+  toolCalls: [{ id: "call_1", name: "search", arguments: '{"q":"cats"}' }],
+  usage: {
+    inputTokens: 1_050,
+    cachedInputTokens: 900,
+    cacheWriteTokens: 0,
+    outputTokens: 12,
+    // The thinking share of those 12, on every wire that reports one.
+    // Anthropic's does not, and a guessed number is worse than none.
+    ...(vendor.name === "anthropic" ? {} : { reasoningTokens: 4 }),
+  },
+  finishReason: "tool_calls",
+});
+
 async function assemble(stream: AsyncIterable<ProviderChunk>): Promise<Turn> {
   const calls = new Map<number, { id: string; name: string; arguments: string }>();
   let text = "";
@@ -738,21 +755,47 @@ describe.each(VENDORS)("$name", (vendor) => {
   });
 
   it("normalizes its own dialect into the one turn every vendor must produce", async () => {
-    expect(await assemble(ask(vendor.create(serving(vendor.turn))))).toEqual({
-      text: "Hello there",
-      reasoning: "Let me think.",
-      toolCalls: [{ id: "call_1", name: "search", arguments: '{"q":"cats"}' }],
-      usage: {
-        inputTokens: 1_050,
-        cachedInputTokens: 900,
-        cacheWriteTokens: 0,
-        outputTokens: 12,
-        // The thinking share of those 12, on every wire that reports one.
-        // Anthropic's does not, and a guessed number is worse than none.
-        ...(vendor.name === "anthropic" ? {} : { reasoningTokens: 4 }),
-      },
-      finishReason: "tool_calls",
-    } satisfies Turn);
+    expect(await assemble(ask(vendor.create(serving(vendor.turn))))).toEqual(theTurn(vendor));
+  });
+
+  it("keeps the whole turn when the socket dies after its last event", async () => {
+    // Kimi, GLM and OpenCode Go: the answer arrives whole, `[DONE]` or
+    // `message_stop` included, and then the read after it fails. Reading on
+    // threw away a turn the caller had already been shown (cc-proxy, measured).
+    expect(await assemble(ask(vendor.create(dying(vendor.turn))))).toEqual(theTurn(vendor));
+  });
+
+  it("keeps a turn whose finish arrived when the socket dies before the rest", async () => {
+    // The finish is stated and only trailing frames are left: the usage record
+    // on the OpenAI shape, `message_stop` on Anthropic's. Gemini and Responses
+    // end on the frame that states the finish, so the test above covers them.
+    const trailingFrom: Partial<Record<string, string>> = {
+      openai: 'data: {"choices":[],"usage"',
+      anthropic: "event: message_stop",
+    };
+    const trailing = trailingFrom[vendor.name];
+    if (!trailing) return;
+    const cut = vendor.turn.slice(0, vendor.turn.indexOf(trailing));
+    expect(await assemble(ask(vendor.create(dying(cut))))).toEqual({
+      ...theTurn(vendor),
+      // Lost with the frame that carried it. Anthropic's came in `message_delta`.
+      ...(vendor.name === "openai" ? { usage: NO_USAGE } : {}),
+    });
+  });
+
+  it("fails a frame that is not JSON on the JSON wires, after what came before it", async () => {
+    // Keep-alives are comments or JSON pings, dropped or ignored before this
+    // point, so a frame that does not parse is a lost event. Gemini is the
+    // documented exception: its suite pins a skip.
+    const at = vendor.turn.indexOf(" there");
+    const start = vendor.turn.lastIndexOf("data:", at);
+    const broken = `${vendor.turn.slice(0, start)}data: {"not json\n\n${vendor.turn.slice(start)}`;
+    const stream = ask(vendor.create(serving(broken)));
+    if (vendor.name === "gemini") {
+      expect(await assemble(stream)).toEqual(theTurn(vendor));
+      return;
+    }
+    expect(failure(await thrownBy(stream))).toMatchObject({ kind: "network" });
   });
 
   it("delivers what arrived, then says the stream was cut", async () => {

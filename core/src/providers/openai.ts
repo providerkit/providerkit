@@ -649,6 +649,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         onDone: () => {
           ended = true;
         },
+        // Usage comes AFTER the finish on this shape, so the reader keeps going
+        // to `[DONE]` (invariant 5). But a read that dies in between costs only
+        // the usage frame: the answer is whole once its finish is stated.
+        finished: () => ended,
       })) {
         const chunk = parseFrame<OpenAIChunk>(data, id);
 

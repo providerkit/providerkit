@@ -399,6 +399,10 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
         ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
+        // This wire has no terminal event to stop at, so the finish reason is
+        // the end: a read that dies after it can cost a late usage record, never
+        // the answer.
+        finished: () => finished,
       })) {
         let chunk: GeminiResponse;
         try {

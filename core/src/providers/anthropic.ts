@@ -514,7 +514,6 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       // What proves the turn ended rather than the socket: a stated stop
       // reason, or `message_stop`. See the check after the loop.
       let stopped = false;
-      let closed = false;
       const usageChunk = (): ProviderChunk => ({
         type: "usage",
         usage: {
@@ -544,6 +543,9 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
         ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
+        // The stop reason rides in `message_delta` with the final usage, so a
+        // read that dies after it loses nothing but `message_stop`.
+        finished: () => stopped,
       })) {
         const event = parseFrame<AnthropicEvent>(data, id);
 
@@ -612,15 +614,18 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             break;
           }
 
+          // The turn's last event, so the reader stops here. Some gateways
+          // append a `[DONE]` or other bytes after it, and a read that died on
+          // those failed an answer that was already whole (Kimi, GLM and
+          // OpenCode Go, measured by cc-proxy).
           case "message_stop":
-            closed = true;
             yield usageChunk();
-            break;
+            return;
         }
       }
-      if (closed) return;
-      // A gateway that states its stop reason and then skips `message_stop`
-      // still finished the turn — and still billed it.
+      // A gateway that states its stop reason and then skips `message_stop`, or
+      // whose socket dies after the reason, still finished the turn, and still
+      // billed it.
       if (stopped) {
         yield usageChunk();
         return;
