@@ -109,7 +109,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | `tool-args.ts`           | truncation salvage + double-escape healing                                 |
 | `tools.ts`               | validated, cancellable, time-bounded tool calls + registry                 |
 | `schema.ts`              | clamp overflow to advertised bounds                                        |
-| `context.ts`             | compaction decisions — `needsCompaction`, `pickCut`, `applyCompaction`     |
+| `context.ts`             | `needsCompaction`, `pickCut`, `applyCompaction`, and `repairHistory`       |
 | `providers/anthropic.ts` | Anthropic shape                                                            |
 | `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)             |
 | `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend             |
@@ -201,6 +201,16 @@ un-learned.
     streams live, so a reader watches the model think. An empty turn with a `length` finish is
     `invalid`, not `overload`: the cap is the caller's, so a retry or a backup model meets the
     same cap and fails the same way, and cooling a model down for it punishes the wrong party.
+14. **History repair has no side effects and never moves an earlier byte.** All four adapters
+    run `repairHistory` on every request they send. The same input gives the same bytes, an id
+    depends only on the messages before it, and repair never makes up a random id, so a longer
+    history repairs into the shorter one's bytes plus what is new. The prompt cache is a prefix
+    cache: one earlier byte that changes between sends, and every turn after it re-bills the
+    whole conversation. Claude Code minted new ids on every resume, and its transcripts grew
+    exponentially. That is why an empty id becomes `call_{message}_{call}` rather than
+    `normalizeToolId`'s random fallback, and why a reused id is renamed against the ids before
+    it, never the ones after. `golden.test.ts` sends one broken history twice on all four wires
+    and wants the same bytes both times.
 
 ## Next
 
