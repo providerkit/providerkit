@@ -22,9 +22,10 @@ const provider = providers.get("go");
 and one credential.
 
 `get("go")` runs every model the connection has, in order. With no `model` or `models` set,
-`opencode-go` uses its own list: `mimo-v2.6-flash`, then `mimo-v2.5`, `glm-5.3-flash`, `qwen3.8-flash` and
-`longcat-2.0`. Each model has its own watchdog. The models sit in one fallback pool: when one
-fails before it sends anything, the pool benches it for a while and the next one answers.
+`opencode-go` uses its own list: `mimo-v2.6-flash`, then `mimo-v2.5`, `glm-5.3-flash`,
+`qwen3.8-flash` and `longcat-2.0`. Each model has its own watchdog. The models sit in one fallback
+pool: when one fails before it sends anything, the pool benches it for a while and the next one
+answers.
 
 Calling `get` on every request is fine. Each chain is built once, the first time a call needs it,
 and then shared.
