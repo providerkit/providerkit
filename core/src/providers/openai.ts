@@ -5,7 +5,8 @@
 // Their divergences are small and named where they appear.
 import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
-import { streamSse, apiUrl } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame } from "../transport.ts";
+import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
   ChatMessage,
@@ -329,19 +330,43 @@ function dialectFor(id: string): EffortDialect {
   return "openai";
 }
 
-function mapFinishReason(reason: string | null | undefined): FinishReason | undefined {
+/**
+ * A stated finish, or a throw for one this dialect does not document. An
+ * unknown reason used to end the stream as a clean success with no finish at
+ * all, so DeepSeek's `insufficient_system_resource`, Z.ai's `network_error` and
+ * OpenRouter's `error` each read as a finished answer. Nothing says the answer
+ * ended on purpose, so it is `overload`: theirs, and worth a retry (cc-proxy
+ * answers it the same way).
+ */
+function mapFinishReason(provider: string, reason: string): FinishReason {
   switch (reason) {
+    // A natural end under another name, from servers on this wire: Together's
+    // `eos`, Hugging Face TGI's `eos_token` and `stop_sequence`. Thrown as
+    // unknown, each would fail an answer that was already whole.
     case "stop":
+    case "eos":
+    case "eos_token":
+    case "stop_sequence":
       return "stop";
+    // Z.ai's `model_context_window_exceeded` and Mistral's `model_length`: the
+    // context window filled before the answer did. Cut short, and a retry fills
+    // it the same way.
     case "length":
+    case "model_context_window_exceeded":
+    case "model_length":
       return "length";
     case "tool_calls":
     case "function_call":
       return "tool_calls";
+    // `sensitive` is Z.ai's name for its safety stop. A retry meets the same
+    // filter.
     case "content_filter":
+    case "sensitive":
       return "content_filter";
     default:
-      return undefined;
+      throw new ProviderError(provider, "overload", `${provider} ended the turn on "${reason}"`, {
+        code: reason,
+      });
   }
 }
 
@@ -627,6 +652,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         : "/v1/chat/completions";
 
       let ended = false;
+      // Each call as its deltas named it, by index. The finish checks them
+      // before it goes out, and they are what says the turn called a tool.
+      const calls = new Map<number, ToolCallIdentity>();
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
@@ -649,13 +677,12 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         onDone: () => {
           ended = true;
         },
+        // Usage comes AFTER the finish on this shape, so the reader keeps going
+        // to `[DONE]` (invariant 5). But a read that dies in between costs only
+        // the usage frame: the answer is whole once its finish is stated.
+        finished: () => ended,
       })) {
-        let chunk: OpenAIChunk;
-        try {
-          chunk = JSON.parse(data) as OpenAIChunk;
-        } catch {
-          continue;
-        }
+        const chunk = parseFrame<OpenAIChunk>(data, id);
 
         // A failure the backend reports after its headers went out. The
         // gateways speaking this dialect — OpenRouter above all — report a
@@ -727,18 +754,35 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
                 ? { arguments: call.function.arguments }
                 : {}),
             }));
+            for (const call of out.toolCalls) {
+              const seen = calls.get(call.index) ?? { index: call.index, id: "", name: "" };
+              if (call.id) seen.id = call.id;
+              if (call.name) seen.name = call.name;
+              calls.set(call.index, seen);
+            }
             has = true;
           }
           if (has) yield out;
         }
 
-        if (choice.finish_reason) ended = true;
-        const finishReason = mapFinishReason(choice.finish_reason);
-        if (finishReason) yield { type: "finish", finishReason };
+        if (choice.finish_reason) {
+          const stated = mapFinishReason(id, choice.finish_reason);
+          const minted = settleToolCalls(id, calls.values());
+          if (minted.length > 0) yield { type: "delta", toolCalls: minted };
+          ended = true;
+          // Several gateways end a turn that called a tool on `stop`, and a
+          // caller reading that as done never runs the tool. Only `stop` is
+          // promoted: a length cut or a filter may be what broke the call.
+          const finishReason = stated === "stop" && calls.size > 0 ? "tool_calls" : stated;
+          yield { type: "finish", finishReason };
+        }
       }
       // Either proof will do: some gateways send `[DONE]` with no finish, and
       // some a finish with no `[DONE]`. Neither means the socket closed early.
       if (!ended) throw streamCut(id);
+      // A `[DONE]` with no finish stated still owes its calls the same check.
+      const minted = settleToolCalls(id, calls.values());
+      if (minted.length > 0) yield { type: "delta", toolCalls: minted };
     },
   };
 

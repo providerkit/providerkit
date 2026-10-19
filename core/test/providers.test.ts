@@ -1466,3 +1466,183 @@ describe("one tool call per turn", () => {
     });
   });
 });
+
+// ── what the two readers refuse to read past ─────────────────────────────
+
+const SHAPES = [
+  {
+    name: "openai",
+    create: (fetchImpl: typeof fetch) =>
+      createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl }),
+  },
+  {
+    name: "anthropic",
+    create: (fetchImpl: typeof fetch) =>
+      createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", fetchImpl }),
+  },
+];
+
+const ASK: ChatMessage[] = [{ role: "user", content: "hi" }];
+
+/** Every chunk a stream delivered, then the error it ended with. */
+async function settle(stream: AsyncIterable<ProviderChunk>) {
+  const chunks: ProviderChunk[] = [];
+  try {
+    for await (const chunk of stream) chunks.push(chunk);
+  } catch (error) {
+    return { chunks, error };
+  }
+  return { chunks, error: undefined };
+}
+
+describe.each(SHAPES)("the $name reader", ({ name, create }) => {
+  const text = (delta: string) =>
+    name === "openai"
+      ? j({ choices: [{ delta: { content: delta } }] })
+      : j({ type: "content_block_delta", delta: { type: "text_delta", text: delta } });
+  const finish = (reason: string) =>
+    name === "openai"
+      ? [j({ choices: [{ delta: {}, finish_reason: reason }] })]
+      : [
+          j({ type: "message_delta", delta: { stop_reason: reason }, usage: { output_tokens: 1 } }),
+          j({ type: "message_stop" }),
+        ];
+
+  it("throws a retryable error on a finish it does not know", async () => {
+    // DeepSeek's `insufficient_system_resource` ended the stream as a clean
+    // success with no finish at all, so a turn the backend gave up on read as
+    // an answer.
+    const { fetchImpl } = recorder([...finish("insufficient_system_resource")]);
+    const { error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "overload", code: "insufficient_system_resource" });
+    expect((error as ProviderError).isTransient).toBe(true);
+  });
+
+  const call = (id: string | undefined, toolName: string | undefined) =>
+    name === "openai"
+      ? [
+          j({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      ...(id ? { id } : {}),
+                      function: { ...(toolName ? { name: toolName } : {}), arguments: "{}" },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        ]
+      : [
+          j({
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              ...(id ? { id } : {}),
+              ...(toolName ? { name: toolName } : {}),
+            },
+          }),
+          j({
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: "{}" },
+          }),
+          j({ type: "content_block_stop", index: 0 }),
+        ];
+  const stop = name === "openai" ? "stop" : "end_turn";
+  const cap = name === "openai" ? "length" : "max_tokens";
+  const calls = (chunks: ProviderChunk[]) => chunks.flatMap((c) => c.toolCalls ?? []);
+
+  it("finishes a turn that called a tool as tool_calls when it says stop", async () => {
+    // A caller reading `stop` as done never runs the tool.
+    const { fetchImpl } = recorder([...call("call_1", "search"), ...finish(stop)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
+  });
+
+  it("keeps a length cut a length cut, calls or not", async () => {
+    // The cut may be what broke the call's arguments, so it outranks them.
+    const { fetchImpl } = recorder([...call("call_1", "search"), ...finish(cap)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("length");
+  });
+
+  it("fails a tool call that has no name", async () => {
+    const { fetchImpl } = recorder([...call("call_1", undefined), ...finish(stop)]);
+    const { error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "overload" });
+  });
+
+  it("gives a tool call with no id one, before the finish", async () => {
+    const { fetchImpl } = recorder([...call(undefined, "search"), ...finish(stop)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    const ids = calls(chunks).flatMap((c) => (c.id ? [c.id] : []));
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).toMatch(/^call_pk_\w+$/);
+    const finishAt = chunks.findIndex((c) => c.type === "finish");
+    expect(chunks.findIndex((c) => c.toolCalls?.some((t) => t.id))).toBeLessThan(finishAt);
+  });
+
+  it("never rewrites an id the vendor sent, however long", async () => {
+    const long = `toolu_${"x".repeat(80)}`;
+    const { fetchImpl } = recorder([...call(long, "search"), ...finish(stop)]);
+    const chunks = await collect(create(fetchImpl).createStream(ASK, []));
+    expect(calls(chunks).flatMap((c) => (c.id ? [c.id] : []))).toEqual([long]);
+  });
+
+  it("reads a context window that filled mid-answer as a length cut", async () => {
+    // Z.ai's chat dialect and Anthropic's both name it. Retried, it fills the
+    // same window again.
+    const { fetchImpl } = recorder([text("Hel"), ...finish("model_context_window_exceeded")]);
+    const { chunks, error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeUndefined();
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("length");
+  });
+
+  it("fails a frame that is not JSON as network, after what came before it", async () => {
+    // Keep-alives are comments, dropped before the adapter. A frame that does
+    // not parse is a lost delta, call or finish, and skipping it read the turn
+    // as whole.
+    const { fetchImpl } = recorder([text("Hel"), "not json at all", text("lo")]);
+    const { chunks, error } = await settle(create(fetchImpl).createStream(ASK, []));
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "network", body: "not json at all" });
+    expect(chunks.map((c) => c.content ?? "").join("")).toBe("Hel");
+  });
+});
+
+describe("the openai reader, on Z.ai's finish names", () => {
+  it("reads `sensitive` as Z.ai's safety stop, not as a failure to retry", async () => {
+    const { fetchImpl } = recorder([j({ choices: [{ delta: {}, finish_reason: "sensitive" }] })]);
+    const chunks = await collect(
+      createOpenAIProvider({ apiKey: "k", model: "glm-5.3", fetchImpl }).createStream(ASK, []),
+    );
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("content_filter");
+  });
+});
+
+describe("the openai reader, on other servers' finish names", () => {
+  it.each([
+    ["eos", "stop"],
+    ["eos_token", "stop"],
+    ["stop_sequence", "stop"],
+    ["model_length", "length"],
+  ] as const)("reads `%s` as %s, not as a failure to retry", async (stated, expected) => {
+    // Together, Hugging Face TGI and Mistral end whole answers this way. Thrown
+    // as unknown, the answer the reader already showed would fail after it.
+    const { fetchImpl } = recorder([
+      j({ choices: [{ delta: { content: "Hello" }, finish_reason: null }] }),
+      j({ choices: [{ delta: {}, finish_reason: stated }] }),
+    ]);
+    const chunks = await collect(
+      createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl }).createStream(ASK, []),
+    );
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe(expected);
+  });
+});

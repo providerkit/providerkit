@@ -493,6 +493,32 @@ const NO_USAGE = {
   outputTokens: 0,
 };
 
+/** A transcript with every match of `swaps` applied, failing loudly when none
+ *  matched, so a fixture that drifts cannot turn a check into a no-op. Every
+ *  match, because Responses states a call twice: in its skeleton and its `.done`. */
+function rewrite(turn: string, swaps: [string, string][], mustChange = true): string {
+  const out = swaps.reduce((body, [from, to]) => body.replaceAll(from, to), turn);
+  expect(out !== turn, "no swap matched this transcript").toBe(mustChange);
+  return out;
+}
+
+/** The one turn every vendor's transcript must assemble into. */
+const theTurn = (vendor: Vendor): Turn => ({
+  text: "Hello there",
+  reasoning: "Let me think.",
+  toolCalls: [{ id: "call_1", name: "search", arguments: '{"q":"cats"}' }],
+  usage: {
+    inputTokens: 1_050,
+    cachedInputTokens: 900,
+    cacheWriteTokens: 0,
+    outputTokens: 12,
+    // The thinking share of those 12, on every wire that reports one.
+    // Anthropic's does not, and a guessed number is worse than none.
+    ...(vendor.name === "anthropic" ? {} : { reasoningTokens: 4 }),
+  },
+  finishReason: "tool_calls",
+});
+
 async function assemble(stream: AsyncIterable<ProviderChunk>): Promise<Turn> {
   const calls = new Map<number, { id: string; name: string; arguments: string }>();
   let text = "";
@@ -738,21 +764,105 @@ describe.each(VENDORS)("$name", (vendor) => {
   });
 
   it("normalizes its own dialect into the one turn every vendor must produce", async () => {
-    expect(await assemble(ask(vendor.create(serving(vendor.turn))))).toEqual({
-      text: "Hello there",
-      reasoning: "Let me think.",
-      toolCalls: [{ id: "call_1", name: "search", arguments: '{"q":"cats"}' }],
-      usage: {
-        inputTokens: 1_050,
-        cachedInputTokens: 900,
-        cacheWriteTokens: 0,
-        outputTokens: 12,
-        // The thinking share of those 12, on every wire that reports one.
-        // Anthropic's does not, and a guessed number is worse than none.
-        ...(vendor.name === "anthropic" ? {} : { reasoningTokens: 4 }),
-      },
-      finishReason: "tool_calls",
-    } satisfies Turn);
+    expect(await assemble(ask(vendor.create(serving(vendor.turn))))).toEqual(theTurn(vendor));
+  });
+
+  it("keeps the whole turn when the socket dies after its last event", async () => {
+    // Kimi, GLM and OpenCode Go: the answer arrives whole, `[DONE]` or
+    // `message_stop` included, and then the read after it fails. Reading on
+    // threw away a turn the caller had already been shown (cc-proxy, measured).
+    expect(await assemble(ask(vendor.create(dying(vendor.turn))))).toEqual(theTurn(vendor));
+  });
+
+  it("keeps a turn whose finish arrived when the socket dies before the rest", async () => {
+    // The finish is stated and only trailing frames are left: the usage record
+    // on the OpenAI shape, `message_stop` on Anthropic's. Gemini and Responses
+    // end on the frame that states the finish, so the test above covers them.
+    const trailingFrom: Partial<Record<string, string>> = {
+      openai: 'data: {"choices":[],"usage"',
+      anthropic: "event: message_stop",
+    };
+    const trailing = trailingFrom[vendor.name];
+    if (!trailing) return;
+    const cut = vendor.turn.slice(0, vendor.turn.indexOf(trailing));
+    expect(await assemble(ask(vendor.create(dying(cut))))).toEqual({
+      ...theTurn(vendor),
+      // Lost with the frame that carried it. Anthropic's came in `message_delta`.
+      ...(vendor.name === "openai" ? { usage: NO_USAGE } : {}),
+    });
+  });
+
+  it("throws a retryable error on a finish it does not know", async () => {
+    // DeepSeek's `insufficient_system_resource`, Gemini's `OTHER`: each ended
+    // the stream as a clean success once, a turn the backend gave up on read
+    // as an answer. Each wire states its finish in its own place; one of these
+    // swaps lands on each.
+    const unknown = rewrite(vendor.turn, [
+      ['"finish_reason":"tool_calls"', '"finish_reason":"mystery"'],
+      ['"stop_reason":"tool_use"', '"stop_reason":"mystery"'],
+      ['"finishReason":"STOP"', '"finishReason":"MYSTERY"'],
+      [
+        '"type":"response.completed","response":{',
+        '"type":"response.completed","response":{"status":"mystery",',
+      ],
+    ]);
+    const err = await thrownBy(ask(vendor.create(serving(unknown))));
+    expect(failure(err)).toMatchObject({ kind: "overload" });
+    expect((err as ProviderError).isTransient).toBe(true);
+  });
+
+  it("fails a frame that is not JSON on the JSON wires, after what came before it", async () => {
+    // Keep-alives are comments or JSON pings, dropped or ignored before this
+    // point, so a frame that does not parse is a lost event. Gemini is the
+    // documented exception: its suite pins a skip.
+    const at = vendor.turn.indexOf(" there");
+    const start = vendor.turn.lastIndexOf("data:", at);
+    const broken = `${vendor.turn.slice(0, start)}data: {"not json\n\n${vendor.turn.slice(start)}`;
+    const stream = ask(vendor.create(serving(broken)));
+    if (vendor.name === "gemini") {
+      expect(await assemble(stream)).toEqual(theTurn(vendor));
+      return;
+    }
+    expect(failure(await thrownBy(stream))).toMatchObject({ kind: "network" });
+  });
+
+  it("finishes a turn that called a tool as tool_calls, even when it says stop", async () => {
+    // Several gateways end a tool turn on a plain stop, and a caller reading
+    // that as done never runs the tool. Gemini always says STOP and Responses
+    // never states a reason, so only the first two wires need the swap.
+    const saysStop = rewrite(
+      vendor.turn,
+      [
+        ['"finish_reason":"tool_calls"', '"finish_reason":"stop"'],
+        ['"stop_reason":"tool_use"', '"stop_reason":"end_turn"'],
+      ],
+      vendor.name === "openai" || vendor.name === "anthropic",
+    );
+    expect(await assemble(ask(vendor.create(serving(saysStop))))).toEqual(theTurn(vendor));
+  });
+
+  it("fails a tool call that has no name", async () => {
+    // Nothing says which tool to run. Passed on, the loop failed one step
+    // later with nothing to say why.
+    const nameless = rewrite(vendor.turn, [['"name":"search",', ""]]);
+    const err = await thrownBy(ask(vendor.create(serving(nameless))));
+    expect(failure(err)).toMatchObject({ kind: "overload" });
+  });
+
+  it("gives a tool call with no id one, and the same one on every wire", async () => {
+    // The result is paired back to its call by id, so a call without one
+    // can't be answered. Responses names it `call_id`.
+    const noId = rewrite(vendor.turn, [
+      ['"id":"call_1",', ""],
+      ['"call_id":"call_1",', ""],
+    ]);
+    const turn = await assemble(ask(vendor.create(serving(noId))));
+    expect(turn).toEqual({
+      ...theTurn(vendor),
+      toolCalls: [
+        { id: expect.stringMatching(/^call_pk_\w+$/), name: "search", arguments: '{"q":"cats"}' },
+      ],
+    });
   });
 
   it("delivers what arrived, then says the stream was cut", async () => {

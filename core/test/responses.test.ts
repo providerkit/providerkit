@@ -151,10 +151,29 @@ describe("responses adapter", () => {
     expect(chunks.map((c) => c.content).join("")).toBe("Hello");
   });
 
-  it("skips a frame that is not JSON", async () => {
-    const { fetchImpl } = recorder(["not json at all", ...TEXT_TURN]);
-    const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
-    expect(chunks.filter((c) => c.content)).toHaveLength(2);
+  it("fails a frame that is not JSON rather than skipping it", async () => {
+    // Keep-alives never reach the adapter, so a frame that does not parse is a
+    // lost event. Skipped, the turn read as whole with a delta missing.
+    const { fetchImpl } = recorder([...TEXT_TURN.slice(0, 3), "not json at all", ...TEXT_TURN]);
+    const seen: ProviderChunk[] = [];
+    const err = await (async () => {
+      for await (const chunk of provider({ fetchImpl }).createStream(hi, [])) seen.push(chunk);
+    })().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ kind: "network", body: "not json at all" });
+    expect(seen.map((c) => c.content).join("")).toBe("Hel");
+  });
+
+  it("throws on a terminal status that does not say the turn finished", async () => {
+    // A `completed` event that says `cancelled` read as a clean stop.
+    const { fetchImpl } = recorder([
+      j({ type: "response.completed", response: { status: "cancelled", usage: USAGE } }),
+    ]);
+    const err = await collect(provider({ fetchImpl }).createStream(hi, [])).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ kind: "overload", code: "cancelled" });
   });
 });
 
@@ -330,10 +349,11 @@ describe("responses tool calls", () => {
     ]);
   });
 
-  it("drops a done-only call with no call_id instead of handing one over unrunnable", async () => {
-    // Nothing was streamed for it, so it can still be dropped — and a turn
-    // whose only call vanished must not finish as tool_calls, or the loop
-    // goes looking for a call that is not there.
+  it("gives a call with no call_id an id instead of dropping it", async () => {
+    // It used to be dropped, so the result would not quote `""` and take a
+    // 400 a turn later. Dropped, the model's call silently never happened. An
+    // id made here is sent back on both the call and its result, so the pair
+    // still matches.
     const { fetchImpl } = recorder([
       j({
         type: "response.output_item.done",
@@ -343,8 +363,26 @@ describe("responses tool calls", () => {
     ]);
     const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
 
-    expect(chunks.flatMap((c) => c.toolCalls ?? [])).toEqual([]);
-    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("stop");
+    const [call] = assemble(chunks);
+    expect(call).toMatchObject({ index: 0, name: "search", arguments: '{"q":"x"}' });
+    expect(call!.id).toMatch(/^call_pk_\w+$/);
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
+  });
+
+  it("fails a call that never states its name", async () => {
+    // Nothing can dispatch it. Passed on, the loop failed one step later with
+    // nothing to say why.
+    const { fetchImpl } = recorder([
+      j({ type: "response.output_item.added", item: { type: "function_call", id: "fc_1" } }),
+      j({
+        type: "response.output_item.done",
+        item: { type: "function_call", id: "fc_1", call_id: "call_1", arguments: "{}" },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ]);
+    await expect(collect(provider({ fetchImpl }).createStream(hi, []))).rejects.toMatchObject({
+      kind: "overload",
+    });
   });
 
   it("says nothing on a done that restates exactly what already streamed", async () => {

@@ -6,9 +6,9 @@
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
 import { repairHistory } from "../context.ts";
-import { ProviderError, streamCut, streamError } from "../errors.ts";
+import { ProviderError, streamCut, streamError, type ErrorKind } from "../errors.ts";
 import { schemaPrompt, toGeminiToolSchema } from "../schema.ts";
-import { parseToolArgs } from "../tool-args.ts";
+import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
@@ -227,15 +227,66 @@ function toToolConfig(choice: ToolChoice | undefined): unknown {
   return { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [choice.name] } };
 }
 
-function mapFinishReason(reason: string): FinishReason {
+/**
+ * Every finish reason Gemini documents (the generate-content reference, read
+ * 2026-10-19), decided one by one. Anything this switch did not name used to
+ * read as `stop`, so a call the model botched (`MALFORMED_FUNCTION_CALL`) or a
+ * turn that ended for no stated reason (`OTHER`) came back as a finished, empty
+ * answer. After a tool result, `requireContent` takes an empty `stop` as the
+ * model choosing to say nothing, so nothing retried it.
+ */
+function mapFinishReason(provider: string, reason: string): FinishReason {
+  const fail = (kind: ErrorKind, why: string): never => {
+    throw new ProviderError(provider, kind, `${provider} ended the turn on ${reason}: ${why}`, {
+      code: reason,
+    });
+  };
   switch (reason) {
+    case "STOP":
+      return "stop";
+    // The output cap. CONTINUATION is the same cap with a token to carry on,
+    // which this adapter never sends back.
     case "MAX_TOKENS":
+    case "CONTINUATION":
       return "length";
+    // A filter on what was said or drawn. The text so far stands and the
+    // finish says why it ended, as `content_filter` does on every wire. A
+    // retry would mostly meet the same filter.
     case "SAFETY":
     case "PROHIBITED_CONTENT":
+    case "BLOCKLIST":
+    case "SPII":
+    case "RECITATION":
+    case "LANGUAGE":
+    case "ESCALATION":
+    case "IMAGE_SAFETY":
+    case "IMAGE_PROHIBITED_CONTENT":
+    case "IMAGE_RECITATION":
       return "content_filter";
+    // The request lost a thought signature, and the same request loses it
+    // again. A bug in what was sent, so nothing retries it.
+    case "MISSING_THOUGHT_SIGNATURE":
+      return fail("invalid", "the request is missing a thought signature");
+    // The account was limited for a policy violation. Benched like a refused
+    // key, so a key pool moves to another project.
+    case "PUP_LIMITED_DISABLED":
+      return fail("auth", "the account is limited or disabled");
+    // The model broke its own turn: a call it could not form, one with no tool
+    // offered, too many in a row, a malformed reply, an image it never made.
+    // The same request usually works on the next try.
+    case "MALFORMED_FUNCTION_CALL":
+    case "UNEXPECTED_TOOL_CALL":
+    case "TOO_MANY_TOOL_CALLS":
+    case "MALFORMED_RESPONSE":
+    case "NO_IMAGE":
+      return fail("overload", "the model broke its own turn");
+    // These say nothing about why, and a reason added after this list says
+    // nothing we can read. Neither proves the answer is whole.
+    case "OTHER":
+    case "IMAGE_OTHER":
+    case "FINISH_REASON_UNSPECIFIED":
     default:
-      return "stop";
+      return fail("overload", "it gave no reason that shows the answer is complete");
   }
 }
 
@@ -399,6 +450,10 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
         ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
+        // This wire has no terminal event to stop at, so the finish reason is
+        // the end: a read that dies after it can cost a late usage record, never
+        // the answer.
+        finished: () => finished,
       })) {
         let chunk: GeminiResponse;
         try {
@@ -456,12 +511,14 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
           const call = part.functionCall;
           if (!call) continue;
           const index = callIndex++;
+          const identity = { index, id: call.id ?? "", name: call.name ?? "" };
+          // The part is the whole call, so it is settled here: one with no
+          // name can't run, and one with no id gets one the way the other
+          // three wires mint it. Gemini omits the id on a single-call turn, and
+          // the seam's consumers pair a result back to its call by id.
+          settleToolCalls(id, [identity]);
           toolCalls.push({
-            index,
-            // Gemini omits the id on a single-call turn, and the seam's
-            // consumers pair a result back to its call by id.
-            id: call.id ?? `call_${index}`,
-            ...(call.name ? { name: call.name } : {}),
+            ...identity,
             // Whole and already assembled — unlike the OpenAI shape, Gemini
             // never fragments an argument object across chunks.
             arguments: JSON.stringify(call.args ?? {}),
@@ -477,13 +534,16 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         }
 
         if (candidate.finishReason) {
+          // Mapped first: a reason that throws must not be dressed as tool_calls.
+          const finishReason = mapFinishReason(id, candidate.finishReason);
           finished = true;
           yield {
             type: "finish",
-            // A turn that called tools finishes as tool_calls whatever the
-            // candidate says — Gemini routinely reports STOP there, and a
+            // Gemini routinely reports STOP on a turn that called tools, and a
             // caller reading that as "done" drops the tool round entirely.
-            finishReason: sawFunctionCalls ? "tool_calls" : mapFinishReason(candidate.finishReason),
+            // Only STOP is promoted, as on the other three wires: a length cut
+            // or a filter may be what broke the call (invariant 10).
+            finishReason: sawFunctionCalls && finishReason === "stop" ? "tool_calls" : finishReason,
           };
         }
       }

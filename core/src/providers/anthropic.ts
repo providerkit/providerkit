@@ -2,8 +2,8 @@
 import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
-import { parseToolArgs } from "../tool-args.ts";
-import { streamSse, apiUrl } from "../transport.ts";
+import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
+import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
@@ -192,19 +192,32 @@ function continuesToolLoop(messages: readonly ChatMessage[]): boolean {
   return false;
 }
 
-function mapStopReason(reason: string | undefined): FinishReason | undefined {
+/**
+ * A stated stop, or a throw for one this adapter does not know. An unknown
+ * reason used to end the stream as a clean success with no finish at all.
+ * Nothing says the answer ended on purpose, so it is `overload`: theirs, and
+ * worth a retry (cc-proxy answers it the same way). `pause_turn` lands there
+ * too: it is a server-tool turn waiting to be sent back, which this adapter
+ * never asks for, and a half answer is not a finished one.
+ */
+function mapStopReason(provider: string, reason: string): FinishReason {
   switch (reason) {
     case "end_turn":
     case "stop_sequence":
       return "stop";
     case "tool_use":
       return "tool_calls";
+    // `model_context_window_exceeded`: the context window filled before the
+    // answer did. Cut short, and a retry fills it the same way.
     case "max_tokens":
+    case "model_context_window_exceeded":
       return "length";
     case "refusal":
       return "content_filter";
     default:
-      return undefined;
+      throw new ProviderError(provider, "overload", `${provider} stopped the turn on "${reason}"`, {
+        code: reason,
+      });
   }
 }
 
@@ -509,12 +522,12 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       let cachedInputTokens = 0;
       let cacheWriteTokens = 0;
       let outputTokens = 0;
-      let toolCall: { index: number; id: string; name: string } | null = null;
+      let toolCall: ToolCallIdentity | null = null;
+      let sawToolCall = false;
       let blockIndex = -1;
       // What proves the turn ended rather than the socket: a stated stop
       // reason, or `message_stop`. See the check after the loop.
       let stopped = false;
-      let closed = false;
       const usageChunk = (): ProviderChunk => ({
         type: "usage",
         usage: {
@@ -544,13 +557,11 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
         ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
+        // The stop reason rides in `message_delta` with the final usage, so a
+        // read that dies after it loses nothing but `message_stop`.
+        finished: () => stopped,
       })) {
-        let event: AnthropicEvent;
-        try {
-          event = JSON.parse(data) as AnthropicEvent;
-        } catch {
-          continue; // a keep-alive or a frame we do not model
-        }
+        const event = parseFrame<AnthropicEvent>(data, id);
 
         switch (event.type) {
           // A failure the backend reports after its headers went out. Classified
@@ -576,6 +587,10 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
                 id: event.content_block.id ?? "",
                 name: event.content_block.name ?? "",
               };
+              // Checked here, because this block is the only place this shape
+              // states a call's id and name.
+              settleToolCalls(id, [toolCall]);
+              sawToolCall = true;
               yield {
                 type: "delta",
                 toolCalls: [{ index: toolCall.index, id: toolCall.id, name: toolCall.name }],
@@ -611,21 +626,31 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             cachedInputTokens = event.usage?.cache_read_input_tokens ?? cachedInputTokens;
             cacheWriteTokens = event.usage?.cache_creation_input_tokens ?? cacheWriteTokens;
             outputTokens = event.usage?.output_tokens ?? outputTokens;
-            if (event.delta?.stop_reason) stopped = true;
-            const finishReason = mapStopReason(event.delta?.stop_reason);
-            if (finishReason) yield { type: "finish", finishReason };
+            if (event.delta?.stop_reason) {
+              const stated = mapStopReason(id, event.delta.stop_reason);
+              stopped = true;
+              // Anthropic-compatible gateways can end a tool turn on
+              // `end_turn`, and a caller reading that as done never runs the
+              // tool. Only `stop` is promoted: a length cut may be what broke
+              // the call.
+              const finishReason = stated === "stop" && sawToolCall ? "tool_calls" : stated;
+              yield { type: "finish", finishReason };
+            }
             break;
           }
 
+          // The turn's last event, so the reader stops here. Some gateways
+          // append a `[DONE]` or other bytes after it, and a read that died on
+          // those failed an answer that was already whole (Kimi, GLM and
+          // OpenCode Go, measured by cc-proxy).
           case "message_stop":
-            closed = true;
             yield usageChunk();
-            break;
+            return;
         }
       }
-      if (closed) return;
-      // A gateway that states its stop reason and then skips `message_stop`
-      // still finished the turn — and still billed it.
+      // A gateway that states its stop reason and then skips `message_stop`, or
+      // whose socket dies after the reason, still finished the turn, and still
+      // billed it.
       if (stopped) {
         yield usageChunk();
         return;
