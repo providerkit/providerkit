@@ -78,7 +78,7 @@ export default defineConfig({
               label: "Guides",
               paths: ["guides/**"],
               description:
-                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, cost, Jev",
+                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, resume, cost, Jev",
             },
             {
               label: "API reference",
@@ -139,6 +139,7 @@ export default defineConfig({
           items: [
             { label: "Tools", slug: "guides/tools" },
             { label: "Context and compaction", slug: "guides/context" },
+            { label: "Resume after a crash", slug: "guides/resume" },
             { label: "Usage and cost", slug: "guides/usage" },
             { label: "Jev decisions", slug: "guides/jev" },
           ],
