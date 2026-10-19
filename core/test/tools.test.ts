@@ -113,6 +113,27 @@ describe("defineTool", () => {
     });
     expect((await tool.invoke({ q: "x" })).callId).toBeTruthy();
   });
+
+  it("promises nothing a tool did not state: every flag defaults to false", () => {
+    // A write that left `isReadOnly` out was told, after a crash, that it
+    // "changed nothing, so it is safe to call again".
+    const spec = { name: "write", description: "w", inputSchema: schema, run: async () => "ok" };
+    expect(defineTool(spec)).toMatchObject({
+      isReadOnly: false,
+      isConcurrencySafe: false,
+      needsApproval: false,
+      isTerminal: false,
+    });
+    const { inputSchema: _json, ...rest } = spec;
+    expect(zodTool({ ...rest, input: z.object({ q: z.string() }) })).toMatchObject({
+      isReadOnly: false,
+      isConcurrencySafe: false,
+    });
+    expect(defineTool({ ...spec, isReadOnly: true, isConcurrencySafe: true })).toMatchObject({
+      isReadOnly: true,
+      isConcurrencySafe: true,
+    });
+  });
 });
 
 describe("ToolRegistry", () => {

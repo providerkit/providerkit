@@ -51,8 +51,16 @@ export interface ToolSpec<I, O> {
   summarize?: (output: O) => string;
   /** Default 60s. A tool with no ceiling can hang a whole run. */
   timeoutMs?: number;
+  /**
+   * The tool changes nothing. Default false: a flag that promises safety is
+   * true only when the tool says so. `repairHistory` tells the model an
+   * interrupted read-only call "changed nothing, so it is safe to call again",
+   * and a write that left this out used to be told that too.
+   */
   isReadOnly?: boolean;
   needsApproval?: boolean;
+  /** The tool may run in parallel with others. Default false, for the same
+   *  reason as `isReadOnly`: two writes run at once by omission can race. */
   isConcurrencySafe?: boolean;
   /** A terminal tool ends the run; its validated input is the run's output. */
   isTerminal?: boolean;
@@ -142,9 +150,9 @@ export function defineTool<I = unknown, O = unknown>(spec: ToolSpec<I, O>): Tool
     description: spec.description,
     inputSchema: spec.inputSchema,
     timeoutMs,
-    isReadOnly: spec.isReadOnly ?? true,
+    isReadOnly: spec.isReadOnly ?? false,
     needsApproval: spec.needsApproval ?? false,
-    isConcurrencySafe: spec.isConcurrencySafe ?? true,
+    isConcurrencySafe: spec.isConcurrencySafe ?? false,
     isTerminal: spec.isTerminal ?? false,
 
     definition() {
