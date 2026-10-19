@@ -55,12 +55,20 @@ export interface KeyPoolOptions {
   now?: () => number;
 }
 
-/** No key can serve right now. `retryAtMs` = when the soonest one is back. */
-export class NoAvailableKeyError extends Error {
+/** No key can serve right now. `retryAtMs` = when the soonest one is back.
+ *
+ *  A `ProviderError` of kind `rate` that carries that moment as `resetAtMs` and
+ *  `retryAfterMs`. As a plain `Error` it classified as `rate` only by its
+ *  wording and carried no deadline anyone read, so a FallbackPool around the
+ *  key pool benched it for its default minute, whatever the keys had said. */
+export class NoAvailableKeyError extends ProviderError {
   readonly retryAtMs: number;
 
-  constructor(label: string, retryAtMs: number) {
-    super(`No ${label} API key available (all rate-limited or denied)`);
+  constructor(label: string, retryAtMs: number, now: number) {
+    super(label, "rate", `No ${label} API key available (all rate-limited or denied)`, {
+      resetAtMs: retryAtMs,
+      retryAfterMs: Math.max(0, retryAtMs - now),
+    });
     this.name = "NoAvailableKeyError";
     this.retryAtMs = retryAtMs;
   }
@@ -101,7 +109,7 @@ export class KeyPool {
    */
   async with<T>(fn: (apiKey: string, tier: KeyTier) => Promise<T>): Promise<T> {
     const candidates = this.candidates(this.now());
-    if (candidates.length === 0) throw new NoAvailableKeyError(this.label, this.nextAvailableAt());
+    if (candidates.length === 0) throw this.noneAvailable();
 
     let last: unknown;
     for (const key of candidates) {
@@ -112,7 +120,7 @@ export class KeyPool {
         // The single-key rule: with nothing to rotate to, benching the only key
         // answers NoAvailableKeyError to every call for the next minute — for a
         // failure the caller's own retry would have absorbed.
-        const cooldown = this.size > 1 ? cooldownFor(err) : null;
+        const cooldown = this.size > 1 ? cooldownFor(err, this.now()) : null;
         if (cooldown === null) throw err;
         key.evictedUntil = this.now() + cooldown.forMs;
         this.onEvict?.({ tier: key.tier, kind: cooldown.kind, forMs: cooldown.forMs });
@@ -120,8 +128,7 @@ export class KeyPool {
     }
 
     // Every candidate was evicted during this call.
-    if (this.candidates(this.now()).length === 0)
-      throw new NoAvailableKeyError(this.label, this.nextAvailableAt());
+    if (this.candidates(this.now()).length === 0) throw this.noneAvailable();
     throw last;
   }
 
@@ -138,9 +145,10 @@ export class KeyPool {
     return out;
   }
 
-  private nextAvailableAt(): number {
+  private noneAvailable(): NoAvailableKeyError {
     const all = this.paid ? [...this.free, this.paid] : this.free;
-    return Math.min(...all.map((key) => key.evictedUntil));
+    const retryAtMs = Math.min(...all.map((key) => key.evictedUntil));
+    return new NoAvailableKeyError(this.label, retryAtMs, this.now());
   }
 }
 
@@ -149,15 +157,24 @@ export class KeyPool {
  * key's fault. Nothing is gained by rotating, and benching would spend the
  * pool on a request that fails the same way everywhere.
  */
-function cooldownFor(err: unknown): { kind: ErrorKind; forMs: number } | null {
+function cooldownFor(err: unknown, now: number): { kind: ErrorKind; forMs: number } | null {
   if (!(err instanceof ProviderError)) return null;
   const clamp = (ms: number) => Math.min(Math.max(ms, MIN_EVICTION_MS), MAX_EVICTION_MS);
   switch (err.kind) {
     // The three kinds that are about THIS key.
     case "rate":
       return { kind: err.kind, forMs: clamp(err.retryAfterMs ?? RATE_COOLDOWN_MS) };
-    case "quota":
-      return { kind: err.kind, forMs: clamp(err.retryAfterMs ?? QUOTA_COOLDOWN_MS) };
+    case "quota": {
+      // A spent window names its reset, and that outranks Retry-After: Anthropic
+      // sends `retry-after: 60` beside a weekly window, and a key benched for
+      // the minute is dialled again into the same wall.
+      const reset = err.resetAtMs;
+      const forMs =
+        reset !== undefined && Number.isFinite(reset)
+          ? reset - now
+          : (err.retryAfterMs ?? QUOTA_COOLDOWN_MS);
+      return { kind: err.kind, forMs: clamp(forMs) };
+    }
     case "auth":
       // 12 h, not forever: a key is also refused while a billing account is
       // reinstated, and a pool that drops keys permanently ends up empty.
