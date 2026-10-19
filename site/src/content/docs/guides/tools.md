@@ -38,12 +38,16 @@ The flags are metadata your loop reads. The kernel does not enforce policy:
 | `isConcurrencySafe` | May run in parallel with other tools.        |
 | `isTerminal`        | Ends the turn: a submit or a final answer.   |
 
+Left out, `isReadOnly` and `isConcurrencySafe` are `true`, and the other two are `false`. Set
+`isReadOnly: false` on every tool that writes: [resuming a turn](/guides/resume/) tells the model
+a read-only call is safe to run again.
+
 ## Wire repairs and schema sanitization
 
 Gateways, streaming cutoffs, and vendor quirks corrupt tool calls in ways that standard SDKs drop as 400 errors:
 
 - **Concatenated JSON (`findLastValidJsonObject`)**: When a gateway emits `{}{"query":"foo"}`, `parseToolArgs` extracts the valid object from the tail rather than failing.
-- **Tool ID synthesis and bounding (`normalizeToolId`)**: Synthesizes a deterministic ID when upstreams emit blank/empty strings, and bounds IDs to 64 characters so ChatGPT Responses API does not reject turns.
+- **Tool ID synthesis and bounding (`normalizeToolId`)**: Makes up a random ID (`call_pk_` plus random letters and digits) when an upstream sends a blank one, so the same call gets a different ID each time. An ID over 64 characters becomes its first 48 characters plus a hash, the same every time, so the ChatGPT Responses API does not reject the turn. To fix the IDs of a saved history, use `repairHistory`: it names a blank one `call_{message}_{call}`, which never changes between sends.
 - **Gemini schema sanitization (`toGeminiToolSchema`)**: Converts nullable unions (`anyOf` with null) to `nullable: true`, numeric enums to string enums, and strips unsupported keywords (`$schema`, `additionalProperties: true`).
 - **Anthropic schema sanitization (`toAnthropicToolSchema`)**: Unwraps root `anyOf` / `oneOf` unions into a unified object schema to prevent Anthropic's root-object rejection.
 

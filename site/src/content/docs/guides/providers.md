@@ -81,11 +81,20 @@ interface ProviderChunk {
 }
 ```
 
-Tool calls arrive as `ToolCallDelta` fragments to be assembled by `index`. Providers stream
-arguments a few characters at a time, so a call is only complete at the `finish` chunk.
+Tool calls arrive as `ToolCallDelta` fragments. Providers stream arguments a few characters at a
+time, so a call is only complete at the `finish` chunk. You don't have to put them back together:
+`collectTurn` reads the turn to the end and returns the assistant message to append, with each
+call joined from its fragments and the calls in `index` order.
+
+```ts
+import { collectTurn } from "@providerkit/core";
+
+const turn = await collectTurn(provider.createStream(history, tools));
+history.push(turn.message); // turn.message.toolCalls holds the calls to run
+```
 
 :::caution[Usage chunks are cumulative on some providers and final-only on others]
-Take the **last** one, never the sum. `drainStream` already does this.
+Take the **last** one, never the sum. `collectTurn` and `drainStream` already do this.
 :::
 
 ### Reasoning that must ride back
@@ -108,7 +117,8 @@ understanding. If your history layer normalises tool calls, keep this field.
 
 `reasoningDetails` is OpenRouter's normalized version of the same idea: its reasoning payload,
 arriving on the stream and going back verbatim as `reasoning_details` on the next turn. Same
-contract: opaque, provider-owned. `drainStream` keeps it on the `Completion`; `stripReasoning`
+contract: opaque, provider-owned. `collectTurn` keeps it on the message it returns, and
+`drainStream` on the `Completion`; `stripReasoning`
 drops it along with `reasoning`, because a thinking-off turn must not carry either half of the
 record.
 
@@ -362,18 +372,23 @@ copy, its own log levels, or a token refresh in front of every request has to bu
 and read the failure itself, but it should not be writing a fourth SSE parser to do it.
 
 ```ts
-import { parseSseStream } from "@providerkit/core";
+import { parseFrame, parseSseStream } from "@providerkit/core";
 
 const res = await myFetchWithAuth(url, init);
 if (!res.ok) throw myOwnTranslatedError(res); // your envelope, your wording
 for await (const payload of parseSseStream(res.body!)) {
-  handle(JSON.parse(payload));
+  handle(parseFrame(payload, "my-gateway"));
 }
 ```
 
 It yields each frame's `data:` payload: frames split on the blank line the spec requires (so a
-payload containing a newline survives), CRLF normalised, continuation lines joined, `[DONE]`
-swallowed, and the final frame emitted even when the stream ends without its trailing blank line.
+payload containing a newline survives), CRLF normalised, continuation lines joined, and the final
+frame emitted even when the stream ends without its trailing blank line. `[DONE]` is not yielded:
+it ends the stream. Comments and empty frames, which is how vendors send keep-alives, are dropped.
+
+So a payload that reaches your loop and isn't JSON is a lost piece of the turn, not a keep-alive.
+`parseFrame` throws a `network` error for it, the same as a socket that dies mid-read, so the
+turn fails instead of passing with a delta, a tool call or its finish missing.
 
 It also yields a bare JSON object appended **outside** the framing, because Gemini reports a
 mid-stream failure that way. Dropped, a 429 that lands after the headers reads as an empty,

@@ -90,15 +90,20 @@ const provider = withKeyPool(pool, (apiKey) => createGeminiProvider({ apiKey, mo
 `withKeyPool` returns an ordinary `Provider`, so everything downstream (the watchdog, the retry
 policy, the loop) is unchanged. A key that fails is benched for a period matched to _why_:
 
-| Kind            | Benched for | Why that long                                                            |
-| --------------- | ----------- | ------------------------------------------------------------------------ |
-| `rate`          | 1 minute    | A per-minute throttle: the window it named is the next one.              |
-| `quota`         | 1 hour      | A balance or a daily window. Minutes will not bring it back.             |
-| `auth`          | 12 hours    | Durable, but key-specific. One dead key must not sink the pool.          |
-| transient (5xx) | 1 minute    | The vendor's bad time, not the key's; a sibling key may route elsewhere. |
+| Kind            | Benched for                                | Why that long                                                            |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------------------ |
+| `rate`          | what `Retry-After` asks, or 1 minute       | A per-minute throttle: the window it named is the next one.              |
+| `quota`         | the reset, else `Retry-After`, else 1 hour | A balance or a daily window. Minutes will not bring it back.             |
+| `auth`          | 12 hours                                   | Durable, but key-specific. One dead key must not sink the pool.          |
+| transient (5xx) | 1 minute                                   | The vendor's bad time, not the key's; a sibling key may route elsewhere. |
+
+No bench is longer than 12 hours. A spent window's reset outranks `Retry-After`, for the same
+reason as above: Anthropic sends `retry-after: 60` next to a weekly window.
 
 When every key is benched, `with()` throws `NoAvailableKeyError`. Its `retryAtMs` says when the
-soonest key comes back, so the caller can say something better than "try again later".
+soonest key comes back, so the caller can say something better than "try again later". It is a
+`rate` `ProviderError` with that wait in `retryAfterMs`, so a fallback pool around the key pool
+benches it until then, not for a fixed minute.
 
 :::danger[One key is not a pool]
 With a single key there is nothing to rotate to, so **nothing is evicted** and the error

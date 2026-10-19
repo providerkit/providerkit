@@ -436,7 +436,7 @@ what keeps the agent channel worth having.
   to the timer it arms.
 
 A figure is earned by having **spatial** information to carry — a threshold, an interval — not
-by being a page. The other six guides get none, and that is a decision rather than a backlog.
+by being a page. The other eleven guides get none, and that is a decision rather than a backlog.
 
 Label sizes in these figures are authored in viewBox units against a ~748px rendered measure,
 so they are set for what lands on the page (a 12px label would render at 9).
@@ -564,7 +564,7 @@ Agents read this site as much as people do, and they never render the visual wor
 the markdown underneath. (`AGENTS.md` speaks to agents working _on_ providerkit; this part is
 for agents _using_ it.)
 
-- `starlight-llms-txt` serves `/llms.txt`, `/llms-full.txt` and `/llms-small.txt`. 8 guides plus
+- `starlight-llms-txt` serves `/llms.txt`, `/llms-full.txt` and `/llms-small.txt`. 13 guides plus
   ~85 generated TypeDoc pages is too much for one context file, so `llms-small.txt` covers the
   guides and `llms-full.txt` carries guides plus reference. The plugin does **not** emit
   per-page markdown.

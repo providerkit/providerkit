@@ -57,7 +57,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 956 tests
+bun run test                 # vitest, 1,077 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -96,7 +96,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 ## State
 
-**Built, tested, green** (956 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built, tested, green** (1,077 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                              |
 | ------------------------ | -------------------------------------------------------------------------- |
@@ -223,7 +223,7 @@ un-learned.
 
 ## Next
 
-`0.17.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
+`0.23.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
 came out smaller:
 
 | Migration                           | Runtime                                   |    Net |
@@ -246,7 +246,7 @@ all landed here, so what remains is mechanical and needs only a free tree.
 Every migration is tracked in `ROADMAP.local.md`, deliberately not in this repo because it is a
 map of codebases that are not open.
 
-**The fleet is on `^0.16` from the registry** — every adopter, including the one whose migration
+**The fleet is on `^0.22` from the registry** — every adopter, including the one whose migration
 was backed out but whose newest module was already written against the package. No `link:`, no
 `file:`, nothing that resolves only on one machine. Each bump is verified against the adopter's
 own gates, not just installed. On the first flip, to `^0.4.0`, the two that were on a `bun link`
