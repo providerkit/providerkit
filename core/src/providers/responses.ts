@@ -12,6 +12,7 @@
 // adapter reads `type` — which is what survives, and what gateways agree on.
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
+import { parseRateLimitReset } from "../rate-limit.ts";
 import type {
   ChatMessage,
   ContentPart,
@@ -282,8 +283,11 @@ interface ResponsesEvent {
   headers?: Record<string, unknown>;
 }
 
+/** One window of the snapshot: the `x-codex-<slot>-*` header numbers as JSON. */
 interface CodexWindow {
   used_percent?: number;
+  window_minutes?: number;
+  reset_at?: number;
   reset_after_seconds?: number;
 }
 
@@ -301,22 +305,40 @@ interface CodexRateLimits {
  * A full window the account's credits cover, or that the backend still
  * `allowed`, lets the turn proceed. It is only the reason when the stream then
  * closes without a response: that close is a spent window, not a dropped
- * socket, and retrying it walks every backup into the same wall. The fuller
- * window binds; cc-proxy took the primary's clock first and told a weekly wall
- * to come back in a few hours.
+ * socket, and retrying it walks every backup into the same wall.
+ *
+ * Which window, and when it lifts, comes from the same parser as the headers
+ * the snapshot mirrors: the fuller window binds, and the later reset when both
+ * are full. cc-proxy took the primary's clock first and told a weekly wall to
+ * come back in a few hours. The window is named so a caller can say "weekly"
+ * instead of "the limit", which reads as the 5-hour one.
  */
 function quotaWall(event: ResponsesEvent, provider: string): ProviderError | undefined {
   const limits = event.rate_limits;
   if (!limits?.limit_reached || limits.allowed) return undefined;
   if (event.credits?.has_credits || event.credits?.unlimited) return undefined;
-  const windows = [limits.primary, limits.secondary].filter((w): w is CodexWindow => !!w);
-  const binding = windows.sort((a, b) => (b.used_percent ?? 0) - (a.used_percent ?? 0))[0];
-  const after = binding?.reset_after_seconds;
-  return new ProviderError(provider, "quota", `${provider}: the usage limit has been reached`, {
-    ...(after !== undefined && after >= 0
-      ? { retryAfterMs: after * 1000, resetAtMs: Date.now() + after * 1000 }
-      : {}),
+  const now = Date.now();
+  const { window, resetAtMs } = parseRateLimitReset(codexHeaders(limits), now);
+  const named = window ? ` (${window} window)` : "";
+  const message = `${provider}: the usage limit has been reached${named}`;
+  return new ProviderError(provider, "quota", message, {
+    ...(resetAtMs !== undefined ? { retryAfterMs: resetAtMs - now, resetAtMs } : {}),
+    window,
   });
+}
+
+/** The snapshot as the `x-codex-*` headers it mirrors, rebuilt the way
+ *  cc-proxy's `event_headers` does, so one parser reads both. */
+function codexHeaders(limits: CodexRateLimits): Headers {
+  const headers = new Headers();
+  for (const slot of ["primary", "secondary"] as const) {
+    for (const [field, value] of Object.entries(limits[slot] ?? {})) {
+      if (typeof value === "number") {
+        headers.set(`x-codex-${slot}-${field.replaceAll("_", "-")}`, String(value));
+      }
+    }
+  }
+  return headers;
 }
 
 function usageChunk(usage: ResponsesUsage): ProviderChunk {

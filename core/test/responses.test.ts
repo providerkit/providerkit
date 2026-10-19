@@ -494,14 +494,18 @@ describe("responses finish reasons", () => {
   it("names a spent window when the backend's last word was a quota snapshot", async () => {
     // The snapshot is telemetry on a healthy turn. Followed by a close with no
     // response, it is the reason — and the fuller window binds.
-    const wall = (extra: Record<string, unknown> = {}) =>
+    const wall = (extra: Record<string, unknown> = {}, primaryPercent = 40) =>
       recorder([
         j({
           type: "codex.rate_limits",
           rate_limits: {
             limit_reached: true,
-            primary: { used_percent: 40, reset_after_seconds: 3_600 },
-            secondary: { used_percent: 100, reset_after_seconds: 400_000 },
+            primary: {
+              used_percent: primaryPercent,
+              window_minutes: 300,
+              reset_after_seconds: 3_600,
+            },
+            secondary: { used_percent: 100, window_minutes: 10_080, reset_after_seconds: 400_000 },
           },
           ...extra,
         }),
@@ -509,7 +513,15 @@ describe("responses finish reasons", () => {
     const err = (await collect(
       provider({ fetchImpl: wall().fetchImpl }).createStream(hi, []),
     ).catch((e: unknown) => e)) as ProviderError;
-    expect(err).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000 });
+    expect(err).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000, window: "weekly" });
+    expect(err.message).toContain("weekly window");
+
+    // Both spent: the later reset binds, since the turn passes only once both
+    // have cleared. The primary's hour would send the caller into the week.
+    const both = (await collect(
+      provider({ fetchImpl: wall({}, 100).fetchImpl }).createStream(hi, []),
+    ).catch((e: unknown) => e)) as ProviderError;
+    expect(both).toMatchObject({ kind: "quota", retryAfterMs: 400_000_000, window: "weekly" });
 
     // Credits cover the window: not a wall, so the close is a plain cut.
     const covered = await collect(
