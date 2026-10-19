@@ -2,6 +2,26 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.24.0] - 2026-10-19
+
+### Changed
+
+- **Breaking: a tool is read-only or parallel-safe only when it says so.** `defineTool` and `zodTool` now default `isReadOnly` and `isConcurrencySafe` to `false`. Before, both were `true`, so after a crash `repairHistory` could tell the model a write that may have half run was safe to call again. Set `isReadOnly: true` and `isConcurrencySafe: true` on the tools that really are.
+
+### Added
+
+- **`createRegistry` sets up your providers and credentials once.** Name each connection with its preset and one credential (`apiKey`, `keys` or `token`), list chains of refs, then ask for what you need: `providers.get("default", { effort: "high" })`, `providers.get("go/glm-5.3")` or `providers.get("go")`. Each model gets a watchdog, a gate when the connection sets `maxConcurrent`, and a fallback pool when there is more than one model to try. `update(name, config)` swaps a key without a restart, and a provider you took earlier sends the new one on its next call. `status()` shows gate use, benched keys and cooldowns. The [registry guide](https://providerkit.dev/guides/registry/) has the rest.
+- **A gate caps how many calls run at once on one connection.** Calls past the cap wait in line, first in first out, and each keeps its slot from its first read until the stream ends, fails, is dropped or is aborted: `withGate(provider, createGate(4))`.
+- **`collectTurn` turns a stream into the message you append to history.** It joins the text and the reasoning, puts tool calls back together in index order, and keeps usage, finish reason and source. A tool call that ends with no name throws `overload`: `const { message, usage } = await collectTurn(provider.createStream(history, tools));`
+- **`presetAdapter` builds the bare adapter for one preset and one model**, with no fallbacks and no watchdog: `presetAdapter("opencode-go", { apiKey, model: "glm-5.3" })`.
+- **`KeyPool.status()` lists each key's tier and when it is back**, never the key itself.
+- **A guide for resuming a turn after a crash:** what to save, how to repair it on load, and what stays with your job runner.
+
+### Fixed
+
+- **A provider you rebuild can keep its session.** Pass `instanceSessionId` to `createPresetProvider` or to the OpenAI, Anthropic or Responses adapter, and every build sends that id when a call has no `sessionId`. Before, `withKeyPool` and `withToken` built a new provider per attempt, each with a new random id, so OpenCode Go and the ChatGPT backend saw every call as a new session and the prompt cache missed. The registry does this for you.
+- **`drainStream` keeps tool calls.** It used to drop them, so a turn that only called a tool came back looking empty. `Completion.toolCalls` now holds them.
+
 ## [0.23.0] - 2026-10-19
 
 ### Fixed
