@@ -155,6 +155,25 @@ describe("KeyPool — eviction", () => {
     });
     expect(evictions).toEqual([{ tier: "free", kind: "quota", forMs: 90_000 }]);
   });
+
+  it("shows each key's tier and bench in status, and never the key", async () => {
+    const time = clock();
+    const pool = new KeyPool("test", { keys: ["a", "b"], paidKey: "p", now: time.now });
+    await pool.with(async (key) => {
+      if (key === "a") throw rateLimited(90_000);
+      return key;
+    });
+    expect(pool.status()).toEqual([
+      { tier: "free", evictedUntil: START + 90_000 },
+      { tier: "free", evictedUntil: 0 },
+      { tier: "paid", evictedUntil: 0 },
+    ]);
+    expect(JSON.stringify(pool.status())).not.toMatch(/"a"|"b"|"p"/);
+
+    // A bench that ran out reads as serving, not as a time in the past.
+    time.advance(90_000);
+    expect(pool.status()[0]).toEqual({ tier: "free", evictedUntil: 0 });
+  });
 });
 
 describe("KeyPool — the single-key rule", () => {

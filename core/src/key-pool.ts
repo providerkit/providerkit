@@ -101,6 +101,17 @@ export class KeyPool {
     return this.free.length + (this.paid ? 1 : 0);
   }
 
+  /** Each key's tier and when it is back (0 = serving now): free keys in
+   *  config order, then the paid one. Never the key itself, so a status page
+   *  can show it as is. */
+  status(): Array<{ tier: KeyTier; evictedUntil: number }> {
+    const now = this.now();
+    return [...this.free, ...(this.paid ? [this.paid] : [])].map(({ tier, evictedUntil }) => ({
+      tier,
+      evictedUntil: evictedUntil > now ? evictedUntil : 0,
+    }));
+  }
+
   /**
    * Run `fn` with the next available key, rotating on key-specific and
    * transient failures. Everything else (a bad request, a content block) throws
