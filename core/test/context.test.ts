@@ -9,8 +9,9 @@ import {
   messageTokens,
   needsCompaction,
   pickCut,
+  repairHistory,
 } from "../src/context.ts";
-import type { ChatMessage } from "../src/types.ts";
+import type { ChatMessage, ImagePart } from "../src/types.ts";
 
 const user = (text: string): ChatMessage => ({ role: "user", content: text });
 const assistant = (text: string): ChatMessage => ({ role: "assistant", content: text });
@@ -180,6 +181,222 @@ describe("applyCompaction", () => {
     ];
     const folded = applyCompaction(long, 45, "the first 44 messages");
     expect(conversationTokens(folded)).toBeLessThan(conversationTokens(long));
+  });
+});
+
+describe("repairHistory", () => {
+  const calls = (...ids: string[]): ChatMessage => ({
+    role: "assistant",
+    content: "",
+    toolCalls: ids.map((id) => ({
+      id,
+      name: id.startsWith("read") ? "read" : "write",
+      arguments: "{}",
+    })),
+  });
+  const result = (id: string, content = `${id} done`, images?: ImagePart[]): ChatMessage => ({
+    role: "tool",
+    toolCallId: id,
+    name: id.startsWith("read") ? "read" : "write",
+    content,
+    ...(images ? { images } : {}),
+  });
+  const MAY_HAVE_RUN =
+    "This call was interrupted before it returned. It may have partly run, so check its effect before calling it again.";
+  const SAFE_AGAIN =
+    "This call was interrupted before it returned. It changed nothing, so it is safe to call again.";
+  const repaired = (messages: ChatMessage[]) => repairHistory(messages).messages;
+
+  it("leaves a valid history as it is, object for object", () => {
+    // Nothing to fix must cost nothing: the same objects, so a caller comparing
+    // by identity (Responses' reasoning replay does) sees no change.
+    const history = [user("go"), calls("a", "b"), result("a"), result("b"), assistant("done")];
+    const out = repaired(history);
+    expect(out).toEqual(history);
+    out.forEach((message, i) => expect(message).toBe(history[i]));
+  });
+
+  it("moves a span's results to just after its calls, in call order, and keeps the rest in order", () => {
+    // A steer the user typed while the tools ran lands between the results.
+    // Every wire wants the results first, so the steer waits behind them.
+    const steer = user("also check the logs");
+    expect(repaired([calls("a", "b"), result("b"), steer, result("a")])).toEqual([
+      calls("a", "b"),
+      result("a"),
+      result("b"),
+      steer,
+    ]);
+  });
+
+  it("answers a call that never returned, under its own id", () => {
+    const { messages, interrupted } = repairHistory([user("go"), calls("a", "b"), result("a")]);
+    expect(messages.at(-1)).toEqual({
+      role: "tool",
+      toolCallId: "b",
+      name: "write",
+      content: MAY_HAVE_RUN,
+    });
+    expect(interrupted).toEqual([{ id: "b", name: "write", arguments: "{}" }]);
+  });
+
+  it("says a read-only call is safe to repeat, and only when told it is read-only", () => {
+    const history = [calls("read_1", "write_1")];
+    const told = repairHistory(history, { isReadOnly: (name) => name === "read" }).messages;
+    expect(told.slice(1).map((m) => m.content)).toEqual([SAFE_AGAIN, MAY_HAVE_RUN]);
+    // Not knowing is not knowing it is safe.
+    const untold = repaired(history);
+    expect(untold.slice(1).map((m) => m.content)).toEqual([MAY_HAVE_RUN, MAY_HAVE_RUN]);
+  });
+
+  it("turns a result with no call in its span into a user note, images and all", () => {
+    const png: ImagePart = { type: "image", mimeType: "image/png", data: "iVBORw0K" };
+    const history = [
+      result("early"), // before any call at all
+      calls("a"),
+      result("a"),
+      result("a", "again"), // the call already has its result
+      result("z", "lost", [png]), // a call this span never made
+      assistant("done"),
+      result("a", "late"), // its call is in an EARLIER span
+    ];
+    const note = (id: string, text: string) =>
+      `[Tool result for ${id}; the tool call is missing or already has a result]\n${text}`;
+    expect(repaired(history)).toEqual([
+      { role: "user", content: note("early", "early done") },
+      calls("a"),
+      result("a"),
+      { role: "user", content: note("a", "again") },
+      { role: "user", content: [{ type: "text", text: note("z", "lost") }, png] },
+      assistant("done"),
+      { role: "user", content: note("a", "late") },
+    ]);
+  });
+
+  it("renames an id a later reply reuses, call and result together", () => {
+    // Kimi restarts its ids every reply. Anthropic and Responses reject the
+    // second `functions.search:0`, so it becomes `_2`, and its result follows.
+    const kimi = "functions.search:0";
+    const out = repaired([
+      user("go"),
+      calls(kimi),
+      result(kimi),
+      calls(kimi),
+      result(kimi),
+      calls(kimi, `${kimi}_2`),
+      result(kimi),
+      result(`${kimi}_2`),
+    ]);
+    const ids = out.flatMap((m) =>
+      m.role === "assistant"
+        ? (m.toolCalls ?? []).map((c) => `call ${c.id}`)
+        : m.role === "tool"
+          ? [`result ${m.toolCallId}`]
+          : [],
+    );
+    // The third reply asks for `_2` itself, which is taken by then. The rename
+    // never reaches back to change an earlier id: earlier bytes stay put.
+    expect(ids).toEqual([
+      `call ${kimi}`,
+      `result ${kimi}`,
+      `call ${kimi}_2`,
+      `result ${kimi}_2`,
+      `call ${kimi}_3`,
+      `call ${kimi}_2_2`,
+      `result ${kimi}_3`,
+      `result ${kimi}_2_2`,
+    ]);
+  });
+
+  it("pairs two calls that share an id inside one reply in order", () => {
+    const out = repaired([calls("x", "x"), result("x", "first"), result("x", "second")]);
+    expect(out.slice(1)).toEqual([
+      result("x", "first"),
+      { ...result("x", "second"), toolCallId: "x_2" },
+    ]);
+  });
+
+  it("names an empty id after where it sits, never at random", () => {
+    // `normalizeToolId` would mint a random one, and a random id is a new
+    // prompt on every send: the cache misses from that turn on.
+    const history: ChatMessage[] = [
+      user("go"),
+      { role: "assistant", content: "", toolCalls: [{ id: "", name: "write", arguments: "{}" }] },
+      { role: "tool", toolCallId: "", name: "write", content: "ok" },
+      { role: "assistant", content: "", toolCalls: [{ id: " ", name: "write", arguments: "{}" }] },
+    ];
+    const { messages, interrupted } = repairHistory(history);
+    expect(messages[1]).toMatchObject({ toolCalls: [{ id: "call_1_0" }] });
+    expect(messages[2]).toMatchObject({ toolCallId: "call_1_0", content: "ok" });
+    expect(messages[3]).toMatchObject({ toolCalls: [{ id: "call_3_0" }] });
+    expect(interrupted.map((call) => call.id)).toEqual(["call_3_0"]);
+    expect(repairHistory(history)).toEqual({ messages, interrupted });
+  });
+
+  it("drops an assistant turn with no calls and only whitespace, as if it were never there", () => {
+    // A loop that saves a placeholder before its tools run must not orphan
+    // their results: the empty turn neither ends the span nor reaches the wire.
+    expect(repaired([user("go"), calls("a"), assistant("  \n"), result("a")])).toEqual([
+      user("go"),
+      calls("a"),
+      result("a"),
+    ]);
+    // Reasoning alone does not keep it: a turn that said nothing is not an answer.
+    expect(repaired([user("go"), { role: "assistant", content: "", reasoning: "hmm" }])).toEqual([
+      user("go"),
+    ]);
+  });
+
+  it("changes nothing the second time", () => {
+    const messy = [
+      user("go"),
+      calls("functions.search:0", "", "b"),
+      user("steer"),
+      result("b"),
+      result("ghost"),
+      assistant(""),
+      calls("functions.search:0"),
+      result("functions.search:0"),
+    ];
+    const once = repairHistory(messy);
+    const twice = repairHistory(once.messages);
+    expect(twice.messages).toEqual(once.messages);
+    expect(twice.interrupted).toEqual([]);
+  });
+
+  it("keeps every earlier byte when the history grows", () => {
+    // The prompt cache is a prefix cache. If repairing turn N+1 changed a byte
+    // of what turn N sent, every turn after a repair would re-bill the whole
+    // conversation. Claude Code minted new ids on every resume, and its
+    // transcripts grew exponentially.
+    const kimi = "functions.search:0";
+    const history = [
+      user("go"),
+      calls(kimi, ""),
+      result(kimi),
+      user("steer"),
+      assistant("looking"),
+      calls(kimi),
+      result("ghost"),
+      result(kimi),
+      calls(kimi, "b"),
+      result("b"),
+      assistant("done"),
+    ];
+    const whole = JSON.stringify(repaired(history));
+    for (let end = 1; end <= history.length; end++) {
+      // Only a cut at an assistant message closes every span before it; a cut
+      // inside a span is a span still waiting for its results.
+      if (end < history.length && history[end]!.role !== "assistant") continue;
+      const prefix = JSON.stringify(repaired(history.slice(0, end))).slice(0, -1);
+      expect(whole.startsWith(prefix), `cut at ${end}`).toBe(true);
+    }
+  });
+
+  it("does not touch the caller's array or messages", () => {
+    const history = [calls("x"), result("x"), calls("x"), result("ghost")];
+    const before = structuredClone(history);
+    repairHistory(history);
+    expect(history).toEqual(before);
   });
 });
 
