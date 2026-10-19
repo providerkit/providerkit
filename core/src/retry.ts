@@ -28,6 +28,17 @@ export interface RetryOptions {
   /** Maximum acceptable wait. A longer server deadline ends retry so an outer
    *  fallback can switch provider; it is never shortened to retry too early. */
   maxDelayMs?: number;
+  /**
+   * How long recovery may go on, counted from the FIRST failure. A retry
+   * starts only if it would start before then, its wait included. An attempt
+   * already running is never cut. Default 60s; `Infinity` turns it off.
+   *
+   * Without it the worst case is every attempt in full plus every wait: three
+   * stalled streams at the watchdog's 300s each is a quarter of an hour before
+   * the caller hears anything. The clock starts at the first failure, not at
+   * the call, so a long healthy run that then fails still gets its recovery.
+   */
+  budgetMs?: number;
   /** Aborts the wait as well as the work, so Stop lands promptly. */
   signal?: AbortSignal;
   /** Decide retryability. Default: transient kinds only. */
@@ -40,6 +51,7 @@ export interface RetryOptions {
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 30_000;
+const DEFAULT_BUDGET_MS = 60_000;
 
 /**
  * Full-jitter exponential backoff: a random delay in
@@ -92,6 +104,29 @@ function delayFor(err: unknown, attempt: number, opts: RetryOptions): number | n
 
 const defaultShouldRetry = (err: unknown, _attempt: number): boolean => isRetryable(err);
 
+/** The moment the recovery budget runs out, fixed at the first failure. */
+const budgetEnd = (opts: RetryOptions): number => Date.now() + (opts.budgetMs ?? DEFAULT_BUDGET_MS);
+
+/**
+ * Wait out the delay before the next attempt, or rethrow `err` unchanged when
+ * there is none: the server's deadline is past `maxDelayMs`, or the next
+ * attempt would start past the budget.
+ */
+async function waitToRetry(
+  err: unknown,
+  attempt: number,
+  opts: RetryOptions,
+  budgetEndsAt: number,
+): Promise<void> {
+  const delayMs = delayFor(err, attempt, opts);
+  if (delayMs === null || Date.now() + delayMs >= budgetEndsAt) throw err;
+  opts.onRetry?.({ error: err, attempt, delayMs });
+  await (opts.sleep ?? sleep)(delayMs, opts.signal);
+  // A timer can wake long after it was due (a suspended worker, a throttled
+  // tab). The budget is about when the attempt starts, not when it was meant to.
+  if (Date.now() >= budgetEndsAt) throw err;
+}
+
 /**
  * Run `fn`, retrying transient failures with backoff. For one-shot calls such
  * as a title, a summary or a compaction pass.
@@ -102,7 +137,7 @@ export async function withRetry<T>(
 ): Promise<T> {
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const shouldRetry = opts.shouldRetry ?? defaultShouldRetry;
-  const nap = opts.sleep ?? sleep;
+  let budgetEndsAt: number | undefined;
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -114,10 +149,8 @@ export async function withRetry<T>(
       // A caller's Stop is never a transient failure, whatever it looks like.
       if (opts.signal?.aborted) throw err;
       if (attempt >= maxAttempts || !shouldRetry(err, attempt)) throw err;
-      const delayMs = delayFor(err, attempt, opts);
-      if (delayMs === null) throw err;
-      opts.onRetry?.({ error: err, attempt, delayMs });
-      await nap(delayMs, opts.signal);
+      budgetEndsAt ??= budgetEnd(opts);
+      await waitToRetry(err, attempt, opts, budgetEndsAt);
     }
   }
   throw lastError;
@@ -138,7 +171,7 @@ export async function* withStreamRetry<T>(
 ): AsyncGenerator<T> {
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const shouldRetry = opts.shouldRetry ?? defaultShouldRetry;
-  const nap = opts.sleep ?? sleep;
+  let budgetEndsAt: number | undefined;
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -163,10 +196,8 @@ export async function* withStreamRetry<T>(
       if (opts.signal?.aborted) throw err;
       // Rule 2: past the first chunk there is no going back.
       if (emitted || attempt >= maxAttempts || !shouldRetry(err, attempt)) throw err;
-      const delayMs = delayFor(err, attempt, opts);
-      if (delayMs === null) throw err;
-      opts.onRetry?.({ error: err, attempt, delayMs });
-      await nap(delayMs, opts.signal);
+      budgetEndsAt ??= budgetEnd(opts);
+      await waitToRetry(err, attempt, opts, budgetEndsAt);
     } finally {
       opts.signal?.removeEventListener("abort", onOuterAbort);
       // Abandoning mid-iteration (the consumer broke out, or we are retrying)
