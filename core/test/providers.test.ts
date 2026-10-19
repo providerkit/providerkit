@@ -516,6 +516,30 @@ describe("toAnthropicMessages", () => {
     expect(JSON.stringify(messages)).not.toContain("secret thoughts");
   });
 
+  it("maps ids outside [A-Za-z0-9_-] the same way every time, without collisions", () => {
+    // An opencode-go rotation hands Kimi's `functions.search:0` from chat
+    // completions to Messages, whose id pattern refuses it with a 400.
+    const call = (id: string) => ({ id, name: "s", arguments: "{}" });
+    const history: ChatMessage[] = [
+      { role: "assistant", content: "", toolCalls: [call("a.b"), call("a_b"), call("a:b")] },
+      { role: "tool", toolCallId: "a:b", name: "s", content: "three" },
+      { role: "tool", toolCallId: "a.b", name: "s", content: "one" },
+      { role: "tool", toolCallId: "a_b", name: "s", content: "two" },
+    ];
+    const ids = (out: unknown[]) =>
+      out.flatMap((m) =>
+        (m as { content: { id?: string; tool_use_id?: string }[] }).content.map(
+          (block) => block.id ?? block.tool_use_id,
+        ),
+      );
+    const { messages } = toAnthropicMessages(history);
+
+    // First come keeps the clean form; a later id that cleans to a taken one
+    // moves, never an earlier one. Each result follows its own call.
+    expect(ids(messages)).toEqual(["a_b", "a_b_2", "a_b_3", "a_b_3", "a_b", "a_b_2"]);
+    expect(toAnthropicMessages(history)).toEqual({ messages });
+  });
+
   it("sends an image as a base64 source block", () => {
     const { messages } = toAnthropicMessages([
       { role: "user", content: [{ type: "image", mimeType: "image/png", data: "AAA" }] },

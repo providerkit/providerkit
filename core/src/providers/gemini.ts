@@ -5,6 +5,7 @@
 // its own chain of thought on the next turn. Written straight against the REST
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
+import { repairHistory } from "../context.ts";
 import { ProviderError, streamCut, streamError } from "../errors.ts";
 import { schemaPrompt, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs } from "../tool-args.ts";
@@ -133,6 +134,12 @@ function toResponseObject(content: string): Record<string, unknown> {
  * and carry tool calls as `functionCall` parts with the thought signature
  * beside them; tool results are role `user` with a `functionResponse` part
  * naming the FUNCTION, since Gemini pairs a result to its call by name.
+ *
+ * A run of results is ONE user turn: Gemini answers a model turn's parallel
+ * calls with every response together, and spread over several turns it 400s
+ * that the response count does not match the call count. The responses go
+ * first, in call order, and the run's images follow them all, the way the
+ * OpenAI dialect places them.
  */
 export function toGeminiContents(messages: readonly ChatMessage[]): {
   system?: string;
@@ -140,8 +147,11 @@ export function toGeminiContents(messages: readonly ChatMessage[]): {
 } {
   let system = "";
   const contents: GeminiContent[] = [];
+  // The open run of tool results: its parts, and how many lead with a response.
+  let results: { parts: unknown[]; responses: number } | undefined;
 
   for (const message of messages) {
+    if (message.role === "user" || message.role === "assistant") results = undefined;
     switch (message.role) {
       case "system":
         system = system ? `${system}\n\n${message.content}` : message.content;
@@ -181,23 +191,24 @@ export function toGeminiContents(messages: readonly ChatMessage[]): {
         break;
       }
 
-      case "tool":
-        contents.push({
-          role: "user",
-          parts: [
-            {
-              functionResponse: {
-                id: message.toolCallId,
-                name: message.name,
-                response: toResponseObject(message.content),
-              },
-            },
-            ...(message.images ?? []).map((image) => ({
-              inlineData: { mimeType: image.mimeType, data: image.data },
-            })),
-          ],
+      case "tool": {
+        if (!results) {
+          results = { parts: [], responses: 0 };
+          contents.push({ role: "user", parts: results.parts });
+        }
+        results.parts.splice(results.responses, 0, {
+          functionResponse: {
+            id: message.toolCallId,
+            name: message.name,
+            response: toResponseObject(message.content),
+          },
         });
+        results.responses += 1;
+        for (const image of message.images ?? []) {
+          results.parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
+        }
         break;
+      }
     }
   }
 
@@ -277,7 +288,9 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
     ): AsyncIterable<ProviderChunk> {
       const effort = opts.effort ?? config.effort;
       const maxTokens = opts.maxTokens ?? config.maxTokens;
-      const { system, contents } = toGeminiContents(messages);
+      // Repaired first: a result with no call, or a call with no result, is a
+      // 400 that loses the turn. See repairHistory.
+      const { system, contents } = toGeminiContents(repairHistory(messages).messages);
 
       // A model id copied out of Gemini's docs is often already `models/…`, and
       // the doubled segment 404s as "model not found" — a confusing way to

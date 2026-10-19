@@ -10,6 +10,7 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
+import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import type {
@@ -373,8 +374,11 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       const model = opts.model ?? config.model;
       const museContributor = isMuseSparkContributor(model);
       const requestTools = museContributor && opts.toolChoice === "none" ? [] : tools;
+      // Repaired before the images are gated: an orphaned result becomes a user
+      // note that keeps its images, and those must meet the limits too.
+      const sent = repairHistory(messages).messages;
       const { instructions, input } = toResponsesInput(
-        config.imageLimits ? gateImages(messages, config.imageLimits) : messages,
+        config.imageLimits ? gateImages(sent, config.imageLimits) : sent,
         id,
       );
 

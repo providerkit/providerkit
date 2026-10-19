@@ -579,13 +579,39 @@ describe("toGeminiContents", () => {
     ]);
   });
 
+  it("answers parallel calls in ONE user turn, responses in call order, then their images", () => {
+    // Spread over one turn each, Gemini 400s that the response count does not
+    // match the call count, and the whole tool round is lost.
+    const shot = { type: "image" as const, mimeType: "image/png" as const, data: "AAA" };
+    const { contents } = toGeminiContents([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "a", name: "shot", arguments: "{}" },
+          { id: "b", name: "search", arguments: "{}" },
+        ],
+      },
+      { role: "tool", toolCallId: "a", name: "shot", content: "taken", images: [shot] },
+      { role: "tool", toolCallId: "b", name: "search", content: "found" },
+      { role: "user", content: "go on" },
+    ]);
+
+    expect(contents.map((c) => c.role)).toEqual(["model", "user", "user"]);
+    expect(contents[1]!.parts).toEqual([
+      { functionResponse: { id: "a", name: "shot", response: { output: "taken" } } },
+      { functionResponse: { id: "b", name: "search", response: { output: "found" } } },
+      { inlineData: { mimeType: "image/png", data: "AAA" } },
+    ]);
+  });
+
   it("wraps a non-object tool result — Gemini requires an object response", () => {
     const responses = toGeminiContents([
       { role: "tool", toolCallId: "a", name: "s", content: "plain text" },
       { role: "tool", toolCallId: "b", name: "s", content: "42" },
       { role: "tool", toolCallId: "c", name: "s", content: "[1,2]" },
-    ]).contents.map(
-      (c) => (c.parts[0] as { functionResponse: { response: unknown } }).functionResponse.response,
+    ]).contents[0]!.parts.map(
+      (p) => (p as { functionResponse: { response: unknown } }).functionResponse.response,
     );
 
     expect(responses).toEqual([{ output: "plain text" }, { output: 42 }, { output: [1, 2] }]);

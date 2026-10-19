@@ -3,6 +3,7 @@
 // This is the dialect most gateways speak, so one adapter serves OpenAI,
 // OpenRouter, DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio.
 // Their divergences are small and named where they appear.
+import { repairHistory } from "../context.ts";
 import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
 import { streamSse, apiUrl } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
@@ -519,7 +520,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       const effort = opts.effort ?? config.effort;
       const model = opts.model ?? config.model;
 
-      const body = toOpenAIMessages(messages, id);
+      // Repaired first: a result with no call, or a call with no result, is a
+      // 400 that loses the turn. See repairHistory.
+      const body = toOpenAIMessages(repairHistory(messages).messages, id);
       const request: Record<string, unknown> = {
         model,
         messages: body,

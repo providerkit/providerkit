@@ -1,9 +1,10 @@
-// Deciding when a conversation no longer fits, and where to cut it.
+// Deciding when a conversation no longer fits, where to cut it, and how to
+// make a saved one valid to send again.
 //
 // Everything here is pure and testable. The model call that writes the summary
 // and the row that stores it belong to the caller — what is decidable without
 // I/O is decided here.
-import type { ChatMessage } from "./types.ts";
+import type { ChatMessage, ToolCall } from "./types.ts";
 
 /**
  * What the answer needs after the prompt: an output budget, plus the tools'
@@ -151,6 +152,140 @@ export function applyCompaction(
     { role: "user", content: `[Earlier conversation, summarized]\n\n${summary}` },
     ...tail,
   ];
+}
+
+type ToolResult = Extract<ChatMessage, { role: "tool" }>;
+
+/** What a call with no result answers, by whether running it again is safe.
+ *  The model reads this and decides whether to call again, so the two must
+ *  differ on exactly that. */
+const INTERRUPTED_READ_ONLY =
+  "This call was interrupted before it returned. It changed nothing, so it is safe to call again.";
+const INTERRUPTED =
+  "This call was interrupted before it returned. It may have partly run, so check its effect before calling it again.";
+
+/** `id`, or `id_2`, `id_3`… whichever is free first. Only ids already handed
+ *  out are consulted, so an id never depends on what comes after it. */
+function freshId(id: string, used: Set<string>): string {
+  let fresh = id;
+  for (let k = 2; used.has(fresh); k++) fresh = `${id}_${k}`;
+  used.add(fresh);
+  return fresh;
+}
+
+interface Span {
+  calls: ToolCall[];
+  vendorIds: string[];
+  results: (ToolResult | undefined)[];
+  rest: ChatMessage[];
+}
+
+/** The first call in the span asked under `id` that has no result yet, or -1.
+ *  First unanswered rather than first: two calls in one reply can share an id,
+ *  and their results then pair in order. */
+function openSlot(span: Span, id: string): number {
+  return span.vendorIds.findIndex((asked, i) => asked === id && !span.results[i]);
+}
+
+/** A result with no call to answer, kept as words the model can still read
+ *  instead of a `tool` message every provider answers with a 400. */
+function orphanNote(result: ToolResult): ChatMessage {
+  const text = `[Tool result for ${result.toolCallId}; the tool call is missing or already has a result]\n${result.content}`;
+  return {
+    role: "user",
+    content: result.images?.length ? [{ type: "text", text }, ...result.images] : text,
+  };
+}
+
+/**
+ * Make a saved, resumed or interrupted history valid to send: every call has
+ * exactly one result, right after it, under an id no other call uses.
+ *
+ * A span runs from an assistant message with tool calls to the next assistant
+ * message. Its results move to just after the calls, in call order, and the
+ * rest of the span (a steer the user typed while the tools ran) keeps its
+ * order after them. Then:
+ *
+ * - A call with no result in its span gets one under the same id, saying it was
+ *   interrupted. `isReadOnly` picks the wording; without it every tool may
+ *   have partly run. These calls come back as `interrupted`, under the ids
+ *   the request carries.
+ * - A result whose call is not in its span becomes a user note, images kept.
+ *   Paired against the span only, because chat and Messages both require the
+ *   result in the turn right after its call: a looser pairing still 400s.
+ * - A repeated id becomes `{id}_{k}`, the smallest free k, call and result
+ *   together. Kimi and Gemini restart their ids every reply
+ *   (`functions.search:0`, `call_0`), and Anthropic and Responses reject the
+ *   second use.
+ * - An empty id becomes `call_{message}_{call}`, never `normalizeToolId`'s
+ *   random fallback.
+ * - An assistant message with no calls and only whitespace is dropped, as if
+ *   it were never there, so a placeholder saved before the tools ran orphans
+ *   nothing.
+ *
+ * No side effects, and the same input always gives the same bytes: a span's
+ * output and every id depend only on what came before, so repairing a longer
+ * history keeps the shorter one's bytes and the prompt cache keeps hitting.
+ * Repairing a repaired history changes nothing. Every adapter here runs this
+ * on what it sends; call it yourself to know what `interrupted` holds.
+ */
+export function repairHistory(
+  messages: readonly ChatMessage[],
+  opts: { isReadOnly?: (toolName: string) => boolean } = {},
+): { messages: ChatMessage[]; interrupted: ToolCall[] } {
+  const out: ChatMessage[] = [];
+  const interrupted: ToolCall[] = [];
+  const used = new Set<string>();
+  // The open span: its calls as sent, the id the vendor gave each, the result
+  // each has found so far, and everything else in arrival order.
+  let span: Span | undefined;
+
+  const close = () => {
+    if (!span) return;
+    for (const [i, call] of span.calls.entries()) {
+      const result = span.results[i];
+      if (result) {
+        out.push(result);
+        continue;
+      }
+      interrupted.push(call);
+      const content = opts.isReadOnly?.(call.name) ? INTERRUPTED_READ_ONLY : INTERRUPTED;
+      out.push({ role: "tool", toolCallId: call.id, name: call.name, content });
+    }
+    out.push(...span.rest);
+    span = undefined;
+  };
+
+  for (const [index, message] of messages.entries()) {
+    if (message.role === "assistant") {
+      const calls = message.toolCalls ?? [];
+      if (calls.length === 0 && !message.content.trim()) continue;
+      close();
+      if (calls.length === 0) {
+        out.push(message);
+        continue;
+      }
+      const sent = calls.map((call, c) => {
+        const id = freshId(call.id.trim() ? call.id : `call_${index}_${c}`, used);
+        return id === call.id ? call : { ...call, id };
+      });
+      const renamed = sent.some((call, c) => call !== calls[c]);
+      out.push(renamed ? { ...message, toolCalls: sent } : message);
+      span = { calls: sent, vendorIds: calls.map((call) => call.id), results: [], rest: [] };
+    } else if (message.role === "tool") {
+      const slot = span ? openSlot(span, message.toolCallId) : -1;
+      if (span && slot !== -1) {
+        const id = span.calls[slot]!.id;
+        span.results[slot] = id === message.toolCallId ? message : { ...message, toolCallId: id };
+      } else {
+        (span?.rest ?? out).push(orphanNote(message));
+      }
+    } else {
+      (span?.rest ?? out).push(message);
+    }
+  }
+  close();
+  return { messages: out, interrupted };
 }
 
 /**
