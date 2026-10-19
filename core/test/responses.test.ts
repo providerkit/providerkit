@@ -356,8 +356,8 @@ describe("responses tool calls", () => {
     ]);
     const chunks = await collect(provider({ fetchImpl }).createStream(hi, []));
 
-    const [call] = assemble(chunks);
-    expect(call).toMatchObject({ index: 0, name: "search", arguments: '{"q":"x"}' });
+    const [call] = await assemble(chunks);
+    expect(call).toMatchObject({ name: "search", arguments: '{"q":"x"}' });
     expect(call!.id).toMatch(/^call_pk_\w+$/);
     expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("tool_calls");
   });

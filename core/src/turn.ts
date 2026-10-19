@@ -74,10 +74,11 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
       // Identity is the last value STATED, so an empty one never erases a real
       // one: Anthropic opens a call with `""` for what it lacks, and the
       // ChatGPT backend states the real call_id and name only on the call's
-      // closing event. A call that never states an id keeps `""`: one made up
-      // here would differ per adapter (invariant 10), while `repairHistory`
-      // gives it the same id on every send. Arguments are fragments, joined in
-      // arrival order.
+      // closing event. A call that never states an id keeps `""`. The four
+      // adapters here mint one before their finish (`settleToolCalls`); for any
+      // other Provider, one made up here would be ours and not the wire's
+      // (invariant 10), and `repairHistory` already names it the same way on
+      // every send. Arguments are fragments, joined in arrival order.
       if (delta.id) call.id = delta.id;
       if (delta.name) call.name = delta.name;
       if (delta.thoughtSignature) call.thoughtSignature = delta.thoughtSignature;
@@ -97,7 +98,9 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
     // body, a turn that completed with nothing): our request was fine, the
     // vendor's frame was not. A retry may well get a whole call, and another
     // model is a fair next try if this one keeps doing it. `invalid` would
-    // blame our request and stop the run over a fault that is not ours.
+    // blame our request and stop the run over a fault that is not ours. The
+    // four adapters here fail such a call themselves, with the same kind
+    // (`settleToolCalls`); this gives any other Provider the same answer.
     const provider = source?.provider ?? "turn";
     const which = call.id || `at index ${index}`;
     throw new ProviderError(
