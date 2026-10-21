@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.25.2] - 2026-10-21
+
+### Fixed
+
+- **OpenCode Go privacy and region blocks now classify as `model`, and missing Go subscriptions as `entitlement`.** OpenCode Go answers `400` when a workspace's Privacy settings block a model that trains on request data (`Allow paid endpoints that train on request data in your workspace's Privacy settings to use it`) or needs Global regions (`Select Global in your workspace's Privacy settings to use it`). Because the status is `400`, it used to classify as `invalid` and stop the fallback pool on the first model instead of rotating to the next candidate. Both wordings (plus OpenRouter's `No endpoints found matching your data policy`) now classify as `model`, and `An active OpenCode Go subscription is required` classifies as `entitlement`.
+
 ## [0.25.1] - 2026-10-21
 
 ### Added

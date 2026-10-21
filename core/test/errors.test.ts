@@ -215,6 +215,30 @@ describe("classifyHttp — the response-shaped entry point", () => {
     expect(classifyHttp(400, "Requires a subscription to access this model")).toBe("entitlement");
     expect(classifyHttp(400, '{"error":"subscription_required"}')).toBe("entitlement");
     expect(classifyHttp(400, "Upgrade for access to frontier models")).toBe("entitlement");
+    expect(
+      classifyHttp(
+        403,
+        '{"error":{"type":"server_error","message":"Upstream request failed: An active OpenCode Go subscription is required to use Go models."}}',
+      ),
+    ).toBe("entitlement");
+  });
+
+  it("reads OpenCode Go privacy/region 400 and OpenRouter data-policy 404 as model so fallback pools rotate", () => {
+    expect(
+      classifyHttp(
+        400,
+        '{"error":{"type":"server_error","message":"Upstream request failed: This Go model trains on request data. Allow paid endpoints that train on request data in your workspace\'s Privacy settings to use it."}}',
+      ),
+    ).toBe("model");
+    expect(
+      classifyHttp(
+        400,
+        '{"error":{"type":"server_error","message":"Upstream request failed: This Go model requires Global regions. Select Global in your workspace\'s Privacy settings to use it."}}',
+      ),
+    ).toBe("model");
+    expect(
+      classifyHttp(400, '{"error":{"message":"No endpoints found matching your data policy"}}'),
+    ).toBe("model");
   });
 
   it("reads an OAuth invalid_grant as auth, not as a bad request", () => {
