@@ -248,7 +248,11 @@ function buildWireAdapter(
   }
 }
 
-const OPENCODE_CLI_USER_AGENT = "opencode/latest/2.0.32/cli";
+/**
+ * The User-Agent OpenCode Zen's free tier accepts. Exported for hosts that cannot set
+ * the header on `fetch` (Chromium ignores it) and stamp it another way.
+ */
+export const OPENCODE_CLI_USER_AGENT = "opencode/latest/2.0.32/cli";
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /** Whether an OpenCode Zen model id belongs to the free shelf (`big-pickle` or `*-free`). */

@@ -85,6 +85,17 @@ export function resolveAntigravityWireModel(model: string): string {
   return ANTIGRAVITY_WIRE_MODELS[stripped] ?? stripped;
 }
 
+/**
+ * The User-Agent Cloud Code Assist expects for a model: `gemini-4-argon` is served to
+ * the Antigravity CLI, every other model to the IDE. Exported for hosts that cannot
+ * set the header on `fetch` (Chromium ignores it) and stamp it another way.
+ */
+export function antigravityUserAgent(model: string): string {
+  return resolveAntigravityWireModel(model).startsWith("gemini-4-argon")
+    ? ANTIGRAVITY_CLI_USER_AGENT
+    : ANTIGRAVITY_IDE_USER_AGENT;
+}
+
 /** Deterministic Antigravity session id (`-<uint64>`), matching cc-proxy. */
 export async function antigravitySessionId(sessionId?: string): Promise<string> {
   const seed = sessionId && sessionId.length > 0 ? sessionId : crypto.randomUUID();
@@ -532,11 +543,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
           : { "x-goog-api-key": config.apiKey }
         : {};
       const antigravityUa: Record<string, string> = isAntigravity
-        ? {
-            "user-agent": wireModel.startsWith("gemini-4-argon")
-              ? ANTIGRAVITY_CLI_USER_AGENT
-              : ANTIGRAVITY_IDE_USER_AGENT,
-          }
+        ? { "user-agent": antigravityUserAgent(model) }
         : {};
       const headers: Record<string, string> = {
         ...antigravityUa,

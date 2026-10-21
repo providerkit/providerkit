@@ -3,7 +3,11 @@
 // builds. Same shape as providers.test.ts, plus the signal the fetch must see.
 import { describe, expect, it } from "vitest";
 import { ProviderError } from "../src/errors.ts";
-import { createGeminiProvider, toGeminiContents } from "../src/providers/gemini.ts";
+import {
+  antigravityUserAgent,
+  createGeminiProvider,
+  toGeminiContents,
+} from "../src/providers/gemini.ts";
 import type {
   ChatMessage,
   Effort,
@@ -762,5 +766,14 @@ describe("toGeminiContents", () => {
         ],
       },
     ]);
+  });
+});
+
+describe("antigravityUserAgent", () => {
+  it("serves gemini-4-argon to the CLI and every other model to the IDE", () => {
+    expect(antigravityUserAgent("gemini-4-argon")).toContain("antigravity/cli/");
+    expect(antigravityUserAgent("antigravity/gemini-4-argon")).toContain("antigravity/cli/");
+    expect(antigravityUserAgent("gemini-3.8-flash")).toContain("antigravity/ide/");
+    expect(antigravityUserAgent("claude-opus-5-5")).toContain("antigravity/ide/");
   });
 });
