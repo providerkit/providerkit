@@ -47,7 +47,7 @@ Gateways, streaming cutoffs, and vendor quirks corrupt tool calls in ways that s
 
 - **Concatenated JSON (`findLastValidJsonObject`)**: When a gateway emits `{}{"query":"foo"}`, `parseToolArgs` extracts the valid object from the tail rather than failing.
 - **Tool ID synthesis and bounding (`normalizeToolId`)**: Makes up a random ID (`call_pk_` plus random letters and digits) when an upstream sends a blank one, so the same call gets a different ID each time. An ID over 64 characters becomes its first 48 characters plus a hash, the same every time, so the ChatGPT Responses API does not reject the turn. To fix the IDs of a saved history, use `repairHistory`: it names a blank one `call_{message}_{call}`, which never changes between sends.
-- **Gemini schema sanitization (`toGeminiToolSchema`)**: Converts nullable unions (`anyOf` with null) to `nullable: true`, numeric enums to string enums, and strips unsupported keywords (`$schema`, `additionalProperties: true`).
+- **Gemini schema repair (`toGeminiToolSchema`)**: Gemini takes standard JSON Schema, so your schema goes out as written, with four exceptions that Gemini answers with a 400. A `required` name with no matching property is dropped. A Draft-04 `exclusiveMinimum: true` becomes the number form. Tuple `items` becomes `prefixItems`. A recursive `$ref` that Gemini cannot follow becomes `{}`. The same repair covers the schema you pass as `json`.
 - **Anthropic schema sanitization (`toAnthropicToolSchema`)**: Unwraps root `anyOf` / `oneOf` unions into a unified object schema to prevent Anthropic's root-object rejection.
 
 ## Invoking

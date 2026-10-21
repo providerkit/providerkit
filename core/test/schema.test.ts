@@ -7,94 +7,161 @@ import {
   withoutPatterns,
 } from "../src/schema.ts";
 
+// Each case below is a shape sent to gemini-3.8-flash on 2026-10-21, in a tool and as a
+// response schema. The 400 it got, or its acceptance, is why the test expects what it does.
 describe("toGeminiToolSchema", () => {
-  it("converts nullable union types to nullable: true", () => {
-    const input = {
-      type: "object",
-      properties: {
-        note: {
-          anyOf: [{ type: "string" }, { type: "null" }],
-        },
-      },
-    };
-    const sanitized = toGeminiToolSchema(input);
-    const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.note!.type).toBe("string");
-    expect(props.note!.nullable).toBe(true);
-  });
-
-  it("converts type arrays with null to nullable: true", () => {
-    const input = {
-      type: "object",
-      properties: {
-        count: {
-          type: ["integer", "null"],
-        },
-      },
-    };
-    const sanitized = toGeminiToolSchema(input);
-    const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.count!.type).toBe("integer");
-    expect(props.count!.nullable).toBe(true);
-  });
-
-  it("converts const to enum", () => {
-    const input = {
-      type: "object",
-      properties: {
-        action: {
-          const: "send_message",
-        },
-      },
-    };
-    const sanitized = toGeminiToolSchema(input);
-    const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.action!.enum).toEqual(["send_message"]);
-    expect(props.action!.const).toBeUndefined();
-  });
-
-  it("converts numeric enums to string enums", () => {
-    const input = {
-      type: "object",
-      properties: {
-        level: {
-          type: "number",
-          enum: [1, 2, 3],
-        },
-      },
-    };
-    const sanitized = toGeminiToolSchema(input);
-    const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.level!.enum).toEqual(["1", "2", "3"]);
-  });
-
-  it("ensures array schemas have items", () => {
-    const input = {
-      type: "object",
-      properties: {
-        tags: {
-          type: "array",
-        },
-      },
-    };
-    const sanitized = toGeminiToolSchema(input);
-    const props = sanitized.properties as Record<string, Record<string, unknown>>;
-    expect(props.tags!.items).toEqual({ type: "string" });
-  });
-
-  it("strips unsupported keywords ($schema, additionalProperties: true)", () => {
-    const input = {
+  it("sends what Gemini accepts exactly as written", () => {
+    const accepted = {
       $schema: "http://json-schema.org/draft-07/schema#",
       type: "object",
       additionalProperties: true,
       properties: {
-        name: { type: "string" },
+        level: { type: "integer", enum: [1, 2, 3] },
+        action: { const: "send_message" },
+        note: { anyOf: [{ type: "string" }, { type: "null" }] },
+        count: { type: ["integer", "null"] },
+        tags: { type: "array", description: "any kind of item" },
+        pick: { $ref: "#/$defs/Pick" },
+        either: { oneOf: [{ type: "string" }, { type: "integer" }] },
+        word: { type: "string", pattern: "^[a-z]+$", format: "uri" },
       },
+      required: ["level"],
+      $defs: { Pick: { type: "string" } },
     };
-    const sanitized = toGeminiToolSchema(input);
-    expect(sanitized.$schema).toBeUndefined();
-    expect(sanitized.additionalProperties).toBeUndefined();
-    expect(sanitized.properties).toBeDefined();
+    expect(toGeminiToolSchema(accepted)).toEqual(accepted);
+  });
+
+  it("does not touch the input", () => {
+    const input = { type: "object", properties: { a: { type: "array", items: [{}] } } };
+    const before = structuredClone(input);
+    toGeminiToolSchema(input);
+    expect(input).toEqual(before);
+  });
+
+  it("drops required names that have no property, at any depth", () => {
+    expect(
+      toGeminiToolSchema({
+        type: "object",
+        properties: {
+          inner: {
+            type: "object",
+            properties: { b: { type: "string" } },
+            required: ["b", "ghost"],
+          },
+          list: {
+            type: "array",
+            items: { type: "object", required: ["ghost"] },
+          },
+        },
+        required: ["inner", "ghost"],
+      }),
+    ).toEqual({
+      type: "object",
+      properties: {
+        inner: { type: "object", properties: { b: { type: "string" } }, required: ["b"] },
+        list: { type: "array", items: { type: "object", required: [] } },
+      },
+      required: ["inner"],
+    });
+  });
+
+  it("turns Draft-04 exclusive bounds into the numeric form", () => {
+    const { properties } = toGeminiToolSchema({
+      type: "object",
+      properties: {
+        over: { type: "number", minimum: 0, exclusiveMinimum: true },
+        under: { type: "number", maximum: 9, exclusiveMaximum: true },
+        inclusive: { type: "number", minimum: 1, exclusiveMinimum: false },
+        already: { type: "number", exclusiveMinimum: 0 },
+      },
+    });
+    expect(properties).toEqual({
+      over: { type: "number", exclusiveMinimum: 0 },
+      under: { type: "number", exclusiveMaximum: 9 },
+      inclusive: { type: "number", minimum: 1 },
+      already: { type: "number", exclusiveMinimum: 0 },
+    });
+  });
+
+  it("turns a tuple into prefixItems, and additionalItems into items", () => {
+    const { properties } = toGeminiToolSchema({
+      type: "object",
+      properties: {
+        open: { type: "array", items: [{ type: "string" }, { type: "number" }] },
+        closed: { type: "array", items: [{ type: "string" }], additionalItems: false },
+        rest: { type: "array", items: [{ type: "string" }], additionalItems: { type: "number" } },
+      },
+    });
+    expect(properties).toEqual({
+      open: { type: "array", prefixItems: [{ type: "string" }, { type: "number" }] },
+      closed: { type: "array", prefixItems: [{ type: "string" }], items: false },
+      rest: { type: "array", prefixItems: [{ type: "string" }], items: { type: "number" } },
+    });
+  });
+
+  it("cuts a recursive $ref only where Gemini refuses the loop", () => {
+    const node = (extra: Record<string, unknown>) => ({
+      type: "object",
+      properties: { n: { $ref: "#/$defs/Node" } },
+      $defs: { Node: { type: "object", ...extra } },
+    });
+    const self = { $ref: "#/$defs/Node" };
+    const defOf = (schema: Record<string, unknown>) =>
+      (schema.$defs as Record<string, unknown>).Node;
+
+    // 400 "ref loops are only supported if they include optional ..." on all three:
+    expect(
+      defOf(toGeminiToolSchema(node({ properties: { next: self }, required: ["next"] }))),
+    ).toEqual({ type: "object", properties: { next: {} }, required: ["next"] });
+    expect(
+      defOf(
+        toGeminiToolSchema(
+          node({
+            properties: { kids: { type: "array", minItems: 1, items: self } },
+            required: ["kids"],
+          }),
+        ),
+      ),
+    ).toEqual({
+      type: "object",
+      properties: { kids: { type: "array", minItems: 1, items: {} } },
+      required: ["kids"],
+    });
+    expect(
+      toGeminiToolSchema({
+        type: "object",
+        properties: { child: { $ref: "#" } },
+        required: ["child"],
+      }).properties,
+    ).toEqual({ child: {} });
+
+    // Accepted: through an optional property, and through an array that may be empty.
+    const optional = node({ properties: { next: self } });
+    expect(toGeminiToolSchema(optional)).toEqual(optional);
+    const list = node({
+      properties: { kids: { type: "array", items: self } },
+      required: ["kids"],
+    });
+    expect(toGeminiToolSchema(list)).toEqual(list);
+  });
+
+  it("leaves data alone: defaults, consts, and properties named like keywords", () => {
+    const input = {
+      type: "object",
+      properties: {
+        required: { type: "array", items: { type: "string" } },
+        exclusiveMinimum: true,
+        items: { type: "string", default: { items: [1, 2], required: ["ghost"] } },
+        mode: { const: { exclusiveMaximum: true, minimum: 3 } },
+      },
+      required: ["required", "items"],
+    };
+    expect(toGeminiToolSchema(input)).toEqual(input);
+  });
+
+  it("gives a non-object an empty object schema", () => {
+    expect(toGeminiToolSchema(undefined)).toEqual({ type: "object", properties: {} });
+    expect(toGeminiToolSchema([])).toEqual({ type: "object", properties: {} });
   });
 });
 
