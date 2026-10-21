@@ -338,6 +338,9 @@ describe("context overflow is not a rate limit", () => {
     "input is too long for requested model",
     // GitHub Copilot, which no other wording here reads.
     "prompt token count of 270000 exceeds the limit of 128000",
+    // Gemini's INVALID_ARGUMENT for a prompt over the window (cc-proxy 0.2.9). It read as
+    // `invalid`, so the conversation was never compacted.
+    "The input token count exceeds the maximum number of tokens allowed 1048576.",
   ])("%s", (message) => {
     expect(kindOf(apiError(400, { message }))).toBe("context");
   });
