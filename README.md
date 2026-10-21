@@ -118,6 +118,23 @@ Keep one provider alive across calls, so it remembers which models are spent.
 Go also asks each client to send its own user agent, not the runtime's default. Pass
 `headers: { "user-agent": "my-app" }`, and add it to each Go entry in `fallbacks` too.
 
+### OpenCode Zen
+
+Pay as you go, with one key for Claude, GPT, Grok, Gemini and open models. The preset has no
+default model, because prices differ a lot between them. Name the one you want:
+
+```ts
+const provider = createPresetProvider("opencode-zen", { apiKey, model: "claude-sonnet-5-5" });
+```
+
+Like Go, Zen puts models on different endpoints, and the preset picks one from the model id:
+`claude-` and most `qwen` models on Anthropic Messages, `gpt-`, `grok-` and `muse-` on
+Responses, `gemini-` on Google's API, and the rest on chat completions. A per-call `model` on a
+different endpoint is refused with an `invalid` error, before any request.
+
+Zen's free models (`big-pickle` and every id ending in `-free`) do not work here. Zen answers
+them with `403 FreeTierError`, because its free tier is only for OpenCode itself.
+
 ### Set up providers once
 
 ```ts

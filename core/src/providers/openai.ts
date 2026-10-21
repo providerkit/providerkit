@@ -333,7 +333,9 @@ function goEffortParams(effort: Effort, model = ""): Record<string, unknown> {
 function dialectFor(id: string): EffortDialect {
   if (id === "openrouter") return "openrouter";
   if (id === "deepseek") return "deepseek";
-  if (id === "opencode-go") return "opencode-go";
+  // Zen puts the same GLM and DeepSeek models on its chat wire, and cc-proxy
+  // translates both gateways with one table.
+  if (id === "opencode-go" || id === "opencode-zen") return "opencode-go";
   return "openai";
 }
 

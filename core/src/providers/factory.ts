@@ -48,7 +48,7 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   headers?: Record<string, string>;
   /**
    * The session id for a call without `StreamOptions.sessionId`, on a preset
-   * that sends one (`opencode-go`, `chatgpt`). Absent, the provider mints its
+   * that sends one (`opencode-go`, `opencode-zen`, `chatgpt`). Absent, the provider mints its
    * own when it is built. Pass one when you build the provider per attempt
    * (`withKeyPool`, `withToken`): each build would mint a new id, and a gateway
    * that pins a session to one upstream host then treats every call as a new
@@ -117,7 +117,7 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
  * watchdog inside its own.
  *
  * The adapter's `id` is the preset id, because the OpenAI shape reads its
- * effort dialect from it (`opencode-go`, `openrouter`, `deepseek`).
+ * effort dialect from it (`opencode-go`, `opencode-zen`, `openrouter`, `deepseek`).
  */
 export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig): Provider {
   const preset = presetFor(id);

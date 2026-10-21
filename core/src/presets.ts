@@ -431,6 +431,66 @@ export const PROVIDER_PRESETS = {
     // privacy setting, and answers 500 without it.
     rotation: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
   },
+  /**
+   * OpenCode Zen: pay as you go, one key across Claude, GPT, Grok, Gemini and
+   * the open models. Zen's docs give each model its own endpoint, and `routes`
+   * picks it from the model id: `claude-` and the Qwen models other than
+   * `qwen3.8-max` on Anthropic Messages (key in `x-api-key`), `gpt-`, `grok-`
+   * and `muse-` on Responses, `gemini-` on Google's REST, and everything else on
+   * chat completions.
+   *
+   * Measured 2026-10-21 on all four endpoints, once with a wrong key and once
+   * with none: the first answers 401 "Invalid credential" and the second 401
+   * "Missing API key", so each endpoint reads the key from the header its wire
+   * uses. Nothing past that check is measured, because no paid key was at hand.
+   * Run `scripts/probe-model.ts opencode-zen <model>` with one before relying on
+   * a model.
+   *
+   * The free models (`big-pickle` and every `-free` id) are not served here.
+   * Zen answers them with 403 `FreeTierError`: "OpenCode's free tier can only be
+   * used from within OpenCode". That is a rule of the service, so this preset
+   * does not send the OpenCode CLI's user agent or session ids to get around it.
+   *
+   * There is no `defaultModel`: prices run from cents to dollars per million
+   * tokens, so a call with no model should fail before it spends. Pass `model`.
+   * The session header is Go's. Zen's docs do not mention it, and no key was at
+   * hand to see whether a paid call needs it, so it is sent in case Zen does.
+   */
+  "opencode-zen": {
+    shape: "openai",
+    baseUrl: "https://opencode.ai/inference/openai/v1",
+    auth: "bearer",
+    models: [
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5",
+      "gpt-5.6-luna",
+      "grok-4.7",
+      "gemini-3.8-flash",
+      "glm-5.3-flash",
+      "deepseek-v4.1-flash",
+      "kimi-k3",
+    ],
+    sessionHeader: "x-opencode-session",
+    routes: [
+      {
+        prefixes: ["claude-", "qwen3.8-flash", "qwen3.7", "qwen3.6", "qwen3.5"],
+        shape: "anthropic",
+        baseUrl: "https://opencode.ai/inference/anthropic",
+        auth: "key",
+      },
+      {
+        prefixes: ["gpt-", "grok-", "muse-"],
+        shape: "responses",
+        baseUrl: "https://opencode.ai/inference/openai",
+      },
+      {
+        prefixes: ["gemini-"],
+        shape: "gemini",
+        baseUrl: "https://opencode.ai/inference/google",
+        auth: "key",
+      },
+    ],
+  },
   kimi: {
     shape: "anthropic",
     baseUrl: "https://api.kimi.ai/coding",

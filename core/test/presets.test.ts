@@ -308,6 +308,78 @@ describe("opencode-go — the session header", () => {
     );
   });
 
+  describe("opencode-zen routes", () => {
+    const hi = [{ role: "user" as const, content: "hi" }];
+    const call = async (model: string, opts = {}) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider("opencode-zen", { apiKey: "k", model, fetchImpl });
+      await drain(provider.createStream(hi, [], opts)).catch(() => {});
+      const [url, init] = fetchImpl.mock.calls[0]!;
+      return { url: String(url), headers: new Headers(init?.headers) };
+    };
+
+    // Zen's docs table, one model per row and the exceptions in the family
+    // (`qwen3.8-max` is on chat completions, `qwen3.8-flash` on Messages).
+    it.each([
+      ["glm-5.3", "https://opencode.ai/inference/openai/v1/chat/completions"],
+      ["kimi-k3", "https://opencode.ai/inference/openai/v1/chat/completions"],
+      ["minimax-m3", "https://opencode.ai/inference/openai/v1/chat/completions"],
+      ["qwen3.8-max", "https://opencode.ai/inference/openai/v1/chat/completions"],
+      ["claude-sonnet-5-5", "https://opencode.ai/inference/anthropic/v1/messages"],
+      ["qwen3.8-flash", "https://opencode.ai/inference/anthropic/v1/messages"],
+      ["qwen3.7-plus", "https://opencode.ai/inference/anthropic/v1/messages"],
+      ["gpt-5.6-luna", "https://opencode.ai/inference/openai/v1/responses"],
+      ["grok-4.5", "https://opencode.ai/inference/openai/v1/responses"],
+      ["muse-spark-1.3", "https://opencode.ai/inference/openai/v1/responses"],
+      [
+        "gemini-3.8-flash",
+        "https://opencode.ai/inference/google/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+      ],
+    ])("sends %s to %s", async (model, url) => {
+      expect((await call(model)).url).toBe(url);
+    });
+
+    it("sends the key in the header each wire reads", async () => {
+      const { headers: messages } = await call("claude-haiku-5-5");
+      expect(messages.get("x-api-key")).toBe("k");
+      expect(messages.get("authorization")).toBeNull();
+      expect((await call("gemini-3.8-flash")).headers.get("x-goog-api-key")).toBe("k");
+      expect((await call("gpt-5.6-luna")).headers.get("authorization")).toBe("Bearer k");
+      expect((await call("glm-5.3")).headers.get("authorization")).toBe("Bearer k");
+    });
+
+    it("sends the call's session id on the wires that take one", async () => {
+      for (const model of ["glm-5.3", "claude-haiku-5-5", "gpt-5.6-luna"]) {
+        const sent = await call(model, { sessionId: "conv-1" });
+        expect(sent.headers.get("x-opencode-session")).toBe("conv-1");
+      }
+    });
+
+    it("never sends the OpenCode CLI's identity", async () => {
+      // Zen's free tier is for OpenCode alone. A provider here must not pose as it.
+      const { headers } = await call("glm-5.3");
+      for (const name of ["x-opencode-client", "x-opencode-project", "x-session-affinity"]) {
+        expect(headers.has(name)).toBe(false);
+      }
+      expect(headers.get("user-agent") ?? "").not.toMatch(/opencode/i);
+    });
+
+    it("names no default model, so a call with none fails before it spends", () => {
+      expect(() => createPresetProvider("opencode-zen", { apiKey: "k" })).toThrow(/defaultModel/);
+    });
+
+    it.each([
+      ["glm-5.3", "none", "high"],
+      ["deepseek-v4-pro", "none", "low"],
+      ["kimi-k3", "max", "high"],
+    ] as const)("says %s at effort %s as reasoning_effort %s", async (model, effort, wire) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider("opencode-zen", { apiKey: "k", model, fetchImpl });
+      await drain(provider.createStream(hi, [], { effort })).catch(() => {});
+      expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body)).reasoning_effort).toBe(wire);
+    });
+  });
+
   it("only chatgpt replays reasoning", () => {
     expect(PROVIDER_PRESETS.chatgpt.replayReasoning).toBe(true);
     for (const [id, preset] of Object.entries(PROVIDER_PRESETS)) {
