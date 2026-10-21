@@ -366,7 +366,7 @@ const ENTITLEMENT_PATTERNS: readonly RegExp[] = [
   /upgrade to [\w ]{1,30}(?:or higher|plan)/i,
   /requires? (?:the |a |an )?[\w\s]{1,30}plan/i,
   /requires? (?:a )?subscription/i,
-  /subscription[_\s]?required/i,
+  /subscription(?: is)?[_\s]?required/i,
   /upgrade for access/i,
   /no api access/i,
   /OAuth authentication is currently not allowed for this organization/i,
@@ -422,6 +422,15 @@ const MODEL_PATTERNS: readonly RegExp[] = [
   /unknown model/i,
   // OpenRouter: "z-ai/glm-5.3-flash@novita is not a valid model ID"
   /is not a valid model ID/i,
+  // OpenCode Go answers 400 when the workspace's Privacy settings block a
+  // specific model ("This Go model trains on request data. Allow paid
+  // endpoints that train on request data in your workspace's Privacy settings
+  // to use it." or "This Go model requires Global regions. Select Global in
+  // your workspace's Privacy settings to use it."), and OpenRouter answers 404
+  // ("No endpoints found matching your data policy"). The prompt is valid and
+  // another model in the chain can serve it, so this is `model`, not `invalid`.
+  /Privacy settings to use it/i,
+  /no endpoints found matching your data policy/i,
 ];
 
 const AUTH_PATTERNS: readonly RegExp[] = [
