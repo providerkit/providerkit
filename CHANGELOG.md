@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.25.1] - 2026-10-21
+
+### Added
+
+- **`OPENCODE_CLI_USER_AGENT` and `antigravityUserAgent(model)` are exported.** OpenCode Zen's free tier and Cloud Code Assist both read the User-Agent, and a browser cannot set it on `fetch`: Chromium ignores the header and sends its own. A browser app can now read the exact string and stamp it on the request with `declarativeNetRequest`.
+
 ## [0.25.0] - 2026-10-21
 
 ### Added

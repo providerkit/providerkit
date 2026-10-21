@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createPresetProvider,
+  OPENCODE_CLI_USER_AGENT,
   PRESET_IDS,
   PROVIDER_PRESETS,
   type Provider,
@@ -356,7 +357,7 @@ describe("opencode-go — the session header", () => {
       expect(headers.get("x-session-id")).toBe(ses);
       expect(headers.get("x-opencode-project")).toBe("global");
       expect(headers.get("x-opencode-client")).toBe("cli");
-      expect(headers.get("user-agent")).toBe("opencode/latest/2.0.32/cli");
+      expect(headers.get("user-agent")).toBe(OPENCODE_CLI_USER_AGENT);
     });
 
     it("offers a decoy read tool with tool_choice none on free models when no tools are passed", async () => {
