@@ -223,7 +223,7 @@ un-learned.
 
 ## Next
 
-`0.23.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
+`0.24.0` is on npm. **Four of the five source codebases have migrated**, and every one of them
 came out smaller:
 
 | Migration                           | Runtime                                   |    Net |
@@ -246,7 +246,7 @@ all landed here, so what remains is mechanical and needs only a free tree.
 Every migration is tracked in `ROADMAP.local.md`, deliberately not in this repo because it is a
 map of codebases that are not open.
 
-**The fleet is on `^0.22` from the registry** — every adopter, including the one whose migration
+**The fleet is on `^0.24` from the registry** — every adopter, including the one whose migration
 was backed out but whose newest module was already written against the package. No `link:`, no
 `file:`, nothing that resolves only on one machine. Each bump is verified against the adopter's
 own gates, not just installed. On the first flip, to `^0.4.0`, the two that were on a `bun link`
