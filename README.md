@@ -118,6 +118,20 @@ Keep one provider alive across calls, so it remembers which models are spent.
 Go also asks each client to send its own user agent, not the runtime's default. Pass
 `headers: { "user-agent": "my-app" }`, and add it to each Go entry in `fallbacks` too.
 
+### OpenCode Zen and Google Antigravity
+
+`opencode-zen` serves OpenCode Zen's free and paid models on `https://opencode.ai/zen/v1`.
+By default it rotates through the free models first (`minimax-m3.1-flash-free`,
+`mimo-v2.6-flash-free`, `deepseek-v4.1-flash-free`, `big-pickle`, `glm-5.3-flash-free`),
+and routes `claude-`, `gpt-`, `grok-`, `muse-`, `gemini-` and `qwen` models to the endpoint
+each family uses. You can also sign in with `createAuthFlow("opencode-zen", host)` from
+`@providerkit/core/auth`.
+
+`antigravity` serves Google Cloud Code Assist over OAuth (`gemini-4-argon`,
+`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.1-pro`, `claude-opus-5-5`,
+`claude-sonnet-5-5`). Sign in with `createAuthFlow("antigravity", host)` to discover the
+Cloud Code Assist project and hand the token source to `withToken` or `createRegistry`.
+
 ### Set up providers once
 
 ```ts

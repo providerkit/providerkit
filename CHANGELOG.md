@@ -2,6 +2,19 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.25.0] - 2026-10-21
+
+### Added
+
+- **`opencode-zen` preset and Console device sign-in.** Serves OpenCode Zen's free and paid models on `https://opencode.ai/zen/v1`, with free models (`minimax-m3.1-flash-free`, `mimo-v2.6-flash-free`, `deepseek-v4.1-flash-free`, `big-pickle`, `glm-5.3-flash-free`) first in the list and default rotation. Routes `claude-`, `gpt-`, `grok-`, `muse-`, `gemini-` and `qwen` models to their own endpoints, formats `ses_` session ids, offers the `read` tool gate on free models, and retries a free model anonymously if a stale key answers 401. `createAuthFlow("opencode-zen", host)` signs in through OpenCode Console's device flow and resolves its relative verification URL.
+- **`antigravity` preset and Google Cloud Code Assist OAuth flow.** `createAuthFlow("antigravity", host)` signs in with Google OAuth PKCE (`antigravityAuthorizeUrl`), discovers or onboards the Cloud Code Assist `projectId`, and stores it on the credential. `withToken` and `createRegistry` forward it to the `antigravity` preset, which wraps requests in the Cloud Code Assist agent envelope, maps wire model ids and per-model User-Agent headers, and falls back from the daily host to prod on 403, 404 and 5xx before any output.
+
+### Fixed
+
+- **Gemini's input token count overflow now classifies as `context`.** Gemini answers a prompt over its limit with `The input token count exceeds the maximum number of tokens allowed`. It used to classify as `invalid`, so compaction never ran.
+- **Gemini tool and response schemas are sent as written, with only the four shapes Gemini rejects repaired.** `toGeminiToolSchema` now keeps numeric enums, `$ref` / `$defs`, `const`, nullable unions and arrays without `items` intact for `parametersJsonSchema` and `responseJsonSchema`, and repairs only undeclared `required` names, Draft-04 boolean `exclusiveMinimum` / `exclusiveMaximum`, tuple `items`, and recursive `$ref` loops through required properties. `toAntigravityToolSchema` keeps the OpenAPI-subset sanitizer for Cloud Code Assist's `parameters` field.
+- **`effort: "none"` on Gemini 3.7+, 4 and Pro models sends `LOW` instead of `MINIMAL`.** Only `gemini-3-flash`, `gemini-3.5-flash`, `gemini-3.6-flash` and the `flash-lite` models accept `MINIMAL`; the rest rejected it with a 400.
+
 ## [0.24.0] - 2026-10-19
 
 ### Changed

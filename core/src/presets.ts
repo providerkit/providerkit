@@ -431,6 +431,82 @@ export const PROVIDER_PRESETS = {
     // privacy setting, and answers 500 without it.
     rotation: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
   },
+  /**
+   * OpenCode Zen: free and pay-as-you-go models on `https://opencode.ai/zen/v1`,
+   * matching cc-proxy's `opencode-zen` provider.
+   *
+   * Free models (`big-pickle` and every `-free` id) lead the list and the default
+   * rotation. Zen's free tier requires the OpenCode CLI headers, a `ses_` session
+   * id and a `read` tool on the request; the factory adds those automatically and
+   * retries a free model anonymously if a stale key answers 401.
+   *
+   * `routes` picks each model's wire from its id: `claude-` and Qwen (except
+   * `qwen3.8-max`) on Anthropic `/v1/messages`, `gpt-`, `grok-` and `muse-` on
+   * `/v1/responses`, `gemini-` on `/v1/models/<id>:streamGenerateContent?alt=sse`,
+   * and everything else on `/v1/chat/completions`.
+   */
+  "opencode-zen": {
+    shape: "openai",
+    baseUrl: "https://opencode.ai/zen/v1",
+    auth: "bearer",
+    defaultModel: "minimax-m3.1-flash-free",
+    models: [
+      "minimax-m3.1-flash-free",
+      "mimo-v2.6-flash-free",
+      "deepseek-v4.1-flash-free",
+      "glm-5.3-flash-free",
+      "big-pickle",
+      "mimo-v2.5-free",
+      "nemotron-3.5-super-vl-free",
+      "nemotron-3.5-lightning-free",
+      "longcat-2.5-preview-free",
+      "beam-free",
+      "ll-alpha-free",
+      "exo-free",
+      "nemotron-3-ultra-free",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+      "claude-fable-5-1",
+      "claude-haiku-5-5",
+      "gpt-6-sol",
+      "gpt-5.6-luna",
+      "gemini-4-argon",
+      "gemini-3.8-flash",
+      "grok-4.7",
+      "glm-5.3-flash",
+      "deepseek-v4.1-flash",
+      "kimi-k3",
+      "minimax-m3",
+      "qwen3.8-flash",
+    ],
+    sessionHeader: "x-opencode-session",
+    routes: [
+      {
+        prefixes: ["claude-", "qwen3.8-flash", "qwen3.7", "qwen3.6", "qwen3.5"],
+        shape: "anthropic",
+        baseUrl: "https://opencode.ai/zen",
+        auth: "key",
+      },
+      {
+        prefixes: ["gpt-", "grok-", "muse-"],
+        shape: "responses",
+        baseUrl: "https://opencode.ai/zen",
+      },
+      {
+        prefixes: ["gemini-"],
+        shape: "gemini",
+        baseUrl: "https://opencode.ai/zen/v1",
+        auth: "key",
+      },
+    ],
+    rotation: [
+      "minimax-m3.1-flash-free",
+      "mimo-v2.6-flash-free",
+      "deepseek-v4.1-flash-free",
+      "big-pickle",
+      "glm-5.3-flash-free",
+    ],
+  },
   kimi: {
     shape: "anthropic",
     baseUrl: "https://api.kimi.ai/coding",
@@ -616,6 +692,30 @@ export const PROVIDER_PRESETS = {
       "Copilot-Vision-Request": "true",
     },
     initiatorHeader: true,
+  },
+  /**
+   * Google Antigravity (Cloud Code Assist) OAuth, matching cc-proxy's
+   * `antigravity` provider. Sign in with `createAuthFlow("antigravity", host)`
+   * from `@providerkit/core/auth`, which discovers the Cloud Code Assist
+   * `projectId` and stores it on the credential; `withToken` and `createRegistry`
+   * forward it automatically.
+   */
+  antigravity: {
+    shape: "gemini",
+    baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+    path: "/v1internal:streamGenerateContent?alt=sse",
+    auth: "oauth",
+    defaultModel: "gemini-4-argon",
+    models: [
+      "gemini-4-argon",
+      "gemini-3.8-flash",
+      "gemini-3.7-flash",
+      "gemini-3.1-pro",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-sonnet-4-6",
+      "claude-opus-4-6-thinking",
+    ],
   },
 } as const satisfies Record<string, ProviderPreset>;
 

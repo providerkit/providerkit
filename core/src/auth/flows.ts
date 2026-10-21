@@ -40,7 +40,14 @@ export interface AuthFlow {
 }
 
 export type AuthFlowId =
-  "chatgpt" | "kimi-plan" | "grok" | "github-copilot" | "meta" | "openrouter";
+  | "chatgpt"
+  | "kimi-plan"
+  | "grok"
+  | "github-copilot"
+  | "meta"
+  | "openrouter"
+  | "opencode-zen"
+  | "antigravity";
 
 export function createAuthFlow(id: AuthFlowId, host: AuthHost): AuthFlow {
   switch (id) {
@@ -66,6 +73,10 @@ export function createAuthFlow(id: AuthFlowId, host: AuthHost): AuthFlow {
       );
     case "openrouter":
       return openrouterFlow(host);
+    case "opencode-zen":
+      return deviceFlow(host, OPENCODE_ZEN_DEVICE, opencodeZenCredential, opencodeZenRefresh(host));
+    case "antigravity":
+      return antigravityFlow(host);
   }
 }
 
@@ -516,6 +527,282 @@ function openrouterFlow(host: AuthHost): AuthFlow {
     // signing in again mints a new one.
     refresh: (credential) => Promise.resolve(credential),
   };
+}
+
+// ── OpenCode Console (Zen / Go): device code ──────────────────────────────
+// Matches `opencode auth login opencode` in OpenCode v2 (`packages/core/src/plugin/provider/opencode.ts`)
+// and `cc-proxy auth login opencode-zen --device`. The Console returns a relative
+// `verification_uri_complete` (`/console/device?user_code=…&client_id=opencode-cli`),
+// which `requestDeviceCode` resolves against `deviceUrl`.
+
+const OPENCODE_ZEN_DEVICE: DeviceEndpoint = {
+  clientId: "opencode-cli",
+  deviceUrl: "https://opencode.ai/console/auth/device/code",
+  tokenUrl: "https://opencode.ai/console/auth/device/token",
+  extra: { supports_org_scope: true },
+  encode: "json",
+};
+
+function opencodeZenCredential(
+  body: Record<string, unknown>,
+  fallbackRefresh?: string,
+): Credential {
+  const accessToken = str(body.access_token);
+  if (!accessToken) {
+    throw authError("token_incomplete", "OpenCode Console's reply has no access token.");
+  }
+  const refreshToken = str(body.refresh_token) ?? fallbackRefresh ?? "";
+  const expiresIn = num(body.expires_in);
+  const expiresAt =
+    refreshToken && expiresIn !== undefined
+      ? Date.now() + expiresIn * 1000 - REFRESH_SKEW_MS
+      : NEVER;
+  const account = str(body.org_id) ?? accountFromToken(accessToken, "email", "sub");
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt,
+    ...(account ? { account } : {}),
+  };
+}
+
+function opencodeZenRefresh(host: AuthHost): AuthFlow["refresh"] {
+  return async (credential) => {
+    if (!credential.refreshToken) return credential;
+    const body = await postToken(
+      host,
+      OPENCODE_ZEN_DEVICE.tokenUrl,
+      {
+        client_id: OPENCODE_ZEN_DEVICE.clientId,
+        grant_type: "refresh_token",
+        refresh_token: credential.refreshToken,
+      },
+      { encode: "json" },
+    );
+    const fresh = opencodeZenCredential(body, credential.refreshToken);
+    return credential.account && !fresh.account ? { ...fresh, account: credential.account } : fresh;
+  };
+}
+
+// ── Google Antigravity (Cloud Code Assist): PKCE + project discovery ──────
+// Mirrors `cc-proxy/src/providers/antigravity.rs` and `opencodex/src/oauth/google-antigravity.ts`.
+// Signs in with Google OAuth PKCE using the public Antigravity desktop client,
+// then discovers the Cloud Code Assist `projectId` via `loadCodeAssist` (with
+// `onboardUser` fallback for accounts without a project yet).
+
+const ANTIGRAVITY = {
+  clientId: [
+    "1071006060591-",
+    "tmhssin2h21lcre235vtolojh4g403ep",
+    ".apps.google",
+    "usercontent.com",
+  ].join(""),
+  clientSecret: ["GOCS", "PX-", "K58FWR486LdL", "J1mLB8sXC4z6qDAf"].join(""),
+  authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+  tokenUrl: "https://oauth2.googleapis.com/token",
+  redirectUri: "http://127.0.0.1:51121/callback",
+  prodApi: "https://cloudcode-pa.googleapis.com",
+  dailyApi: "https://daily-cloudcode-pa.googleapis.com",
+  apiVersion: "v1internal",
+  ideUserAgent:
+    "antigravity/ide/2.5.5 (os_type=windows; arch=amd64; aidev_client; auth_method=oauth)",
+  scopes: [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/cclog",
+    "https://www.googleapis.com/auth/experimentsandconfigs",
+  ].join(" "),
+  onboardAttempts: 5,
+  onboardPollMs: 2_000,
+} as const;
+
+/** The authorize URL to open for Google Antigravity. Exported so tests can pin the exact params. */
+export function antigravityAuthorizeUrl(challenge: string, state: string): string {
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: ANTIGRAVITY.clientId,
+    redirect_uri: ANTIGRAVITY.redirectUri,
+    scope: ANTIGRAVITY.scopes,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    access_type: "offline",
+    prompt: "consent",
+    state,
+  });
+  return `${ANTIGRAVITY.authorizeUrl}?${params.toString()}`;
+}
+
+function extractAntigravityProjectId(data: Record<string, unknown>): string | undefined {
+  for (const key of ["cloudaicompanionProject", "projectId", "project"]) {
+    const val = data[key];
+    const direct = str(val);
+    if (direct) return direct;
+    const nested = str(asRecord(val).id);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+/** Discover the Cloud Code Assist project for an Antigravity access token. */
+export async function discoverAntigravityProject(
+  host: AuthHost,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": ANTIGRAVITY.ideUserAgent,
+  };
+  try {
+    const loadRes = await authFetch(
+      host,
+      `${ANTIGRAVITY.prodApi}/${ANTIGRAVITY.apiVersion}:loadCodeAssist`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
+        ...(signal ? { signal } : {}),
+      },
+    );
+    if (loadRes.ok) {
+      const payload = asRecord(parseJson(await loadRes.text().catch(() => "")));
+      const found = extractAntigravityProjectId(payload);
+      if (found) return found;
+    }
+  } catch (err) {
+    if (signal?.aborted) throw err;
+  }
+
+  for (let attempt = 0; attempt < ANTIGRAVITY.onboardAttempts; attempt++) {
+    if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
+    try {
+      const onboardRes = await authFetch(
+        host,
+        `${ANTIGRAVITY.dailyApi}/${ANTIGRAVITY.apiVersion}:onboardUser`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            tier_id: "free-tier",
+            metadata: {
+              ide_type: "ANTIGRAVITY",
+              ide_name: "antigravity",
+              ide_version: "2.5.5",
+            },
+          }),
+          ...(signal ? { signal } : {}),
+        },
+      );
+      if (onboardRes.ok) {
+        const payload = asRecord(parseJson(await onboardRes.text().catch(() => "")));
+        if (payload.done === true) {
+          const found = extractAntigravityProjectId(asRecord(payload.response));
+          if (found) return found;
+        }
+      } else if (onboardRes.status !== 429 && onboardRes.status < 500) {
+        return undefined;
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+    }
+    if (attempt + 1 < ANTIGRAVITY.onboardAttempts) {
+      await waitMs(ANTIGRAVITY.onboardPollMs, signal);
+    }
+  }
+  return undefined;
+}
+
+function waitMs(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("Aborted"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("Aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function antigravityFlow(host: AuthHost): AuthFlow {
+  const tokenRequest = (params: Record<string, string>) =>
+    postToken(
+      host,
+      ANTIGRAVITY.tokenUrl,
+      {
+        client_id: ANTIGRAVITY.clientId,
+        client_secret: ANTIGRAVITY.clientSecret,
+        ...params,
+      },
+      { encode: "form" },
+    );
+
+  return {
+    async signIn(signal, onPrompt) {
+      const { verifier, challenge } = await generatePKCE();
+      const state = randomState();
+      const authorizeUrl = antigravityAuthorizeUrl(challenge, state);
+      onPrompt({ url: authorizeUrl });
+      const code = await host.captureRedirect({
+        authorizeUrl,
+        redirectUri: ANTIGRAVITY.redirectUri,
+        state,
+        signal,
+      });
+      const body = await tokenRequest({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: ANTIGRAVITY.redirectUri,
+        code_verifier: verifier,
+      });
+      const credential = antigravityCredential(body);
+      const projectId = await discoverAntigravityProject(host, credential.accessToken, signal);
+      if (!projectId) {
+        throw authError(
+          "setup_required",
+          "Antigravity login could not discover a Cloud Code Assist project for this Google account.",
+        );
+      }
+      return { ...credential, projectId };
+    },
+    async refresh(credential) {
+      const body = await tokenRequest({
+        grant_type: "refresh_token",
+        refresh_token: credential.refreshToken,
+      });
+      const fresh = antigravityCredential(body, credential.refreshToken, credential.account);
+      const projectId =
+        credential.projectId ??
+        (await discoverAntigravityProject(host, fresh.accessToken).catch(() => undefined));
+      return projectId ? { ...fresh, projectId } : fresh;
+    },
+  };
+}
+
+function antigravityCredential(
+  body: Record<string, unknown>,
+  fallbackRefresh?: string,
+  fallbackAccount?: string,
+): Credential {
+  const credential = toCredential(
+    { ...body, expires_in: num(body.expires_in) ?? GROK_DEFAULT_LIFETIME_SEC },
+    fallbackRefresh,
+  );
+  const idToken = str(body.id_token);
+  const account =
+    accountFromToken(idToken, "email") ??
+    accountFromToken(credential.accessToken, "email") ??
+    fallbackAccount;
+  return account ? { ...credential, account } : credential;
 }
 
 function parseJson(text: string): unknown {

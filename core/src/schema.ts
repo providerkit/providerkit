@@ -162,106 +162,234 @@ const SCHEMA_MAPS = ["properties", "patternProperties", "$defs", "definitions", 
  * validation the caller's tool runner repeats anyway; the 400 costs the turn.
  */
 export function withoutPatterns(node: unknown): unknown {
-  if (!node || typeof node !== "object" || Array.isArray(node)) return node;
-  const { pattern: _pattern, ...schema } = node as Record<string, unknown>;
-  for (const key of SCHEMA_SLOTS) {
-    const value = schema[key];
+  if (!isSchemaObject(node)) return node;
+  const { pattern: _pattern, ...schema } = node;
+  mapChildren(schema, withoutPatterns);
+  return schema;
+}
+
+function isSchemaObject(node: unknown): node is Record<string, unknown> {
+  return typeof node === "object" && node !== null && !Array.isArray(node);
+}
+
+/** Replaces every child schema of `schema`, in place, with what `visit` returns for it. `slot`
+ *  is the keyword it sits under and `name` is its property name, for the keywords that map
+ *  names to schemas. */
+function mapChildren(
+  schema: Record<string, unknown>,
+  visit: (child: unknown, slot: string, name?: string) => unknown,
+): void {
+  for (const slot of SCHEMA_SLOTS) {
+    const value = schema[slot];
     if (value !== undefined) {
-      schema[key] = Array.isArray(value) ? value.map(withoutPatterns) : withoutPatterns(value);
+      schema[slot] = Array.isArray(value)
+        ? value.map((child) => visit(child, slot))
+        : visit(value, slot);
     }
   }
-  for (const key of SCHEMA_LISTS) {
-    const value = schema[key];
-    if (Array.isArray(value)) schema[key] = value.map(withoutPatterns);
+  for (const slot of SCHEMA_LISTS) {
+    const value = schema[slot];
+    if (Array.isArray(value)) schema[slot] = value.map((child) => visit(child, slot));
   }
-  for (const key of SCHEMA_MAPS) {
-    const value = schema[key];
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      schema[key] = Object.fromEntries(
-        Object.entries(value).map(([name, child]) => [name, withoutPatterns(child)]),
+  for (const slot of SCHEMA_MAPS) {
+    const value = schema[slot];
+    if (isSchemaObject(value)) {
+      schema[slot] = Object.fromEntries(
+        Object.entries(value).map(([name, child]) => [name, visit(child, slot, name)]),
       );
+    }
+  }
+}
+
+/**
+ * A JSON Schema for Gemini's `parametersJsonSchema` and `responseJsonSchema`, which take
+ * standard JSON Schema. It is sent as written except for the four shapes the API refuses.
+ * Measured on `gemini-3.8-flash` on 2026-10-21, in a tool and as a response schema alike;
+ * every other keyword tried (`$ref`, `$defs`, `oneOf`, `allOf`, `not`, `if`, `const`, numeric
+ * `enum`, `type: [..., "null"]`, `patternProperties`, `additionalProperties`, arrays without
+ * `items`) came back accepted:
+ *
+ * - `required` names a property that is not declared, at any depth: 400 "requires unspecified
+ *   property". The names with no property are dropped.
+ * - Draft-04 `exclusiveMinimum: true` (or `false`): 400 "must be a number". It becomes the
+ *   number form, `exclusiveMinimum: <minimum>`, and `minimum` goes.
+ * - A tuple, `items: [a, b]`: 400 "must be a boolean or an object". It becomes `prefixItems`,
+ *   and `additionalItems` becomes `items`, as in 2020-12.
+ * - A recursive `$ref` that is not behind an optional property or an array that may be empty:
+ *   400 "ref loops are only supported if ...". The self-reference becomes `{}`.
+ *
+ * This replaced a sanitizer written for the older `parameters` field, which accepts a small
+ * OpenAPI subset. Kept on `parametersJsonSchema`, it turned a numeric enum into a string enum
+ * (the model then sent `"2"` for `2`), forced string items onto an array of anything, and
+ * dropped every `$ref`, while still sending the 400s above.
+ */
+export function toGeminiToolSchema(node: unknown): Record<string, unknown> {
+  if (!isSchemaObject(node)) return { type: "object", properties: {} };
+  const root = geminiStandardForm(node);
+  for (const defs of ["$defs", "definitions"]) {
+    const entries = root[defs];
+    if (isSchemaObject(entries)) {
+      root[defs] = Object.fromEntries(
+        Object.entries(entries).map(([name, def]) => [
+          name,
+          cutRefLoops(def, `#/${defs}/${name}`, false),
+        ]),
+      );
+    }
+  }
+  const cut = cutRefLoops(root, "#", false);
+  return isSchemaObject(cut) ? cut : root;
+}
+
+function geminiStandardForm(node: Record<string, unknown>): Record<string, unknown> {
+  const schema = { ...node };
+  mapChildren(schema, (child) => (isSchemaObject(child) ? geminiStandardForm(child) : child));
+
+  if (Array.isArray(schema.required)) {
+    const declared = isSchemaObject(schema.properties) ? schema.properties : {};
+    schema.required = schema.required.filter(
+      (name) => typeof name === "string" && Object.hasOwn(declared, name),
+    );
+  }
+
+  for (const [flag, bound] of [
+    ["exclusiveMinimum", "minimum"],
+    ["exclusiveMaximum", "maximum"],
+  ] as const) {
+    if (typeof schema[flag] !== "boolean") continue;
+    if (schema[flag] && typeof schema[bound] === "number") {
+      schema[flag] = schema[bound];
+      delete schema[bound];
+    } else {
+      delete schema[flag];
+    }
+  }
+
+  if (Array.isArray(schema.items)) {
+    schema.prefixItems = schema.items;
+    delete schema.items;
+    if ("additionalItems" in schema) {
+      const extra = schema.additionalItems;
+      schema.items = isSchemaObject(extra) ? geminiStandardForm(extra) : extra;
+      delete schema.additionalItems;
     }
   }
   return schema;
 }
 
 /**
- * Sanitize a JSON Schema for Google Gemini's REST API.
+ * Gemini takes a recursive `$ref` only when the loop passes through a property that is not
+ * required or an `items` that may be empty. Any other reference to `target` becomes `{}`.
  *
- * Gemini's functionDeclarations schema parser only accepts a strict OpenAPI 3.0 subset.
- * It rejects:
- * - Nullable type arrays (`type: ["string", "null"]`), requiring `{ type: "string", nullable: true }`.
- * - Union types with null (`anyOf: [{ type: "string" }, { type: "null" }]`), requiring `{ type: "string", nullable: true }`.
- * - Numeric enums (`enum: [1, 2, 3]`), requiring string enums.
- * - `const: "val"`, requiring `enum: ["val"]`.
- * - Arrays without `items`, requiring an explicit items schema.
- * - Unsupported keywords ($schema, definitions, $defs, patternProperties, additionalProperties: true).
+ * ponytail: this cuts a definition's reference to ITSELF. Two definitions that refer to each
+ * other through required properties still get the 400; follow the ref graph if one shows up.
  */
-export function toGeminiToolSchema(node: unknown): Record<string, unknown> {
-  if (!node || typeof node !== "object" || Array.isArray(node)) {
-    return { type: "object", properties: {} };
-  }
-  const schema = { ...(node as Record<string, unknown>) };
-
-  delete schema.$schema;
-  delete schema.$id;
-  delete schema.$ref;
-  delete schema.definitions;
-  delete schema.$defs;
-  delete schema.patternProperties;
-
-  if (schema.additionalProperties === true) {
-    delete schema.additionalProperties;
-  }
-
-  if ("const" in schema && !("enum" in schema)) {
-    schema.enum = [String(schema.const)];
-    delete schema.const;
-  }
-
-  const union = schema.anyOf ?? schema.oneOf;
-  if (Array.isArray(union)) {
-    const nonNullBranches = union.filter(
-      (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>).type !== "null",
-    );
-    const hasNull = union.some(
-      (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>).type === "null",
-    );
-    if (nonNullBranches.length === 1 && typeof nonNullBranches[0] === "object") {
-      const merged = toGeminiToolSchema(nonNullBranches[0]);
-      if (hasNull) merged.nullable = true;
-      return merged;
-    }
-  }
-
-  if (Array.isArray(schema.type)) {
-    const types = schema.type as string[];
-    const hasNull = types.includes("null");
-    const nonNull = types.filter((t) => t !== "null");
-    schema.type = nonNull[0] ?? "string";
-    if (hasNull) schema.nullable = true;
-  }
-
-  if (Array.isArray(schema.enum)) {
-    schema.enum = schema.enum.map((val) => String(val));
-  }
-
-  if (schema.type === "array" && !schema.items) {
-    schema.items = { type: "string" };
-  } else if (schema.items && typeof schema.items === "object") {
-    schema.items = toGeminiToolSchema(schema.items);
-  }
-
-  if (schema.properties && typeof schema.properties === "object") {
-    const props = schema.properties as Record<string, unknown>;
-    const sanitizedProps: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(props)) {
-      sanitizedProps[key] = toGeminiToolSchema(val);
-    }
-    schema.properties = sanitizedProps;
-  }
-
+function cutRefLoops(node: unknown, target: string, safe: boolean): unknown {
+  if (!isSchemaObject(node)) return node;
+  if (!safe && node.$ref === target) return {};
+  const schema = { ...node };
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const mayBeEmpty = !(typeof schema.minItems === "number" && schema.minItems > 0);
+  mapChildren(schema, (child, slot, name) =>
+    cutRefLoops(
+      child,
+      target,
+      safe ||
+        (slot === "items" && mayBeEmpty) ||
+        (slot === "properties" && !required.includes(name)),
+    ),
+  );
   return schema;
+}
+
+/**
+ * Sanitize a JSON Schema to the OpenAPI 3.0 subset Google's Cloud Code Assist
+ * (`antigravity`) accepts in its `parameters` field (`type`, `nullable`,
+ * `description`, `format`, `enum`, `properties`, `items`, `required`, `anyOf`).
+ * Mirrors cc-proxy's `clean_json_schema`, including the `{ type: "string" }`
+ * fallback when an array omits `items`.
+ */
+export function toAntigravityToolSchema(node: unknown): Record<string, unknown> {
+  if (!isSchemaObject(node)) return { type: "object" };
+  const out: Record<string, unknown> = {};
+  let nullable = node.nullable === true;
+
+  if (typeof node.type === "string") {
+    if (node.type === "null") nullable = true;
+    else out.type = node.type;
+  } else if (Array.isArray(node.type)) {
+    let picked: string | undefined;
+    for (const item of node.type) {
+      if (typeof item !== "string") continue;
+      if (item === "null") nullable = true;
+      else if (picked === undefined) picked = item;
+    }
+    if (picked !== undefined) out.type = picked;
+  }
+  if (nullable) out.nullable = true;
+  if (typeof node.description === "string" && node.description.length > 0) {
+    out.description = node.description;
+  }
+  if (node.format === "enum" || node.format === "date-time") {
+    out.format = node.format;
+  }
+  if (Array.isArray(node.enum)) {
+    const strings = node.enum.filter((v): v is string => typeof v === "string");
+    if (strings.length > 0) out.enum = strings;
+  } else if (typeof node.const === "string") {
+    out.enum = [node.const];
+  }
+  if (isSchemaObject(node.properties)) {
+    const cleanProps: Record<string, unknown> = {};
+    for (const [propName, propSchema] of Object.entries(node.properties)) {
+      cleanProps[propName] = toAntigravityToolSchema(propSchema);
+    }
+    if (Array.isArray(node.required)) {
+      const validReq = node.required.filter(
+        (k): k is string => typeof k === "string" && Object.hasOwn(cleanProps, k),
+      );
+      if (validReq.length > 0) out.required = validReq;
+    }
+    out.properties = cleanProps;
+    if (!("type" in out)) out.type = "object";
+  }
+  if ("items" in node && node.items !== undefined) {
+    out.items = Array.isArray(node.items)
+      ? node.items.length > 0
+        ? toAntigravityToolSchema(node.items[0])
+        : { type: "string" }
+      : toAntigravityToolSchema(node.items);
+    if (!("type" in out)) out.type = "array";
+  }
+  const union = Array.isArray(node.anyOf)
+    ? node.anyOf
+    : Array.isArray(node.oneOf)
+      ? node.oneOf
+      : undefined;
+  if (union) {
+    const branches: Record<string, unknown>[] = [];
+    for (const branch of union) {
+      if (isSchemaObject(branch) && branch.type === "null") {
+        out.nullable = true;
+        continue;
+      }
+      branches.push(toAntigravityToolSchema(branch));
+    }
+    if (branches.length === 1) {
+      for (const [k, v] of Object.entries(branches[0]!)) {
+        if (!(k in out)) out[k] = v;
+      }
+    } else if (branches.length > 0) {
+      out.anyOf = branches;
+    }
+  }
+  if (!("type" in out) && !("anyOf" in out)) {
+    out.type = "string";
+  }
+  if (out.type === "array" && !("items" in out)) {
+    out.items = { type: "string" };
+  }
+  return out;
 }
 
 /**

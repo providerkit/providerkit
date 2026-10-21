@@ -361,23 +361,32 @@ describe("gemini adapter", () => {
   });
 
   it("puts the thinking level under generationConfig, and omits it with no effort", async () => {
-    const levelFor = async (effort?: Effort) => {
+    const levelFor = async (effort?: Effort, model?: string) => {
       const { seen, fetchImpl } = recorder(TEXT_TURN);
-      await collect(provider(fetchImpl).createStream(HI, [], { ...(effort ? { effort } : {}) }));
+      await collect(
+        provider(fetchImpl, model ? { model } : {}).createStream(HI, [], {
+          ...(effort ? { effort } : {}),
+        }),
+      );
       const generationConfig = seen[0]!.body.generationConfig as {
         thinkingConfig?: { thinkingLevel: string };
       };
       return generationConfig.thinkingConfig?.thinkingLevel;
     };
 
-    // A hard 0 budget is rejected by the Pro models — MINIMAL is how `none`
-    // survives the request.
-    expect(await levelFor("none")).toBe("MINIMAL");
+    // Flash 3.0 / 3.5 / 3.6 and Flash-Lite accept MINIMAL (0 thought tokens).
+    // Pro, 3.7-flash, 3.8-flash, 4-argon and flash-latest reject MINIMAL with
+    // a 400 and take LOW as their lowest level (measured 2026-10-21).
+    expect(await levelFor("none", "gemini-3.6-flash")).toBe("MINIMAL");
+    expect(await levelFor("none", "gemini-3.5-flash-lite")).toBe("MINIMAL");
+    expect(await levelFor("none", "gemini-3.8-flash")).toBe("LOW");
+    expect(await levelFor("none", "gemini-3.1-pro-preview")).toBe("LOW");
+    expect(await levelFor("none", "gemini-4-argon")).toBe("LOW");
     expect(await levelFor("low")).toBe("LOW");
     expect(await levelFor("medium")).toBe("MEDIUM");
     expect(await levelFor("high")).toBe("HIGH");
     expect(await levelFor("max")).toBe("HIGH");
-    // Absent effort is the model's own dynamic thinking, never MINIMAL.
+    // Absent effort is the model's own dynamic thinking, never MINIMAL or LOW.
     expect(await levelFor()).toBeUndefined();
   });
 

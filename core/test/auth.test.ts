@@ -1,6 +1,7 @@
 // The sign-in flows and the token source, against recorded replies. No network.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  antigravityAuthorizeUrl,
   chatgptAccountIdFromToken,
   chatgptAuthorizeUrl,
   createAuthFlow,
@@ -331,6 +332,111 @@ describe("the other flows", () => {
       .catch((e: unknown) => e);
     expect(error).toMatchObject({ code: "setup_required" });
     expect(String(error)).toContain("https://meta.ai/muse");
+  });
+
+  it("opencode-zen: resolves relative verification_uri_complete and refreshes when a refresh token is returned", async () => {
+    vi.useFakeTimers();
+    const { calls, fetchImpl } = scripted({
+      "https://opencode.ai/console/auth/device/code": [
+        json({
+          device_code: "dev_1",
+          user_code: "VHDD-TRPN",
+          verification_uri: "/console/device",
+          verification_uri_complete: "/console/device?user_code=VHDD-TRPN&client_id=opencode-cli",
+          expires_in: 600,
+          interval: 5,
+        }),
+      ],
+      "https://opencode.ai/console/auth/device/token": [
+        json({
+          access_token: "oc_tok_1",
+          refresh_token: "oc_ref_1",
+          expires_in: 3600,
+          org_id: "org-alpha",
+        }),
+        json({
+          access_token: "oc_tok_2",
+          refresh_token: "oc_ref_2",
+          expires_in: 3600,
+        }),
+      ],
+    });
+    const host = hostWith(fetchImpl);
+    const onPrompt = vi.fn();
+    const pending = createAuthFlow("opencode-zen", host).signIn(
+      new AbortController().signal,
+      onPrompt,
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    const cred = await pending;
+    expect(JSON.parse(calls[0]!.body)).toEqual({
+      client_id: "opencode-cli",
+      supports_org_scope: true,
+    });
+    expect(onPrompt).toHaveBeenCalledWith({
+      url: "https://opencode.ai/console/device?user_code=VHDD-TRPN&client_id=opencode-cli",
+      userCode: "VHDD-TRPN",
+    });
+    expect(cred.accessToken).toBe("oc_tok_1");
+    expect(cred.refreshToken).toBe("oc_ref_1");
+    expect(cred.account).toBe("org-alpha");
+
+    const refreshed = await createAuthFlow("opencode-zen", host).refresh(cred);
+    expect(refreshed.accessToken).toBe("oc_tok_2");
+    expect(refreshed.account).toBe("org-alpha");
+    vi.useRealTimers();
+  });
+
+  it("antigravity: exchanges PKCE code, discovers Cloud Code Assist projectId, and forwards it via withToken", async () => {
+    const url = new URL(antigravityAuthorizeUrl("chal", "state-1"));
+    expect(url.origin + url.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+    expect(url.searchParams.get("redirect_uri")).toBe("http://127.0.0.1:51121/callback");
+    expect(url.searchParams.get("access_type")).toBe("offline");
+
+    const { calls, fetchImpl } = scripted({
+      "https://oauth2.googleapis.com/token": [
+        json({
+          access_token: "ya29.tok1",
+          refresh_token: "1//ref1",
+          expires_in: 3600,
+          id_token: jwt({ email: "Dev@Example.com" }),
+        }),
+      ],
+      "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist": [
+        json({ cloudaicompanionProject: "cca-proj-42" }),
+      ],
+    });
+    const host = hostWith(fetchImpl, {
+      captureRedirect: vi.fn(async () => "auth-code-1"),
+    });
+    const cred = await createAuthFlow("antigravity", host).signIn(
+      new AbortController().signal,
+      vi.fn(),
+    );
+    expect(cred.accessToken).toBe("ya29.tok1");
+    expect(cred.refreshToken).toBe("1//ref1");
+    expect(cred.account).toBe("dev@example.com");
+    expect(cred.projectId).toBe("cca-proj-42");
+    expect(calls[1]!.headers.get("user-agent")).toContain("antigravity/ide/");
+
+    const modelFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          'data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}}\n\n',
+        ),
+      );
+    const source = tokenSource({
+      load: async () => cred,
+      save: async () => {},
+      refresh: async (c) => c,
+    });
+    const provider = withToken(source, (auth) =>
+      createPresetProvider("antigravity", { ...auth, fetchImpl: modelFetch }),
+    );
+    for await (const _ of provider.createStream([{ role: "user", content: "hi" }], [])) void _;
+    const sentBody = JSON.parse(String(modelFetch.mock.calls[0]?.[1]?.body));
+    expect(sentBody.project).toBe("cca-proj-42");
   });
 });
 

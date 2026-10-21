@@ -23,7 +23,15 @@ import {
   type ProviderPreset,
   type ProviderPresetId,
 } from "../presets.ts";
-import type { Effort, Provider, ServiceTier } from "../types.ts";
+import type {
+  ChatMessage,
+  Effort,
+  Provider,
+  ProviderChunk,
+  ServiceTier,
+  StreamOptions,
+  ToolDefinition,
+} from "../types.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
 export interface PresetProviderConfig extends ProviderFallbackConfig {
@@ -48,7 +56,7 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   headers?: Record<string, string>;
   /**
    * The session id for a call without `StreamOptions.sessionId`, on a preset
-   * that sends one (`opencode-go`, `chatgpt`). Absent, the provider mints its
+   * that sends one (`opencode-go`, `opencode-zen`, `chatgpt`). Absent, the provider mints its
    * own when it is built. Pass one when you build the provider per attempt
    * (`withKeyPool`, `withToken`): each build would mint a new id, and a gateway
    * that pins a session to one upstream host then treats every call as a new
@@ -57,6 +65,8 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    * it and ignores it.
    */
   instanceSessionId?: string;
+  /** Google Antigravity (Cloud Code Assist) project id for the request envelope. */
+  projectId?: string;
   /**
    * App attribution for OpenRouter's rankings. The site URL rides as
    * `HTTP-Referer`, the app name as `X-Title`. Public, not secret. Sent on
@@ -132,6 +142,26 @@ export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig)
         "Remove serviceTier.",
     );
   }
+  let provider = buildWireAdapter(id, preset, wire, model, config, config.fetchImpl);
+  if (id === "opencode-zen") {
+    provider = wrapOpenCodeZen(provider, preset, wire, config, model);
+  }
+
+  // Here rather than in `createPresetProvider`: the wire is resolved here, and
+  // the bare adapter is exported, so it must refuse on its own a per-call model
+  // it would post to the wrong endpoint. That 404 reads as an unknown model,
+  // and a pool benches the model for an hour.
+  return preset.routes ? refuseOtherWires(provider, preset, wire) : provider;
+}
+
+function buildWireAdapter(
+  id: ProviderPresetId,
+  preset: ProviderPreset,
+  wire: Wire,
+  model: string,
+  config: PresetAdapterConfig,
+  fetchImpl: typeof fetch | undefined,
+): Provider {
   const headers = { ...preset.headers, ...config.headers };
   const baseUrl = config.baseUrl ?? wire.baseUrl;
   const maxTokens = config.maxTokens ?? preset.maxTokens;
@@ -146,12 +176,11 @@ export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig)
     watchdog: undefined,
   };
 
-  let provider: Provider;
   switch (wire.shape) {
     case "anthropic":
       // `key` rides Anthropic's native x-api-key; coding plans and OAuth
       // tokens read Bearer (measured across the family's coding endpoints).
-      provider = createAnthropicProvider({
+      return createAnthropicProvider({
         ...baseConfig,
         apiKey: config.apiKey,
         model,
@@ -165,11 +194,10 @@ export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig)
         // The endpoint's thinking dialect rides the table (zai: silence means
         // the model default, which is ON — "none" must be said out loud).
         ...(preset.explicitNone ? { explicitNone: true } : {}),
-        fetchImpl: config.fetchImpl,
+        fetchImpl,
       });
-      break;
     case "openai":
-      provider = createOpenAIProvider({
+      return createOpenAIProvider({
         ...baseConfig,
         id,
         apiKey: config.apiKey,
@@ -183,11 +211,10 @@ export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig)
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         ...(preset.initiatorHeader ? { initiatorHeader: true } : {}),
         ...(preset.noSampling ? { noSampling: true } : {}),
-        fetchImpl: config.fetchImpl,
+        fetchImpl,
       });
-      break;
     case "responses":
-      provider = createResponsesProvider({
+      return createResponsesProvider({
         ...baseConfig,
         apiKey: config.apiKey,
         model,
@@ -200,28 +227,210 @@ export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig)
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         ...(preset.imageLimits ? { imageLimits: preset.imageLimits } : {}),
         ...(preset.replayReasoning ? { replayReasoning: true } : {}),
-        fetchImpl: config.fetchImpl,
+        fetchImpl,
       });
-      break;
     case "gemini":
-      provider = createGeminiProvider({
+      return createGeminiProvider({
         ...baseConfig,
         apiKey: config.apiKey,
         model,
         effort: config.effort,
+        maxTokens,
         baseUrl,
+        ...(wire.path ? { path: wire.path } : {}),
+        bearer: wire.auth !== "key",
+        ...(config.projectId ? { projectId: config.projectId } : {}),
+        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         id,
         headers,
-        fetchImpl: config.fetchImpl,
+        fetchImpl,
       });
-      break;
   }
+}
 
-  // Here rather than in `createPresetProvider`: the wire is resolved here, and
-  // the bare adapter is exported, so it must refuse on its own a per-call model
-  // it would post to the wrong endpoint. That 404 reads as an unknown model,
-  // and a pool benches the model for an hour.
-  return preset.routes ? refuseOtherWires(provider, preset, wire) : provider;
+const OPENCODE_CLI_USER_AGENT = "opencode/latest/2.0.32/cli";
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/** Whether an OpenCode Zen model id belongs to the free shelf (`big-pickle` or `*-free`). */
+export function isZenFreeModel(model: string): boolean {
+  return model === "big-pickle" || model.endsWith("-free");
+}
+
+/**
+ * Deterministically turns any conversation session id into OpenCode's
+ * `ses_<12 hex><14 base62>` identifier shape (`packages/schema/src/session-id.ts`),
+ * matching cc-proxy's `forge_opencode_session_id`.
+ */
+export async function forgeOpenCodeSessionId(sessionId?: string): Promise<string> {
+  if (sessionId && /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/.test(sessionId)) {
+    return sessionId;
+  }
+  const seed = sessionId && sessionId.length > 0 ? sessionId : crypto.randomUUID();
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed)),
+  );
+  let hexPart = "";
+  for (let i = 0; i < 6; i++) {
+    hexPart += digest[i]!.toString(16).padStart(2, "0");
+  }
+  let tail = "";
+  for (let i = 6; i < 20; i++) {
+    tail += BASE62[digest[i]! % 62];
+  }
+  return `ses_${hexPart}${tail}`;
+}
+
+/**
+ * OpenCode Zen's free tier answers only a streamed call whose tools include
+ * OpenCode's own `read` (`cc-proxy/src/providers/opencode/mod.rs`). A call with
+ * `Read` sends it as `read` and gets `Read` back; a call with neither gets a
+ * decoy `read` the model is told not to call (and `toolChoice: "none"` when the
+ * caller passed no tools).
+ */
+function offerOpenCodeRead(
+  messages: ChatMessage[],
+  tools: ToolDefinition[],
+  opts: StreamOptions,
+): {
+  messages: ChatMessage[];
+  tools: ToolDefinition[];
+  opts: StreamOptions;
+  renamedRead: boolean;
+} {
+  if (tools.some((t) => t.name === "read")) {
+    return { messages, tools, opts, renamedRead: false };
+  }
+  const hasClaudeRead = tools.some((t) => t.name === "Read");
+  if (!hasClaudeRead) {
+    const decoy: ToolDefinition = {
+      name: "read",
+      description: "Not available in this conversation. Never call it.",
+      inputSchema: { type: "object", properties: {} },
+    };
+    return {
+      messages,
+      tools: [...tools, decoy],
+      opts: tools.length === 0 ? { ...opts, toolChoice: "none" } : opts,
+      renamedRead: false,
+    };
+  }
+  const nextTools = tools.map((t) => (t.name === "Read" ? { ...t, name: "read" } : t));
+  const nextMessages: ChatMessage[] = messages.map((msg) => {
+    if (msg.role === "assistant" && msg.toolCalls?.some((c) => c.name === "Read")) {
+      return {
+        ...msg,
+        toolCalls: msg.toolCalls.map((c) => (c.name === "Read" ? { ...c, name: "read" } : c)),
+      };
+    }
+    if (msg.role === "tool" && msg.name === "Read") {
+      return { ...msg, name: "read" };
+    }
+    return msg;
+  });
+  const nextOpts =
+    opts.toolChoice && typeof opts.toolChoice === "object" && opts.toolChoice.name === "Read"
+      ? { ...opts, toolChoice: { type: "tool" as const, name: "read" } }
+      : opts;
+  return { messages: nextMessages, tools: nextTools, opts: nextOpts, renamedRead: true };
+}
+
+function wrapOpenCodeZen(
+  baseProvider: Provider,
+  preset: ProviderPreset,
+  wire: Wire,
+  config: PresetAdapterConfig,
+  defaultModel: string,
+): Provider {
+  const instanceSessionId = config.instanceSessionId ?? crypto.randomUUID();
+  const baseFetch = config.fetchImpl ?? fetch;
+  const callerUa = config.headers?.["user-agent"] ?? config.headers?.["User-Agent"];
+
+  return {
+    ...baseProvider,
+    async *createStream(messages, tools, opts = {}) {
+      const activeModel = opts.model ?? defaultModel;
+      const free = isZenFreeModel(activeModel);
+      const ses = await forgeOpenCodeSessionId(opts.sessionId ?? instanceSessionId);
+      const prepared = free
+        ? offerOpenCodeRead(messages, tools, opts)
+        : { messages, tools, opts, renamedRead: false };
+
+      const runAttempt = async function* (anonymous: boolean): AsyncIterable<ProviderChunk> {
+        const fetchImpl: typeof fetch = (input, init) => {
+          const merged = new Headers(init?.headers);
+          if (!callerUa) merged.set("user-agent", OPENCODE_CLI_USER_AGENT);
+          merged.set("x-opencode-session", ses);
+          merged.set("x-opencode-session-id", ses);
+          merged.set("x-session-affinity", ses);
+          merged.set("x-session-id", ses);
+          merged.set("x-opencode-project", "global");
+          merged.set("x-opencode-client", "cli");
+          if (anonymous) {
+            merged.delete("authorization");
+            merged.delete("x-api-key");
+            merged.delete("x-goog-api-key");
+          }
+          const headerRecord: Record<string, string> = {};
+          merged.forEach((v, k) => {
+            headerRecord[k] = v;
+          });
+          return baseFetch(input, { ...init, headers: headerRecord });
+        };
+
+        const bound = buildWireAdapter(
+          "opencode-zen",
+          preset,
+          wire,
+          defaultModel,
+          config,
+          fetchImpl,
+        );
+        for await (const chunk of bound.createStream(prepared.messages, prepared.tools, {
+          ...prepared.opts,
+          sessionId: ses,
+        })) {
+          if (
+            prepared.renamedRead &&
+            chunk.type === "delta" &&
+            chunk.toolCalls?.some((c) => c.name === "read")
+          ) {
+            yield {
+              ...chunk,
+              toolCalls: chunk.toolCalls.map((c) =>
+                c.name === "read" ? { ...c, name: "Read" } : c,
+              ),
+            };
+          } else {
+            yield chunk;
+          }
+        }
+      };
+
+      const startAnonymous = free && !config.apiKey;
+      let emitted = false;
+      try {
+        for await (const chunk of runAttempt(startAnonymous)) {
+          emitted = true;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        // Free models accept a valid key (using the account's own free quota),
+        // and refuse a stale key with 401. Retry anonymously when that happens.
+        if (
+          free &&
+          !startAnonymous &&
+          !emitted &&
+          err instanceof ProviderError &&
+          err.status === 401
+        ) {
+          yield* runAttempt(true);
+          return;
+        }
+        throw err;
+      }
+    },
+  };
 }
 
 /** The table is closed (`satisfies`), but a caller may hold an id as a plain

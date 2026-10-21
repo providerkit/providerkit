@@ -349,6 +349,9 @@ const CONTEXT_PATTERNS: readonly RegExp[] = [
   // shipped the same two patterns for the same reason (0.1.51).
   /model_max_prompt_tokens_exceeded/i,
   /prompt token count of \d+ exceeds the limit/i,
+  // Gemini: "The input token count exceeds the maximum number of tokens allowed 1048576."
+  // The generic pattern below stops at "maximum number", so this read as `invalid`.
+  /input token count exceeds the maximum number of tokens/i,
   // Scoped to the thing that overflowed: a bare "exceeds the maximum" also
   // covers image counts and per-minute token rates, which compaction can't fix.
   /exceeds? the (?:model'?s? )?maximum (?:input |prompt |context )?(?:tokens?|length|context)/i,

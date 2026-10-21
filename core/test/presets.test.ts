@@ -3,6 +3,7 @@ import {
   createPresetProvider,
   PRESET_IDS,
   PROVIDER_PRESETS,
+  type Provider,
   type ProviderPresetId,
 } from "../src/index.ts";
 import type { ProviderPreset } from "../src/presets.ts";
@@ -73,8 +74,9 @@ describe("provider presets — every row joins to one request, correctly", () =>
       }
 
       // The model resolves: preset default when none is passed, never empty.
-      // Gemini carries it in the URL path (/v1beta/models/<id>:…), not the body.
-      if (preset.shape === "gemini") {
+      // Gemini carries it in the URL path (/v1beta/models/<id>:…), not the body,
+      // except on Antigravity where `path` is fixed and the model sits in the envelope.
+      if (preset.shape === "gemini" && !preset.path) {
         expect(sentUrl).toContain(encodeURIComponent(model));
       } else {
         const body = JSON.parse(String(init?.body));
@@ -306,6 +308,204 @@ describe("opencode-go — the session header", () => {
         expect(fetchImpl).not.toHaveBeenCalled();
       },
     );
+  });
+
+  describe("opencode-zen", () => {
+    const hi = [{ role: "user" as const, content: "hi" }];
+    const call = async (
+      model: string,
+      opts = {},
+      tools: Parameters<Provider["createStream"]>[1] = [],
+    ) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider("opencode-zen", { apiKey: "k", model, fetchImpl });
+      await drain(provider.createStream(hi, tools, opts)).catch(() => {});
+      const [url, init] = fetchImpl.mock.calls[0]!;
+      return {
+        url: String(url),
+        headers: new Headers(init?.headers),
+        body: JSON.parse(String(init?.body)),
+      };
+    };
+
+    it.each([
+      ["minimax-m3.1-flash-free", "https://opencode.ai/zen/v1/chat/completions"],
+      ["glm-5.3", "https://opencode.ai/zen/v1/chat/completions"],
+      ["kimi-k3", "https://opencode.ai/zen/v1/chat/completions"],
+      ["minimax-m3", "https://opencode.ai/zen/v1/chat/completions"],
+      ["qwen3.8-max", "https://opencode.ai/zen/v1/chat/completions"],
+      ["claude-sonnet-5-5", "https://opencode.ai/zen/v1/messages"],
+      ["qwen3.8-flash", "https://opencode.ai/zen/v1/messages"],
+      ["gpt-5.6-luna", "https://opencode.ai/zen/v1/responses"],
+      ["grok-4.7", "https://opencode.ai/zen/v1/responses"],
+      ["muse-spark-1.3", "https://opencode.ai/zen/v1/responses"],
+      [
+        "gemini-3.8-flash",
+        "https://opencode.ai/zen/v1/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+      ],
+    ])("sends %s to %s", async (model, url) => {
+      expect((await call(model)).url).toBe(url);
+    });
+
+    it("forges ses_ session headers and sets the OpenCode CLI headers", async () => {
+      const { headers } = await call("glm-5.3", { sessionId: "conv-1" });
+      const ses = headers.get("x-opencode-session")!;
+      expect(ses).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+      expect(headers.get("x-opencode-session-id")).toBe(ses);
+      expect(headers.get("x-session-affinity")).toBe(ses);
+      expect(headers.get("x-session-id")).toBe(ses);
+      expect(headers.get("x-opencode-project")).toBe("global");
+      expect(headers.get("x-opencode-client")).toBe("cli");
+      expect(headers.get("user-agent")).toBe("opencode/latest/2.0.32/cli");
+    });
+
+    it("offers a decoy read tool with tool_choice none on free models when no tools are passed", async () => {
+      const sent = await call("mimo-v2.6-flash-free");
+      expect(sent.body.tools).toEqual([
+        {
+          type: "function",
+          function: {
+            name: "read",
+            description: "Not available in this conversation. Never call it.",
+            parameters: { type: "object", properties: {} },
+          },
+        },
+      ]);
+      expect(sent.body.tool_choice).toBe("none");
+    });
+
+    it("renames Claude Code's Read tool to read on free models and restores Read on the response", async () => {
+      const toolTurn = new Response(
+        [
+          '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\\"path\\":\\"a\\"}"}}]}}]}',
+          '{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+          "[DONE]",
+        ]
+          .map((p) => `data: ${p}\n\n`)
+          .join(""),
+      );
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(toolTurn);
+      const provider = createPresetProvider("opencode-zen", {
+        apiKey: "k",
+        model: "mimo-v2.6-flash-free",
+        fetchImpl,
+      });
+      const chunks = [];
+      for await (const c of provider.createStream(hi, [
+        { name: "Read", description: "Read file", inputSchema: { type: "object" } },
+      ])) {
+        chunks.push(c);
+      }
+      const sentBody = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
+      expect(sentBody.tools[0].function.name).toBe("read");
+      const delta = chunks.find((c) => c.type === "delta" && c.toolCalls?.length);
+      expect(delta?.toolCalls?.[0]?.name).toBe("Read");
+    });
+
+    it("retries a free model anonymously when a stale key answers 401", async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: { message: "Invalid credential" } }), {
+            status: 401,
+          }),
+        )
+        .mockResolvedValueOnce(ok());
+      const provider = createPresetProvider("opencode-zen", {
+        apiKey: "stale-key",
+        model: "mimo-v2.6-flash-free",
+        fetchImpl,
+      });
+      await drain(provider.createStream(hi, []));
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+        "Bearer stale-key",
+      );
+      expect(new Headers(fetchImpl.mock.calls[1]?.[1]?.headers).get("authorization")).toBeNull();
+    });
+
+    it.each([
+      ["glm-5.3", "none", "high"],
+      ["deepseek-v4-pro", "none", "low"],
+      ["minimax-m3.1-flash-free", "none", "low"],
+      ["kimi-k3", "max", "high"],
+    ] as const)("says %s at effort %s as reasoning_effort %s", async (model, effort, wire) => {
+      const sent = await call(model, { effort });
+      expect(sent.body.reasoning_effort).toBe(wire);
+    });
+  });
+
+  describe("antigravity", () => {
+    const hi = [{ role: "user" as const, content: "hi" }];
+
+    it("wraps the Gemini request in the Cloud Code Assist envelope and picks the per-model UA", async () => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => ok());
+      const provider = createPresetProvider("antigravity", {
+        apiKey: "tok",
+        model: "gemini-4-argon",
+        projectId: "proj-123",
+        fetchImpl,
+      });
+      await drain(
+        provider.createStream(
+          [
+            {
+              role: "system",
+              content:
+                "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nKeep it brief.",
+            },
+            ...hi,
+          ],
+          [
+            {
+              name: "list_tags",
+              description: "List tags",
+              inputSchema: { type: "object", properties: { tags: { type: "array" } } },
+            },
+          ],
+          { sessionId: "conv-1" },
+        ),
+      );
+      const [url, init] = fetchImpl.mock.calls[0]!;
+      const headers = new Headers(init?.headers);
+      const body = JSON.parse(String(init?.body));
+      expect(String(url)).toBe(
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+      );
+      expect(headers.get("authorization")).toBe("Bearer tok");
+      expect(headers.get("user-agent")).toContain("antigravity/cli/");
+      expect(body.model).toBe("gemini-4-argon-high");
+      expect(body.project).toBe("proj-123");
+      expect(body.requestType).toBe("agent");
+      expect(body.request.sessionId).toMatch(/^-\d+$/);
+      expect(body.request.systemInstruction.parts[0].text).toBe("Keep it brief.");
+      expect(body.request.tools[0].functionDeclarations[0].parameters).toEqual({
+        type: "object",
+        properties: { tags: { type: "array", items: { type: "string" } } },
+      });
+    });
+
+    it("falls back from daily to prod when daily returns 404 before any output", async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+        .mockResolvedValueOnce(
+          new Response(
+            'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}\n\n',
+          ),
+        );
+      const provider = createPresetProvider("antigravity", {
+        apiKey: "tok",
+        model: "gemini-3.8-flash",
+        projectId: "proj-123",
+        fetchImpl,
+      });
+      await drain(provider.createStream(hi, []));
+      expect(fetchImpl.mock.calls.map(([u]) => String(u))).toEqual([
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+        "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+      ]);
+    });
   });
 
   it("only chatgpt replays reasoning", () => {
