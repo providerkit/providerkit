@@ -449,6 +449,7 @@ const VENDORS: Vendor[] = [
     refused: GEMINI_REFUSED,
     refusesThinking: (body) =>
       at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "MINIMAL" ||
+      at(body, "generationConfig", "thinkingConfig", "thinkingLevel") === "LOW" ||
       at(body, "generationConfig", "thinkingConfig", "thinkingBudget") === 0,
     takesFiles: true,
     takesServiceTier: false,

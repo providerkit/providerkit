@@ -55,20 +55,32 @@ export interface GeminiConfig extends ProviderFallbackConfig {
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com";
 
 /**
- * Gemini 3's thinking dial. `none` is MINIMAL rather than a 0 budget: the Pro
- * models reject a hard 0, so the only way to say "think as little as possible"
- * without a 400 is the lowest level.
+ * Gemini 3+ thinking dial.
+ *
+ * Measured across all 17 text models on 2026-10-21:
+ * - Only `gemini-3-flash*`, `gemini-3.5-flash*`, `gemini-3.6-flash`, and the
+ *   `flash-lite` models accept `MINIMAL` (which spends 0 thought tokens).
+ * - `gemini-3.7-flash`, `gemini-3.8-flash`, `gemini-4-*`, `gemini-flash-latest`,
+ *   and every Pro model answer `MINIMAL` with `400 Thinking level MINIMAL is not
+ *   supported for this model`, and take `LOW` as their lowest level.
  *
  * Sent as the REST enum NAMES. The SDK's `ThinkingLevel` members serialize to
  * exactly these strings, so nothing is lost by writing them out.
  */
-const THINKING_LEVEL: Record<Effort, string> = {
-  none: "MINIMAL",
+const THINKING_LEVEL: Record<Exclude<Effort, "none">, string> = {
   low: "LOW",
   medium: "MEDIUM",
   high: "HIGH",
   max: "HIGH",
 };
+
+const TAKES_MINIMAL_THINKING =
+  /^gemini-(?:3(?:\.[056])?-flash(?:-preview|-lite(?:-preview)?)?|3\.1-flash-lite(?:-preview)?|flash-lite-latest)$/i;
+
+function geminiThinkingLevel(model: string, effort: Effort): string {
+  if (effort !== "none") return THINKING_LEVEL[effort];
+  return TAKES_MINIMAL_THINKING.test(model) ? "MINIMAL" : "LOW";
+}
 
 /**
  * Gemini 2.x thinking budget dial (tokens). Gemini 2.5 takes `thinkingBudget`
@@ -364,7 +376,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       if (effort) {
         generationConfig.thinkingConfig = isGemini2
           ? { thinkingBudget: GEMINI_2_THINKING_BUDGET[effort] }
-          : { thinkingLevel: THINKING_LEVEL[effort] };
+          : { thinkingLevel: geminiThinkingLevel(model, effort) };
       }
       // A schema that shares its call with tools pins the decoder, and a pinned
       // decoder cannot emit a functionCall — the model narrates the call it
