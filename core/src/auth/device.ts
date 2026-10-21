@@ -18,8 +18,9 @@ export interface DeviceEndpoint {
   clientId: string;
   /** Sent with the code request, for vendors that want scopes. */
   scope?: string;
-  /** Extra fields on the code request only (xAI wants a `referrer`). */
-  extra?: Record<string, string>;
+  /** Extra fields on the code request only (xAI wants a `referrer`, OpenCode
+   *  Console wants `supports_org_scope: true`). */
+  extra?: Record<string, string | boolean>;
   encode: "form" | "json";
 }
 
@@ -51,9 +52,12 @@ export async function requestDeviceCode(
   );
   const userCode = str(body.user_code);
   const deviceCode = str(body.device_code);
-  // The complete URL carries the code, so there is nothing to type.
+  // The complete URL carries the code, so there is nothing to type. OpenCode
+  // Console returns a path relative to its origin (`/console/device?user_code=…`),
+  // so resolve against `deviceUrl`.
   const verificationUrl =
-    webUrl(str(body.verification_uri_complete)) ?? webUrl(str(body.verification_uri));
+    webUrl(str(body.verification_uri_complete), undefined, endpoint.deviceUrl) ??
+    webUrl(str(body.verification_uri), undefined, endpoint.deviceUrl);
   if (!userCode || !deviceCode || !verificationUrl) {
     throw authError(
       "device_response_invalid",

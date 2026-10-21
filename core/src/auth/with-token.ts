@@ -71,12 +71,14 @@ export function withToken<C extends Credential>(
 }
 
 function authOf(credential: Credential): TokenAuth {
+  const headers: Record<string, string> = {
+    ...(credential.chatgptAccountId ? { "ChatGPT-Account-Id": credential.chatgptAccountId } : {}),
+    ...(credential.projectId ? { "x-antigravity-project": credential.projectId } : {}),
+  };
   return {
     apiKey: credential.accessToken,
     ...(credential.baseUrl ? { baseUrl: credential.baseUrl } : {}),
-    ...(credential.chatgptAccountId
-      ? { headers: { "ChatGPT-Account-Id": credential.chatgptAccountId } }
-      : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
 }
 

@@ -322,7 +322,9 @@ function goEffortParams(effort: Effort, model = ""): Record<string, unknown> {
   if (/glm-5[-.p]?[23]/.test(id)) {
     return level(effort === "max" ? "max" : "high");
   }
-  if (id.includes("deepseek-v4")) return level(effort === "none" ? "low" : effort);
+  if (id.includes("deepseek-v4") || id.includes("minimax")) {
+    return level(effort === "none" ? "low" : effort);
+  }
   if (id.includes("mimo"))
     return effort === "max" ? refuse("none, low, medium or high") : level(effort);
   return level(effort === "max" ? "high" : effort);
@@ -333,7 +335,7 @@ function goEffortParams(effort: Effort, model = ""): Record<string, unknown> {
 function dialectFor(id: string): EffortDialect {
   if (id === "openrouter") return "openrouter";
   if (id === "deepseek") return "deepseek";
-  if (id === "opencode-go") return "opencode-go";
+  if (id === "opencode-go" || id === "opencode-zen") return "opencode-go";
   return "openai";
 }
 
@@ -667,7 +669,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
-          authorization: `Bearer ${config.apiKey}`,
+          ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
           ...attributionHeaders(config, config.headers),
           ...(config.sessionHeader
             ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }

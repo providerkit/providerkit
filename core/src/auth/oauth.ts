@@ -42,6 +42,8 @@ export interface Credential {
   account?: string;
   /** ChatGPT only: send it as the `ChatGPT-Account-Id` header. */
   chatgptAccountId?: string;
+  /** Google Antigravity only: the Cloud Code Assist project id for the envelope. */
+  projectId?: string;
   /** Set when the vendor gives each account its own host (Copilot). */
   baseUrl?: string;
 }
@@ -137,17 +139,19 @@ function toBase64Url(bytes: Uint8Array): string {
 export async function postToken(
   host: AuthHost,
   url: string,
-  params: Record<string, string>,
+  params: Record<string, string | boolean>,
   opts: { encode: "json" | "form"; allowErrorBody?: boolean },
 ): Promise<Record<string, unknown>> {
   const json = opts.encode === "json";
+  const formEntries = () =>
+    Object.entries(params).map(([k, v]): [string, string] => [k, String(v)]);
   const res = await authFetch(host, url, {
     method: "POST",
     headers: {
       "Content-Type": json ? "application/json" : "application/x-www-form-urlencoded",
       Accept: "application/json",
     },
-    body: json ? JSON.stringify(params) : new URLSearchParams(params).toString(),
+    body: json ? JSON.stringify(params) : new URLSearchParams(formEntries()).toString(),
   });
   const text = await res.text().catch(() => "");
   const record = asRecord(safeJson(text));
@@ -237,10 +241,11 @@ export function accountFromToken(
 export function webUrl(
   value: string | undefined,
   protocols = ["https:", "http:"],
+  base?: string,
 ): string | undefined {
   if (!value) return undefined;
   try {
-    const url = new URL(value);
+    const url = base ? new URL(value, base) : new URL(value);
     return protocols.includes(url.protocol) ? url.href : undefined;
   } catch {
     return undefined;
