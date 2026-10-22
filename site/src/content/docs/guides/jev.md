@@ -1,6 +1,6 @@
 ---
 title: Jev decisions
-description: Ask TypeSafe's Jev model typed questions on any of the four hosts that serve it, and get back checked answers with their probabilities.
+description: Ask TypeSafe's Jev model typed questions on any of the five hosts that serve it, and get back checked answers with their probabilities.
 ---
 
 Jev is a model from TypeSafe that answers questions instead of writing text. You give it some
@@ -60,17 +60,18 @@ Two fields are easy to misread:
 
 ## Hosts
 
-The same questions work on all four hosts. The client handles what differs: the URL, the
+The same questions work on all five hosts. The client handles what differs: the URL, the
 headers, the body wrapper, and where the answers and usage sit in the reply.
 
-| `host`       | Default model          | You need                                                 |
-| ------------ | ---------------------- | -------------------------------------------------------- |
-| `typesafe`   | `jev-latest`           | A TypeSafe key                                           |
-| `openrouter` | `~typesafe/jev-latest` | An OpenRouter key                                        |
-| `cloudflare` | `typesafe/jev`         | An API token with Workers AI access, and the `accountId` |
-| `vercel`     | `typesafe-ai/jev`      | An AI Gateway key                                        |
+| `host`       | Default model          | You need                                                                 |
+| ------------ | ---------------------- | ------------------------------------------------------------------------ |
+| `opencode`   | `jev-1.13-free`        | Nothing for `jev-1.13-free`; an OpenCode Zen key or token for `jev-1.13` |
+| `typesafe`   | `jev-latest`           | A TypeSafe key                                                           |
+| `openrouter` | `~typesafe/jev-latest` | An OpenRouter key                                                        |
+| `cloudflare` | `typesafe/jev`         | An API token with Workers AI access, and the `accountId`                 |
+| `vercel`     | `typesafe-ai/jev`      | An AI Gateway key                                                        |
 
-Pass `model` to pin a version, like `typesafe/jev-1.13` on OpenRouter. On OpenRouter,
+Pass `model` to pin a version, like `jev-1.13` on OpenCode Zen or `typesafe/jev-1.13` on OpenRouter. On OpenRouter,
 `attribution: { siteUrl, siteName }` sends your app's URL and name, which OpenRouter uses to
 credit your traffic.
 

@@ -1,4 +1,4 @@
-// Jev — TypeSafe's decision model, on any of the four hosts that serve it.
+// Jev — TypeSafe's decision model, on any of the five hosts that serve it.
 // `@providerkit/core/jev`.
 //
 // Jev does not write text. It reads a `state` and answers typed questions —
@@ -11,12 +11,13 @@
 // envelope, the classifier, retry — so a throttled Jev call behaves exactly
 // like a throttled chat call.
 //
-// The four hosts serve one model and read the same questions. They differ
+// The five hosts serve one model and read the same questions. They differ
 // only in the envelope: the URL, the auth headers, how the body is wrapped,
 // and where the answers and the usage sit in the reply. One row per host.
 //
 // Prices stay with the caller, for the reason in usage.ts. OpenRouter reports
-// what each call cost; the caller's `ModelRate` prices the other three.
+// what each call cost, and OpenCode Zen's `jev-1.13-free` is $0; the caller's
+// `ModelRate` prices the rest.
 import { attributionHeaders, type Attribution } from "./attribution.ts";
 import { ProviderError, streamError } from "./errors.ts";
 import { openRouterCostUsd } from "./providers/openai.ts";
@@ -24,7 +25,7 @@ import { withRetry, type RetryOptions } from "./retry.ts";
 import { postJson } from "./transport.ts";
 import type { TokenUsage } from "./types.ts";
 
-export type JevHost = "typesafe" | "openrouter" | "cloudflare" | "vercel";
+export type JevHost = "opencode" | "typesafe" | "openrouter" | "cloudflare" | "vercel";
 
 /** What a question asks, beyond its options: a sentence, or any JSON the
  *  model should read alongside it (a goal, a list of rules). */
@@ -113,7 +114,9 @@ export interface JevReply<Q extends Record<string, JevQuestion>> {
 
 export interface JevConfig {
   host: JevHost;
-  apiKey: string;
+  /** Optional on `opencode` when running `jev-1.13-free`, which answers
+   *  without a credential. Required on `jev-1.13` and on every other host. */
+  apiKey?: string;
   /** Cloudflare only: the account the Workers AI call runs on. */
   accountId?: string;
   /** Defaults to each host's always-current alias. */
@@ -151,7 +154,7 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
     ? (value as Record<string, unknown>)
     : undefined;
 
-// ── the four envelopes ────────────────────────────────────────────────────
+// ── the five envelopes ────────────────────────────────────────────────────
 
 interface HostRow {
   model: string;
@@ -164,6 +167,17 @@ interface HostRow {
 }
 
 const HOSTS: Record<JevHost, HostRow> = {
+  opencode: {
+    // OpenCode Zen serves `jev-1.13-free` and `jev-1.13` on its System One
+    // route (checked live, 2026-10-22). `jev-1.13-free` is $0 and answers
+    // both with an OpenCode key/token and with no credential at all; `jev-1.13`
+    // bills the account and requires the credential.
+    model: "jev-1.13-free",
+    url: () => "https://opencode.ai/zen/v1/systemone",
+    headers: () => ({}),
+    body: (model, state, questions) => ({ model, state, questions }),
+    unwrap: record,
+  },
   typesafe: {
     model: "jev-latest",
     url: () => "https://api.typesafe.ai/v1/systemone",
@@ -326,11 +340,16 @@ export function readAnswer(question: JevQuestion, raw: unknown): JevAnswer | nul
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 
-function usageOf(host: JevHost, raw: unknown): TokenUsage {
+function isFreeJevModel(host: JevHost, model: string): boolean {
+  return host === "opencode" && model.endsWith("-free");
+}
+
+function usageOf(host: JevHost, model: string, raw: unknown): TokenUsage {
   const usage = record(raw) ?? {};
   // Keyed on the host, as in the OpenAI adapter: OpenRouter is who sends the
-  // bill, and `cost` is its field in its unit. Another host's `cost` has not
-  // said what it means.
+  // bill, and `cost` is its field in its unit. OpenCode Zen's `-free` model is
+  // $0, so reporting 0 stops `costUsd` from pricing it at TypeSafe's list rate.
+  // Another host's `cost` has not said what it means.
   const reportedCostUsd =
     host === "openrouter"
       ? openRouterCostUsd({
@@ -338,7 +357,9 @@ function usageOf(host: JevHost, raw: unknown): TokenUsage {
           is_byok: usage.is_byok === true,
           cost_details: record(usage.cost_details) ?? null,
         })
-      : undefined;
+      : isFreeJevModel(host, model)
+        ? 0
+        : undefined;
   return {
     inputTokens: count(usage.input_tokens),
     cachedInputTokens: 0,
@@ -366,15 +387,24 @@ export function createJevClient(config: JevConfig): JevClient {
     throw new Error("providerkit: Jev on Cloudflare needs the accountId of the Workers AI account");
   }
   const model = config.model ?? row.model;
+  const free = isFreeJevModel(config.host, model);
+  const apiKey = config.apiKey?.trim() ?? "";
   const provider = `jev:${config.host}`;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  async function post(body: unknown, signal: AbortSignal | undefined): Promise<unknown> {
+  async function postOnce(
+    body: unknown,
+    signal: AbortSignal | undefined,
+    anonymous: boolean,
+  ): Promise<unknown> {
     const deadline = AbortSignal.timeout(timeoutMs);
     try {
       return await postJson({
         url: row.url(config),
-        headers: { Authorization: `Bearer ${config.apiKey}`, ...row.headers(config, model) },
+        headers: {
+          ...(!anonymous && apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          ...row.headers(config, model),
+        },
         body,
         provider,
         signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
@@ -387,6 +417,20 @@ export function createJevClient(config: JevConfig): JevClient {
         throw new ProviderError(provider, "timeout", `${provider}: no answer in ${timeoutMs} ms`, {
           cause: err,
         });
+      }
+      throw err;
+    }
+  }
+
+  async function post(body: unknown, signal: AbortSignal | undefined): Promise<unknown> {
+    const startAnonymous = free && !apiKey;
+    try {
+      return await postOnce(body, signal, startAnonymous);
+    } catch (err) {
+      // Zen's free Jev model accepts a valid key and answers 401 for a stale
+      // one; retry anonymously once, matching the `opencode-zen` chat adapter.
+      if (free && !startAnonymous && err instanceof ProviderError && err.status === 401) {
+        return postOnce(body, signal, true);
       }
       throw err;
     }
@@ -418,12 +462,14 @@ export function createJevClient(config: JevConfig): JevClient {
           for (const [id, question] of Object.entries(questions)) {
             answers[id] = readAnswer(question, raw[id]);
           }
+          const answeredModel =
+            typeof reply.model === "string" && reply.model ? reply.model : model;
           return {
             // Sound: `readAnswer` returns each answer in its own question's
             // type, with a choice limited to that question's options.
             answers: answers as JevReply<typeof questions>["answers"],
-            usage: usageOf(config.host, reply.usage),
-            model: typeof reply.model === "string" && reply.model ? reply.model : model,
+            usage: usageOf(config.host, answeredModel, reply.usage),
+            model: answeredModel,
           };
         },
         { ...config.retry, signal },

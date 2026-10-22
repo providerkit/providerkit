@@ -1,4 +1,4 @@
-// Jev on four hosts. The same questions go out in four envelopes and the same
+// Jev on five hosts. The same questions go out in five envelopes and the same
 // answers must come back — the Jev twin of golden.test.ts, where a divergence
 // passes on the host a developer tried and breaks the app that switches.
 import { describe, expect, expectTypeOf, it } from "vitest";
@@ -76,6 +76,7 @@ const VERCEL_REPLY = {
 };
 
 const REPLIES: Record<JevHost, unknown> = {
+  opencode: { ...TYPESAFE_REPLY, model: "jev-1.13-free" },
   typesafe: TYPESAFE_REPLY,
   openrouter: OPENROUTER_REPLY,
   cloudflare: CLOUDFLARE_REPLY,
@@ -121,8 +122,8 @@ function client(host: JevHost, fetchImpl: typeof fetch, extra: Partial<JevConfig
   });
 }
 
-describe("four hosts, one answer", () => {
-  const hosts: JevHost[] = ["typesafe", "openrouter", "cloudflare", "vercel"];
+describe("five hosts, one answer", () => {
+  const hosts: JevHost[] = ["opencode", "typesafe", "openrouter", "cloudflare", "vercel"];
 
   it.each(hosts)("%s reads the same answers and token counts", async (host) => {
     const { fetchImpl } = fakeFetch(Response.json(REPLIES[host]));
@@ -146,7 +147,7 @@ describe("four hosts, one answer", () => {
     expect(reply.usage.outputTokens).toBe(70);
   });
 
-  it("takes OpenRouter's bill, and no other host's", async () => {
+  it("takes OpenRouter's bill, prices OpenCode's free model at $0, and leaves the rest to the caller", async () => {
     // The live figure is 397 tokens at $0.042 per million, to the digit.
     const or = fakeFetch(Response.json(OPENROUTER_REPLY));
     expect((await client("openrouter", or.fetchImpl).ask(STATE, QUESTIONS)).usage).toEqual({
@@ -155,6 +156,18 @@ describe("four hosts, one answer", () => {
       outputTokens: 70,
       reportedCostUsd: 0.000016674,
     });
+    const ocFree = fakeFetch(Response.json(REPLIES.opencode));
+    expect((await client("opencode", ocFree.fetchImpl).ask(STATE, QUESTIONS)).usage).toEqual({
+      inputTokens: 397,
+      cachedInputTokens: 0,
+      outputTokens: 70,
+      reportedCostUsd: 0,
+    });
+    const ocPaid = fakeFetch(Response.json({ ...TYPESAFE_REPLY, model: "jev-1.13" }));
+    expect(
+      (await client("opencode", ocPaid.fetchImpl, { model: "jev-1.13" }).ask(STATE, QUESTIONS))
+        .usage.reportedCostUsd,
+    ).toBeUndefined();
     const other = fakeFetch(
       Response.json({ ...TYPESAFE_REPLY, usage: { ...TYPESAFE_REPLY.usage, cost: 9 } }),
     );
@@ -175,6 +188,26 @@ describe("four hosts, one answer", () => {
 });
 
 describe("each host's envelope", () => {
+  it("OpenCode Zen: defaults to jev-1.13-free, works keyless, and retries a stale key anonymously", async () => {
+    const { sent, fetchImpl } = fakeFetch(
+      Response.json(REPLIES.opencode),
+      new Response('{"error":{"message":"Invalid credential"}}', { status: 401 }),
+      Response.json(REPLIES.opencode),
+    );
+    await createJevClient({ host: "opencode", fetchImpl, retry: noWait }).ask(STATE, QUESTIONS);
+    expect(sent[0]?.url).toBe("https://opencode.ai/zen/v1/systemone");
+    expect(sent[0]?.headers.Authorization).toBeUndefined();
+    expect(sent[0]?.body).toEqual({
+      model: "jev-1.13-free",
+      state: STATE,
+      questions: QUESTIONS,
+    });
+
+    await client("opencode", fetchImpl, { apiKey: "stale" }).ask(STATE, QUESTIONS);
+    expect(sent[1]?.headers.Authorization).toBe("Bearer stale");
+    expect(sent[2]?.headers.Authorization).toBeUndefined();
+  });
+
   it("TypeSafe: the model and questions in the body, a bearer key", async () => {
     const { sent, fetchImpl } = fakeFetch(Response.json(TYPESAFE_REPLY));
     await client("typesafe", fetchImpl).ask(STATE, QUESTIONS);
