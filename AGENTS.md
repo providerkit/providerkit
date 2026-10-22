@@ -98,30 +98,30 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 **Built, tested, green** (1,077 tests; typecheck, lint, build, and the MV3 guard all clean):
 
-| Module                   | What it holds                                                              |
-| ------------------------ | -------------------------------------------------------------------------- |
-| `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`                |
-| `turn.ts`                | `collectTurn`: a stream into the message to append; `drainStream` on it    |
-| `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them              |
-| `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker        |
-| `watchdog.ts`            | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                 |
-| `gate.ts`                | at most N calls at once per connection, first in first out; `withGate`     |
-| `usage.ts`               | cost arithmetic (rates stay with the caller)                               |
-| `transport.ts`           | fetch + the error envelope, and `parseSseStream` on its own                |
-| `tool-args.ts`           | truncation salvage + double-escape healing                                 |
-| `tools.ts`               | validated, cancellable, time-bounded tool calls + registry                 |
-| `schema.ts`              | clamp overflow to advertised bounds                                        |
-| `context.ts`             | `needsCompaction`, `pickCut`, `applyCompaction`, and `repairHistory`       |
-| `providers/anthropic.ts` | Anthropic shape                                                            |
-| `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)             |
-| `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend             |
-| `providers/gemini.ts`    | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output    |
-| `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator        |
-| `registry.ts`            | providers and keys set up once; `get(ref)` builds gated, watched chains    |
-| `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets |
-| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                       |
-| `jev.ts`                 | `@providerkit/core/jev` — TypeSafe's decision model on its five hosts      |
-| `auth/`                  | `@providerkit/core/auth` — sign-in flows and `tokenSource`, fetch only     |
+| Module                   | What it holds                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------------- |
+| `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`                         |
+| `turn.ts`                | `collectTurn`: a stream into the message to append; `drainStream` on it             |
+| `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them                       |
+| `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker                 |
+| `watchdog.ts`            | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                          |
+| `gate.ts`                | at most N calls at once per connection, first in first out; `withGate`              |
+| `usage.ts`               | cost arithmetic (rates stay with the caller)                                        |
+| `transport.ts`           | fetch + the error envelope, and `parseSseStream` on its own                         |
+| `tool-args.ts`           | truncation salvage + double-escape healing                                          |
+| `tools.ts`               | validated, cancellable, time-bounded tool calls + registry                          |
+| `schema.ts`              | clamp overflow to advertised bounds                                                 |
+| `context.ts`             | `needsCompaction`, `pickCut`, `applyCompaction`, and `repairHistory`                |
+| `providers/anthropic.ts` | Anthropic shape                                                                     |
+| `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)                      |
+| `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend                      |
+| `providers/gemini.ts`    | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output             |
+| `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator                 |
+| `registry.ts`            | providers and keys set up once; `get(ref)` builds gated, watched chains             |
+| `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets          |
+| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                                |
+| `decisions.ts`           | `@providerkit/core/decisions`: typed questions, five hosts and live model discovery |
+| `auth/`                  | `@providerkit/core/auth` — sign-in flows and `tokenSource`, fetch only              |
 
 Scope of `auth/`: it signs in and refreshes. Token storage and sign-in screens stay in the app.
 

@@ -78,7 +78,7 @@ export default defineConfig({
               label: "Guides",
               paths: ["guides/**"],
               description:
-                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, resume, cost, Jev",
+                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, resume, cost, decision models",
             },
             {
               label: "API reference",
@@ -91,7 +91,7 @@ export default defineConfig({
           entryPoints: [
             "../core/src/index.ts",
             "../core/src/zod.ts",
-            "../core/src/jev.ts",
+            "../core/src/decisions.ts",
             "../core/src/auth/index.ts",
           ],
           tsconfig: "../core/tsconfig.json",
@@ -141,7 +141,7 @@ export default defineConfig({
             { label: "Context and compaction", slug: "guides/context" },
             { label: "Resume after a crash", slug: "guides/resume" },
             { label: "Usage and cost", slug: "guides/usage" },
-            { label: "Jev decisions", slug: "guides/jev" },
+            { label: "Decision models", slug: "guides/decisions" },
           ],
         },
         typeDocSidebarGroup,

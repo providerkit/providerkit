@@ -139,14 +139,14 @@ async function errorFor(provider: string, res: Response): Promise<ProviderError>
   });
 }
 
-async function send(opts: RequestInit_): Promise<Response> {
+async function send(opts: RequestInit_, method = "POST"): Promise<Response> {
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
   // Serialized outside the catch below: a body that cannot become JSON is a
   // bug of ours, and must not be dressed as a network blip and retried.
   const body = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
   try {
     return await doFetch(opts.url, {
-      method: "POST",
+      method,
       headers: { "content-type": "application/json", ...opts.headers },
       body,
       signal: opts.signal,
@@ -164,6 +164,13 @@ async function send(opts: RequestInit_): Promise<Response> {
       cause: err,
     });
   }
+}
+
+/** GET and parse JSON with the same transport and HTTP errors as a model call. */
+export async function getJson<T = unknown>(opts: Omit<RequestInit_, "body">): Promise<T> {
+  const res = await send({ ...opts, body: undefined }, "GET");
+  if (!res.ok) throw await errorFor(opts.provider, res);
+  return (await res.json()) as T;
 }
 
 /** POST and parse one JSON response. For the endpoints that do not stream. */

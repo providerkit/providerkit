@@ -4,13 +4,14 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { ProviderError } from "../src/errors.ts";
 import {
-  createJevClient,
+  createDecisionClient,
+  listOpenRouterDecisionModels,
   readAnswer,
   type ChoiceQuestion,
-  type JevConfig,
-  type JevHost,
-  type JevQuestion,
-} from "../src/jev.ts";
+  type DecisionConfig,
+  type DecisionHost,
+  type DecisionQuestion,
+} from "../src/decisions.ts";
 
 const QUESTIONS = {
   next: {
@@ -24,7 +25,7 @@ const QUESTIONS = {
     instructions: "How close is the user to finishing?",
     criteria: ["Far", "Midway", "One click away"],
   },
-} satisfies Record<string, JevQuestion>;
+} satisfies Record<string, DecisionQuestion>;
 
 const STATE = { page: "Checkout. Cart has 2 items. Button: Pay now. Link: Continue shopping." };
 
@@ -75,7 +76,7 @@ const VERCEL_REPLY = {
   providerMetadata: { typesafe: { confidence: { next: 1, urgency: 0.98 } } },
 };
 
-const REPLIES: Record<JevHost, unknown> = {
+const REPLIES: Record<DecisionHost, unknown> = {
   opencode: { ...TYPESAFE_REPLY, model: "jev-1.13-free" },
   typesafe: TYPESAFE_REPLY,
   openrouter: OPENROUTER_REPLY,
@@ -111,8 +112,8 @@ function fakeFetch(...responses: (Response | (() => Promise<Response>))[]) {
 
 const noWait = { sleep: async () => {} };
 
-function client(host: JevHost, fetchImpl: typeof fetch, extra: Partial<JevConfig> = {}) {
-  return createJevClient({
+function client(host: DecisionHost, fetchImpl: typeof fetch, extra: Partial<DecisionConfig> = {}) {
+  return createDecisionClient({
     host,
     apiKey: "k",
     accountId: "acc",
@@ -123,7 +124,7 @@ function client(host: JevHost, fetchImpl: typeof fetch, extra: Partial<JevConfig
 }
 
 describe("five hosts, one answer", () => {
-  const hosts: JevHost[] = ["opencode", "typesafe", "openrouter", "cloudflare", "vercel"];
+  const hosts: DecisionHost[] = ["opencode", "typesafe", "openrouter", "cloudflare", "vercel"];
 
   it.each(hosts)("%s reads the same answers and token counts", async (host) => {
     const { fetchImpl } = fakeFetch(Response.json(REPLIES[host]));
@@ -194,7 +195,10 @@ describe("each host's envelope", () => {
       new Response('{"error":{"message":"Invalid credential"}}', { status: 401 }),
       Response.json(REPLIES.opencode),
     );
-    await createJevClient({ host: "opencode", fetchImpl, retry: noWait }).ask(STATE, QUESTIONS);
+    await createDecisionClient({ host: "opencode", fetchImpl, retry: noWait }).ask(
+      STATE,
+      QUESTIONS,
+    );
     expect(sent[0]?.url).toBe("https://opencode.ai/zen/v1/systemone");
     expect(sent[0]?.headers.Authorization).toBeUndefined();
     expect(sent[0]?.body).toEqual({
@@ -245,7 +249,7 @@ describe("each host's envelope", () => {
   });
 
   it("Cloudflare: refuses to build a URL with no account", () => {
-    expect(() => createJevClient({ host: "cloudflare", apiKey: "k" })).toThrow(/accountId/);
+    expect(() => createDecisionClient({ host: "cloudflare", apiKey: "k" })).toThrow(/accountId/);
   });
 
   it("Vercel: the gateway headers, the model in a header, noul spelled boolean", async () => {
@@ -304,7 +308,7 @@ describe("readAnswer — an answer becomes an action only if it checks out", () 
   it("allows the rounding drift of many live options, and no more", () => {
     // Eight options each rounded to two decimals can honestly sum to 0.98.
     const ids = ["a", "b", "c", "d", "e", "f", "g", "h"];
-    const wide: JevQuestion = {
+    const wide: DecisionQuestion = {
       type: "choice",
       criteria: Object.fromEntries(ids.map((id) => [id, null])),
     };
@@ -321,7 +325,7 @@ describe("readAnswer — an answer becomes an action only if it checks out", () 
     // Twenty live options would earn 10% by the per-option rule; the cap
     // keeps a sum of 0.93 failing.
     const ids = Array.from({ length: 20 }, (_, i) => `o${i}`);
-    const wide: JevQuestion = {
+    const wide: DecisionQuestion = {
       type: "choice",
       criteria: Object.fromEntries(ids.map((id) => [id, null])),
     };
@@ -336,7 +340,7 @@ describe("readAnswer — an answer becomes an action only if it checks out", () 
 
   it("reads a score as the fraction it is", () => {
     // TypeSafe's own docs example: 0 × 0 + 1 × 0.57 + 2 × 0.43 = 1.43.
-    const scale: JevQuestion = { type: "score", criteria: ["low", "mid", "high"] };
+    const scale: DecisionQuestion = { type: "score", criteria: ["low", "mid", "high"] };
     const answer = {
       type: "score",
       score: 1.43,
@@ -348,7 +352,7 @@ describe("readAnswer — an answer becomes an action only if it checks out", () 
   });
 
   it("refuses a noul outside 0..1 and an answer of the wrong type", () => {
-    const yes: JevQuestion = { type: "noul", instructions: "Is it?" };
+    const yes: DecisionQuestion = { type: "noul", instructions: "Is it?" };
     expect(readAnswer(yes, { type: "noul", noul: 1.5 })).toBeNull();
     expect(readAnswer(yes, good)).toBeNull();
   });
@@ -384,7 +388,7 @@ describe("failures", () => {
       '{"detail":{"error_type":"authentication_error","message":"Cannot authenticate with the server. Please check your API key and try again."}}';
     const { sent, fetchImpl } = fakeFetch(new Response(body, { status: 401 }));
     await expect(client("typesafe", fetchImpl).ask(STATE, QUESTIONS)).rejects.toMatchObject({
-      provider: "jev:typesafe",
+      provider: "decisions:typesafe",
       kind: "auth",
       status: 401,
     });
@@ -429,7 +433,11 @@ describe("failures", () => {
         STATE,
         QUESTIONS,
       ),
-    ).rejects.toMatchObject({ name: "ProviderError", provider: "jev:typesafe", kind: "timeout" });
+    ).rejects.toMatchObject({
+      name: "ProviderError",
+      provider: "decisions:typesafe",
+      kind: "timeout",
+    });
   });
 
   it("lets the caller's Stop through untouched, and never retries it", async () => {
@@ -472,7 +480,7 @@ describe("failures", () => {
   });
 });
 
-describe("checkKey", () => {
+describe("checkConnection", () => {
   const ok = {
     model: "jev-1.13.0",
     answers: {
@@ -488,19 +496,23 @@ describe("checkKey", () => {
 
   it("passes when one real question comes back readable", async () => {
     const { sent, fetchImpl } = fakeFetch(Response.json(ok));
-    await expect(client("openrouter", fetchImpl).checkKey()).resolves.toBeUndefined();
+    await expect(client("openrouter", fetchImpl).checkConnection()).resolves.toBeUndefined();
     expect(sent[0]?.url).toBe("https://openrouter.ai/api/v1/systemone");
   });
 
   it("throws the classified failure for a bad key", async () => {
     const { fetchImpl } = fakeFetch(new Response("", { status: 401 }));
-    await expect(client("vercel", fetchImpl).checkKey()).rejects.toMatchObject({ kind: "auth" });
+    await expect(client("vercel", fetchImpl).checkConnection()).rejects.toMatchObject({
+      kind: "auth",
+    });
   });
 
   it("throws when the key works but the answer does not check out", async () => {
     const garbled = { ...ok, answers: { ok: { type: "choice", choice: "MAYBE" } } };
     const { fetchImpl } = fakeFetch(Response.json(garbled));
-    await expect(client("typesafe", fetchImpl).checkKey()).rejects.toBeInstanceOf(ProviderError);
+    await expect(client("typesafe", fetchImpl).checkConnection()).rejects.toBeInstanceOf(
+      ProviderError,
+    );
   });
 });
 
@@ -511,5 +523,103 @@ describe("types", () => {
     expectTypeOf(reply.answers.next?.choice).toEqualTypeOf<"PAY" | "SHOP" | "NONE" | undefined>();
     expectTypeOf(reply.answers.is_checkout?.noul).toEqualTypeOf<number | undefined>();
     expectTypeOf(reply.answers.urgency?.score).toEqualTypeOf<number | undefined>();
+  });
+});
+
+describe("decision model discovery", () => {
+  it("GETs the separate decision catalog, keeping live limits and prices", async () => {
+    let request: Request | undefined;
+    const fetchImpl: typeof fetch = async (url, init) => {
+      request = new Request(url, init);
+      return Response.json({
+        data: [
+          {
+            id: "baseten/mammoth-1:free",
+            name: "Mammoth 1 (free)",
+            architecture: { input_modalities: ["text"], output_modalities: ["decisions"] },
+            context_length: 16384,
+            pricing: { prompt: "0", completion: "0" },
+          },
+          {
+            id: "typesafe/jev-1.14",
+            architecture: { input_modalities: ["text", "image"], output_modalities: ["decisions"] },
+            context_length: 262144,
+            pricing: { prompt: "0.000000042", completion: "0" },
+          },
+          { id: "chat-model", architecture: { output_modalities: ["text"] } },
+          { id: 123, architecture: { output_modalities: ["decisions"] } },
+        ],
+      });
+    };
+    const models = await listOpenRouterDecisionModels({ apiKey: "key", fetchImpl });
+    expect(request?.method).toBe("GET");
+    expect(request?.url).toBe("https://openrouter.ai/api/v1/models?output_modalities=decisions");
+    expect(request?.headers.get("Authorization")).toBe("Bearer key");
+    expect(request?.body).toBeNull();
+    expect(models).toEqual([
+      {
+        id: "baseten/mammoth-1:free",
+        name: "Mammoth 1 (free)",
+        inputModalities: ["text"],
+        contextLength: 16384,
+        rate: { input: 0, output: 0, cacheRead: 0 },
+      },
+      {
+        id: "typesafe/jev-1.14",
+        name: "typesafe/jev-1.14",
+        inputModalities: ["text", "image"],
+        contextLength: 262144,
+        rate: { input: expect.closeTo(0.042), output: 0, cacheRead: expect.closeTo(0.042) },
+      },
+    ]);
+  });
+
+  it("keeps unknown price and context unknown, and exposes Span-01's observed restriction", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      Response.json({
+        data: [
+          {
+            id: "respan/span-01-lite:free",
+            architecture: { input_modalities: ["text"], output_modalities: ["decisions"] },
+            context_length: 0,
+            pricing: { prompt: "", completion: "invalid" },
+          },
+        ],
+      });
+    const [model] = await listOpenRouterDecisionModels({ fetchImpl });
+    expect(model).toEqual({
+      id: "respan/span-01-lite:free",
+      name: "respan/span-01-lite:free",
+      inputModalities: ["text"],
+      questionTypes: ["noul"],
+    });
+  });
+
+  it("does not dress a failed catalog read as an empty list", async () => {
+    const fetchImpl: typeof fetch = async () => new Response("Invalid API key", { status: 401 });
+    await expect(listOpenRouterDecisionModels({ fetchImpl })).rejects.toMatchObject({
+      kind: "auth",
+      status: 401,
+    });
+    await expect(
+      listOpenRouterDecisionModels({ fetchImpl: async () => Response.json({ error: "bad list" }) }),
+    ).rejects.toMatchObject({ kind: "unknown" });
+  });
+
+  it("uses a yes/no connection check for a model that cannot choose an option", async () => {
+    let body: unknown;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ answers: { ok: { type: "noul", noul: 0.99 } }, usage: {} });
+    };
+    await createDecisionClient({
+      host: "openrouter",
+      model: "respan/span-01-lite:free",
+      apiKey: "key",
+      fetchImpl,
+    }).checkConnection();
+    expect(body).toMatchObject({
+      questions: { ok: { type: "noul", instructions: "Does the text say hello?" } },
+    });
   });
 });

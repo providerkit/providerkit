@@ -1,40 +1,26 @@
-// Jev — TypeSafe's decision model, on any of the five hosts that serve it.
-// `@providerkit/core/jev`.
-//
-// Jev does not write text. It reads a `state` and answers typed questions —
-// pick one option (choice), is this true (noul), where on this scale (score) —
-// each with the probabilities behind the answer, in well under a second, for
-// $0.042 per million input tokens with output free (TypeSafe's list price,
-// 2026-09-27). That is why it is not a `Provider`: there is no stream and no
-// message, nothing the chat seam could carry without lying about it. It gets
-// its own entry point and borrows the rest of the package — the error
-// envelope, the classifier, retry — so a throttled Jev call behaves exactly
-// like a throttled chat call.
-//
-// The five hosts serve one model and read the same questions. They differ
-// only in the envelope: the URL, the auth headers, how the body is wrapped,
-// and where the answers and the usage sit in the reply. One row per host.
-//
-// Prices stay with the caller, for the reason in usage.ts. OpenRouter reports
-// what each call cost, and OpenCode Zen's `jev-1.13-free` is $0; the caller's
-// `ModelRate` prices the rest.
+// Typed decisions, separate from chat: a state and choice, yes/no or score
+// questions go in; checked probabilities come back. Jev is one model, not
+// the interface. Host envelopes differ; answer checks and retries do not.
+// Prices stay with the caller. OpenRouter reports its bill, and OpenCode
+// Zen's free model explicitly reports $0.
 import { attributionHeaders, type Attribution } from "./attribution.ts";
 import { ProviderError, streamError } from "./errors.ts";
 import { openRouterCostUsd } from "./providers/openai.ts";
 import { withRetry, type RetryOptions } from "./retry.ts";
-import { postJson } from "./transport.ts";
+import { getJson, postJson } from "./transport.ts";
 import type { TokenUsage } from "./types.ts";
+import type { ModelRate } from "./usage.ts";
 
-export type JevHost = "opencode" | "typesafe" | "openrouter" | "cloudflare" | "vercel";
+export type DecisionHost = "opencode" | "typesafe" | "openrouter" | "cloudflare" | "vercel";
 
 /** What a question asks, beyond its options: a sentence, or any JSON the
  *  model should read alongside it (a goal, a list of rules). */
-export type JevInstructions = string | Record<string, unknown> | readonly unknown[];
+export type DecisionInstructions = string | Record<string, unknown> | readonly unknown[];
 
 /** Pick one option. */
 export interface ChoiceQuestion<Option extends string = string> {
   type: "choice";
-  instructions?: JevInstructions;
+  instructions?: DecisionInstructions;
   /** Each option, mapped to what it means. Use `null` when its name says it all.
    *  TypeSafe takes up to 255. */
   criteria: Record<Option, unknown>;
@@ -43,7 +29,7 @@ export interface ChoiceQuestion<Option extends string = string> {
 /** Is this statement true? */
 export interface NoulQuestion {
   type: "noul";
-  instructions: JevInstructions;
+  instructions: DecisionInstructions;
   /** What yes and what no mean, when the statement alone leaves it open. */
   criteria?: { true?: string; false?: string };
 }
@@ -51,12 +37,12 @@ export interface NoulQuestion {
 /** Where on this ordered scale? */
 export interface ScoreQuestion {
   type: "score";
-  instructions?: JevInstructions;
+  instructions?: DecisionInstructions;
   /** The levels, lowest first. TypeSafe takes 2 to 10. */
   criteria: readonly unknown[];
 }
 
-export type JevQuestion = ChoiceQuestion | NoulQuestion | ScoreQuestion;
+export type DecisionQuestion = ChoiceQuestion | NoulQuestion | ScoreQuestion;
 
 export interface ChoiceAnswer<Option extends string = string> {
   type: "choice";
@@ -89,7 +75,7 @@ export interface ScoreAnswer {
   confidence: number | null;
 }
 
-export type JevAnswer = ChoiceAnswer | NoulAnswer | ScoreAnswer;
+export type DecisionAnswer = ChoiceAnswer | NoulAnswer | ScoreAnswer;
 
 /** The answer type a question gets back. A choice's options carry through. */
 export type AnswerTo<Q> =
@@ -101,7 +87,7 @@ export type AnswerTo<Q> =
         ? ScoreAnswer
         : never;
 
-export interface JevReply<Q extends Record<string, JevQuestion>> {
+export interface DecisionReply<Q extends Record<string, DecisionQuestion>> {
   /** One per question. `null` when that answer did not pass the checks in
    *  `readAnswer`. Each fails alone: in a fan-out, a malformed answer to a
    *  question the caller never acts on must not cost the one it does. */
@@ -112,8 +98,8 @@ export interface JevReply<Q extends Record<string, JevQuestion>> {
   model: string;
 }
 
-export interface JevConfig {
-  host: JevHost;
+export interface DecisionConfig {
+  host: DecisionHost;
   /** Optional on `opencode` when running `jev-1.13-free`, which answers
    *  without a credential. Required on `jev-1.13` and on every other host. */
   apiKey?: string;
@@ -132,19 +118,19 @@ export interface JevConfig {
   fetchImpl?: typeof fetch;
 }
 
-export interface JevClient {
-  readonly host: JevHost;
+export interface DecisionClient {
+  readonly host: DecisionHost;
   readonly model: string;
-  ask<Q extends Record<string, JevQuestion>>(
+  ask<Q extends Record<string, DecisionQuestion>>(
     state: unknown,
     questions: Q,
     opts?: { signal?: AbortSignal },
-  ): Promise<JevReply<Q>>;
+  ): Promise<DecisionReply<Q>>;
   /** Proves the key, the account and the model work, with one real question:
    *  about 40 input tokens, a few millionths of a dollar. A free read (a
    *  model list, a balance) proves only the key, not that this account can
    *  run this model. Vercel has no such free read. Throws the classified failure. */
-  checkKey(opts?: { signal?: AbortSignal }): Promise<void>;
+  checkConnection(opts?: { signal?: AbortSignal }): Promise<void>;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -154,19 +140,119 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
     ? (value as Record<string, unknown>)
     : undefined;
 
+/** Live catalog metadata, not a promise that the model suits a particular task. */
+export interface DecisionModel {
+  id: string;
+  name: string;
+  inputModalities: string[];
+  /** Missing when the host does not report a usable limit. Never means unlimited. */
+  contextLength?: number;
+  /** USD per million tokens, read from the current catalog. */
+  rate?: ModelRate;
+  /** Present only for known restrictions; absence does not promise every question type. */
+  questionTypes?: readonly DecisionQuestion["type"][];
+}
+
+function noulOnly(model: string): boolean {
+  // ponytail: OpenRouter reports modality, not per-model question types.
+  // Span-01 rejected choice/score live on 2026-10-22. Use catalog metadata
+  // instead when OpenRouter starts publishing this restriction.
+  return /^respan\/span-01(?:-lite)?(?::free)?$/.test(model);
+}
+
+function catalogPrice(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const price = Number(value);
+  return Number.isFinite(price) && price >= 0 ? price * 1_000_000 : undefined;
+}
+
+function catalogModel(value: unknown): DecisionModel | null {
+  const row = record(value);
+  const architecture = record(row?.architecture);
+  if (
+    typeof row?.id !== "string" ||
+    !row.id.trim() ||
+    !Array.isArray(architecture?.output_modalities) ||
+    !architecture.output_modalities.includes("decisions")
+  )
+    return null;
+  const pricing = record(row.pricing);
+  const input = catalogPrice(pricing?.prompt);
+  const output = catalogPrice(pricing?.completion);
+  const contextLength = row.context_length;
+  return {
+    id: row.id,
+    name: typeof row.name === "string" && row.name.trim() ? row.name : row.id,
+    ...(noulOnly(row.id) ? { questionTypes: ["noul"] as const } : {}),
+    inputModalities: Array.isArray(architecture.input_modalities)
+      ? architecture.input_modalities.filter((v): v is string => typeof v === "string")
+      : [],
+    ...(typeof contextLength === "number" && Number.isFinite(contextLength) && contextLength > 0
+      ? { contextLength }
+      : {}),
+    ...(input !== undefined && output !== undefined
+      ? { rate: { input, output, cacheRead: catalogPrice(pricing?.input_cache_read) ?? input } }
+      : {}),
+  };
+}
+
+/** OpenRouter's separate decision catalog. Chat `/models` defaults to text models. */
+export async function listOpenRouterDecisionModels(
+  opts: Pick<DecisionConfig, "apiKey" | "fetchImpl" | "timeoutMs" | "retry"> & {
+    signal?: AbortSignal;
+  } = {},
+): Promise<DecisionModel[]> {
+  return withRetry(
+    async () => {
+      const deadline = AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      const signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
+      let json: unknown;
+      try {
+        json = await getJson({
+          url: "https://openrouter.ai/api/v1/models?output_modalities=decisions",
+          provider: "decisions:openrouter",
+          headers: opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {},
+          signal,
+          fetchImpl: opts.fetchImpl,
+        });
+      } catch (err) {
+        if (deadline.aborted && !opts.signal?.aborted) {
+          throw new ProviderError(
+            "decisions:openrouter",
+            "timeout",
+            "The decision model list timed out. Try again.",
+            { cause: err },
+          );
+        }
+        throw err;
+      }
+      const data = record(json)?.data;
+      if (!Array.isArray(data)) {
+        throw new ProviderError(
+          "decisions:openrouter",
+          "unknown",
+          "The decision model catalog has no model list. Try again.",
+        );
+      }
+      return data.map(catalogModel).filter((model): model is DecisionModel => model !== null);
+    },
+    { ...opts.retry, signal: opts.signal },
+  );
+}
+
 // ── the five envelopes ────────────────────────────────────────────────────
 
 interface HostRow {
   model: string;
-  url(config: JevConfig): string;
-  headers(config: JevConfig, model: string): Record<string, string>;
-  body(model: string, state: unknown, questions: Record<string, JevQuestion>): unknown;
+  url(config: DecisionConfig): string;
+  headers(config: DecisionConfig, model: string): Record<string, string>;
+  body(model: string, state: unknown, questions: Record<string, DecisionQuestion>): unknown;
   /** The reply in TypeSafe's own shape (`{ model, answers, usage }`),
    *  whatever the host wrapped it in. */
   unwrap(json: unknown): Record<string, unknown> | undefined;
 }
 
-const HOSTS: Record<JevHost, HostRow> = {
+const HOSTS: Record<DecisionHost, HostRow> = {
   opencode: {
     // OpenCode Zen serves `jev-1.13-free` and `jev-1.13` on its System One
     // route (checked live, 2026-10-22). `jev-1.13-free` is $0 and answers
@@ -235,6 +321,11 @@ const HOSTS: Record<JevHost, HostRow> = {
     unwrap: fromVercel,
   },
 };
+
+/** The host's default decision model, also used when migrating a saved connection. */
+export function defaultDecisionModel(host: DecisionHost): string {
+  return HOSTS[host].model;
+}
 
 /**
  * Vercel's reply, back in TypeSafe's shape: a `boolean` answer carries its
@@ -308,8 +399,11 @@ function distribution(value: unknown, keys: readonly string[]): Record<string, n
  * keep its own request (its own error copy, its own auth refresh) and can
  * still take the checks.
  */
-export function readAnswer<Q extends JevQuestion>(question: Q, raw: unknown): AnswerTo<Q> | null;
-export function readAnswer(question: JevQuestion, raw: unknown): JevAnswer | null {
+export function readAnswer<Q extends DecisionQuestion>(
+  question: Q,
+  raw: unknown,
+): AnswerTo<Q> | null;
+export function readAnswer(question: DecisionQuestion, raw: unknown): DecisionAnswer | null {
   const answer = record(raw);
   if (!answer || answer.type !== question.type) return null;
   if (question.type === "noul") {
@@ -340,11 +434,11 @@ export function readAnswer(question: JevQuestion, raw: unknown): JevAnswer | nul
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 
-function isFreeJevModel(host: JevHost, model: string): boolean {
+function isFreeDecisionModel(host: DecisionHost, model: string): boolean {
   return host === "opencode" && model.endsWith("-free");
 }
 
-function usageOf(host: JevHost, model: string, raw: unknown): TokenUsage {
+function usageOf(host: DecisionHost, model: string, raw: unknown): TokenUsage {
   const usage = record(raw) ?? {};
   // Keyed on the host, as in the OpenAI adapter: OpenRouter is who sends the
   // bill, and `cost` is its field in its unit. OpenCode Zen's `-free` model is
@@ -357,7 +451,7 @@ function usageOf(host: JevHost, model: string, raw: unknown): TokenUsage {
           is_byok: usage.is_byok === true,
           cost_details: record(usage.cost_details) ?? null,
         })
-      : isFreeJevModel(host, model)
+      : isFreeDecisionModel(host, model)
         ? 0
         : undefined;
   return {
@@ -370,16 +464,16 @@ function usageOf(host: JevHost, model: string, raw: unknown): TokenUsage {
 
 // ── the client ────────────────────────────────────────────────────────────
 
-/** The question `checkKey` asks: the cheapest one whose answer can be checked. */
+/** The question `checkConnection` asks: the cheapest one whose answer can be checked. */
 const KEY_CHECK = {
   ok: {
     type: "choice",
     instructions: "Does the text say hello?",
     criteria: { YES: null, NO: null },
   },
-} satisfies Record<string, JevQuestion>;
+} satisfies Record<string, DecisionQuestion>;
 
-export function createJevClient(config: JevConfig): JevClient {
+export function createDecisionClient(config: DecisionConfig): DecisionClient {
   const row = HOSTS[config.host];
   if (config.host === "cloudflare" && !config.accountId) {
     // Sent anyway, the URL has an empty account and Cloudflare answers 404,
@@ -387,9 +481,9 @@ export function createJevClient(config: JevConfig): JevClient {
     throw new Error("providerkit: Jev on Cloudflare needs the accountId of the Workers AI account");
   }
   const model = config.model ?? row.model;
-  const free = isFreeJevModel(config.host, model);
+  const free = isFreeDecisionModel(config.host, model);
   const apiKey = config.apiKey?.trim() ?? "";
-  const provider = `jev:${config.host}`;
+  const provider = `decisions:${config.host}`;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   async function postOnce(
@@ -436,7 +530,7 @@ export function createJevClient(config: JevConfig): JevClient {
     }
   }
 
-  const client: JevClient = {
+  const client: DecisionClient = {
     host: config.host,
     model,
     ask(state, questions, opts = {}) {
@@ -458,7 +552,7 @@ export function createJevClient(config: JevConfig): JevClient {
               body: (JSON.stringify(json) ?? "").slice(0, 2_000),
             });
           }
-          const answers: Record<string, JevAnswer | null> = {};
+          const answers: Record<string, DecisionAnswer | null> = {};
           for (const [id, question] of Object.entries(questions)) {
             answers[id] = readAnswer(question, raw[id]);
           }
@@ -467,7 +561,7 @@ export function createJevClient(config: JevConfig): JevClient {
           return {
             // Sound: `readAnswer` returns each answer in its own question's
             // type, with a choice limited to that question's options.
-            answers: answers as JevReply<typeof questions>["answers"],
+            answers: answers as DecisionReply<typeof questions>["answers"],
             usage: usageOf(config.host, answeredModel, reply.usage),
             model: answeredModel,
           };
@@ -475,8 +569,12 @@ export function createJevClient(config: JevConfig): JevClient {
         { ...config.retry, signal },
       );
     },
-    async checkKey(opts) {
-      const reply = await client.ask("hello", KEY_CHECK, opts);
+    async checkConnection(opts) {
+      const questions: Record<string, DecisionQuestion> =
+        config.host === "openrouter" && noulOnly(model)
+          ? { ok: { type: "noul", instructions: "Does the text say hello?" } }
+          : KEY_CHECK;
+      const reply = await client.ask("hello", questions, opts);
       if (!reply.answers.ok) {
         throw new ProviderError(
           provider,

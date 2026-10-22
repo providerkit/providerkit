@@ -2,6 +2,18 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.26.0] - 2026-10-22
+
+### Breaking
+
+- Rename `@providerkit/core/jev` to `@providerkit/core/decisions`. `createJevClient` becomes `createDecisionClient`, the `Jev*` types become `Decision*`, and `checkKey()` becomes `checkConnection()`. Jev is one supported model, not the interface. The old export is removed rather than kept as an alias.
+
+### Added
+
+- `listOpenRouterDecisionModels()` reads the separate decision-model catalog, including current prices and context limits. Known Span-01 restrictions are exposed as `questionTypes: ["noul"]`; these scoring models are not browser-action selectors.
+- `defaultDecisionModel(host)` exposes the same default the client uses, so stored connections can migrate without duplicating model IDs.
+- A runnable decision-model probe sends synthetic text through the production client. Mammoth, Elephant and Mercury Decide passed choice, yes/no and score checks on 2026-10-22. Span-01 Lite rejected choice questions and stays available for yes/no scoring only.
+
 ## [0.25.3] - 2026-10-22
 
 ### Added
