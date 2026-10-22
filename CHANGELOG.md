@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.25.3] - 2026-10-22
+
+### Added
+
+- **`opencode` Jev host on `@providerkit/core/jev`.** Calls `https://opencode.ai/zen/v1/systemone` with `jev-1.13-free` by default (or `model: "jev-1.13"` for the paid tier). `jev-1.13-free` works without an `apiKey`, reports `reportedCostUsd: 0`, and retries a 401 anonymously when a stale key is sent.
+
 ## [0.25.2] - 2026-10-21
 
 ### Fixed

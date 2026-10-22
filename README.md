@@ -167,7 +167,7 @@ drift.
 | [Resume after a crash](https://providerkit.dev/guides/resume/)          | Pick a conversation up after the process stops   |
 | [Usage and cost](https://providerkit.dev/guides/usage/)                 | Reconciling cache tokens, cost, savings          |
 | [Sign in to a subscription](https://providerkit.dev/guides/auth/)       | Device code and PKCE sign-in, token refresh      |
-| [Jev decisions](https://providerkit.dev/guides/jev/)                    | TypeSafe's decision model on four hosts          |
+| [Jev decisions](https://providerkit.dev/guides/jev/)                    | TypeSafe's decision model on five hosts          |
 
 The [API reference](https://providerkit.dev/reference/) is generated from the source, so it
 cannot drift either.
