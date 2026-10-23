@@ -777,6 +777,50 @@ describe("openai-shape adapter", () => {
     });
   });
 
+  it("sends OpenRouter's data_collection, pin or no pin, and never to another host", async () => {
+    // A promise in an app's privacy policy ("hosts that do not train on it")
+    // is this one key. It has to ride an unpinned call too, where no provider
+    // block was built before, and a preset connection has to pass it through.
+    const send = async (config: Partial<Parameters<typeof createOpenAIProvider>[0]>) => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await collect(
+        createOpenAIProvider({
+          apiKey: "k",
+          model: "xiaomi/mimo-v2.6-flash",
+          baseUrl: "https://openrouter.ai/api",
+          dataCollection: "deny",
+          fetchImpl,
+          ...config,
+        }).createStream([{ role: "user", content: "hi" }], []),
+      );
+      return seen[0]!.body;
+    };
+
+    expect((await send({})).provider).toEqual({ data_collection: "deny" });
+    expect((await send({ model: "z-ai/glm-5.3-flash" })).provider).toEqual({
+      order: ["z-ai"],
+      allow_fallbacks: true,
+      data_collection: "deny",
+    });
+    expect((await send({ providerOrder: ["deepinfra"] })).provider).toEqual({
+      order: ["deepinfra"],
+      allow_fallbacks: true,
+      data_collection: "deny",
+    });
+    expect(await send({ baseUrl: "https://api.deepseek.com" })).not.toHaveProperty("provider");
+
+    const preset = recorder(OPENAI_TEXT_TURN);
+    await collect(
+      createPresetProvider("openrouter", {
+        apiKey: "k",
+        model: "xiaomi/mimo-v2.6-flash",
+        dataCollection: "deny",
+        fetchImpl: preset.fetchImpl,
+      }).createStream([{ role: "user", content: "hi" }], []),
+    );
+    expect(preset.seen[0]!.body.provider).toEqual({ data_collection: "deny" });
+  });
+
   it("sends NO routing block without a pin — never an empty order array", async () => {
     // An empty `order` on the wire is not "no preference", it is a preference
     // for nothing, and nothing above the adapter can see the difference: one
