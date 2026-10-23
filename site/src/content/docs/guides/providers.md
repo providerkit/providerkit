@@ -267,6 +267,22 @@ createOpenAIProvider({
 });
 ```
 
+### OpenRouter data policy
+
+`dataCollection: "deny"` sends OpenRouter's `provider.data_collection`, so the request only goes to
+hosts that, by OpenRouter's records, don't train on your prompts. Some of them still keep prompts
+for a while: OpenRouter's separate `zdr` setting is what rules that out. It rides with the
+route pin or alone, and only to openrouter.ai. If a model has no such host, OpenRouter answers 404
+instead of sending the request anywhere else. Leave it unset and your account's setting applies.
+
+```ts
+createPresetProvider("openrouter", {
+  apiKey: process.env.OPENROUTER_API_KEY!,
+  model: "z-ai/glm-5.3-flash",
+  dataCollection: "deny",
+});
+```
+
 ### Curated presets and `createPresetProvider`
 
 Instead of hand-crafting `baseUrl`, header styles, and dialect quirks per vendor, you can instantiate

@@ -84,6 +84,11 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    *  between rounds. Pinning keeps a conversation's rounds (and their cache)
    *  on one host. Empty/absent = default routing. */
   providerOrder?: string[];
+  /** OpenRouter-only: `provider.data_collection`. `"deny"` keeps the request
+   *  on hosts that don't train on the prompt. Not zero retention: that is
+   *  OpenRouter's separate `zdr`. Absent = the account's own setting. Never
+   *  sent to another host. */
+  dataCollection?: "allow" | "deny";
   /** Default `service_tier` for every call on the OpenAI and Responses shapes;
    *  `StreamOptions.serviceTier` wins. Anthropic and Gemini presets refuse it. */
   serviceTier?: ServiceTier;
@@ -208,6 +213,7 @@ function buildWireAdapter(
         ...(wire.path ? { path: wire.path } : {}),
         headers,
         ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
+        ...(config.dataCollection ? { dataCollection: config.dataCollection } : {}),
         ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
         ...(preset.initiatorHeader ? { initiatorHeader: true } : {}),
         ...(preset.noSampling ? { noSampling: true } : {}),

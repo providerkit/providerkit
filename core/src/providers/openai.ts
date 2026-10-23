@@ -103,6 +103,16 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    * when hitting openrouter.ai and providerOrder is not passed. Defaults to true.
    */
   pinHost?: boolean;
+  /**
+   * OpenRouter's `provider.data_collection`. `"deny"` routes only to hosts
+   * that, by OpenRouter's records, don't train on the prompt; a model with no
+   * such host answers 404 instead of falling back to one that does. It is not
+   * zero retention: some of those hosts keep prompts for a while, which only
+   * OpenRouter's separate `zdr` rules out. Sent on OpenRouter only, with or
+   * without a pin; any other host never sees it. Unset leaves the account's
+   * own setting in charge.
+   */
+  dataCollection?: "allow" | "deny";
   /** Header that carries `StreamOptions.sessionId`. When set and a call has
    *  no sessionId, the provider's own per-instance id rides instead, so the
    *  gateway never sees a call without one. */
@@ -654,8 +664,12 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             })()
           : undefined;
 
-      if (pinOrder?.length) {
-        request.provider = { order: pinOrder, allow_fallbacks: true };
+      const dataCollection = isOpenRouter(baseUrl) ? config.dataCollection : undefined;
+      if (pinOrder?.length || dataCollection) {
+        request.provider = {
+          ...(pinOrder?.length ? { order: pinOrder, allow_fallbacks: true } : {}),
+          ...(dataCollection ? { data_collection: dataCollection } : {}),
+        };
       }
 
       const defaultPath = /\/v\d+[^/]*$/i.test(baseUrl.replace(/\/+$/, ""))
