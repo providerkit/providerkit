@@ -85,8 +85,9 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    *  on one host. Empty/absent = default routing. */
   providerOrder?: string[];
   /** OpenRouter-only: `provider.data_collection`. `"deny"` keeps the request
-   *  on hosts that neither store the prompt nor train on it. Absent = the
-   *  account's own setting. Never sent to another host. */
+   *  on hosts that don't train on the prompt. Not zero retention: that is
+   *  OpenRouter's separate `zdr`. Absent = the account's own setting. Never
+   *  sent to another host. */
   dataCollection?: "allow" | "deny";
   /** Default `service_tier` for every call on the OpenAI and Responses shapes;
    *  `StreamOptions.serviceTier` wins. Anthropic and Gemini presets refuse it. */

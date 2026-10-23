@@ -102,6 +102,26 @@ describe("refs", () => {
     expect(sent[0]?.url.startsWith(PROVIDER_PRESETS.openrouter.baseUrl)).toBe(true);
   });
 
+  it("passes an openrouter connection's dataCollection to a chain's tail", async () => {
+    // The registry builds each adapter from its connection, so a field it
+    // drops here leaves the wire silently, and an app's privacy policy can
+    // rest on this one.
+    const { fetchImpl, sent } = server((req) =>
+      req.model === "glm-5.3" ? throttled() : turn(req.model),
+    );
+    const providers = createRegistry({
+      connections: {
+        go: { preset: "opencode-go", apiKey: "k", fetchImpl },
+        openrouter: { preset: "openrouter", apiKey: "k", dataCollection: "deny", fetchImpl },
+      },
+      chains: { default: ["go/glm-5.3", "openrouter/xiaomi/mimo-v2.6-flash"] },
+    });
+    expect(await ask(providers.get("default"))).toBe("xiaomi/mimo-v2.6-flash");
+    const tail = sent.find((req) => req.url.startsWith(PROVIDER_PRESETS.openrouter.baseUrl));
+    expect(tail?.body.provider).toEqual({ data_collection: "deny" });
+    expect(sent.find((req) => req.model === "glm-5.3")?.body).not.toHaveProperty("provider");
+  });
+
   it("expands a bare connection to the preset's rotation", () => {
     const { fetchImpl } = server();
     const providers = createRegistry({

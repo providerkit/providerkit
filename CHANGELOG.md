@@ -6,7 +6,7 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 ### Added
 
-- **`dataCollection: "allow" | "deny"` on the OpenAI adapter and on presets.** It sends OpenRouter's `provider.data_collection`, so `"deny"` keeps a request on hosts that, by OpenRouter's records, neither store the prompt nor train on it. Before, the adapter built a `provider` block only for a route pin, so an app had no way to send this setting and the account's dashboard toggle was the only control. It now rides with the pin or alone, only when the base URL is openrouter.ai, and registry connections and fallbacks pass it through like `providerOrder`. A model with no such host answers OpenRouter's `No endpoints found matching your data policy`, which already classifies as `model`, so a pool moves on to the next candidate.
+- **`dataCollection: "allow" | "deny"` on the OpenAI adapter and on presets.** It sends OpenRouter's `provider.data_collection`, so `"deny"` keeps a request on hosts that, by OpenRouter's records, don't train on the prompt. It is not zero retention: some of those hosts still keep prompts for a while, and OpenRouter's separate `zdr` setting covers that. Before, the adapter built a `provider` block only for a route pin, so an app had no way to send this setting and the account's dashboard toggle was the only control. It now rides with the pin or alone, only when the base URL is openrouter.ai, and registry connections and fallbacks pass it through like `providerOrder`. A model with no such host answers OpenRouter's `No endpoints found matching your data policy`, which already classifies as `model`, so a pool moves on to the next candidate.
 
 ## [0.26.0] - 2026-10-22
 
