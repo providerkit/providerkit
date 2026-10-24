@@ -315,6 +315,29 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
         ? (source as Record<string, unknown>)
         : (body as Record<string, unknown>);
 
+    // OpenCode puts a budget's ISO reset in envelope metadata, or in Google's
+    // ErrorInfo details. It names the real horizon, not a short retry hint.
+    const envelopes: unknown[] = [
+      body,
+      error,
+      ...(Array.isArray(error.details) ? error.details : []),
+    ];
+    let metadataReset = -Infinity;
+    for (const envelope of envelopes) {
+      if (typeof envelope !== "object" || envelope === null || !("metadata" in envelope)) continue;
+      const metadata = envelope.metadata;
+      if (
+        typeof metadata !== "object" ||
+        metadata === null ||
+        !("resetsAt" in metadata) ||
+        typeof metadata.resetsAt !== "string"
+      )
+        continue;
+      const at = Date.parse(metadata.resetsAt);
+      if (Number.isFinite(at)) metadataReset = Math.max(metadataReset, at);
+    }
+    if (Number.isFinite(metadataReset)) return resetAfter(Math.max(0, metadataReset - now), now);
+
     const inSeconds = jsonSeconds(error.resets_in_seconds);
     const atSeconds = jsonSeconds(error.resets_at);
     // The plain wait some gateways put in the error body instead of a header,

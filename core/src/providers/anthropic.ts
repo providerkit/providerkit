@@ -578,7 +578,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           // most of the time, but a prompt found too long mid-stream arrives the
           // same way, and retrying that one only fails it again more slowly.
           case "error":
-            throw streamError(id, event.error);
+            throw streamError(id, event);
 
           case "message_start": {
             const usage = event.message?.usage;

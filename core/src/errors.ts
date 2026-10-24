@@ -361,7 +361,7 @@ const CONTEXT_PATTERNS: readonly RegExp[] = [
 // it, and its wording overlaps both other categories ("plan" appears in all
 // three), so it is checked first.
 const ENTITLEMENT_PATTERNS: readonly RegExp[] = [
-  /plan does(?:n't| not) (?:include|support)/i,
+  /plan does(?:n't| not) (?:yet )?(?:include|support)/i,
   /not included (?:in|with) your .{0,40}plan/i,
   /upgrade to [\w ]{1,30}(?:or higher|plan)/i,
   /requires? (?:the |a |an )?[\w\s]{1,30}plan/i,
@@ -381,6 +381,9 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   /insufficient[_\s]quota/i,
   /exceeded your current quota/i,
   /insufficient (?:balance|credits?)/i,
+  /insufficient (?:account )?funds/i,
+  /\bcredit limit exceeded\b/i,
+  /\baccount invoice is overdue\b/i,
   /credit balance is too low/i,
   /(?:no|any|out of) credits/i,
   /(?:credits?|balance) depleted/i,
@@ -401,6 +404,13 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   // The OpenAI-shape `type` field for billing failures, serialized into the
   // scanned text — a quota signal with no prose wording at all (codex-router).
   /billing_error/i,
+  // OpenCode's typed account caps can carry throttle prose or no prose at all.
+  // Their names survive both the HTTP and in-band error envelopes.
+  /\b(?:GoUsageLimitError|BudgetLimitError|FreeUsageLimitError|CreditLimitExceeded)\b/i,
+  /\bbudget exceeded\b/i,
+  // Z.ai reports expired coding packages and spent weekly/monthly windows as 429.
+  /\bpackage has expired\b/i,
+  /\b(?:weekly|monthly) limit exhausted\b/i,
   // Alibaba intl's English spelling of 欠费.
   /\barrears?\b/i,
   /余额不足/,
@@ -721,19 +731,28 @@ const STATUS_BY_TYPE: ReadonlyMap<string, number> = new Map([
  * body does name keeps its own kind, which is what tells the caller to wait,
  * rotate a key, or compact instead of retrying a failure that will repeat.
  */
-export function streamError(provider: string, error: unknown): ProviderError {
-  const body = JSON.stringify(error ?? {}) ?? "";
+export function streamError(provider: string, envelope: unknown): ProviderError {
+  const body = JSON.stringify(envelope ?? {}) ?? "";
+  // Keep the envelope: gateways put reset metadata beside, not inside, error.
+  const error =
+    typeof envelope === "object" && envelope !== null && "error" in envelope
+      ? envelope.error
+      : envelope;
   const status = [
     readNumber(error, "code"),
     readNumber(error, "status"),
     readNumber(error, "status_code"),
+    readNumber(envelope, "status_code"),
   ].find((value) => value !== undefined && value >= 400 && value < 600);
   const code =
     readString(error, "code") ?? readString(error, "status") ?? readString(error, "type");
   const typeStatus =
     STATUS_BY_TYPE.get(readString(error, "type") ?? "") ??
     STATUS_BY_TYPE.get(readString(error, "code") ?? "");
-  const kind = classifyHttp(status ?? typeStatus, body);
+  // An actual 5xx outranks client-error wording. A gateway's generic
+  // `server_error` type does not: OpenCode uses it for spent account budgets.
+  const classified = classifyHttp(status, body);
+  const kind = classified === "unknown" ? classifyHttp(typeStatus, body) : classified;
   return new ProviderError(
     provider,
     kind === "unknown" ? "overload" : kind,
@@ -742,7 +761,7 @@ export function streamError(provider: string, error: unknown): ProviderError {
       ...(status !== undefined ? { status } : {}),
       ...(code ? { code } : {}),
       retryAfterMs: parseRetryAfterMs(error, body),
-      ...readReset(error, body),
+      ...readReset(envelope, body),
       body: body.slice(0, 2_000),
     },
   );

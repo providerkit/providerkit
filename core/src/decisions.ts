@@ -547,7 +547,8 @@ export function createDecisionClient(config: DecisionConfig): DecisionClient {
             // retried into hiding it.
             const payload = record(json);
             const error = payload?.error ?? payload?.errors;
-            if (error !== undefined) throw streamError(provider, error);
+            if (error !== undefined)
+              throw streamError(provider, payload?.error !== undefined ? payload : error);
             throw new ProviderError(provider, "unknown", `${provider}: the reply has no answers`, {
               body: (JSON.stringify(json) ?? "").slice(0, 2_000),
             });
