@@ -1,8 +1,8 @@
 // Envelopes from anomalyco/opencode at 6ac6549a0aed2c69cc31eff17abdc1d690a585a6,
 // packages/ai/test/provider-error.test.ts and packages/core/test/session-error.test.ts.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDecisionClient } from "../src/decisions.ts";
-import { classifyHttp, isRetryable, streamError } from "../src/errors.ts";
+import { classifyHttp, isRetryable, ProviderError, streamError } from "../src/errors.ts";
 import { parseUsageLimitBody } from "../src/rate-limit.ts";
 import { createRegistry } from "../src/registry.ts";
 import { drainStream } from "../src/turn.ts";
@@ -32,6 +32,13 @@ const googleBudget = {
   },
 };
 
+beforeEach(() => {
+  vi.spyOn(Date, "now").mockReturnValue(NOW);
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 const caps = [
   { type: "GoUsageLimitError", message: "Go usage limit exceeded" },
   budget.error,
@@ -60,6 +67,60 @@ describe("account caps are not short-term throttles", () => {
     expect(classifyHttp(429, JSON.stringify(googleBudget))).toBe("quota");
   });
 
+  it("does not scan or log echoed request content on failed responses", () => {
+    const error = streamError("plan", {
+      error: { code: "server_error", message: "try again" },
+      instructions: "private context window text",
+      tools: [{ description: "private tool description" }],
+      output: "private output",
+    });
+    expect(error.kind).toBe("overload");
+    expect(error.body).not.toContain("private");
+  });
+
+  it("keeps type-derived rate and auth statuses ahead of generic content words", () => {
+    expect(
+      streamError("plan", {
+        type: "rate_limit_error",
+        message: "Request blocked because the rate limit was exceeded",
+      }).kind,
+    ).toBe("rate");
+    expect(
+      streamError("plan", {
+        type: "authentication_error",
+        message: "Account blocked",
+      }).kind,
+    ).toBe("auth");
+  });
+
+  it("ignores mirrored account windows on a 503 but keeps its Retry-After", () => {
+    const error = streamError("plan", {
+      error: { code: 503, message: "server unavailable" },
+      headers: {
+        "retry-after": "5",
+        "anthropic-ratelimit-unified-7d-utilization": "1",
+        "anthropic-ratelimit-unified-7d-reset": String(RESET_MS / 1000),
+      },
+      metadata,
+    });
+    expect(error).toMatchObject({ kind: "overload", retryAfterMs: 5_000 });
+    expect(error.resetAtMs).toBeUndefined();
+  });
+
+  it("keeps headers inside error as well as beside it", () => {
+    const error = streamError("plan", {
+      error: {
+        type: "usage_limit_reached",
+        headers: {
+          "x-codex-primary-used-percent": "100",
+          "x-codex-primary-window-minutes": "10080",
+          "x-codex-primary-reset-at": String(RESET_MS / 1000),
+        },
+      },
+    });
+    expect(error).toMatchObject({ kind: "quota", resetAtMs: RESET_MS, window: "weekly" });
+  });
+
   it("keeps normal throttles and invalid requests distinct", () => {
     expect(classifyHttp(429, "Rate limit exceeded. See your budget settings.")).toBe("rate");
     expect(classifyHttp(400, "Invalid budget parameter")).toBe("invalid");
@@ -84,15 +145,18 @@ describe("account caps are not short-term throttles", () => {
 });
 
 describe("budget reset metadata", () => {
-  it("keeps metadata beside an error on a non-streaming decision reply", async () => {
-    const client = createDecisionClient({
-      host: "opencode",
-      fetchImpl: async () => new Response(JSON.stringify(budget)),
-    });
-    await expect(
-      client.ask("hello", { ok: { type: "noul", instructions: "Does it say hello?" } }),
-    ).rejects.toMatchObject({ kind: "quota", resetAtMs: RESET_MS });
-  });
+  it.each([budget, { errors: [budget.error], metadata }])(
+    "keeps metadata beside a decision error",
+    async (payload) => {
+      const client = createDecisionClient({
+        host: "opencode",
+        fetchImpl: async () => new Response(JSON.stringify(payload)),
+      });
+      await expect(
+        client.ask("hello", { ok: { type: "noul", instructions: "Does it say hello?" } }),
+      ).rejects.toMatchObject({ kind: "quota", resetAtMs: RESET_MS });
+    },
+  );
 
   it.each([budget, googleBudget, { error: { ...budget.error, metadata } }])(
     "reads the ISO reset from each supported envelope",
@@ -114,6 +178,25 @@ describe("budget reset metadata", () => {
       expect(parseUsageLimitBody(JSON.stringify({ error: {}, metadata: value }), NOW)).toEqual({});
     }
   });
+
+  it("keeps SDK-shaped bodies parseable without their exception prefix", () => {
+    const sdkError = Object.assign(new Error("429 status code"), { status: 429, error: budget });
+    expect(ProviderError.from("plan", sdkError)).toMatchObject({
+      kind: "quota",
+      resetAtMs: RESET_MS,
+    });
+  });
+
+  it.each([NOW - 1, NOW + 60_000])(
+    "does not let metadata reset %s hide a later usage reset",
+    (at) => {
+      const payload = {
+        error: { resets_in_seconds: 86_400 },
+        metadata: { resetsAt: new Date(at).toISOString() },
+      };
+      expect(parseUsageLimitBody(JSON.stringify(payload), NOW).resetAtMs).toBe(NOW + 86_400_000);
+    },
+  );
 
   it("waits for the latest budget when several ErrorInfo details bind", () => {
     const body = {

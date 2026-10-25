@@ -734,7 +734,10 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           // out: a terminal `response.failed`, or a bare error frame from a
           // gateway in front of it.
           case "response.failed":
-            throw streamError(id, event.response);
+            throw streamError(
+              id,
+              event.response?.error ? event.response : { message: "response failed" },
+            );
 
           case "error":
           case "response.error":

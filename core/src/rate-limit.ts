@@ -336,7 +336,6 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
       const at = Date.parse(metadata.resetsAt);
       if (Number.isFinite(at)) metadataReset = Math.max(metadataReset, at);
     }
-    if (Number.isFinite(metadataReset)) return resetAfter(Math.max(0, metadataReset - now), now);
 
     const inSeconds = jsonSeconds(error.resets_in_seconds);
     const atSeconds = jsonSeconds(error.resets_at);
@@ -346,12 +345,12 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
       jsonSeconds(error.retry_after) ??
       jsonSeconds(error.retry_after_seconds) ??
       jsonSeconds((body as Record<string, unknown>).retry_after_seconds);
-    if (inSeconds !== undefined && inSeconds >= 0) return resetAfter(inSeconds * 1000, now);
-    if (atSeconds !== undefined && atSeconds > 0) {
-      return resetAfter(Math.max(0, atSeconds * 1000 - now), now);
-    }
-    if (afterSeconds !== undefined && afterSeconds >= 0) {
-      return resetAfter(afterSeconds * 1000, now);
+    let waitMs: number | undefined;
+    if (inSeconds !== undefined && inSeconds >= 0) waitMs = inSeconds * 1000;
+    else if (atSeconds !== undefined && atSeconds > 0) waitMs = Math.max(0, atSeconds * 1000 - now);
+    else if (afterSeconds !== undefined && afterSeconds >= 0) waitMs = afterSeconds * 1000;
+    if (waitMs !== undefined || Number.isFinite(metadataReset)) {
+      return resetAfter(Math.max(0, waitMs ?? 0, metadataReset - now), now);
     }
   }
 

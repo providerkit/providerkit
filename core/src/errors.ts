@@ -10,7 +10,12 @@
 // read before the status — status alone gives the wrong advice ("retry" for an
 // empty balance, "check your key" for a plan that never included the API).
 
-import { parseRateLimitResponse, parseUsageLimitBody, type RateLimitWindow } from "./rate-limit.ts";
+import {
+  parseRateLimitReset,
+  parseRateLimitResponse,
+  parseUsageLimitBody,
+  type RateLimitWindow,
+} from "./rate-limit.ts";
 import type { FilePart } from "./types.ts";
 
 /** What kind of failure this is, named by what actually fixes it. */
@@ -164,11 +169,12 @@ export class ProviderError extends Error {
     const code = readString(err, "code") ?? readString(err, "type");
     const message = messageOf(err);
     const body = bodyTextOf(err);
+    const resetBody = providerBodyOf(err) ?? body;
     return new ProviderError(provider, classify(err, status, body), message, {
       status,
       code,
-      retryAfterMs: parseRetryAfterMs(err, body),
-      ...parseUsageLimitBody(body),
+      retryAfterMs: parseRetryAfterMs(err, resetBody),
+      ...parseUsageLimitBody(resetBody),
       body: body.slice(0, 2_000) || undefined,
       cause: err,
     });
@@ -218,13 +224,17 @@ export function messageOf(err: unknown): string {
  */
 function bodyTextOf(err: unknown): string {
   const message = messageOf(err);
-  if (typeof err !== "object" || err === null) return message;
-  const body = (err as Record<string, unknown>).error;
-  if (body === undefined) return message;
+  const body = providerBodyOf(err);
+  return body === undefined ? message : `${message} ${body}`;
+}
+
+/** Kept as JSON for reset parsing; the searchable text above is not JSON. */
+function providerBodyOf(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null || !("error" in err)) return undefined;
   try {
-    return `${message} ${typeof body === "string" ? body : JSON.stringify(body)}`;
+    return typeof err.error === "string" ? err.error : JSON.stringify(err.error);
   } catch {
-    return message;
+    return undefined;
   }
 }
 
@@ -732,12 +742,12 @@ const STATUS_BY_TYPE: ReadonlyMap<string, number> = new Map([
  * rotate a key, or compact instead of retrying a failure that will repeat.
  */
 export function streamError(provider: string, envelope: unknown): ProviderError {
-  const body = JSON.stringify(envelope ?? {}) ?? "";
-  // Keep the envelope: gateways put reset metadata beside, not inside, error.
-  const error =
-    typeof envelope === "object" && envelope !== null && "error" in envelope
-      ? envelope.error
-      : envelope;
+  // Only failure data is searchable or logged. A failed Responses object can
+  // echo instructions, tool definitions and output alongside its error.
+  const outer =
+    typeof envelope === "object" && envelope !== null ? (envelope as Record<string, unknown>) : {};
+  const error = outer.error ?? outer.errors ?? envelope;
+  const body = JSON.stringify(error ?? {}) ?? "";
   const status = [
     readNumber(error, "code"),
     readNumber(error, "status"),
@@ -749,10 +759,16 @@ export function streamError(provider: string, envelope: unknown): ProviderError 
   const typeStatus =
     STATUS_BY_TYPE.get(readString(error, "type") ?? "") ??
     STATUS_BY_TYPE.get(readString(error, "code") ?? "");
-  // An actual 5xx outranks client-error wording. A gateway's generic
-  // `server_error` type does not: OpenCode uses it for spent account budgets.
-  const classified = classifyHttp(status, body);
-  const kind = classified === "unknown" ? classifyHttp(typeStatus, body) : classified;
+  // Keep type-derived 4xx precedence. Only a generic 5xx label without a real
+  // status may hide an account cap; OpenCode uses server_error for those.
+  const classified = classifyHttp(status ?? typeStatus, body);
+  const kind =
+    status === undefined &&
+    typeStatus !== undefined &&
+    typeStatus >= 500 &&
+    (matches(QUOTA_PATTERNS, body) || matches(ENTITLEMENT_PATTERNS, body))
+      ? classifyHttp(undefined, body)
+      : classified;
   return new ProviderError(
     provider,
     kind === "unknown" ? "overload" : kind,
@@ -760,27 +776,35 @@ export function streamError(provider: string, envelope: unknown): ProviderError 
     {
       ...(status !== undefined ? { status } : {}),
       ...(code ? { code } : {}),
-      retryAfterMs: parseRetryAfterMs(error, body),
-      ...readReset(envelope, body),
+      ...readReset(envelope, error, body, kind),
       body: body.slice(0, 2_000),
     },
   );
 }
 
-/** The reset a stream error carries: the body's clock, plus the rate-limit
- *  headers the ChatGPT backend mirrors into its error frame, the only place a
- *  failure after the 200 can say which window ran out. */
-function readReset(error: unknown, body: string) {
-  const raw =
-    typeof error === "object" && error !== null
-      ? (error as { headers?: unknown }).headers
-      : undefined;
-  if (typeof raw !== "object" || raw === null) return parseUsageLimitBody(body);
+/** Read reset metadata without copying echoed request data into diagnostics.
+ *  Mirrored account windows describe only rate/quota failures, not a 503. */
+function readReset(envelope: unknown, error: unknown, body: string, kind: ErrorKind) {
   const headers = new Headers();
-  for (const [name, value] of Object.entries(raw)) {
-    if (typeof value === "string" || typeof value === "number") headers.set(name, String(value));
+  for (const source of [error, envelope]) {
+    if (typeof source !== "object" || source === null || !("headers" in source)) continue;
+    const raw = source.headers;
+    if (typeof raw !== "object" || raw === null) continue;
+    for (const [name, value] of Object.entries(raw)) {
+      if (typeof value === "string" || typeof value === "number") headers.set(name, String(value));
+    }
   }
-  return parseRateLimitResponse(headers, body);
+  if (kind !== "rate" && kind !== "quota") {
+    return {
+      retryAfterMs: parseRateLimitReset(headers).retryAfterMs ?? parseRetryAfterMs(error, body),
+    };
+  }
+  const metadata =
+    typeof envelope === "object" && envelope !== null && "metadata" in envelope
+      ? envelope.metadata
+      : undefined;
+  const reset = parseRateLimitResponse(headers, JSON.stringify({ error, metadata }));
+  return { ...reset, retryAfterMs: reset.retryAfterMs ?? parseRetryAfterMs(error, body) };
 }
 
 /**
