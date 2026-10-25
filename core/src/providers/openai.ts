@@ -715,7 +715,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         // line, and a frame carrying `error` carries no choices: unread, it
         // falls through both branches below and the turn ends as a successful
         // zero-token completion nobody retries.
-        if (chunk.error) throw streamError(id, chunk.error);
+        if (chunk.error) throw streamError(id, chunk);
 
         // A usage-only frame carries no choices — this shape sends it last.
         if (chunk.usage) {

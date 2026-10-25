@@ -2,6 +2,13 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.26.2] - 2026-10-24
+
+### Fixed
+
+- OpenCode's `GoUsageLimitError`, `BudgetLimitError`, `FreeUsageLimitError` and `CreditLimitExceeded` now read as exhausted quota, not a short throttle. Z.ai's expired packages and spent weekly/monthly limits do too. A fallback chain moves on without retrying the same account cap.
+- Budget reset times in OpenCode's `metadata.resetsAt` and Google's ErrorInfo now reach the fallback cooldown. Streaming adapters keep the whole error envelope so metadata beside `error` is not lost. A generic `server_error` label no longer hides a budget rejection when no actual 5xx status was reported. These cases use response shapes from OpenCode's upstream tests, not live calls.
+
 ## [0.26.1] - 2026-10-23
 
 ### Added

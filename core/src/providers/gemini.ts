@@ -594,7 +594,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
             // `?alt=sse` commits to 200 the moment the headers go out, so a
             // throttle or an overload landing after that arrives here as a
             // google.rpc.Status in the body rather than as a status line.
-            if (chunk.error) throw streamError(id, chunk.error);
+            if (chunk.error) throw streamError(id, chunk);
             // A blocked PROMPT has no candidate to finish, so it reads as a cut
             // stream — retried, into the same block. It is a content failure.
             const blocked = chunk.promptFeedback?.blockReason;

@@ -315,6 +315,28 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
         ? (source as Record<string, unknown>)
         : (body as Record<string, unknown>);
 
+    // OpenCode puts a budget's ISO reset in envelope metadata, or in Google's
+    // ErrorInfo details. It names the real horizon, not a short retry hint.
+    const envelopes: unknown[] = [
+      body,
+      error,
+      ...(Array.isArray(error.details) ? error.details : []),
+    ];
+    let metadataReset = -Infinity;
+    for (const envelope of envelopes) {
+      if (typeof envelope !== "object" || envelope === null || !("metadata" in envelope)) continue;
+      const metadata = envelope.metadata;
+      if (
+        typeof metadata !== "object" ||
+        metadata === null ||
+        !("resetsAt" in metadata) ||
+        typeof metadata.resetsAt !== "string"
+      )
+        continue;
+      const at = Date.parse(metadata.resetsAt);
+      if (Number.isFinite(at)) metadataReset = Math.max(metadataReset, at);
+    }
+
     const inSeconds = jsonSeconds(error.resets_in_seconds);
     const atSeconds = jsonSeconds(error.resets_at);
     // The plain wait some gateways put in the error body instead of a header,
@@ -323,12 +345,12 @@ export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLim
       jsonSeconds(error.retry_after) ??
       jsonSeconds(error.retry_after_seconds) ??
       jsonSeconds((body as Record<string, unknown>).retry_after_seconds);
-    if (inSeconds !== undefined && inSeconds >= 0) return resetAfter(inSeconds * 1000, now);
-    if (atSeconds !== undefined && atSeconds > 0) {
-      return resetAfter(Math.max(0, atSeconds * 1000 - now), now);
-    }
-    if (afterSeconds !== undefined && afterSeconds >= 0) {
-      return resetAfter(afterSeconds * 1000, now);
+    let waitMs: number | undefined;
+    if (inSeconds !== undefined && inSeconds >= 0) waitMs = inSeconds * 1000;
+    else if (atSeconds !== undefined && atSeconds > 0) waitMs = Math.max(0, atSeconds * 1000 - now);
+    else if (afterSeconds !== undefined && afterSeconds >= 0) waitMs = afterSeconds * 1000;
+    if (waitMs !== undefined || Number.isFinite(metadataReset)) {
+      return resetAfter(Math.max(0, waitMs ?? 0, metadataReset - now), now);
     }
   }
 

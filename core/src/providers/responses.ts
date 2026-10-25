@@ -689,7 +689,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             // error failed, and one that states `incomplete` was cut. Read as
             // a clean stop, either is a broken turn reported as a finished one.
             if (response?.status === "failed" || response?.error) {
-              throw streamError(id, response.error ?? { message: "response failed" });
+              throw streamError(id, response.error ? response : { message: "response failed" });
             }
             // Any other status (`cancelled`, `queued`, one added later) says
             // nothing about the answer being whole. Read as a clean stop, it
@@ -734,7 +734,10 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           // out: a terminal `response.failed`, or a bare error frame from a
           // gateway in front of it.
           case "response.failed":
-            throw streamError(id, event.response?.error);
+            throw streamError(
+              id,
+              event.response?.error ? event.response : { message: "response failed" },
+            );
 
           case "error":
           case "response.error":
@@ -742,12 +745,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             // them a spent Codex window reads as an unnamed in-stream failure:
             // floored to overload, then retried and walked across every backup
             // on the same account wall.
-            throw streamError(
-              id,
-              event.error
-                ? { ...event.error, status_code: event.status_code, headers: event.headers }
-                : { message: event.message, code: event.code },
-            );
+            throw streamError(id, event);
         }
       }
 
