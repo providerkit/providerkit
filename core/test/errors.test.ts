@@ -9,6 +9,7 @@ import {
   classify,
   describeProviderError,
   isBackupEligible,
+  isOpenCodeFreeLimit,
   isRetryable,
   isTransient,
   isTransportFailure,
@@ -129,6 +130,35 @@ describe("the body outranks the status for the 4xx family", () => {
     const kind = kindOf(apiError(429, { message: "Rate limit reached for gpt-5.6" }));
     expect(kind).toBe("rate");
     expect(isBackupEligible(kind)).toBe(true);
+  });
+});
+
+describe("OpenCode free allowance", () => {
+  it.each([
+    "FreeUsageLimitError",
+    '{"error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded"}}',
+    '{"name":"freeusagelimiterror"}',
+  ])("shares the typed quota classification: %s", (body) => {
+    expect(isOpenCodeFreeLimit(body)).toBe(true);
+    expect(classifyHttp(429, body)).toBe("quota");
+    expect(isRetryable(new ProviderError("opencode-zen", classifyHttp(429, body), body))).toBe(
+      false,
+    );
+    const error = streamError("opencode-zen", { error: { type: "server_error", message: body } });
+    expect(error.kind).toBe("quota");
+    expect(isRetryable(error)).toBe(false);
+  });
+
+  it.each([
+    "",
+    "Rate limit exceeded",
+    "BudgetLimitError",
+    "GoUsageLimitError",
+    "CreditLimitExceeded",
+    "NotFreeUsageLimitError",
+    "FreeUsageLimitErrorExtra",
+  ])("does not label another failure as a free allowance: %s", (body) => {
+    expect(isOpenCodeFreeLimit(body)).toBe(false);
   });
 });
 

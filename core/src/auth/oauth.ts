@@ -92,7 +92,11 @@ const AUTH_TIMEOUT_MS = 30_000;
  * is sent. The timeout rejects with a `TimeoutError`, which is not a refusal,
  * so `tokenSource` keeps the stored credential.
  */
-export function authFetch(host: AuthHost, url: string, init: RequestInit = {}): Promise<Response> {
+export function authFetch(
+  host: Pick<AuthHost, "fetchImpl" | "timeoutMs">,
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
   const deadline = AbortSignal.timeout(host.timeoutMs ?? AUTH_TIMEOUT_MS);
   return (host.fetchImpl ?? fetch)(url, {
     ...init,

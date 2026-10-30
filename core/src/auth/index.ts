@@ -4,5 +4,6 @@
 export * from "./oauth.ts";
 export * from "./device.ts";
 export * from "./flows.ts";
+export * from "./chatgpt-models.ts";
 export * from "./token-source.ts";
 export * from "./with-token.ts";

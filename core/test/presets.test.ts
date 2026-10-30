@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPresetProvider,
   OPENCODE_CLI_USER_AGENT,
+  OPENCODE_PUBLIC_API_KEY,
   PRESET_IDS,
   PROVIDER_PRESETS,
   type Provider,
@@ -403,6 +404,86 @@ describe("opencode-go — the session header", () => {
       expect(delta?.toolCalls?.[0]?.name).toBe("Read");
     });
 
+    it.each(["big-pickle", "mimo-v2.6-flash-free"])(
+      "sends the public credential for %s without an account",
+      async (model) => {
+        const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
+        const provider = createPresetProvider("opencode-zen", { apiKey: "", model, fetchImpl });
+        await drain(provider.createStream(hi, []));
+        expect(OPENCODE_PUBLIC_API_KEY).toBe("public");
+        const headers = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
+        expect(headers.get("authorization")).toBe(`Bearer ${OPENCODE_PUBLIC_API_KEY}`);
+        expect(headers.get("user-agent")).toBe(OPENCODE_CLI_USER_AGENT);
+        expect(headers.has("x-api-key")).toBe(false);
+        expect(headers.has("x-goog-api-key")).toBe(false);
+      },
+    );
+
+    it("does not retry an explicit public credential after a 401", async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response("Unauthorized", { status: 401 }));
+      const provider = createPresetProvider("opencode-zen", {
+        apiKey: OPENCODE_PUBLIC_API_KEY,
+        model: "mimo-v2.6-flash-free",
+        fetchImpl,
+      });
+      await expect(drain(provider.createStream(hi, []))).rejects.toMatchObject({ kind: "auth" });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([401, 429])("never bypasses exhausted free quota on HTTP %s", async (status) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: { type: "FreeUsageLimitError", message: "Rate limit exceeded" },
+          }),
+          { status },
+        ),
+      );
+      const provider = createPresetProvider("opencode-zen", {
+        apiKey: "account-key",
+        model: "mimo-v2.6-flash-free",
+        fetchImpl,
+      });
+      await expect(drain(provider.createStream(hi, []))).rejects.toMatchObject({ kind: "quota" });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("never falls back to the public credential for a paid model", async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response("Unauthorized", { status: 401 }));
+      const provider = createPresetProvider("opencode-zen", {
+        apiKey: "stale-key",
+        model: "glm-5.3",
+        fetchImpl,
+      });
+      await expect(drain(provider.createStream(hi, []))).rejects.toMatchObject({ kind: "auth" });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+        "Bearer stale-key",
+      );
+    });
+
+    it("does not replay a free request after it has emitted a chunk", async () => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(
+            'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n' +
+              'data: {"error":{"status":401,"message":"Invalid credential"}}\n\n',
+          ),
+        );
+      const provider = createPresetProvider("opencode-zen", {
+        apiKey: "stale-key",
+        model: "mimo-v2.6-flash-free",
+        fetchImpl,
+      });
+      await expect(drain(provider.createStream(hi, []))).rejects.toMatchObject({ kind: "auth" });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
     it("retries a free model anonymously when a stale key answers 401", async () => {
       const fetchImpl = vi
         .fn<typeof fetch>()
@@ -422,7 +503,9 @@ describe("opencode-go — the session header", () => {
       expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
         "Bearer stale-key",
       );
-      expect(new Headers(fetchImpl.mock.calls[1]?.[1]?.headers).get("authorization")).toBeNull();
+      expect(new Headers(fetchImpl.mock.calls[1]?.[1]?.headers).get("authorization")).toBe(
+        `Bearer ${OPENCODE_PUBLIC_API_KEY}`,
+      );
     });
 
     it.each([

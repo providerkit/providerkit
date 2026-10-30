@@ -385,6 +385,13 @@ const ENTITLEMENT_PATTERNS: readonly RegExp[] = [
   /usage not included/i,
 ];
 
+const OPENCODE_FREE_LIMIT = /\bFreeUsageLimitError\b/i;
+
+/** OpenCode's free allowance ran out, not a paid account's balance. */
+export function isOpenCodeFreeLimit(body: string): boolean {
+  return OPENCODE_FREE_LIMIT.test(body);
+}
+
 // Balance or usage window used up. Chinese-market providers report it in
 // Chinese, which is why the literal strings are here rather than a rule.
 const QUOTA_PATTERNS: readonly RegExp[] = [
@@ -416,7 +423,8 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
   /billing_error/i,
   // OpenCode's typed account caps can carry throttle prose or no prose at all.
   // Their names survive both the HTTP and in-band error envelopes.
-  /\b(?:GoUsageLimitError|BudgetLimitError|FreeUsageLimitError|CreditLimitExceeded)\b/i,
+  /\b(?:GoUsageLimitError|BudgetLimitError|CreditLimitExceeded)\b/i,
+  OPENCODE_FREE_LIMIT,
   /\bbudget exceeded\b/i,
   // Z.ai reports expired coding packages and spent weekly/monthly windows as 429.
   /\bpackage has expired\b/i,
