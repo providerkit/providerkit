@@ -259,6 +259,8 @@ function buildWireAdapter(
  * the header on `fetch` (Chromium ignores it) and stamp it another way.
  */
 export const OPENCODE_CLI_USER_AGENT = "opencode/latest/2.0.32/cli";
+/** OpenCode's public credential for free models without an account. */
+export const OPENCODE_PUBLIC_API_KEY = "public";
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /** Whether an OpenCode Zen model id belongs to the free shelf (`big-pickle` or `*-free`). */
@@ -376,7 +378,7 @@ function wrapOpenCodeZen(
           merged.set("x-opencode-project", "global");
           merged.set("x-opencode-client", "cli");
           if (anonymous) {
-            merged.delete("authorization");
+            merged.set("authorization", `Bearer ${OPENCODE_PUBLIC_API_KEY}`);
             merged.delete("x-api-key");
             merged.delete("x-goog-api-key");
           }
@@ -416,7 +418,7 @@ function wrapOpenCodeZen(
         }
       };
 
-      const startAnonymous = free && !config.apiKey;
+      const startAnonymous = free && (!config.apiKey || config.apiKey === OPENCODE_PUBLIC_API_KEY);
       let emitted = false;
       try {
         for await (const chunk of runAttempt(startAnonymous)) {
@@ -432,6 +434,7 @@ function wrapOpenCodeZen(
           !startAnonymous &&
           !emitted &&
           err instanceof ProviderError &&
+          err.kind === "auth" &&
           err.status === 401
         ) {
           yield* runAttempt(true);

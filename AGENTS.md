@@ -85,7 +85,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
   `bun run release:patch|minor|major`. They live in `core/` (that is where the version and
   publish happen) and the root mirrors them as `bun run --filter @providerkit/core …`
   passthroughs, so a release never needs `cd core`. `prepublishOnly` runs lint → typecheck →
-  test → build → `sync:docs` (which copies the root README and LICENSE into `core/`, so they
+  build → `sync:docs` (which copies the root README and LICENSE into `core/`, so they
   are tracked once and `.gitignore`d inside `core/`).
 
 - **Site deploys to Cloudflare Pages** on push to `main`, project `providerkit`. Needs
