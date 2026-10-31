@@ -11,7 +11,13 @@
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
 import { repairHistory } from "../context.ts";
-import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
+import {
+  fileRefused,
+  ProviderError,
+  streamCut,
+  streamError,
+  validateMaxAttempts,
+} from "../errors.ts";
 import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
 import { settleToolCalls } from "../tool-args.ts";
@@ -419,6 +425,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       tools: ToolDefinition[],
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
+      validateMaxAttempts(opts.maxAttempts);
       const effort = opts.effort ?? config.effort;
       const model = opts.model ?? config.model;
       const museContributor = isMuseSparkContributor(model);

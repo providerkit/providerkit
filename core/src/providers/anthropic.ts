@@ -1,6 +1,12 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
 import { repairHistory } from "../context.ts";
-import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
+import {
+  fileRefused,
+  ProviderError,
+  streamCut,
+  streamError,
+  validateMaxAttempts,
+} from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { streamSse, apiUrl, parseFrame } from "../transport.ts";
@@ -422,6 +428,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       tools: ToolDefinition[],
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
+      validateMaxAttempts(opts.maxAttempts);
       const model = opts.model ?? config.model;
       const maxTokens = opts.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
       const effort = opts.effort ?? config.effort;

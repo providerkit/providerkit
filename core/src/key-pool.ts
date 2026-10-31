@@ -13,7 +13,7 @@
 // error propagates untouched: a transient 503 must not switch a single-key
 // deployment off for a minute, where the caller's own retry is the whole
 // recovery there is.
-import { isTransient, ProviderError } from "./errors.ts";
+import { isTransient, ProviderError, validateMaxAttempts } from "./errors.ts";
 import type { ErrorKind } from "./errors.ts";
 import type {
   ChatMessage,
@@ -135,9 +135,7 @@ export class KeyPool {
     opts: KeyPoolCallOptions = {},
   ): Promise<T> {
     const { maxAttempts } = opts;
-    if (maxAttempts !== undefined && (!Number.isInteger(maxAttempts) || maxAttempts < 1)) {
-      throw new RangeError("KeyPool maxAttempts must be a positive integer");
-    }
+    validateMaxAttempts(maxAttempts);
     const candidates = this.candidates(this.now());
     if (candidates.length === 0) throw this.noneAvailable();
 
@@ -260,41 +258,44 @@ export function withKeyPool(pool: KeyPool, factory: (apiKey: string) => Provider
       tools: ToolDefinition[],
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
-      const opened = await pool.with(async (apiKey) => {
-        // One AbortController per attempt, chained to the caller's own signal
-        // (retry.ts's rule). Finalizing a generator is not cancellation:
-        // `return()` unwinds the adapter down to `streamSse`'s finalizer, which
-        // only releases the reader's lock — the response body stays live and
-        // the request is never aborted. Without this controller an abandoned
-        // attempt keeps the provider generating the rest of the answer, holding
-        // a connection and a concurrency slot on the very key the pool is
-        // rotating away from.
-        const controller = new AbortController();
-        const onAbort = () => controller.abort(opts.signal?.reason);
-        if (opts.signal?.aborted) onAbort();
-        else opts.signal?.addEventListener("abort", onAbort, { once: true });
+      const opened = await pool.with(
+        async (apiKey) => {
+          // One AbortController per attempt, chained to the caller's own signal
+          // (retry.ts's rule). Finalizing a generator is not cancellation:
+          // `return()` unwinds the adapter down to `streamSse`'s finalizer, which
+          // only releases the reader's lock — the response body stays live and
+          // the request is never aborted. Without this controller an abandoned
+          // attempt keeps the provider generating the rest of the answer, holding
+          // a connection and a concurrency slot on the very key the pool is
+          // rotating away from.
+          const controller = new AbortController();
+          const onAbort = () => controller.abort(opts.signal?.reason);
+          if (opts.signal?.aborted) onAbort();
+          else opts.signal?.addEventListener("abort", onAbort, { once: true });
 
-        const stream = factory(apiKey).createStream(messages, tools, {
-          ...opts,
-          signal: controller.signal,
-        });
-        const iterator = stream[Symbol.asyncIterator]();
-        const release = async () => {
-          opts.signal?.removeEventListener("abort", onAbort);
-          await close(iterator);
-          controller.abort();
-        };
+          const stream = factory(apiKey).createStream(messages, tools, {
+            ...opts,
+            signal: controller.signal,
+          });
+          const iterator = stream[Symbol.asyncIterator]();
+          const release = async () => {
+            opts.signal?.removeEventListener("abort", onAbort);
+            await close(iterator);
+            controller.abort();
+          };
 
-        try {
-          return { iterator, first: await iterator.next(), release };
-        } catch (err) {
-          // The request failed under the pool, which is about to try the next
-          // key: release this attempt before a second one opens against the
-          // same rate limit.
-          await release();
-          throw err;
-        }
-      });
+          try {
+            return { iterator, first: await iterator.next(), release };
+          } catch (err) {
+            // The request failed under the pool, which is about to try the next
+            // key: release this attempt before a second one opens against the
+            // same rate limit.
+            await release();
+            throw err;
+          }
+        },
+        { maxAttempts: opts.maxAttempts },
+      );
 
       const { iterator, first, release } = opened;
       try {

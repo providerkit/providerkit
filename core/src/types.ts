@@ -356,6 +356,16 @@ export type JsonWithTools = "response_format" | "prompt";
 export interface StreamOptions {
   /** Override the provider's bound model for this call. */
   model?: string;
+  /**
+   * Maximum attempts at each SDK recovery layer, including the first. Must
+   * be a positive integer. Omit to keep normal recovery. `1` prevents another
+   * inference request through model, key, host or token fallback, keeping the
+   * original failure and normal cooldown or credential renewal for later calls.
+   * Values above `1` are PER LAYER, not a total HTTP budget across nested pools.
+   * Initial token acquisition and credential refresh are not inference attempts.
+   * App-written outer retries need their own limit (`RetryOptions.maxAttempts`).
+   */
+  maxAttempts?: number;
   effort?: Effort;
   /** Output ceiling. On most providers thinking and answer SHARE it, so a
    *  task emitting a large artifact must raise it or the tool-call JSON is

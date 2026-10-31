@@ -482,6 +482,26 @@ function scripted(script: Record<string, Script>) {
 const HELLO: ChatMessage[] = [{ role: "user", content: "hi" }];
 
 describe("withKeyPool", () => {
+  it("forwards a per-stream cap, keeps eviction and cancels the one failed attempt", async () => {
+    const { factory, opened, closed, signals } = scripted({ a: "on-request" });
+    const evictions: KeyTier[] = [];
+    const pool = new KeyPool("test", {
+      keys: ["a", "b"],
+      paidKey: "paid",
+      onEvict: ({ tier }) => evictions.push(tier),
+    });
+    const provider = withKeyPool(pool, factory);
+    await expect(
+      collect(provider.createStream(HELLO, [], { maxAttempts: 1 })),
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(opened).toEqual(["a"]);
+    expect(closed).toEqual(["a"]);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(evictions).toEqual(["free"]);
+    await expect(collect(provider.createStream(HELLO, []))).resolves.toHaveLength(2);
+    expect(opened).toEqual(["a", "b"]);
+  });
+
   it("rotates when the REQUEST fails, because the first chunk is pulled under the pool", async () => {
     const { factory, opened } = scripted({ a: "on-request" });
     const provider = withKeyPool(new KeyPool("test", { keys: ["a", "b"] }), factory);

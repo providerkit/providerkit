@@ -107,6 +107,13 @@ export function isRetryable(err: unknown, maxWaitMs = 60_000): boolean {
   return isTransient(kind);
 }
 
+/** @internal Shared validation before a recovery layer can start I/O. */
+export function validateMaxAttempts(maxAttempts: number | undefined): void {
+  if (maxAttempts !== undefined && (!Number.isInteger(maxAttempts) || maxAttempts < 1)) {
+    throw new RangeError("maxAttempts must be a positive integer");
+  }
+}
+
 export class ProviderError extends Error {
   readonly provider: string;
   readonly kind: ErrorKind;
