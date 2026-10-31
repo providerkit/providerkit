@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- `KeyPool.with(fn, { maxAttempts: 1 })` invokes `fn` at most once, so a paid request with a lost answer is not sent through another key. The limit must be a positive integer and counts callback invocations, not keys skipped during cooldown. At the limit, normal key eviction still runs and the original error is rethrown. Omit the option to keep the existing rotation behavior. Retries inside the callback or around the pool need their own limits.
+
 ## [0.26.2] - 2026-10-24
 
 ### Fixed

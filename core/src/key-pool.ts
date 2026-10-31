@@ -55,6 +55,12 @@ export interface KeyPoolOptions {
   now?: () => number;
 }
 
+export interface KeyPoolCallOptions {
+  /** Maximum callback invocations, including the first. Must be a positive
+   *  integer. Omit to try every available key as usual. */
+  maxAttempts?: number;
+}
+
 /** No key can serve right now. `retryAtMs` = when the soonest one is back.
  *
  *  A `ProviderError` of kind `rate` that carries that moment as `resetAtMs` and
@@ -117,14 +123,29 @@ export class KeyPool {
    * transient failures. Everything else (a bad request, a content block) throws
    * straight through: it would fail identically on every key, and spending the
    * pool on it only turns one bad request into an outage.
+   *
+   * Set `maxAttempts: 1` for a paid request that must not be sent again. Only
+   * actual callback invocations count, not keys skipped during cooldown. At
+   * the cap the key is still benched as usual, but its original error is thrown
+   * instead of trying another key. This does not limit retries inside `fn`
+   * or in a wrapper around `with`.
    */
-  async with<T>(fn: (apiKey: string, tier: KeyTier) => Promise<T>): Promise<T> {
+  async with<T>(
+    fn: (apiKey: string, tier: KeyTier) => Promise<T>,
+    opts: KeyPoolCallOptions = {},
+  ): Promise<T> {
+    const { maxAttempts } = opts;
+    if (maxAttempts !== undefined && (!Number.isInteger(maxAttempts) || maxAttempts < 1)) {
+      throw new RangeError("KeyPool maxAttempts must be a positive integer");
+    }
     const candidates = this.candidates(this.now());
     if (candidates.length === 0) throw this.noneAvailable();
 
+    let attempts = 0;
     let last: unknown;
     for (const key of candidates) {
       try {
+        attempts++;
         return await fn(key.apiKey, key.tier);
       } catch (err) {
         last = err;
@@ -135,6 +156,7 @@ export class KeyPool {
         if (cooldown === null) throw err;
         key.evictedUntil = this.now() + cooldown.forMs;
         this.onEvict?.({ tier: key.tier, kind: cooldown.kind, forMs: cooldown.forMs });
+        if (maxAttempts !== undefined && attempts >= maxAttempts) throw err;
       }
     }
 
