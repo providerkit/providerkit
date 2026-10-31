@@ -1,6 +1,6 @@
 // The pool's rules, on an injected clock — a 12-hour cooldown and its expiry
 // cost the suite nothing.
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "../src/errors.ts";
 import type { ErrorKind } from "../src/errors.ts";
 import { FallbackPool } from "../src/fallback.ts";
@@ -15,6 +15,18 @@ import type {
 } from "../src/types.ts";
 
 const START = 1_700_000_000_000;
+
+const unexpectedFetch = vi.fn(() => {
+  throw new Error("Unexpected network request in key-pool test");
+});
+beforeEach(() => {
+  unexpectedFetch.mockClear();
+  vi.stubGlobal("fetch", unexpectedFetch);
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  expect(unexpectedFetch).not.toHaveBeenCalled();
+});
 
 /** A clock the test moves by hand. */
 function clock(at = START) {
@@ -272,6 +284,161 @@ describe("KeyPool — what it refuses to rotate on", () => {
   it("propagates anything that is not a ProviderError — that is a bug of ours", async () => {
     expect(await tried(new Error("boom"))).toEqual(["a"]);
   });
+});
+
+describe("KeyPool call attempt limit", () => {
+  it.each(["timeout", "network", "auth", "rate", "quota", "overload"] as const)(
+    "calls once on %s, without trying another free or paid key",
+    async (kind) => {
+      const pool = new KeyPool("test", { keys: ["a", "b"], paidKey: "paid" });
+      const err = failure(kind);
+      const call = vi.fn(async () => {
+        throw err;
+      });
+
+      await expect(pool.with(call, { maxAttempts: 1 })).rejects.toBe(err);
+      expect(call).toHaveBeenCalledExactlyOnceWith("a", "free");
+    },
+  );
+
+  it.each(["timeout", "auth", "overload"] as const)(
+    "still rotates on %s when no limit was set",
+    async (kind) => {
+      const pool = new KeyPool("test", { keys: ["a", "b"], paidKey: "paid" });
+      const call = vi.fn(async (key: string) => {
+        if (key === "a") throw failure(kind);
+        return key;
+      });
+
+      await expect(pool.with(call)).resolves.toBe("b");
+      expect(call.mock.calls).toEqual([
+        ["a", "free"],
+        ["b", "free"],
+      ]);
+    },
+  );
+
+  it("stops at two actual requests and rethrows the second failure", async () => {
+    const pool = new KeyPool("test", { keys: ["a", "b", "c"], paidKey: "paid" });
+    const first = failure("timeout");
+    const last = failure("auth");
+    const call = vi.fn(async (key: string) => {
+      throw key === "a" ? first : last;
+    });
+
+    await expect(pool.with(call, { maxAttempts: 2 })).rejects.toBe(last);
+    expect(call.mock.calls).toEqual([
+      ["a", "free"],
+      ["b", "free"],
+    ]);
+  });
+
+  it("returns a success within the allowance", async () => {
+    const pool = new KeyPool("test", { keys: ["a", "b"], paidKey: "paid" });
+    const call = vi.fn(async (key: string) => {
+      if (key === "a") throw failure("timeout");
+      return { image: key };
+    });
+
+    await expect(pool.with(call, { maxAttempts: 2 })).resolves.toEqual({ image: "b" });
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips benched keys without spending attempts, keeps cooldowns and returns the original error", async () => {
+    const time = clock();
+    const evictions: { tier: KeyTier; kind: ErrorKind; forMs: number }[] = [];
+    const pool = new KeyPool("test", {
+      keys: ["free"],
+      paidKey: "paid",
+      now: time.now,
+      onEvict: (info) => evictions.push(info),
+    });
+    await expect(
+      pool.with(() => Promise.reject(rateLimited(30_000)), { maxAttempts: 1 }),
+    ).rejects.toBeInstanceOf(ProviderError);
+    const call = vi.fn(async (key: string) => key);
+    await expect(pool.with(call, { maxAttempts: 1 })).resolves.toBe("paid");
+    expect(call).toHaveBeenCalledExactlyOnceWith("paid", "paid");
+
+    const metadata = {
+      status: 429,
+      code: "daily_limit",
+      retryAfterMs: 60_000,
+      resetAtMs: START + 120_000,
+      window: "monthly" as const,
+      shouldRetry: false,
+      body: "original provider response",
+      cause: new Error("original transport error"),
+    };
+    const err = new ProviderError("test", "quota", "daily limit", metadata);
+    await expect(pool.with(() => Promise.reject(err), { maxAttempts: 1 })).rejects.toBe(err);
+    expect(err).toMatchObject(metadata);
+    expect(evictions).toEqual([
+      { tier: "free", kind: "rate", forMs: 30_000 },
+      { tier: "paid", kind: "quota", forMs: 120_000 },
+    ]);
+    expect(pool.status()).toEqual([
+      { tier: "free", evictedUntil: START + 30_000 },
+      { tier: "paid", evictedUntil: START + 120_000 },
+    ]);
+
+    call.mockClear();
+    await expect(pool.with(call, { maxAttempts: 1 })).rejects.toMatchObject({
+      retryAtMs: START + 30_000,
+    });
+    expect(call).not.toHaveBeenCalled();
+    time.advance(30_000);
+    await expect(pool.with(call, { maxAttempts: 1 })).resolves.toBe("free");
+  });
+
+  it("keeps an unclassified transport failure untouched", async () => {
+    const pool = new KeyPool("test", { keys: ["a", "b"], paidKey: "paid" });
+    const err = new TypeError("fetch failed", { cause: new Error("socket closed") });
+    const call = vi.fn(() => Promise.reject(err));
+    await expect(pool.with(call, { maxAttempts: 1 })).rejects.toBe(err);
+    expect(call).toHaveBeenCalledExactlyOnceWith("a", "free");
+  });
+
+  it("does not share an attempt limit with a concurrent ordinary call", async () => {
+    const pool = new KeyPool("test", { keys: ["a", "b", "c"] });
+    const pending = Promise.withResolvers<void>();
+    const err = failure("timeout");
+    const once = vi.fn(async () => {
+      await pending.promise;
+      throw err;
+    });
+    const capped = expect(pool.with(once, { maxAttempts: 1 })).rejects.toBe(err);
+    const ordinary = vi.fn(async (key: string) => {
+      if (key === "b") throw failure("auth");
+      return key;
+    });
+
+    await expect(pool.with(ordinary)).resolves.toBe("c");
+    pending.resolve();
+    await capped;
+    expect(once).toHaveBeenCalledExactlyOnceWith("a", "free");
+    expect(ordinary.mock.calls).toEqual([
+      ["b", "free"],
+      ["c", "free"],
+    ]);
+    // The same pool keeps its cursor and its ordinary behavior after both calls.
+    await expect(pool.with(async (key) => key)).resolves.toBe("c");
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, -Infinity])(
+    "rejects maxAttempts=%s before calling the clock or callback, without moving the cursor",
+    async (maxAttempts) => {
+      const now = vi.fn(() => START);
+      const pool = new KeyPool("test", { keys: ["a", "b"], now });
+      const call = vi.fn(async (key: string) => key);
+      await expect(pool.with(call, { maxAttempts })).rejects.toThrow(
+        "maxAttempts must be a positive integer",
+      );
+      expect(call).not.toHaveBeenCalled();
+      expect(now).not.toHaveBeenCalled();
+      await expect(pool.with(call)).resolves.toBe("a");
+    },
+  );
 });
 
 // ── withKeyPool ───────────────────────────────────────────────────────────
