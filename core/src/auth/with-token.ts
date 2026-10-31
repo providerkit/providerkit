@@ -4,7 +4,7 @@
 //
 // Type-only imports from the sign-in side, so core's root can export this
 // without pulling the flows in.
-import { ProviderError } from "../errors.ts";
+import { ProviderError, validateMaxAttempts } from "../errors.ts";
 import type { PresetProviderConfig } from "../providers/factory.ts";
 import type { Provider } from "../types.ts";
 import type { Credential } from "./oauth.ts";
@@ -32,7 +32,9 @@ export type TokenAuth = Pick<PresetProviderConfig, "apiKey" | "baseUrl" | "heade
  * A 401 before any output renews the token and replays the call once: a token
  * can be refused before its expiry, and without this the caller sees an auth
  * failure that a fallback pool benches for an hour. A second 401 is a real one
- * and surfaces. A 401 after output never replays (invariant 1).
+ * and surfaces. A 401 after output never replays (invariant 1). With
+ * `StreamOptions.maxAttempts: 1`, renewal still runs for future calls but this
+ * call rethrows its original 401 without sending another inference request.
  *
  * Only 401 counts. A 400 or 403 on a model call is a bad request or a plan
  * that lacks the model, and a new token fixes neither.
@@ -50,6 +52,8 @@ export function withToken<C extends Credential>(
     model: identity.model,
 
     async *createStream(messages, tools, opts = {}) {
+      const { maxAttempts } = opts;
+      validateMaxAttempts(maxAttempts);
       const credential = await unlessAborted(source.getToken(), opts.signal);
       let emitted = false;
       try {
@@ -60,12 +64,25 @@ export function withToken<C extends Credential>(
         return;
       } catch (error) {
         if (emitted || !(error instanceof ProviderError) || error.status !== 401) throw error;
+        try {
+          // A capped request still renews the refused token for future calls,
+          // but never buys a second inference with the renewed credential.
+          const renewed = await unlessAborted(
+            source.getToken({ rejected: credential.accessToken }),
+            opts.signal,
+          );
+          if (maxAttempts !== 1) {
+            yield* build(authOf(renewed)).createStream(messages, tools, opts);
+            return;
+          }
+        } catch (renewalError) {
+          // At the cap the first inference's refusal stays the truth, even if
+          // credential maintenance fails. Ordinary refresh errors stay as-is.
+          if (maxAttempts !== 1) throw renewalError;
+        }
+        opts.signal?.throwIfAborted();
+        throw error;
       }
-      const renewed = await unlessAborted(
-        source.getToken({ rejected: credential.accessToken }),
-        opts.signal,
-      );
-      yield* build(authOf(renewed)).createStream(messages, tools, opts);
     },
   };
 }

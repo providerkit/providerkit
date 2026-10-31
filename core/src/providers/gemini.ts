@@ -6,7 +6,13 @@
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
 import { repairHistory } from "../context.ts";
-import { ProviderError, streamCut, streamError, type ErrorKind } from "../errors.ts";
+import {
+  ProviderError,
+  streamCut,
+  streamError,
+  validateMaxAttempts,
+  type ErrorKind,
+} from "../errors.ts";
 import { schemaPrompt, toAntigravityToolSchema, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
 import { streamSse, apiUrl } from "../transport.ts";
@@ -413,6 +419,8 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       tools: ToolDefinition[],
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
+      const { maxAttempts } = opts;
+      validateMaxAttempts(maxAttempts);
       const effort = opts.effort ?? config.effort;
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       // Repaired first: a result with no call, or a call with no result, is a
@@ -690,6 +698,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         } catch (err) {
           const canFallback =
             !emitted &&
+            maxAttempts !== 1 &&
             baseIdx === 0 &&
             bases.length > 1 &&
             err instanceof ProviderError &&

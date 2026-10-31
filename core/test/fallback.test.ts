@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   FallbackPool,
   NoAvailableProviderError,
@@ -14,6 +14,17 @@ import { STREAM_PROGRESS_MS } from "../src/watchdog.ts";
 
 const NOW = 1_800_000_000_000;
 const DAY = 86_400_000;
+const unexpectedFetch = vi.fn<typeof fetch>(async () => {
+  throw new Error("Unexpected network request in fallback test");
+});
+beforeEach(() => {
+  unexpectedFetch.mockClear();
+  vi.stubGlobal("fetch", unexpectedFetch);
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  expect(unexpectedFetch).not.toHaveBeenCalled();
+});
 const failure = (kind: ConstructorParameters<typeof ProviderError>[1], retryAfterMs?: number) =>
   new ProviderError("primary", kind, kind, { retryAfterMs });
 async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
@@ -21,6 +32,101 @@ async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
   for await (const chunk of stream) chunks.push(chunk);
   return chunks;
 }
+
+describe("per-call fallback attempt limits", () => {
+  it("keeps the original failure and cooldown at the cap, and does not count cooled candidates", async () => {
+    const pool = new FallbackPool(["a", "b"], { now: () => NOW });
+    const err = new ProviderError("a", "quota", "spent window", {
+      status: 429,
+      code: "spent",
+      retryAfterMs: 60_000,
+      resetAtMs: NOW + DAY,
+      window: "weekly",
+      shouldRetry: false,
+      body: "original body",
+      cause: new Error("original cause"),
+    });
+    const call = vi.fn(async (id: string) => {
+      if (id === "a") throw err;
+      return id;
+    });
+    await expect(pool.with(call, undefined, { maxAttempts: 1 })).rejects.toBe(err);
+    expect(call.mock.calls.map(([id]) => id)).toEqual(["a"]);
+    expect(pool.status()[0]).toMatchObject({
+      retryAtMs: NOW + DAY,
+      kind: "quota",
+      window: "weekly",
+    });
+    await expect(pool.with(call, undefined, { maxAttempts: 1 })).resolves.toBe("b");
+    expect(call.mock.calls.map(([id]) => id)).toEqual(["a", "b"]);
+  });
+
+  it("counts actual stream callbacks and stops at two without touching the third candidate", async () => {
+    const pool = new FallbackPool(["a", "b", "c"], { now: () => NOW });
+    const seen: string[] = [];
+    const first = failure("timeout");
+    const last = failure("auth");
+    await expect(
+      collect(
+        pool.stream(
+          async function* (id) {
+            seen.push(id);
+            yield* [];
+            throw id === "a" ? first : last;
+          },
+          undefined,
+          { maxAttempts: 2 },
+        ),
+      ),
+    ).rejects.toBe(last);
+    expect(seen).toEqual(["a", "b"]);
+    expect(pool.status()[2]).toMatchObject({ retryAtMs: 0, probing: false });
+  });
+
+  it("waits for a recovery probe without spending the waiting call's allowance", async () => {
+    let now = NOW;
+    const pool = new FallbackPool(["a", "b"], { now: () => now });
+    await expect(
+      pool.with(async (id) => {
+        throw failure("rate", id === "a" ? 100 : 1_000);
+      }),
+    ).rejects.toBeInstanceOf(ProviderError);
+    now += 100;
+    const pending = Promise.withResolvers<string>();
+    const probe = pool.with(() => pending.promise);
+    const call = vi.fn(async (id: string) => id);
+    const waiting = pool.with(call, undefined, { maxAttempts: 1 });
+    expect(call).not.toHaveBeenCalled();
+    pending.resolve("a");
+    await expect(probe).resolves.toBe("a");
+    await expect(waiting).resolves.toBe("a");
+    expect(call.mock.calls.map(([id]) => id)).toEqual(["a"]);
+    expect(pool.status()[0]).toMatchObject({ retryAtMs: 0, probing: false });
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])(
+    "rejects invalid cap %s before callback or clock",
+    async (maxAttempts) => {
+      const now = vi.fn(() => NOW);
+      const pool = new FallbackPool(["a", "b"], { now });
+      const call = vi.fn(async (id: string) => id);
+      await expect(pool.with(call, undefined, { maxAttempts })).rejects.toThrow(/positive integer/);
+      await expect(
+        collect(
+          pool.stream(
+            async function* () {
+              yield "should not run";
+            },
+            undefined,
+            { maxAttempts },
+          ),
+        ),
+      ).rejects.toThrow(/positive integer/);
+      expect(call).not.toHaveBeenCalled();
+      expect(now).not.toHaveBeenCalled();
+    },
+  );
+});
 
 describe("fallback cooldowns", () => {
   it("skips an exhausted plan across calls and returns to it after its weekly reset", async () => {

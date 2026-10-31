@@ -1,8 +1,14 @@
-import { classify, parseRetryAfterMs, ProviderError, type ErrorKind } from "./errors.ts";
+import {
+  classify,
+  parseRetryAfterMs,
+  ProviderError,
+  validateMaxAttempts,
+  type ErrorKind,
+} from "./errors.ts";
 import type { RateLimitWindow } from "./rate-limit.ts";
 import type { ProviderPresetId } from "./presets.ts";
 import { sleep } from "./retry.ts";
-import type { Provider, ProviderChunk } from "./types.ts";
+import type { Provider, ProviderChunk, StreamOptions } from "./types.ts";
 import { STREAM_PROGRESS_MS, withWatchdog, type WatchdogOptions } from "./watchdog.ts";
 import { createPresetProvider, type PresetProviderConfig } from "./providers/factory.ts";
 
@@ -240,21 +246,32 @@ export class FallbackPool<T> {
   async with<R>(
     attempt: (candidate: T, signal: AbortSignal) => Promise<R>,
     signal?: AbortSignal,
+    opts: Pick<StreamOptions, "maxAttempts"> = {},
   ): Promise<R> {
-    for await (const result of this.stream(async function* (candidate, inner) {
-      yield await attempt(candidate, inner);
-    }, signal))
+    for await (const result of this.stream(
+      async function* (candidate, inner) {
+        yield await attempt(candidate, inner);
+      },
+      signal,
+      opts,
+    ))
       return result;
     throw new Error("providerkit: fallback attempt ended without a result");
   }
 
   /** Only a pre-output failure can switch provider. A later failure still
-   *  cools the endpoint for FUTURE calls but never restarts the current answer. */
+   *  cools the endpoint for FUTURE calls but never restarts the current answer.
+   *  `maxAttempts` counts callback invocations, not cooled candidates or waits
+   *  for a probe. Each nested recovery layer has its own limit. */
   async *stream<R>(
     attempt: (candidate: T, signal: AbortSignal) => AsyncIterable<R>,
     signal?: AbortSignal,
+    opts: Pick<StreamOptions, "maxAttempts"> = {},
   ): AsyncGenerator<R> {
+    const { maxAttempts } = opts;
+    validateMaxAttempts(maxAttempts);
     signal?.throwIfAborted();
+    let attempts = 0;
     let hasFailed = false;
     let lastError: unknown;
     for (let round = 0; ; round++) {
@@ -276,6 +293,7 @@ export class FallbackPool<T> {
         const inner = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
         let emitted = false;
         try {
+          attempts++;
           for await (const chunk of attempt(candidate, inner)) {
             inner.throwIfAborted();
             if (!emitted) {
@@ -311,7 +329,7 @@ export class FallbackPool<T> {
           this.options.onCooldown?.({ candidate, error, kind, retryAtMs, window });
           hasFailed = true;
           lastError = error;
-          if (emitted) throw error;
+          if (emitted || (maxAttempts !== undefined && attempts >= maxAttempts)) throw error;
         } finally {
           controller.abort();
           // Only the owner releases its probe. Clearing whatever probe was set
@@ -380,17 +398,21 @@ export function withFallbackProviders(
     model: primary.model,
     fallbacks,
     createStream(messages, tools, opts = {}) {
-      return fallbacks.stream(async function* (provider, signal): AsyncGenerator<ProviderChunk> {
-        const { model: override, ...rest } = opts;
-        const model = provider === primary ? (override ?? provider.model) : provider.model;
-        for await (const chunk of provider.createStream(messages, tools, {
-          ...rest,
-          model,
-          signal,
-        })) {
-          yield { ...chunk, source: chunk.source ?? { provider: provider.id, model } };
-        }
-      }, opts.signal);
+      return fallbacks.stream(
+        async function* (provider, signal): AsyncGenerator<ProviderChunk> {
+          const { model: override, ...rest } = opts;
+          const model = provider === primary ? (override ?? provider.model) : provider.model;
+          for await (const chunk of provider.createStream(messages, tools, {
+            ...rest,
+            model,
+            signal,
+          })) {
+            yield { ...chunk, source: chunk.source ?? { provider: provider.id, model } };
+          }
+        },
+        opts.signal,
+        opts,
+      );
     },
   };
 }

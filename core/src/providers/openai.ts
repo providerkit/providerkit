@@ -4,7 +4,13 @@
 // OpenRouter, DeepSeek, GLM, Kimi, Groq, Together, vLLM, Ollama and LM Studio.
 // Their divergences are small and named where they appear.
 import { repairHistory } from "../context.ts";
-import { fileRefused, ProviderError, streamCut, streamError } from "../errors.ts";
+import {
+  fileRefused,
+  ProviderError,
+  streamCut,
+  streamError,
+  validateMaxAttempts,
+} from "../errors.ts";
 import { streamSse, apiUrl, parseFrame } from "../transport.ts";
 import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
@@ -563,6 +569,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       tools: ToolDefinition[],
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
+      validateMaxAttempts(opts.maxAttempts);
       const effort = opts.effort ?? config.effort;
       const model = opts.model ?? config.model;
 

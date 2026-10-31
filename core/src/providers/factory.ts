@@ -10,7 +10,7 @@
 // `effort` passes through to the adapter unchanged — the per-endpoint
 // thinking dialects (Z.ai's explicit disabled marker, OpenRouter's floors)
 // are the adapters' knowledge, and this factory must not re-derive them.
-import { ProviderError } from "../errors.ts";
+import { ProviderError, validateMaxAttempts } from "../errors.ts";
 import { createAnthropicProvider } from "./anthropic.ts";
 import { createGeminiProvider } from "./gemini.ts";
 import { createOpenAIProvider } from "./openai.ts";
@@ -360,6 +360,8 @@ function wrapOpenCodeZen(
   return {
     ...baseProvider,
     async *createStream(messages, tools, opts = {}) {
+      const { maxAttempts } = opts;
+      validateMaxAttempts(maxAttempts);
       const activeModel = opts.model ?? defaultModel;
       const free = isZenFreeModel(activeModel);
       const ses = await forgeOpenCodeSessionId(opts.sessionId ?? instanceSessionId);
@@ -431,6 +433,7 @@ function wrapOpenCodeZen(
         // and refuse a stale key with 401. Retry anonymously when that happens.
         if (
           free &&
+          maxAttempts !== 1 &&
           !startAnonymous &&
           !emitted &&
           err instanceof ProviderError &&

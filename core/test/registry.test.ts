@@ -2,14 +2,32 @@
 // per connection, one watchdog per candidate, one cooldown store for every
 // chain. These tests drive it on a fake fetch, so each one checks the request
 // a real connection would send.
-import { describe, expect, it, vi } from "vitest";
-import type { TokenSource } from "../src/auth/token-source.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { tokenSource, type TokenSource } from "../src/auth/token-source.ts";
+import { createAnthropicProvider } from "../src/providers/anthropic.ts";
+import { createGeminiProvider } from "../src/providers/gemini.ts";
+import { createOpenAIProvider } from "../src/providers/openai.ts";
+import { createResponsesProvider } from "../src/providers/responses.ts";
+import { createPresetProvider } from "../src/providers/factory.ts";
 import { ProviderError } from "../src/errors.ts";
 import { PROVIDER_PRESETS } from "../src/presets.ts";
 import { createRegistry, type RegistryCooldownInfo } from "../src/registry.ts";
 import type { Provider, ProviderChunk, StreamOptions } from "../src/types.ts";
 
 const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+
+const unexpectedFetch = vi.fn<typeof fetch>(async () => {
+  throw new Error("Unexpected network request in registry test");
+});
+beforeEach(() => {
+  unexpectedFetch.mockClear();
+  vi.stubGlobal("fetch", unexpectedFetch);
+});
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  expect(unexpectedFetch).not.toHaveBeenCalled();
+});
 
 /** One whole chat-completions turn that answers `text`. */
 const turn = (text: string) =>
@@ -36,6 +54,7 @@ interface Sent {
   text: string;
   headers: Headers;
   body: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 
 /** A fake API. `handle` answers each request; by default it echoes the model. */
@@ -49,6 +68,7 @@ function server(handle: (req: Sent) => Response | Promise<Response> = (req) => t
       text: JSON.stringify(body.messages ?? body.input ?? ""),
       headers: new Headers(init?.headers),
       body,
+      signal: init?.signal ?? undefined,
     };
     sent.push(req);
     return handle(req);
@@ -631,4 +651,455 @@ describe("credentials", () => {
     expect(a).toBe(c);
     expect(a).not.toBe(b);
   });
+});
+
+// These are real provider compositions and wire adapters, not fake Providers.
+// Only the injected HTTP transport is fake; every unlisted network path fails.
+describe("per-call inference attempt limits", () => {
+  const muse = "muse-spark-1.3-contributor";
+  const mimo = "mimo-v2.6-flash";
+
+  function go(fetchImpl: typeof fetch, progressMs?: number) {
+    return createRegistry({
+      connections: {
+        go: {
+          preset: "opencode-go",
+          apiKey: "test-go-key",
+          models: [muse, mimo],
+          maxConcurrent: 2,
+          fetchImpl,
+        },
+      },
+      ...(progressMs === undefined ? {} : { watchdog: { progressMs } }),
+    });
+  }
+
+  it.each([
+    ["registry", 1],
+    ["registry", undefined],
+    ["preset", 1],
+    ["preset", undefined],
+  ] as const)(
+    "sends one Go request at cap 1 and retains default recovery through %s (cap %s)",
+    async (composition, maxAttempts) => {
+      const lost = new DOMException("accepted, answer lost", "TimeoutError");
+      const { fetchImpl, sent } = server((req) => {
+        if (req.model === muse) throw lost;
+        return turn("backup answered");
+      });
+      const provider =
+        composition === "registry"
+          ? go(fetchImpl).get("go", { effort: "none", maxTokens: 42 })
+          : createPresetProvider("opencode-go", {
+              apiKey: "test-go-key",
+              models: [muse, mimo],
+              fetchImpl,
+              watchdog: {},
+              effort: "none",
+              maxTokens: 42,
+            });
+      const result = await ask(provider, { maxAttempts, sessionId: "article-run" }).catch(
+        (error: unknown) => error,
+      );
+      expect(fetchImpl).toHaveBeenCalledTimes(maxAttempts === 1 ? 1 : 2);
+      if (maxAttempts === 1) {
+        expect(result).toBeInstanceOf(ProviderError);
+        expect(result).toMatchObject({ provider: "opencode-go", kind: "network", cause: lost });
+        expect(sent.map((req) => req.model)).toEqual([muse]);
+      } else {
+        expect(result).toBe("backup answered");
+        expect(sent.map((req) => req.model)).toEqual([muse, mimo]);
+        expect(sent[1]?.url).toContain("/chat/completions");
+      }
+      expect(sent[0]?.url).toContain("/responses");
+      for (const req of sent) {
+        expect(req.headers.get("x-opencode-session")).toBe("article-run");
+        expect(JSON.stringify(req.body)).not.toMatch(/maxAttempts|max_attempts|recovery/);
+      }
+    },
+  );
+
+  it.each([1, undefined])(
+    "keeps a watchdog timeout's retry directive and cooldown while honoring cap %s",
+    async (maxAttempts) => {
+      vi.useFakeTimers();
+      const { fetchImpl, sent } = server((req) => {
+        if (req.model !== muse) return turn("backup answered");
+        return new Promise<Response>((_resolve, reject) => {
+          req.signal?.addEventListener("abort", () => reject(req.signal?.reason), { once: true });
+        });
+      });
+      const providers = go(fetchImpl, 10);
+      const pending = ask(providers.get("go"), { maxAttempts }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10);
+      const result = await pending;
+      if (maxAttempts === 1) {
+        expect(result).toMatchObject({ kind: "timeout", shouldRetry: false });
+        expect(sent).toHaveLength(1);
+      } else {
+        // shouldRetry:false stops same-provider retry, not ordinary fallback.
+        expect(result).toBe("backup answered");
+        expect(sent).toHaveLength(2);
+      }
+      expect(providers.status().go?.candidates[0]).toMatchObject({
+        kind: "timeout",
+        probing: false,
+      });
+      expect(providers.status().go?.gate).toMatchObject({ held: 0, waiting: 0 });
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([
+    [400, "invalid", 1],
+    [401, "auth", 2],
+    [503, "overload", 2],
+  ] as const)(
+    "keeps HTTP %s metadata at cap 1 and ordinary %s recovery unchanged",
+    async (status, kind, ordinaryRequests) => {
+      const body = JSON.stringify({ error: { message: "request refused" } });
+      for (const maxAttempts of [1, undefined]) {
+        const { fetchImpl, sent } = server((req) =>
+          req.model === muse
+            ? new Response(body, { status, headers: { "x-should-retry": "false" } })
+            : turn("backup answered"),
+        );
+        const result = await ask(go(fetchImpl).get("go"), { maxAttempts }).catch(
+          (error: unknown) => error,
+        );
+        if (maxAttempts === 1 || ordinaryRequests === 1) {
+          expect(result).toMatchObject({
+            provider: "opencode-go",
+            status,
+            kind,
+            body,
+            shouldRetry: false,
+          });
+          expect(sent).toHaveLength(1);
+        } else {
+          expect(result).toBe("backup answered");
+          expect(sent).toHaveLength(ordinaryRequests);
+        }
+      }
+    },
+  );
+
+  it.each([1, undefined])("never retries caller abort at cap %s", async (maxAttempts) => {
+    const stop = new AbortController();
+    const reason = new Error("caller stopped");
+    const { fetchImpl, sent } = server(() => {
+      stop.abort(reason);
+      throw reason;
+    });
+    const providers = go(fetchImpl);
+    await expect(ask(providers.get("go"), { maxAttempts, signal: stop.signal })).rejects.toBe(
+      reason,
+    );
+    expect(sent).toHaveLength(1);
+    expect(providers.status().go?.candidates.every((entry) => entry.retryAtMs === 0)).toBe(true);
+  });
+
+  it("sends no request for an already-aborted call", async () => {
+    const { fetchImpl } = server();
+    const reason = new Error("already stopped");
+    await expect(
+      ask(go(fetchImpl).get("go"), { maxAttempts: 1, signal: AbortSignal.abort(reason) }),
+    ).rejects.toBe(reason);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([1, undefined])(
+    "honors cap %s through nested model and free/paid key pools, keeping both cooldowns",
+    async (maxAttempts) => {
+      const time = clock();
+      const { fetchImpl, sent } = server((req) =>
+        req.model === "primary" ? new Response("busy", { status: 503 }) : turn("backup answered"),
+      );
+      const providers = createRegistry({
+        connections: {
+          a: {
+            preset: "openai",
+            model: "primary",
+            keys: { keys: ["free-a", "free-b"], paidKey: "paid", now: time.now },
+            fetchImpl,
+          },
+          b: { preset: "openai", model: "backup", apiKey: "backup-key", fetchImpl },
+        },
+        chains: { pair: ["a", "b"] },
+        fallback: { now: time.now },
+      });
+      const provider = providers.get("pair");
+      const result = await ask(provider, { maxAttempts }).catch((error: unknown) => error);
+      if (maxAttempts === 1) {
+        expect(result).toMatchObject({ kind: "overload", status: 503, body: "busy" });
+        expect(sent.map((req) => req.headers.get("authorization"))).toEqual(["Bearer free-a"]);
+        expect(providers.status().a?.keys).toEqual([
+          { tier: "free", evictedUntil: time.now() + 60_000 },
+          { tier: "free", evictedUntil: 0 },
+          { tier: "paid", evictedUntil: 0 },
+        ]);
+        expect(providers.status().a?.candidates[0]).toMatchObject({
+          kind: "overload",
+          retryAtMs: time.now() + 30_000,
+        });
+      } else {
+        expect(result).toBe("backup answered");
+        expect(sent.map((req) => req.headers.get("authorization"))).toEqual([
+          "Bearer free-a",
+          "Bearer free-b",
+          "Bearer paid",
+          "Bearer backup-key",
+        ]);
+      }
+      const before = sent.length;
+      await expect(ask(provider, { maxAttempts: 1 })).resolves.toBe("backup answered");
+      expect(sent.slice(before).map((req) => req.model)).toEqual(["backup"]);
+    },
+  );
+
+  it("treats larger caps as per-layer limits, not a total HTTP budget", async () => {
+    const { fetchImpl, sent } = server(() => new Response("busy", { status: 503 }));
+    const providers = createRegistry({
+      connections: {
+        a: { preset: "openai", model: "a", keys: { keys: ["a1", "a2"] }, fetchImpl },
+        b: { preset: "openai", model: "b", keys: { keys: ["b1", "b2"] }, fetchImpl },
+      },
+      chains: { pair: ["a", "b"] },
+    });
+    await expect(ask(providers.get("pair"), { maxAttempts: 2 })).rejects.toMatchObject({
+      status: 503,
+    });
+    expect(sent.map((req) => req.headers.get("authorization"))).toEqual([
+      "Bearer a1",
+      "Bearer a2",
+      "Bearer b1",
+      "Bearer b2",
+    ]);
+  });
+
+  it.each([1, undefined])(
+    "preserves token renewal for future calls but limits inference resends at cap %s",
+    async (maxAttempts) => {
+      let stored = { accessToken: "old", refreshToken: "r1", expiresAt: Infinity };
+      const fresh = { accessToken: "fresh", refreshToken: "r2", expiresAt: Infinity };
+      const refresh = vi.fn(async () => fresh);
+      const save = vi.fn(async (credential: typeof stored) => {
+        stored = credential;
+      });
+      const source = tokenSource({ load: async () => stored, save, refresh });
+      const { fetchImpl, sent } = server((req) =>
+        req.headers.get("authorization") === "Bearer old"
+          ? new Response("token refused", { status: 401 })
+          : turn("fresh answered"),
+      );
+      const providers = createRegistry({
+        connections: { signed: { preset: "openai", model: "one", token: source, fetchImpl } },
+      });
+      const provider = providers.get("signed");
+      const result = await ask(provider, { maxAttempts }).catch((error: unknown) => error);
+      if (maxAttempts === 1) {
+        expect(result).toMatchObject({ kind: "auth", status: 401, body: "token refused" });
+        expect(sent).toHaveLength(1);
+      } else {
+        expect(result).toBe("fresh answered");
+        expect(sent).toHaveLength(2);
+      }
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenCalledWith(fresh);
+      await expect(ask(provider, { maxAttempts: 1 })).resolves.toBe("fresh answered");
+      expect(sent.at(-1)?.headers.get("authorization")).toBe("Bearer fresh");
+      expect(refresh).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("allows credential refresh before the first capped inference", async () => {
+    let stored = { accessToken: "expired", refreshToken: "r1", expiresAt: 0 };
+    const fresh = { accessToken: "fresh", refreshToken: "r2", expiresAt: Infinity };
+    const refresh = vi.fn(async () => fresh);
+    const source = tokenSource({
+      load: async () => stored,
+      save: async (credential) => {
+        stored = credential;
+      },
+      refresh,
+    });
+    const { fetchImpl, sent } = server(() => turn("answered"));
+    const providers = createRegistry({
+      connections: { signed: { preset: "openai", model: "one", token: source, fetchImpl } },
+    });
+    await expect(ask(providers.get("signed"), { maxAttempts: 1 })).resolves.toBe("answered");
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(sent.map((req) => req.headers.get("authorization"))).toEqual(["Bearer fresh"]);
+  });
+
+  it("lets abort win while capped credential maintenance still saves its result", async () => {
+    let stored = { accessToken: "old", refreshToken: "r1", expiresAt: Infinity };
+    const fresh = { accessToken: "fresh", refreshToken: "r2", expiresAt: Infinity };
+    const renewal = Promise.withResolvers<typeof fresh>();
+    const started = Promise.withResolvers<void>();
+    const saved = Promise.withResolvers<void>();
+    const source = tokenSource({
+      load: async () => stored,
+      save: async (credential) => {
+        stored = credential;
+        saved.resolve();
+      },
+      refresh: async () => {
+        started.resolve();
+        return renewal.promise;
+      },
+    });
+    const { fetchImpl, sent } = server(() => new Response("token refused", { status: 401 }));
+    const providers = createRegistry({
+      connections: { signed: { preset: "openai", model: "one", token: source, fetchImpl } },
+    });
+    const stop = new AbortController();
+    const reason = new Error("caller stopped during renewal");
+    const result = ask(providers.get("signed"), { maxAttempts: 1, signal: stop.signal }).catch(
+      (error: unknown) => error,
+    );
+    await started.promise;
+    stop.abort(reason);
+    expect(await result).toBe(reason);
+    expect(sent).toHaveLength(1);
+    renewal.resolve(fresh);
+    await saved.promise;
+    expect(stored).toBe(fresh);
+  });
+
+  it("starts a fresh allowance for an explicit repair after a known answer", async () => {
+    const { fetchImpl, sent } = server((req) =>
+      turn(req.text.includes("repair") ? '{"body":"fixed"}' : '{"body":7}'),
+    );
+    const providers = createRegistry({
+      connections: { one: { preset: "openai", model: "one", apiKey: "test-key", fetchImpl } },
+    });
+    const provider = providers.get("one");
+    const opts = { maxAttempts: 1 };
+    await expect(ask(provider, opts, "first answer")).resolves.toBe('{"body":7}');
+    await expect(ask(provider, opts, "explicit repair")).resolves.toBe('{"body":"fixed"}');
+    expect(sent).toHaveLength(2);
+    expect(opts).toEqual({ maxAttempts: 1 });
+  });
+
+  it("keeps the original capped 401 when credential renewal fails", async () => {
+    const renewalFailure = new Error("auth endpoint unavailable");
+    const source: TokenSource = {
+      getToken: vi.fn<TokenSource["getToken"]>(async (opts) => {
+        if (opts?.rejected) throw renewalFailure;
+        return { accessToken: "old", refreshToken: "r1", expiresAt: Infinity };
+      }),
+    };
+    const { fetchImpl, sent } = server(() => new Response("original refusal", { status: 401 }));
+    const providers = createRegistry({
+      connections: { signed: { preset: "openai", model: "one", token: source, fetchImpl } },
+    });
+    await expect(ask(providers.get("signed"), { maxAttempts: 1 })).rejects.toMatchObject({
+      status: 401,
+      body: "original refusal",
+      kind: "auth",
+    });
+    expect(source.getToken).toHaveBeenCalledWith({ rejected: "old" });
+    expect(sent).toHaveLength(1);
+  });
+
+  it.each([1, undefined])("limits Zen's anonymous resend at cap %s", async (maxAttempts) => {
+    const { fetchImpl, sent } = server((req) =>
+      req.headers.get("authorization") === "Bearer stale"
+        ? new Response("key refused", { status: 401 })
+        : turn("anonymous answered"),
+    );
+    const provider = createPresetProvider("opencode-zen", {
+      apiKey: "stale",
+      model: "mimo-v2.6-flash-free",
+      fetchImpl,
+    });
+    const result = await ask(provider, { maxAttempts }).catch((error: unknown) => error);
+    if (maxAttempts === 1) {
+      expect(result).toMatchObject({ kind: "auth", status: 401, body: "key refused" });
+      expect(sent.map((req) => req.headers.get("authorization"))).toEqual(["Bearer stale"]);
+    } else {
+      expect(result).toBe("anonymous answered");
+      expect(sent.map((req) => req.headers.get("authorization"))).toEqual([
+        "Bearer stale",
+        "Bearer public",
+      ]);
+    }
+  });
+
+  it.each([1, undefined])("limits Antigravity's host resend at cap %s", async (maxAttempts) => {
+    const { fetchImpl, sent } = server((req) =>
+      req.url.startsWith("https://daily-cloudcode-pa.googleapis.com")
+        ? new Response("daily refused", { status: 503 })
+        : new Response(
+            frame({
+              response: {
+                candidates: [
+                  { content: { parts: [{ text: "prod answered" }] }, finishReason: "STOP" },
+                ],
+              },
+            }),
+          ),
+    );
+    const provider = createPresetProvider("antigravity", {
+      apiKey: "test-token",
+      projectId: "test-project",
+      model: "gemini-4-argon",
+      fetchImpl,
+    });
+    const result = await ask(provider, { maxAttempts }).catch((error: unknown) => error);
+    if (maxAttempts === 1) {
+      expect(result).toMatchObject({ kind: "overload", status: 503, body: "daily refused" });
+      expect(sent).toHaveLength(1);
+    } else {
+      expect(result).toBe("prod answered");
+      expect(sent).toHaveLength(2);
+      expect(sent[1]?.url).toContain("https://cloudcode-pa.googleapis.com/");
+    }
+    for (const req of sent) expect(JSON.stringify(req.body)).not.toContain("maxAttempts");
+  });
+
+  it("isolates a capped call from a concurrent ordinary Go call", async () => {
+    const hold = deferred();
+    const lost = new DOMException("capped answer lost", "TimeoutError");
+    const { fetchImpl, sent } = server(async (req) => {
+      if (req.model !== muse) return turn("ordinary backup");
+      if (req.text.includes("capped")) await hold.promise;
+      throw lost;
+    });
+    const provider = go(fetchImpl).get("go");
+    const capped = ask(provider, { maxAttempts: 1 }, "capped").catch((error: unknown) => error);
+    await expect(ask(provider, {}, "ordinary")).resolves.toBe("ordinary backup");
+    hold.resolve();
+    expect(await capped).toMatchObject({ kind: "network", cause: lost });
+    expect(sent.filter((req) => req.text.includes("capped")).map((req) => req.model)).toEqual([
+      muse,
+    ]);
+    expect(sent.filter((req) => req.text.includes("ordinary")).map((req) => req.model)).toEqual([
+      muse,
+      mimo,
+    ]);
+  });
+
+  it.each([
+    ["chat", createOpenAIProvider],
+    ["responses", createResponsesProvider],
+    ["messages", createAnthropicProvider],
+    ["gemini", createGeminiProvider],
+  ] as const)(
+    "validates the cap before HTTP and keeps it off the bare %s payload",
+    async (_name, create) => {
+      const { fetchImpl, sent } = server(() => new Response("busy", { status: 503 }));
+      const provider = create({ apiKey: "test-key", model: "test-model", fetchImpl });
+      for (const maxAttempts of [0, -1, 1.5, NaN, Infinity]) {
+        await expect(ask(provider, { maxAttempts })).rejects.toThrow(
+          /maxAttempts must be a positive integer/,
+        );
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      await expect(ask(provider, { maxAttempts: 1 })).rejects.toMatchObject({ status: 503 });
+      expect(sent).toHaveLength(1);
+      expect(JSON.stringify(sent[0]?.body)).not.toMatch(/maxAttempts|max_attempts|recovery/);
+    },
+  );
 });

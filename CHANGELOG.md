@@ -2,6 +2,13 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.27.2] - 2026-10-31
+
+### Added
+
+- `StreamOptions.maxAttempts` limits each SDK recovery layer for one call. Set it to `1` to send at most one inference request through model, key, host and token fallback. Cooldowns and normal token renewal still run for future calls; the original inference error is kept. Omit it to keep normal recovery. Values above `1` are per-layer limits, not a shared HTTP budget. Initial credential acquisition and refresh are not inference requests. App-written outer retries still need their own limit. The option is never sent in a vendor payload.
+- `FallbackPool.with` and `.stream` accept `{ maxAttempts }` as an optional third argument, after the existing signal. The limit counts callback invocations, not cooled candidates or probe waits, and must be a positive integer.
+
 ## [0.27.1] - 2026-10-31
 
 ### Added
