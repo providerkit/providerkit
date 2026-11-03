@@ -92,6 +92,7 @@ export function createGeminiSpeechProvider(config: GeminiSpeechConfig): SpeechPr
     model: config.model,
     async synthesize(request) {
       const { text, voice, format } = prepareSpeech(provider, request, {
+        apiKey: config.apiKey,
         voice: config.voice,
         format: config.format,
         maxInputChars: limits.maxInputChars,

@@ -124,17 +124,23 @@ export function resolveLimits(config: SpeechLimits): Required<SpeechLimits> {
   return limits;
 }
 
-const refuse = (provider: string, code: string, message: string) =>
-  new ProviderError(provider, "invalid", `${provider}: ${message}`, { code, shouldRetry: false });
+const refuse = (provider: string, code: string, message: string, kind: ErrorKind = "invalid") =>
+  new ProviderError(provider, kind, `${provider}: ${message}`, { code, shouldRetry: false });
+
+/** Space to tilde. Anything else in a header value is refused or altered by a runtime. */
+const HEADER_SAFE = /^[\x20-\x7e]*$/;
 
 /**
- * @internal Trim, bound and fill in defaults. Throws `invalid` BEFORE any request,
- * and never puts the text in the message: it is the caller's, and may be private.
+ * @internal Trim, bound and fill in defaults. Throws BEFORE any request, and never
+ * puts the text or the key in the message: they are the caller's, and may be private.
  */
 export function prepareSpeech(
   provider: string,
   request: SpeechRequest,
   defaults: {
+    /** Checked, never echoed. A key with a line break, a non-Latin-1 character or a zero-width
+     *  one pasted in makes the runtime reject the header and quote the value in its error. */
+    apiKey: string;
     voice?: string;
     format?: SpeechFormat;
     maxInputChars: number;
@@ -142,6 +148,14 @@ export function prepareSpeech(
     formats: readonly SpeechFormat[];
   },
 ): { text: string; voice: string; format: SpeechFormat } {
+  if (!HEADER_SAFE.test(defaults.apiKey)) {
+    throw refuse(
+      provider,
+      "key_invalid",
+      "the API key holds a character that cannot be sent in a header (a line break or a character outside plain ASCII). Paste the key again",
+      "auth",
+    );
+  }
   const text = typeof request.text === "string" ? request.text.trim() : "";
   if (!text) throw refuse(provider, "text_empty", "there is no text to speak");
   if (text.length > defaults.maxInputChars) {

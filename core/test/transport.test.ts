@@ -624,6 +624,56 @@ describe("postBytes", () => {
       kind: "network",
     });
   });
+
+  describe("when the send itself fails", () => {
+    // A runtime that refuses a header quotes its whole value in the TypeError.
+    const rejection = new TypeError("Header 'Authorization' has invalid value: 'Bearer SECRET'");
+    const refusing = (() => Promise.reject(rejection)) as unknown as typeof fetch; // a fetch that rejects the way undici does
+    const typed = { ...opts(refusing), url: "https://user:hunter2@host.example/private/path" };
+
+    it("keeps the runtime's rejection and the full address by default, as the chat calls do", async () => {
+      const error = (await postBytes({ ...typed, maxBytes: 10 }).catch(
+        (e: unknown) => e,
+      )) as ProviderError;
+      expect(error).toMatchObject({ kind: "network" });
+      expect(error.cause).toBe(rejection);
+      expect(error.message).toBe(`no response from ${typed.url}`);
+    });
+
+    it("keeps neither when asked to redact: no cause, and only the host", async () => {
+      const error = (await postBytes({ ...typed, maxBytes: 10, redactErrors: true }).catch(
+        (e: unknown) => e,
+      )) as ProviderError;
+      expect(error).toMatchObject({ kind: "network" });
+      expect(error.cause).toBeUndefined();
+      expect(error.message).toBe("no response from https://host.example");
+    });
+
+    it("names no address at all when the address does not parse", async () => {
+      const error = (await postBytes({
+        ...typed,
+        url: "not a url, user:hunter2",
+        maxBytes: 10,
+        redactErrors: true,
+      }).catch((e: unknown) => e)) as ProviderError;
+      expect(error.message).toBe("no response from the server");
+    });
+
+    it("passes the caller's Stop through untouched, redacted or not", async () => {
+      const controller = new AbortController();
+      const stop = new Error("stopped");
+      controller.abort(stop);
+      const stopped = (() => Promise.reject(stop)) as unknown as typeof fetch; // a fetch that rejects the way undici does
+      await expect(
+        postBytes({
+          ...opts(stopped),
+          signal: controller.signal,
+          maxBytes: 10,
+          redactErrors: true,
+        }),
+      ).rejects.toBe(stop);
+    });
+  });
 });
 
 describe("withDeadline", () => {

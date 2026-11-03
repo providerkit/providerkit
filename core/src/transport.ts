@@ -174,7 +174,22 @@ async function readErrorText(res: Response): Promise<string> {
   }
 }
 
-async function send(opts: RequestInit_, method = "POST"): Promise<Response> {
+/** The scheme and host of a URL, nothing a user typed in front of it or after it. */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "the server";
+  }
+}
+
+/**
+ * `redact` keeps a credential out of a failed send. A runtime that refuses a header
+ * (a key with a line break in it, a character outside Latin-1) puts the whole value
+ * in its TypeError, so the raw rejection is not kept as `cause`, and the message names
+ * the host without its path or any user info a base URL carries.
+ */
+async function send(opts: RequestInit_, method = "POST", redact = false): Promise<Response> {
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
   // Serialized outside the catch below: a body that cannot become JSON is a
   // bug of ours, and must not be dressed as a network blip and retried.
@@ -196,9 +211,12 @@ async function send(opts: RequestInit_, method = "POST"): Promise<Response> {
     // long run died on its first blip. cc-proxy reads every failed send the
     // same way.
     if (opts.signal?.aborted) throw err;
-    throw new ProviderError(opts.provider, "network", `no response from ${opts.url}`, {
-      cause: err,
-    });
+    throw new ProviderError(
+      opts.provider,
+      "network",
+      `no response from ${redact ? originOf(opts.url) : opts.url}`,
+      redact ? {} : { cause: err },
+    );
   }
 }
 
@@ -298,12 +316,13 @@ export async function readBounded(
  * POST and return the raw body, bounded. For the endpoints that answer with
  * bytes (audio) or with JSON too large to trust. Same envelope and error
  * classification as `postJson`. `redactErrors` keeps the provider's words out of
- * a failure: its kind, status and retry hints survive, its text does not.
+ * a failure, and the request's own words too (the full URL, the runtime's rejection):
+ * the kind, status and retry hints survive, the text does not.
  */
 export async function postBytes(
   opts: RequestInit_ & { maxBytes: number; redactErrors?: boolean },
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
-  const res = await send(opts);
+  const res = await send(opts, "POST", opts.redactErrors);
   if (!res.ok) throw await errorFor(opts.provider, res, opts.redactErrors);
   const contentType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
   return { bytes: await readBounded(res, opts.maxBytes, opts.provider, opts.signal), contentType };

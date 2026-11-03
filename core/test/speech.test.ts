@@ -115,6 +115,26 @@ async function failure(promise: Promise<unknown>): Promise<ProviderError> {
   throw new Error("expected the call to fail");
 }
 
+/** All a log line or a bug report could print about an error: its text, its stack, its own
+ *  fields, and the same for every cause behind it. */
+function everythingAbout(error: unknown): string {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  for (
+    let e = error;
+    e !== undefined && !seen.has(e);
+    e = e instanceof Error ? e.cause : undefined
+  ) {
+    seen.add(e);
+    parts.push(
+      e instanceof Error
+        ? `${e.name} ${e.message} ${e.stack ?? ""} ${JSON.stringify(e)}`
+        : String(e),
+    );
+  }
+  return parts.join("\n");
+}
+
 /** A fetch that never answers until its signal aborts, then fails the way fetch does. */
 const hangingFetch = (): typeof fetch => (_url, init) =>
   new Promise((_resolve, reject) => {
@@ -608,6 +628,41 @@ describe.each(SHAPES)("$name wire", (shape) => {
       );
       expect(error.message).not.toContain("private");
     });
+
+    it.each([
+      ["a line break", "sk-abc\nSECRET"],
+      ["a tab", "sk-abc\tSECRET"],
+      ["a delete character", "sk-abc\u007fSECRET"],
+      ["a character outside plain ASCII", "sk-\u00e9-SECRET"],
+      ["a zero-width character", "sk-\u200bSECRET"],
+    ])(
+      "a key with %s, which a runtime would quote back in its own error",
+      async (_name, apiKey) => {
+        const fetchImpl = fakeFetch(shape.ok);
+        const error = await failure(make(fetchImpl, { apiKey }).synthesize({ text: "Hi." }));
+        expect(error).toMatchObject({ kind: "auth", code: "key_invalid", shouldRetry: false });
+        expect(everythingAbout(error)).not.toContain("SECRET");
+        expect(fetchImpl).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a key of every printable ASCII character, space to tilde, is sent as it is", async () => {
+      const apiKey = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) =>
+        String.fromCharCode(0x20 + i),
+      ).join("");
+      const fetchImpl = fakeFetch(shape.ok);
+      await make(fetchImpl, { apiKey }).synthesize({ text: "Hi." });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("takes text of exactly 4,096 characters by default, and refuses one more", async () => {
+    const fetchImpl = fakeFetch(shape.ok);
+    const speech = make(fetchImpl);
+    await speech.synthesize({ text: "x".repeat(4096) });
+    const error = await failure(speech.synthesize({ text: "x".repeat(4097) }));
+    expect(error).toMatchObject({ kind: "invalid", code: "text_too_long", shouldRetry: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   describe("failures", () => {
@@ -643,6 +698,38 @@ describe.each(SHAPES)("$name wire", (shape) => {
       expect(everything).not.toContain("Click Settings");
       expect(everything).not.toContain(KEY);
       expect(error.body).toBeUndefined();
+    });
+
+    it("keeps the key and the address a user typed out of a lost-socket error", async () => {
+      const leaky = vi
+        .fn<typeof fetch>()
+        .mockRejectedValue(
+          new TypeError(`Header 'Authorization' has invalid value: 'Bearer ${KEY}'`),
+        );
+      const error = await failure(
+        make(leaky, { baseUrl: "https://user:hunter2@host.example/private" }).synthesize({
+          text: "Hi.",
+        }),
+      );
+      expect(error).toMatchObject({ kind: "network", shouldRetry: false });
+      expect(error.cause).toBeUndefined();
+      expect(error.message).toBe("no response from https://host.example");
+      const everything = everythingAbout(error);
+      for (const secret of [KEY, "hunter2", "private"]) expect(everything).not.toContain(secret);
+    });
+
+    it("keeps out what the runtime itself quotes when it refuses a header", async () => {
+      // Bun and Node both put the rejected value in the TypeError. This fetch has the runtime
+      // validate the headers, so the test follows the runtime's own wording, and sends nothing.
+      const strict: typeof fetch = async (_url, init) => {
+        new Headers(init?.headers);
+        return shape.ok();
+      };
+      const error = await failure(
+        make(strict, { headers: { "x-extra": "a\nSECRET" } }).synthesize({ text: "Hi." }),
+      );
+      expect(error).toMatchObject({ kind: "network", shouldRetry: false });
+      expect(everythingAbout(error)).not.toContain("SECRET");
     });
 
     it("reads the wait a 429 asks for, and leaves it retryable", async () => {
