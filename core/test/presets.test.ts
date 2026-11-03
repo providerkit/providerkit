@@ -9,6 +9,7 @@ import {
   type ProviderPresetId,
 } from "../src/index.ts";
 import type { ProviderPreset } from "../src/presets.ts";
+import { createSpeechProvider, SPEECH_PRESET_IDS } from "../src/speech.ts";
 
 /** A body that ends a turn on every shape: each adapter reads its own end
  *  signal and skips the other three's frames. These tests are about the
@@ -814,5 +815,112 @@ describe("model chains — one endpoint, one key, several models", () => {
       drain(provider.createStream([{ role: "user", content: "hi" }], [])),
     ).rejects.toThrow();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("provider presets: speech rows", () => {
+  /** A reply either speech wire reads as one clip: the Gemini envelope, and for the
+   *  OpenAI wire a WAV body. Only the request is under test here. */
+  const wavBytes = () => {
+    const word = (n: number, size: number) =>
+      Uint8Array.from({ length: size }, (_, i) => (n >> (8 * i)) & 255);
+    const tag = (value: string) => new TextEncoder().encode(value);
+    const parts = [
+      tag("fmt "),
+      word(16, 4),
+      word(1, 2),
+      word(1, 2),
+      word(24_000, 4),
+      word(48_000, 4),
+      word(2, 2),
+      word(16, 2),
+      tag("data"),
+      word(4, 4),
+      word(0, 4),
+    ];
+    const body = new Uint8Array([...tag("WAVE"), ...parts.flatMap((part) => [...part])]);
+    return new Uint8Array([...tag("RIFF"), ...word(body.length, 4), ...body]);
+  };
+  const reply = (shape: string) =>
+    shape === "gemini"
+      ? new Response(
+          JSON.stringify({
+            status: "completed",
+            steps: [
+              {
+                type: "model_output",
+                content: [{ type: "audio", data: btoa(String.fromCharCode(...wavBytes())) }],
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        )
+      : new Response(wavBytes(), { headers: { "content-type": "audio/wav" } });
+
+  it("lists exactly the presets that carry a speech row", () => {
+    const withRow = PRESET_IDS.filter((id) => {
+      const preset: ProviderPreset = PROVIDER_PRESETS[id];
+      return preset.speech !== undefined;
+    });
+    expect(SPEECH_PRESET_IDS).toEqual(withRow);
+    expect([...SPEECH_PRESET_IDS].sort()).toEqual(["google", "openai", "openrouter"]);
+  });
+
+  for (const id of SPEECH_PRESET_IDS) {
+    const preset: ProviderPreset = PROVIDER_PRESETS[id];
+    const spec = preset.speech!;
+
+    it(`joins ${id} speech (${spec.shape}) to one request, correctly`, async () => {
+      const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => reply(spec.shape));
+      const speech = createSpeechProvider(id, {
+        apiKey: "test-key",
+        model: spec.defaultModel ?? "test-model",
+        voice: spec.defaultVoice ?? "test-voice",
+        fetchImpl,
+      });
+      await speech.synthesize({ text: "hi" });
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchImpl.mock.calls[0]!;
+      const sent = String(url);
+      // The same no-doubled-version check the chat rows get.
+      expect(sent.startsWith(spec.baseUrl ?? preset.baseUrl)).toBe(true);
+      expect(sent.includes("//v") || sent.includes("/v1/v1")).toBe(false);
+      const headers = new Headers(init?.headers);
+      if (spec.shape === "gemini") expect(headers.get("x-goog-api-key")).toBe("test-key");
+      else expect(headers.get("authorization")).toBe("Bearer test-key");
+      expect(JSON.parse(String(init?.body)).model).toBe(spec.defaultModel ?? "test-model");
+    });
+
+    it(`${id}: a default is one of the listed values`, () => {
+      if (spec.defaultModel && spec.models) expect(spec.models).toContain(spec.defaultModel);
+      if (spec.defaultVoice && spec.voices) expect(spec.voices).toContain(spec.defaultVoice);
+      expect(spec.voices ? new Set(spec.voices).size : 0).toBe(spec.voices?.length ?? 0);
+      expect(["openai", "gemini"]).toContain(spec.shape);
+    });
+  }
+
+  it("reaches OpenRouter at its documented speech route", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => reply("openai"));
+    await createSpeechProvider("openrouter", {
+      apiKey: "k",
+      model: "m",
+      voice: "v",
+      fetchImpl,
+    }).synthesize({ text: "hi" });
+    expect(String(fetchImpl.mock.calls[0]![0])).toBe("https://openrouter.ai/api/v1/audio/speech");
+  });
+
+  it("gives Google its thirty voices and the model that has run live", () => {
+    expect(PROVIDER_PRESETS.google.speech.voices).toHaveLength(30);
+    expect(PROVIDER_PRESETS.google.speech.defaultModel).toBe("gemini-3.8-flash-tts");
+    expect(PROVIDER_PRESETS.google.speech.defaultVoice).toBe("Kore");
+  });
+
+  it("gives a sign-in preset no speech row: no speech endpoint is known to take a plan token", () => {
+    for (const id of PRESET_IDS) {
+      const preset: ProviderPreset = PROVIDER_PRESETS[id];
+      if (preset.auth === "oauth") expect(preset.speech, id).toBeUndefined();
+    }
   });
 });
