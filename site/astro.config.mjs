@@ -78,7 +78,7 @@ export default defineConfig({
               label: "Guides",
               paths: ["guides/**"],
               description:
-                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, resume, cost, decision models",
+                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, resume, cost, decision models, speech",
             },
             {
               label: "API reference",
@@ -92,11 +92,12 @@ export default defineConfig({
             "../core/src/index.ts",
             "../core/src/zod.ts",
             "../core/src/decisions.ts",
+            "../core/src/speech.ts",
             "../core/src/auth/index.ts",
           ],
           tsconfig: "../core/tsconfig.json",
           output: "reference",
-          // Four entry points, so the generated group has four children named
+          // Five entry points, so the generated group has five children named
           // after the import paths they document.
           sidebar: { label: "API reference", collapsed: true },
           typeDoc: { excludeInternal: true, useCodeBlocks: true, parametersFormat: "table" },
@@ -142,6 +143,7 @@ export default defineConfig({
             { label: "Resume after a crash", slug: "guides/resume" },
             { label: "Usage and cost", slug: "guides/usage" },
             { label: "Decision models", slug: "guides/decisions" },
+            { label: "Speech", slug: "guides/speech" },
           ],
         },
         typeDocSidebarGroup,
