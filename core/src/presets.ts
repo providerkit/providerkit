@@ -19,6 +19,7 @@
  * Point createOpenAIProvider's baseUrl at your resource instead.
  */
 import type { ImageLimits } from "./image.ts";
+import type { SpeechFormat, SpeechShape } from "./speech-core.ts";
 
 export type PresetShape = "anthropic" | "openai" | "responses" | "gemini";
 
@@ -49,6 +50,34 @@ export interface PresetRoute {
   path?: string;
   /** Defaults to the preset's `auth`. */
   auth?: PresetAuth;
+}
+
+/**
+ * What a preset's endpoint can do besides chat: make speech. Absent means it
+ * cannot, or that nobody has read its documentation yet. `createSpeechProvider`
+ * (from `@providerkit/core/speech`) is what reads this.
+ *
+ * These are facts about the vendor's own host. A caller who points the preset at
+ * another host with `baseUrl` gets none of the defaults below, because a default
+ * model or voice belongs to the host that documented it.
+ */
+export interface PresetSpeech {
+  shape: SpeechShape;
+  /** Defaults to the preset's own `baseUrl`. */
+  baseUrl?: string;
+  path?: string;
+  /** Only when the vendor documents one. */
+  defaultModel?: string;
+  /** Representative model ids, as in `ProviderPreset.models`. */
+  models?: readonly string[];
+  /** A default voice, only when one voice works on every listed model. */
+  defaultVoice?: string;
+  /** The vendor's full voice list, only when it publishes one. */
+  voices?: readonly string[];
+  /** The vendor's documented text limit. Absent: the package's 4,096. */
+  maxInputChars?: number;
+  /** For a host whose accepted formats do not include "wav". */
+  defaultFormat?: SpeechFormat;
 }
 
 export interface ProviderPreset {
@@ -106,6 +135,8 @@ export interface ProviderPreset {
   /** OpenAI shape: never send `temperature` or `top_p`, for an endpoint that
    *  fixes its own sampling and answers the fields with an error. */
   noSampling?: boolean;
+  /** Text to speech on this endpoint. See `PresetSpeech`. */
+  speech?: PresetSpeech;
 }
 
 export const PROVIDER_PRESETS = {
@@ -123,6 +154,34 @@ export const PROVIDER_PRESETS = {
     auth: "key",
     defaultModel: "gpt-5.6-sol",
     models: ["gpt-5.6-sol", "gpt-5.5-pro", "gpt-5.4-mini"],
+    // Source: OpenAI's speech reference and text-to-speech guide, read 2026-11-02.
+    // OpenAI shuts all three models down on 2027-01-06 (its deprecations page), and
+    // names a Realtime model as the replacement, which `/audio/speech` cannot reach.
+    // After that date this row is useful only for OpenAI-compatible servers reached
+    // through `baseUrl`. Remove the OpenAI ids then.
+    speech: {
+      shape: "openai",
+      defaultModel: "gpt-4o-mini-tts",
+      models: ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"],
+      // `alloy` works on all three models. `tts-1` and `tts-1-hd` take only nine of the thirteen.
+      defaultVoice: "alloy",
+      voices: [
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "fable",
+        "onyx",
+        "nova",
+        "sage",
+        "shimmer",
+        "verse",
+        "marin",
+        "cedar",
+      ],
+      maxInputChars: 4096,
+    },
   },
   google: {
     // Native Generative Language REST — the adapter authenticates with
@@ -132,6 +191,52 @@ export const PROVIDER_PRESETS = {
     auth: "key",
     defaultModel: "gemini-3.1-pro-preview",
     models: ["gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-flash-latest"],
+    // Source: Google's speech generation guide, read 2026-11-02. Only the default
+    // model has run against the live API; the other ids come from the guide.
+    speech: {
+      shape: "gemini",
+      defaultModel: "gemini-3.8-flash-tts",
+      models: [
+        "gemini-3.8-flash-tts",
+        "gemini-3.8-flash-lite-tts",
+        "gemini-3.1-flash-tts-preview",
+        "gemini-2.5-pro-preview-tts",
+      ],
+      defaultVoice: "Kore",
+      // The guide's thirty prebuilt voices, in its order.
+      voices: [
+        "Zephyr",
+        "Puck",
+        "Charon",
+        "Kore",
+        "Fenrir",
+        "Leda",
+        "Orus",
+        "Aoede",
+        "Callirrhoe",
+        "Autonoe",
+        "Enceladus",
+        "Iapetus",
+        "Umbriel",
+        "Algieba",
+        "Despina",
+        "Erinome",
+        "Algenib",
+        "Rasalgethi",
+        "Laomedeia",
+        "Achernar",
+        "Alnilam",
+        "Schedar",
+        "Gacrux",
+        "Pulcherrima",
+        "Achird",
+        "Zubenelgenubi",
+        "Vindemiatrix",
+        "Sadachbia",
+        "Sadaltager",
+        "Sulafat",
+      ],
+    },
   },
   /** Gemini behind its OpenAI-compatible route, for codebases
    *  that only speak the openai shape. */
@@ -165,6 +270,11 @@ export const PROVIDER_PRESETS = {
       "x-ai/grok-4.6",
       "openai/gpt-5.6-luna-pro",
     ],
+    // Source: OpenRouter's text-to-speech guide, read 2026-11-02. It takes mp3 or pcm
+    // and answers 400 to anything else. No default model or voice: both depend on
+    // the speech model chosen, and `GET /api/v1/models?output_modalities=speech`
+    // lists them.
+    speech: { shape: "openai", defaultFormat: "mp3" },
   },
   groq: {
     shape: "openai",
@@ -723,3 +833,6 @@ export type ProviderPresetId = keyof typeof PROVIDER_PRESETS;
 
 /** Every valid preset id. The factory's unknown-id error lists these. */
 export const PRESET_IDS = Object.keys(PROVIDER_PRESETS) as ProviderPresetId[];
+
+/** The presets that can speak, for a screen that offers exactly those. */
+export const SPEECH_PRESET_IDS = PRESET_IDS.filter((id) => "speech" in PROVIDER_PRESETS[id]);
