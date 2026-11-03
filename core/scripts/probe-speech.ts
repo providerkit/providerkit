@@ -2,9 +2,9 @@
  * Probe a speech preset against the live API, before code relies on a field.
  *
  * THIS SENDS REAL, PAID REQUESTS. Nothing here runs unless you start it, and without
- * `--yes` it only prints the requests it would send. Each request is a few words of
- * synthetic text: well under one cent on Gemini by Google's list price, and possibly
- * nothing on its free tier. Prices change; check yours.
+ * `--yes` it only lists the steps and how many paid requests they make. Each request
+ * is a few words of synthetic text: well under one cent on Gemini by Google's list
+ * price, and possibly nothing on its free tier. Prices change; check yours.
  *
  * Usage:
  *   bun run scripts/probe-speech.ts <preset> [model] [--yes] [--voice=NAME]
@@ -14,9 +14,10 @@
  * The key is read from the environment inside this process and never printed, never
  * written to a file and never taken from an argument (an argument shows in `ps` and in
  * shell history). google reads GEMINI_API_KEY, openai OPENAI_API_KEY, openrouter
- * OPENROUTER_API_KEY. PROBE_SPEECH_API_KEY overrides all three. A server you reach with
- * --base-url may need no key. Bun reads `.env` from the working directory; for a file
- * elsewhere, add --env-file=<path> after `bun`.
+ * OPENROUTER_API_KEY. PROBE_SPEECH_API_KEY overrides all three. With --base-url only
+ * PROBE_SPEECH_API_KEY is read, so a vendor's key is never sent to a host you typed, and
+ * a server that needs no key needs no variable. Bun reads `.env` from the working
+ * directory; for a file elsewhere, add --env-file=<path> after `bun`.
  *
  * What it settles on `google` (one step each, so a failed variant shows its own reply):
  *   baseline         the request the package sends. The audio block's field names, the
@@ -106,8 +107,11 @@ if (formatFlag !== undefined && !format) {
 }
 const baseUrl = flags["base-url"];
 if (baseUrl && !modelArg) fail("--base-url needs a model. Pass it after the preset.");
-const keyVariable = KEY_VARIABLE[known] ?? `${known.toUpperCase().replaceAll("-", "_")}_API_KEY`;
-const apiKey = process.env.PROBE_SPEECH_API_KEY ?? process.env[keyVariable] ?? "";
+const vendorVariable = KEY_VARIABLE[known] ?? `${known.toUpperCase().replaceAll("-", "_")}_API_KEY`;
+// The variable that is really read. A host you typed gets only the probe's own variable.
+const keyVariable =
+  baseUrl || process.env.PROBE_SPEECH_API_KEY ? "PROBE_SPEECH_API_KEY" : vendorVariable;
+const apiKey = process.env[keyVariable] ?? "";
 const voice = flags.voice ?? (baseUrl ? undefined : preset.speech?.defaultVoice);
 const otherVoice = flags["other-voice"] ?? (known === "google" ? "Charon" : undefined);
 const send = flags.yes === "true";
@@ -137,7 +141,7 @@ if (!send) {
   process.exit(0);
 }
 if (!apiKey && !baseUrl) {
-  fail(`Missing API key. Set ${keyVariable} (or PROBE_SPEECH_API_KEY) in the environment.`);
+  fail(`Missing API key. Set ${vendorVariable} (or PROBE_SPEECH_API_KEY) in the environment.`);
 }
 
 /** The reply as received, with anything long or secret replaced, for printing and fixtures. */
