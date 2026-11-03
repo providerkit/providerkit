@@ -134,7 +134,7 @@ Cloud Code Assist project and hand the token source to `withToken` or `createReg
 
 ### Speech
 
-Text to one audio file, from its own entry point, so a chat-only app loads none of it:
+Text to one audio file, from its own entry point, so a chat-only app loads none of the speech code:
 
 ```ts
 import { createSpeechProvider } from "@providerkit/core/speech";

@@ -4,7 +4,9 @@ description: Turn text into one audio clip with Google Gemini, OpenAI, OpenRoute
 ---
 
 Speech turns a short text into one audio file. It is a separate client from the chat
-`Provider`, in its own entry point, so an app that only chats never loads it.
+`Provider`, in its own entry point, so an app that only chats loads none of the speech code.
+That app still carries the three speech rows of the presets table and a 64 KiB cap on an
+error body: about 1.5 KB more, 0.6 KB gzipped (measured with `bun build --minify`).
 
 ## Say something
 
@@ -38,19 +40,31 @@ field is missing. Missing means unknown, not zero.
 A preset speaks when it has a `speech` row. `SPEECH_PRESET_IDS` lists them, for a screen
 that offers exactly those. Read on 2026-11-02.
 
-| Preset       | Wire     | Default model          | Default voice       | Text limit | Formats it makes               |
-| ------------ | -------- | ---------------------- | ------------------- | ---------- | ------------------------------ |
-| `google`     | `gemini` | `gemini-3.8-flash-tts` | `Kore` (30 voices)  | not stated | wav, pcm                       |
-| `openai`     | `openai` | `gpt-4o-mini-tts`      | `alloy` (13 voices) | 4,096      | wav, mp3, opus, aac, flac, pcm |
-| `openrouter` | `openai` | none: name a model     | none: name a voice  | not stated | mp3 by default, pcm            |
+| Preset       | Wire     | Default model          | Default voice       | Text limit                                          | Formats the vendor documents         |
+| ------------ | -------- | ---------------------- | ------------------- | --------------------------------------------------- | ------------------------------------ |
+| `google`     | `gemini` | `gemini-3.8-flash-tts` | `Kore` (30 voices)  | 4,096 (the package default; the vendor states none) | wav, pcm                             |
+| `openai`     | `openai` | `gpt-4o-mini-tts`      | `alloy` (13 voices) | 4,096                                               | wav, mp3, opus, aac, flac, pcm       |
+| `openrouter` | `openai` | none: name a model     | none: name a voice  | 4,096 (the package default; the vendor states none) | mp3 or pcm, and some models only one |
+
+Only the `gemini` wire checks the format before the request (wav and pcm). The `openai` wire
+sends the `format` you ask for and lets the vendor answer, so a format a model does not make
+comes back as a 400 from the vendor.
 
 The plan sign-ins (`chatgpt`, `claude`, `antigravity` and the rest) have no speech row.
 No speech endpoint is known to accept a plan token.
 
 Google's guide lists `gemini-3.8-flash-tts`, `gemini-3.8-flash-lite-tts`,
 `gemini-3.1-flash-tts-preview` and `gemini-2.5-pro-preview-tts`. Only the first has run
-against the live API. The OpenRouter row takes `mp3` or `pcm` and answers 400 to anything
-else; list its speech models with `GET /api/v1/models?output_modalities=speech`.
+against the live API, and the preset lists the first two. The guide says the older
+`gemini-3.1-flash-tts-preview` answers raw PCM by default. A wav request refuses that as
+`bad_audio` after Google has billed it, so if you name that model or
+`gemini-2.5-pro-preview-tts`, pass `format: "pcm"`. Neither has run here.
+
+OpenRouter takes `mp3` or `pcm`, and some models take only one of them (Gemini TTS and HeyGen
+answer 400 to mp3, MiniMax to pcm). The row asks for `mp3`, so for a Gemini TTS model behind
+OpenRouter pass `format: "pcm"`. OpenRouter states no sample rate for most pcm replies, so
+the result then has no `sampleRate` or `durationMs`. List its speech models with
+`GET /api/v1/models?output_modalities=speech`.
 
 ### OpenAI's models end on 2027-01-06
 
@@ -83,9 +97,10 @@ version (`/v1`) is not given a second one.
 
 A speech reply arrives whole. A chat stream that fails before its first token has cost
 nothing, but a speech call that times out or loses its socket may have been billed already.
-So a timeout, a dropped connection and a 5xx come back with `shouldRetry: false`. A vendor
-that sends `x-should-retry: true` is believed. A 429 stays retryable, because the vendor
-refused before it did any work.
+So a timeout, a dropped connection and a 5xx come back with `shouldRetry: false`, even when
+the vendor sends `x-should-retry: true`: that header says a resend is fine for the vendor, not
+that the first call went unbilled. A 429 stays retryable, because the vendor refused before it
+did any work, and there the header is believed.
 
 Your own retry then does the safe thing without extra rules:
 
@@ -129,25 +144,30 @@ error body is read up to 64 KiB.
 Failures use the same kinds as chat (`auth`, `rate`, `quota`, `model`, and the rest), so the
 classifier you already have reads them. They are read from the status and the body, then the
 provider's words are dropped. An error carries its `kind`, `status`, `code` and retry hints,
-and never the vendor's text or your key: a vendor error can echo the text you sent.
+and never the vendor's text or your key: a vendor error can echo the text you sent. A send
+that fails keeps no `cause` either, because a runtime that refuses a header quotes its value,
+and a base URL can carry a password. The message names the host and nothing after it.
 
-| Situation                                   | Kind           | `code`               |
-| ------------------------------------------- | -------------- | -------------------- |
-| Empty or blank text                         | `invalid`      | `text_empty`         |
-| Text over `maxInputChars`                   | `invalid`      | `text_too_long`      |
-| No voice, and the preset names none         | `invalid`      | `voice_required`     |
-| A format the wire cannot make               | `invalid`      | `format_unsupported` |
-| A failure the provider reports inside a 200 | by its wording | none                 |
-| An empty reply, or no audio block           | `overload`     | `empty_audio`        |
-| A reply that is not audio                   | `unknown`      | `bad_audio`          |
-| A reply over `maxAudioBytes`                | `invalid`      | `response_too_large` |
-| A Gemini clip cut short                     | `invalid`      | `incomplete`         |
+| Situation                                        | Kind           | `code`               |
+| ------------------------------------------------ | -------------- | -------------------- |
+| A key with a line break or a non-ASCII character | `auth`         | `key_invalid`        |
+| Empty or blank text                              | `invalid`      | `text_empty`         |
+| Text over `maxInputChars`                        | `invalid`      | `text_too_long`      |
+| No voice, and the preset names none              | `invalid`      | `voice_required`     |
+| A format the wire cannot make                    | `invalid`      | `format_unsupported` |
+| A failure the provider reports inside a 200      | by its wording | none                 |
+| An empty reply, or no audio block                | `overload`     | `empty_audio`        |
+| A reply that is not audio                        | `unknown`      | `bad_audio`          |
+| A reply over `maxAudioBytes`                     | `invalid`      | `response_too_large` |
+| A Gemini clip cut short                          | `invalid`      | `incomplete`         |
 
-The first four are thrown before any request. An empty reply, `bad_audio`, `incomplete` and
+The first five are thrown before any request. An empty reply, `bad_audio`, `incomplete` and
 a failure reported inside a 200 come after one, so the provider has billed for it. Those are
 `SpeechError`s, and they keep the `usage` the provider stated. A caller that drops one loses
-the only record of the charge. A reply cut off for being too large is a plain error, because
-its usage was never read.
+the only record of the charge. On the OpenAI route a reply cut off for being too large is a plain
+error, because its usage was never read. On Gemini, audio over `maxAudioBytes` inside a reply
+that arrived whole is a `SpeechError` that keeps the usage; only a reply the transport cap
+cut off carries none.
 
 ## Gemini
 
@@ -173,11 +193,14 @@ apply to your key.
 so you can settle what documentation cannot. Run it yourself, in a checkout:
 
 ```sh
-GEMINI_API_KEY=... bun run probe:speech google          # lists the requests, sends nothing
+cd core
+GEMINI_API_KEY=... bun run probe:speech google          # lists the steps, sends nothing
 GEMINI_API_KEY=... bun run probe:speech google --yes    # sends them
 ```
 
-It reads the key from the environment, never from an argument, and never prints it.
+The dry run lists the steps and how many paid requests they make. The script reads the key
+from the environment, never from an argument, and never prints it. With `--base-url` it reads
+only `PROBE_SPEECH_API_KEY`, so a vendor key is never sent to a host you typed.
 
 ## Not in this release
 

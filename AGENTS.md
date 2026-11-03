@@ -57,7 +57,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 1,509 tests
+bun run test                 # vitest, 1,557 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -96,7 +96,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 ## State
 
-**Built, tested, green** (1,509 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built and tested** (1,557 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                                       |
 | ------------------------ | ----------------------------------------------------------------------------------- |
@@ -229,9 +229,11 @@ un-learned.
     has nothing to hold on to: a timeout or a dead socket can land after the vendor started
     billing. `synthesize()` sends one HTTP request. A timeout, a lost socket, a 5xx and anything
     unclassified carry `shouldRetry: false` (`noReplay`, applied in one place so a new failure
-    path cannot forget it). The vendor's own `x-should-retry: true` is believed, and a 429 stays
-    retryable because it refused before doing any work. No fallback model, no second key, no
-    token-renewal replay. `speech.test.ts` counts the fetches on every failure.
+    path cannot forget it). The vendor's own `x-should-retry: true` does not undo that: it says a
+    resend is fine for the vendor, not that the first call went unbilled. A 429 stays retryable
+    because it refused before doing any work, and the header is believed there. No fallback
+    model, no second key, no token-renewal replay. `speech.test.ts` counts the fetches on every
+    failure.
 17. **Audio is labelled by its bytes, not by the request.** Servers ignore `response_format`, so
     `format` comes from the signature (WAV, FLAC, Ogg Opus, mp3, ADTS AAC), and an empty body, a
     JSON body or bytes nobody recognises is an error. Rate, channels and duration are stated only
@@ -242,7 +244,9 @@ un-learned.
     sometimes the key. The error is classified from the status and the body (invariant 3 still
     holds), then the body and message are dropped: it keeps `kind`, `status`, `code` and the retry
     hints. A reply that arrived but is unusable keeps the usage the provider billed for it
-    (`SpeechError.usage`), because the charge happened.
+    (`SpeechError.usage`), because the charge happened. A failed send keeps no `cause` and names
+    only the host: a runtime that refuses a header quotes its value, key included. A key outside
+    printable ASCII is refused before any request (`key_invalid`).
 
 ## Next
 
