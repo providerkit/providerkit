@@ -330,6 +330,15 @@ describe("readWav", () => {
       () => riff(fmtChunk(24_000, 1, 12), chunk("data", new Uint8Array(480))),
     ],
     [
+      // The byte rate agrees with the block align, so only the channels-times-width rule fails.
+      "a block align that is not channels times width",
+      () =>
+        riff(
+          chunk("fmt ", join(u16(1), u16(1), u32(24_000), u32(72_000), u16(3), u16(16))),
+          chunk("data", new Uint8Array(480)),
+        ),
+    ],
+    [
       "bytes after the RIFF ends",
       () => join(riff(fmtChunk(), chunk("data", new Uint8Array(480))), Uint8Array.of(1, 2)),
     ],
@@ -380,6 +389,7 @@ describe("sniffFormat", () => {
     ["MPEG Layer II", Uint8Array.of(0xff, 0xfd, 0x90, 0x00)],
     ["a reserved sample rate", Uint8Array.of(0xff, 0xfb, 0x9c, 0x00)],
     ["an ID3 tag with no audio behind it", join(text("ID3"), Uint8Array.of(4, 0, 0, 0, 0, 0, 0))],
+    ["RIFF that is not WAVE", join(text("RIFF"), u32(36), text("AVI "), new Uint8Array(32))],
     ["JSON", text('{"error":{}}')],
     ["raw samples", new Uint8Array(64)],
     ["a few bytes", Uint8Array.of(0xff)],
@@ -587,6 +597,27 @@ describe("noReplay", () => {
   });
 });
 
+// ── limits ────────────────────────────────────────────────────────────────
+
+describe("resolveLimits", () => {
+  it("defaults to 4,096 characters, 32 MiB and 120 seconds", () => {
+    expect(resolveLimits({})).toEqual({
+      maxInputChars: 4_096,
+      maxAudioBytes: 33_554_432,
+      timeoutMs: 120_000,
+    });
+    expect(DEFAULT_SPEECH_LIMITS).toEqual(resolveLimits({}));
+  });
+
+  it("keeps what the caller sets, and fills in only the rest", () => {
+    expect(resolveLimits({ maxAudioBytes: 10 })).toEqual({
+      maxInputChars: 4_096,
+      maxAudioBytes: 10,
+      timeoutMs: 120_000,
+    });
+  });
+});
+
 // ── both wires ────────────────────────────────────────────────────────────
 
 describe.each(SHAPES)("$name wire", (shape) => {
@@ -623,6 +654,7 @@ describe.each(SHAPES)("$name wire", (shape) => {
         { text: "Hi.", format: "ogg" as never },
         "format_unsupported",
       ],
+      ["a voice of only spaces", { text: "Hi.", voice: "  " }, "voice_required"],
     ])("%s", async (_name, request, code) => {
       const fetchImpl = fakeFetch(shape.ok);
       const error = await failure(make(fetchImpl, { maxInputChars: 10 }).synthesize(request));
@@ -913,6 +945,36 @@ describe.each(SHAPES)("$name wire", (shape) => {
       expect(isRetryable(error)).toBe(false);
     });
 
+    it("keeps the caller's Stop a Stop when it lands after the last byte", async () => {
+      // Every byte is in and the Stop arrives before the result is returned. A clip the
+      // person no longer wants must not come back as a success.
+      const controller = new AbortController();
+      const reply = shape.ok();
+      const type = reply.headers.get("content-type") ?? "";
+      const bytes = new Uint8Array(await reply.arrayBuffer());
+      const fetchImpl = fakeFetch(
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>(
+              {
+                pull(stream) {
+                  stream.enqueue(bytes);
+                  controller.abort();
+                  stream.close();
+                },
+              },
+              { highWaterMark: 0 },
+            ),
+            { headers: { "content-type": type } },
+          ),
+      );
+      const error = await make(fetchImpl, { timeoutMs: 5_000 })
+        .synthesize({ text: "Hi.", signal: controller.signal })
+        .catch((e: unknown) => e);
+      expect(classify(error)).toBe("aborted");
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
     it("keeps the caller's Stop a Stop when it lands during the body", async () => {
       const controller = new AbortController();
       const pending = make(stallingBodyFetch(), { timeoutMs: 5_000 }).synthesize({
@@ -953,6 +1015,34 @@ describe("openai wire", () => {
     const headers = sentHeaders(fetchImpl);
     expect(headers.get("authorization")).toBe(`Bearer ${KEY}`);
     expect(headers.get("content-type")).toBe("application/json");
+  });
+
+  it("sends the text trimmed", async () => {
+    const fetchImpl = fakeFetch(() => audioReply(WAV_BYTES));
+    await openai(fetchImpl).synthesize({ text: "  Click Settings.  " });
+    expect(sentBody(fetchImpl)).toMatchObject({ input: "Click Settings." });
+  });
+
+  it("accepts a reply of exactly maxAudioBytes and refuses one byte more", async () => {
+    // 1,024 bytes: the 44-byte header and 980 bytes of audio.
+    const exact = riff(fmtChunk(), chunk("data", new Uint8Array(980)));
+    expect(exact.byteLength).toBe(1024);
+    const clip = await openai(
+      fakeFetch(() => audioReply(exact)),
+      { maxAudioBytes: 1024 },
+    ).synthesize({ text: "Hi." });
+    expect(clip.bytes.byteLength).toBe(1024);
+    const error = await failure(
+      openai(
+        fakeFetch(() => audioReply(join(exact, Uint8Array.of(0)))),
+        { maxAudioBytes: 1024 },
+      ).synthesize({ text: "Hi." }),
+    );
+    expect(error).toMatchObject({
+      kind: "invalid",
+      code: "response_too_large",
+      shouldRetry: false,
+    });
   });
 
   it("always spells the format out, since each host's own default differs", async () => {
@@ -1069,6 +1159,16 @@ describe("openai wire", () => {
       expect(error).toMatchObject({ kind: "quota" });
     });
 
+    it("classifies a JSON body with an errors list as the failure it is", async () => {
+      const error = await failure(
+        openai(
+          fakeFetch(() => jsonReply({ errors: [{ message: "You exceeded your current quota" }] })),
+        ).synthesize({ text: "Hi." }),
+      );
+      expect(error).toMatchObject({ kind: "quota" });
+      expect(error.message).not.toContain("exceeded");
+    });
+
     it("finds a JSON error behind a content type that does not say so", async () => {
       const error = await failure(
         openai(
@@ -1116,6 +1216,22 @@ describe("gemini wire", () => {
     const headers = sentHeaders(fetchImpl);
     expect(headers.get("x-goog-api-key")).toBe(KEY);
     expect(headers.has("authorization")).toBe(false);
+  });
+
+  it("sends the text trimmed", async () => {
+    const fetchImpl = fakeFetch(() => jsonReply(geminiEnvelope()));
+    await gemini(fetchImpl).synthesize({ text: "  Click Settings.  " });
+    expect(sentBody(fetchImpl)).toMatchObject({
+      input: [{ content: [{ text: "Click Settings." }] }],
+    });
+  });
+
+  it("sends the headers it was given beside the key", async () => {
+    const fetchImpl = fakeFetch(() => jsonReply(geminiEnvelope()));
+    await gemini(fetchImpl, { headers: { "x-proxy": "1" } }).synthesize({ text: "Hi." });
+    const headers = sentHeaders(fetchImpl);
+    expect(headers.get("x-proxy")).toBe("1");
+    expect(headers.get("x-goog-api-key")).toBe(KEY);
   });
 
   it("sends max_output_tokens only when asked to", async () => {
@@ -1272,8 +1388,9 @@ describe("gemini wire", () => {
         status: "completed",
         steps: [
           { type: "model_output", content: [bad] },
-          { type: "thought", content: [{ type: "audio", data: base64(mp3()) }] },
           { type: "model_output", content: [{ type: "text", text: "ok" }, good] },
+          // After the good block, so only skipping this step keeps the good one the winner.
+          { type: "thought", content: [{ type: "audio", data: base64(mp3()) }] },
         ],
       };
       const result = await gemini(fakeFetch(() => jsonReply(envelope))).synthesize({ text: "Hi." });
@@ -1625,6 +1742,29 @@ describe("createSpeechProvider", () => {
     expect(sentUrl(fetchImpl)).toBe("https://openrouter.ai/api/v1/audio/speech");
     expect(sentBody(fetchImpl)).toMatchObject({ response_format: "mp3" });
     expect(sentHeaders(fetchImpl).get("x-title")).toBe("App");
+  });
+
+  it("names the provider after the preset, in its id and in its errors", async () => {
+    const speech = createSpeechProvider("openrouter", {
+      apiKey: KEY,
+      model: "m",
+      voice: "v",
+      fetchImpl: fakeFetch(() => new Response("no", { status: 401 })),
+    });
+    expect(speech.id).toBe("openrouter");
+    expect((await failure(speech.synthesize({ text: "Hi." }))).provider).toBe("speech:openrouter");
+  });
+
+  it("does not carry the preset's format to another host", async () => {
+    const fetchImpl = fakeFetch(() => audioReply(mp3()));
+    await createSpeechProvider("openrouter", {
+      apiKey: KEY,
+      baseUrl: "https://proxy.example/v1",
+      model: "m",
+      voice: "v",
+      fetchImpl,
+    }).synthesize({ text: "Hi." });
+    expect(sentBody(fetchImpl)).toMatchObject({ response_format: "wav" });
   });
 
   it("asks for a voice before any request when the preset names none", async () => {
