@@ -305,8 +305,12 @@ describe("readWav", () => {
       () => riff(fmtChunk(24_000, 1, 12), chunk("data", new Uint8Array(480))),
     ],
     [
-      "trailing bytes after the last chunk",
+      "bytes after the RIFF ends",
       () => join(riff(fmtChunk(), chunk("data", new Uint8Array(480))), Uint8Array.of(1, 2)),
+    ],
+    [
+      "stray bytes inside the RIFF that are not a chunk",
+      () => riff(fmtChunk(), chunk("data", new Uint8Array(480)), Uint8Array.of(1, 2)),
     ],
     [
       "a chunk that runs past the end",
@@ -1298,6 +1302,39 @@ describe("gemini wire", () => {
         shouldRetry: false,
       });
       expect((error as SpeechError).usage?.totalTokens).toBe(109);
+    });
+
+    it("does not decode a payload that is already longer than the cap allows", async () => {
+      const decode = vi.spyOn(globalThis, "atob");
+      try {
+        const tooBig = base64(new Uint8Array(900).fill(1));
+        await gemini(
+          fakeFetch(() => jsonReply(geminiEnvelope([{ type: "audio", data: tooBig }]))),
+          {
+            maxAudioBytes: 600,
+          },
+        )
+          .synthesize({ text: "Hi." })
+          .catch(() => undefined);
+        expect(decode).not.toHaveBeenCalled();
+      } finally {
+        decode.mockRestore();
+      }
+    });
+
+    it("holds the decoded audio to the cap too, since base64 rounds up to whole groups", async () => {
+      // A 601-byte cap allows 804 base64 characters, and 804 characters decode to 603 bytes.
+      const slack = base64(new Uint8Array(603).fill(1));
+      expect(slack).toHaveLength(804);
+      const error = await failure(
+        gemini(
+          fakeFetch(() => jsonReply(geminiEnvelope([{ type: "audio", data: slack }]))),
+          {
+            maxAudioBytes: 601,
+          },
+        ).synthesize({ text: "Hi." }),
+      );
+      expect(error).toMatchObject({ code: "response_too_large" });
     });
 
     it("allows the base64 envelope on top of the audio cap, and no more", async () => {

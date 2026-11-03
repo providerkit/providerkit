@@ -464,7 +464,21 @@ describe("readBounded", () => {
   });
 
   it("refuses a Content-Length over the cap without reading a byte", async () => {
-    const { body, cancelled } = trackedBody([Uint8Array.of(1, 2, 3, 4)]);
+    // highWaterMark 0: the stream asks its source for nothing until somebody reads.
+    let pulls = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(Uint8Array.of(1, 2, 3, 4));
+        },
+        cancel: () => {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
     const res = new Response(body, { headers: { "content-length": "4" } });
     const error = await readBounded(res, 3, "test").catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ProviderError);
@@ -473,7 +487,8 @@ describe("readBounded", () => {
       code: "response_too_large",
       shouldRetry: false,
     });
-    expect(cancelled()).toBe(true);
+    expect(pulls).toBe(0);
+    expect(cancelled).toBe(true);
   });
 
   it("stops a body that grows past the cap mid-read and cancels the rest", async () => {
