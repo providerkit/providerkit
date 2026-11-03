@@ -207,15 +207,17 @@ function neverRetry(err: ProviderError): ProviderError {
  *
  * - The caller's Stop comes back untouched.
  * - A timeout, a dead socket, a 5xx or anything unclassified may have landed after
- *   the vendor started work, so it is marked `shouldRetry: false`. A vendor that
- *   says `x-should-retry: true` is believed.
- * - A 429 keeps its default. The vendor refused before doing any work, so sending
- *   it again is safe, and `Retry-After` is honoured by the caller's own retry.
+ *   the vendor started work, so it is marked `shouldRetry: false`, and a vendor's
+ *   `x-should-retry: true` does not undo that: the header says the vendor thinks a
+ *   resend is fine, not that the first call was not billed.
+ * - Every other kind keeps what it came with. A 429 means the vendor refused before
+ *   doing any work, so sending it again is safe, and `Retry-After` is honoured by
+ *   the caller's own retry. `x-should-retry` is believed there, in either direction.
  */
 export function noReplay(provider: string, error: unknown, signal?: AbortSignal): unknown {
   if (signal?.aborted) return error;
   const err = ProviderError.from(provider, error);
-  return err.shouldRetry === undefined && REPLAY_UNSAFE.has(err.kind) ? neverRetry(err) : err;
+  return REPLAY_UNSAFE.has(err.kind) && err.shouldRetry !== false ? neverRetry(err) : err;
 }
 
 /**

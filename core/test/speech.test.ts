@@ -528,15 +528,38 @@ describe("noReplay", () => {
     },
   );
 
-  it("believes a vendor that says a replay is safe", () => {
-    const said = new ProviderError("p", "overload", "x", { shouldRetry: true });
-    expect(noReplay("p", said)).toBe(said);
+  it.each(["network", "timeout", "overload", "unknown"] as const)(
+    "does not believe a vendor that says a %s is safe to replay",
+    (kind) => {
+      // `x-should-retry: true` says a resend is fine for the vendor. It does not say the
+      // first call went unbilled, which is the only thing that makes a replay safe.
+      const said = new ProviderError("p", kind, "x", {
+        status: 503,
+        retryAfterMs: 2000,
+        shouldRetry: true,
+      });
+      const out = noReplay("p", said);
+      expect(out).toMatchObject({ kind, status: 503, retryAfterMs: 2000, shouldRetry: false });
+      expect(isRetryable(out)).toBe(false);
+    },
+  );
+
+  it("hands back an error that already refuses a replay, not a copy of it", () => {
+    const refused = new ProviderError("p", "network", "x", { shouldRetry: false });
+    expect(noReplay("p", refused)).toBe(refused);
   });
 
   it("leaves a throttle retryable, since nothing ran", () => {
     const rate = new ProviderError("p", "rate", "x", { status: 429, retryAfterMs: 1000 });
     expect(noReplay("p", rate)).toBe(rate);
     expect(isRetryable(rate)).toBe(true);
+  });
+
+  it("believes x-should-retry on a throttle, in either direction", () => {
+    const yes = new ProviderError("p", "rate", "x", { status: 429, shouldRetry: true });
+    expect(isRetryable(noReplay("p", yes))).toBe(true);
+    const no = new ProviderError("p", "quota", "x", { status: 429, shouldRetry: false });
+    expect(isRetryable(noReplay("p", no))).toBe(false);
   });
 
   it("keeps the usage on a SpeechError it rewrites", () => {
@@ -748,12 +771,20 @@ describe.each(SHAPES)("$name wire", (shape) => {
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
 
-    it("believes a 503 that says x-should-retry", async () => {
+    it("does not believe a 503 that says x-should-retry: true", async () => {
       const fetchImpl = fakeFetch(() =>
         shape.failWith(503, "unavailable", { "x-should-retry": "true" }),
       );
       const error = await failure(make(fetchImpl).synthesize({ text: "Hi." }));
-      expect(isRetryable(error)).toBe(true);
+      expect(error).toMatchObject({ kind: "overload", shouldRetry: false });
+      expect(isRetryable(error)).toBe(false);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the wait a 503 asked for, even though it will not be replayed", async () => {
+      const fetchImpl = fakeFetch(() => shape.failWith(503, "unavailable", { "retry-after": "3" }));
+      const error = await failure(make(fetchImpl).synthesize({ text: "Hi." }));
+      expect(error).toMatchObject({ shouldRetry: false, retryAfterMs: 3000 });
     });
 
     it("does not replay a lost socket", async () => {
