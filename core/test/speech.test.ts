@@ -8,14 +8,18 @@ import { describe, expect, it, vi } from "vitest";
 import { classify, isRetryable, ProviderError } from "../src/errors.ts";
 import { withRetry } from "../src/retry.ts";
 import {
-  createGeminiSpeechProvider,
-  createOpenAISpeechProvider,
-  createSpeechProvider,
   decodeBase64,
   describeAudio,
   noReplay,
-  readWav,
+  resolveLimits,
   sniffFormat,
+} from "../src/speech-core.ts";
+import {
+  createGeminiSpeechProvider,
+  createOpenAISpeechProvider,
+  createSpeechProvider,
+  DEFAULT_SPEECH_LIMITS,
+  readWav,
   SpeechError,
   SPEECH_PRESET_IDS,
   type SpeechProvider,
@@ -1534,9 +1538,44 @@ describe("the main entry", () => {
       "SpeechError",
       "readWav",
       "describeAudio",
+      // Transport helpers the speech entry uses. A chat adopter has not asked for them.
+      "postBytes",
+      "readBounded",
+      "withDeadline",
+      "versionedPath",
     ]) {
       expect(name in main, name).toBe(false);
     }
+  });
+
+  it("still carries every transport name it had before speech", async () => {
+    const main = await import("../src/index.ts");
+    for (const name of [
+      "apiUrl",
+      "getJson",
+      "MAX_SSE_FRAME_CHARS",
+      "parseFrame",
+      "parseSseStream",
+      "postJson",
+      "retryAfterFromHeaders",
+      "streamSse",
+    ]) {
+      expect(name in main, name).toBe(true);
+    }
+  });
+
+  it("gives the speech entry its public names and none of the helpers behind them", async () => {
+    const speech = await import("../src/speech.ts");
+    expect(Object.keys(speech).sort()).toEqual([
+      "DEFAULT_SPEECH_LIMITS",
+      "SPEECH_FORMATS",
+      "SPEECH_PRESET_IDS",
+      "SpeechError",
+      "createGeminiSpeechProvider",
+      "createOpenAISpeechProvider",
+      "createSpeechProvider",
+      "readWav",
+    ]);
   });
 });
 

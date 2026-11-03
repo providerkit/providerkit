@@ -45,8 +45,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ProviderError } from "../src/errors.ts";
 import { PROVIDER_PRESETS, SPEECH_PRESET_IDS, type ProviderPreset } from "../src/presets.ts";
+import { asRecord } from "../src/speech-core.ts";
 import {
-  asRecord,
   createSpeechProvider,
   SPEECH_FORMATS,
   SpeechError,
