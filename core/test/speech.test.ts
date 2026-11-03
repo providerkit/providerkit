@@ -6,6 +6,7 @@
 // went wrong without repeating the text that was sent.
 import { describe, expect, it, vi } from "vitest";
 import { classify, isRetryable, ProviderError } from "../src/errors.ts";
+import { withRetry } from "../src/retry.ts";
 import {
   createGeminiSpeechProvider,
   createOpenAISpeechProvider,
@@ -1355,6 +1356,51 @@ describe("gemini wire", () => {
         code: "response_too_large",
       });
     });
+  });
+});
+
+// ── a retry the caller chooses ────────────────────────────────────────────
+
+describe("retrying a speech call on purpose", () => {
+  // The package never replays a paid call by itself. A caller who wants a retry
+  // writes one, and the stock withRetry already does the safe thing with these errors.
+  const retry = <T>(call: () => Promise<T>) =>
+    withRetry(call, { sleep: async () => {}, baseDelayMs: 1 });
+
+  it.each(SHAPES)(
+    "$name: sends a throttled call again, after the wait it asked for",
+    async (shape) => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(shape.failWith(429, "slow down", { "retry-after": "1" }))
+        .mockResolvedValueOnce(shape.ok());
+      const result = await retry(() => shape.make(fetchImpl).synthesize({ text: "Hi." }));
+      expect(result.format).toBe("wav");
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(SHAPES)(
+    "$name: does not send a 503 again, since it may have been billed",
+    async (shape) => {
+      const fetchImpl = fakeFetch(() => shape.failWith(503, "unavailable"));
+      await expect(
+        retry(() => shape.make(fetchImpl).synthesize({ text: "Hi." })),
+      ).rejects.toMatchObject({
+        kind: "overload",
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(SHAPES)("$name: does not send a call again after a lost socket", async (shape) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("fetch failed"));
+    await expect(
+      retry(() => shape.make(fetchImpl).synthesize({ text: "Hi." })),
+    ).rejects.toMatchObject({
+      kind: "network",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
