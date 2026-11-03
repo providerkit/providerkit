@@ -65,7 +65,6 @@ export interface PresetSpeech {
   shape: SpeechShape;
   /** Defaults to the preset's own `baseUrl`. */
   baseUrl?: string;
-  path?: string;
   /** Only when the vendor documents one. */
   defaultModel?: string;
   /** Representative model ids, as in `ProviderPreset.models`. */
@@ -192,16 +191,15 @@ export const PROVIDER_PRESETS = {
     defaultModel: "gemini-3.1-pro-preview",
     models: ["gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-flash-latest"],
     // Source: Google's speech generation guide, read 2026-11-02. Only the default
-    // model has run against the live API; the other ids come from the guide.
+    // model has run against the live API; the lite id comes from the guide. The guide
+    // also names `gemini-3.1-flash-tts-preview` (it says that model answered headerless
+    // PCM by default, which a wav request refuses as `bad_audio` after the charge) and
+    // `gemini-2.5-pro-preview-tts`. Both stay out of `models` until the probe has run
+    // them; a caller can still pass either id as `model`, with `format: "pcm"`.
     speech: {
       shape: "gemini",
       defaultModel: "gemini-3.8-flash-tts",
-      models: [
-        "gemini-3.8-flash-tts",
-        "gemini-3.8-flash-lite-tts",
-        "gemini-3.1-flash-tts-preview",
-        "gemini-2.5-pro-preview-tts",
-      ],
+      models: ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"],
       defaultVoice: "Kore",
       // The guide's thirty prebuilt voices, in its order.
       voices: [
@@ -271,9 +269,11 @@ export const PROVIDER_PRESETS = {
       "openai/gpt-5.6-luna-pro",
     ],
     // Source: OpenRouter's text-to-speech guide, read 2026-11-02. It takes mp3 or pcm
-    // and answers 400 to anything else. No default model or voice: both depend on
-    // the speech model chosen, and `GET /api/v1/models?output_modalities=speech`
-    // lists them.
+    // (its own default is pcm), and some models take only one: Gemini TTS and HeyGen
+    // answer 400 to mp3, MiniMax to pcm. This row asks for mp3, so a Gemini TTS model
+    // here needs `format: "pcm"`, and a pcm reply states no sample rate. No default
+    // model or voice: both depend on the speech model chosen, and
+    // `GET /api/v1/models?output_modalities=speech` lists them.
     speech: { shape: "openai", defaultFormat: "mp3" },
   },
   groq: {

@@ -69,7 +69,6 @@ export function createSpeechProvider(
     voice: config.voice ?? (own ? spec.defaultVoice : undefined),
     format: config.format ?? (own ? spec.defaultFormat : undefined),
     maxInputChars: config.maxInputChars ?? (own ? spec.maxInputChars : undefined),
-    ...(own && spec.path ? { path: spec.path } : {}),
   };
   switch (spec.shape) {
     case "openai": {

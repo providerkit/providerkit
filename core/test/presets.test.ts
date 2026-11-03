@@ -917,6 +917,68 @@ describe("provider presets: speech rows", () => {
     expect(PROVIDER_PRESETS.google.speech.defaultVoice).toBe("Kore");
   });
 
+  it("names the vendors' voices exactly, so a typo in a row cannot reach a request", () => {
+    // Written in alphabetical order, apart from the rows, and compared as sets.
+    const google = [
+      "Achernar",
+      "Achird",
+      "Algenib",
+      "Algieba",
+      "Alnilam",
+      "Aoede",
+      "Autonoe",
+      "Callirrhoe",
+      "Charon",
+      "Despina",
+      "Enceladus",
+      "Erinome",
+      "Fenrir",
+      "Gacrux",
+      "Iapetus",
+      "Kore",
+      "Laomedeia",
+      "Leda",
+      "Orus",
+      "Puck",
+      "Pulcherrima",
+      "Rasalgethi",
+      "Sadachbia",
+      "Sadaltager",
+      "Schedar",
+      "Sulafat",
+      "Umbriel",
+      "Vindemiatrix",
+      "Zephyr",
+      "Zubenelgenubi",
+    ];
+    const openai = [
+      "alloy",
+      "ash",
+      "ballad",
+      "cedar",
+      "coral",
+      "echo",
+      "fable",
+      "marin",
+      "nova",
+      "onyx",
+      "sage",
+      "shimmer",
+      "verse",
+    ];
+    expect([...PROVIDER_PRESETS.google.speech.voices].sort()).toEqual(google);
+    expect([...PROVIDER_PRESETS.openai.speech.voices].sort()).toEqual(openai);
+  });
+
+  it("lists only Google speech models that have run, or share the live one's generation", () => {
+    // The two older ids answer in other ways (headerless PCM by default). They return
+    // here only after the probe has run them.
+    expect(PROVIDER_PRESETS.google.speech.models).toEqual([
+      "gemini-3.8-flash-tts",
+      "gemini-3.8-flash-lite-tts",
+    ]);
+  });
+
   it("gives a sign-in preset no speech row: no speech endpoint is known to take a plan token", () => {
     for (const id of PRESET_IDS) {
       const preset: ProviderPreset = PROVIDER_PRESETS[id];
