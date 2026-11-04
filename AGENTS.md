@@ -79,6 +79,24 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
   is set to `public` so a release can't silently go private.
 - **`core/` is the role, not the identity.** If adapters ever split for bundle size they
   become `@providerkit/gemini` siblings — same scope, no rename, no broken links.
+- **One package, many entry points, decided (v1).** `@providerkit/core` serves chat from `.`,
+  and the rest from subpaths: `./zod`, `./decisions`, `./speech`, `./auth`. A new capability is
+  an entry point first, never a package. The reasons are measured or recorded: an app that only
+  chats pays 1.46 KB for the speech preset rows and nothing for the speech code; a capability in
+  its own package could only reach the shared transport, `ProviderError`, error classification
+  and preset table by making them public API that core could never change again; every extra
+  package is another version an adopter must move in step (the kit's AGENTS.md describes the
+  second copy that appears when two carets drift); and renaming `core` breaks every adopter.
+  A subpath can be marked experimental while `.` stays stable, so v1 is one semver surface.
+- **When a capability becomes its own package.** Only when one of these is true: it needs a
+  dependency core must not carry (a native or WASM library; React bindings, which are already
+  reserved for `@providerkit/react`); its release cadence or owner differs; or an unused copy of
+  it costs a chat-only bundle more than about 12 KB minified. Then it follows the rule above:
+  a sibling in the same scope that imports core's PUBLIC exports only, so whatever it needs
+  becomes public API first. `core/` stays put.
+- **Keep each capability split-ready.** Speech, decisions, zod and auth import the shared modules
+  (types, errors, transport, presets, attribution) and never each other's files. ESLint
+  enforces it (`no-restricted-imports` in `eslint.config.js`), so a split stays a folder move.
 - **GitHub: org `providerkit`, repo `providerkit/providerkit`.** An org rather than a personal
   repo, so maintainers can be added later without a transfer.
 - Release scripts match the other packages in `dev/packages`:
