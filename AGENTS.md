@@ -57,7 +57,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 1,077 tests
+bun run test                 # vitest, 1,557 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -96,7 +96,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 ## State
 
-**Built, tested, green** (1,077 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built and tested** (1,557 tests; typecheck, lint, build, and the MV3 guard all clean):
 
 | Module                   | What it holds                                                                       |
 | ------------------------ | ----------------------------------------------------------------------------------- |
@@ -121,6 +121,9 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 | `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets          |
 | `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                                |
 | `decisions.ts`           | `@providerkit/core/decisions`: typed questions, five hosts and live model discovery |
+| `speech.ts`              | `@providerkit/core/speech`: text to one audio clip, on its own entry point          |
+| `speech-core.ts`         | the speech types, `SpeechError`, no-replay, and the byte checks (`readWav`)         |
+| `providers/*-speech.ts`  | the OpenAI-shaped and Gemini speech wires, and `createSpeechProvider`               |
 | `auth/`                  | `@providerkit/core/auth` — sign-in flows and `tokenSource`, fetch only              |
 
 Scope of `auth/`: it signs in and refreshes. Token storage and sign-in screens stay in the app.
@@ -220,6 +223,30 @@ un-learned.
     then none. The abort is the case a `finally` cannot cover, because a consumer that holds a
     stream and stops reading never reaches it. Released twice, a slot lets one call in past the
     cap. `gate.test.ts` ends a stream every way a stream can end and checks the count after each.
+
+16. **A paid synthesis is never replayed.** A chat stream retries only while nothing was
+    emitted, because a failed stream has cost nothing. A speech reply arrives whole, so that rule
+    has nothing to hold on to: a timeout or a dead socket can land after the vendor started
+    billing. `synthesize()` sends one HTTP request. A timeout, a lost socket, a 5xx and anything
+    unclassified carry `shouldRetry: false` (`noReplay`, applied in one place so a new failure
+    path cannot forget it). The vendor's own `x-should-retry: true` does not undo that: it says a
+    resend is fine for the vendor, not that the first call went unbilled. A 429 stays retryable
+    because it refused before doing any work, and the header is believed there. No fallback
+    model, no second key, no token-renewal replay. `speech.test.ts` counts the fetches on every
+    failure.
+17. **Audio is labelled by its bytes, not by the request.** Servers ignore `response_format`, so
+    `format` comes from the signature (WAV, FLAC, Ogg Opus, mp3, ADTS AAC), and an empty body, a
+    JSON body or bytes nobody recognises is an error. Rate, channels and duration are stated only
+    when a header or the request states them, never estimated. Raw PCM has no signature, so it is
+    accepted only when PCM was asked for. A WAV whose header does not check out is still `wav`,
+    with no numbers.
+18. **A speech error keeps no vendor words.** A vendor error can echo the text that was sent, and
+    sometimes the key. The error is classified from the status and the body (invariant 3 still
+    holds), then the body and message are dropped: it keeps `kind`, `status`, `code` and the retry
+    hints. A reply that arrived but is unusable keeps the usage the provider billed for it
+    (`SpeechError.usage`), because the charge happened. A failed send keeps no `cause` and names
+    only the host: a runtime that refuses a header quotes its value, key included. A key outside
+    printable ASCII is refused before any request (`key_invalid`).
 
 ## Next
 

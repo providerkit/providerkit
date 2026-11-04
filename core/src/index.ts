@@ -7,7 +7,20 @@ export * from "./key-pool.ts";
 export * from "./watchdog.ts";
 export * from "./gate.ts";
 export * from "./usage.ts";
-export * from "./transport.ts";
+// Named, not `export *`: `postBytes`, `readBounded`, `withDeadline` and `versionedPath`
+// serve the speech entry point and stay off this one until a chat adopter needs them.
+export {
+  apiUrl,
+  getJson,
+  MAX_SSE_FRAME_CHARS,
+  parseFrame,
+  parseSseStream,
+  postJson,
+  retryAfterFromHeaders,
+  streamSse,
+  type RequestInit_,
+  type SseHooks,
+} from "./transport.ts";
 export * from "./rate-limit.ts";
 export * from "./tool-args.ts";
 export * from "./tools.ts";

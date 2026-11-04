@@ -4,9 +4,13 @@ import {
   apiUrl,
   parseFrame,
   parseSseStream,
+  postBytes,
   postJson,
+  readBounded,
   retryAfterFromHeaders,
   streamSse,
+  versionedPath,
+  withDeadline,
 } from "../src/transport.ts";
 
 /** A Response whose body streams the given chunks, as the network would. */
@@ -414,3 +418,301 @@ describe("retryAfterFromHeaders", () => {
     expect(retryAfterFromHeaders(new Headers(), now)).toBeUndefined();
   });
 });
+
+describe("versionedPath", () => {
+  it.each([
+    ["https://api.x.com", "/audio/speech", "v1", "/v1/audio/speech"],
+    ["https://api.x.com/", "/audio/speech", "v1", "/v1/audio/speech"],
+    ["https://api.x.com/v1", "/audio/speech", "v1", "/audio/speech"],
+    ["https://api.x.com/openai/v1/", "/audio/speech", "v1", "/audio/speech"],
+    ["https://api.x.com/api/v4", "/audio/speech", "v1", "/audio/speech"],
+    ["https://api.x.com", "/interactions", "v1beta", "/v1beta/interactions"],
+    ["https://api.x.com/v1beta", "/interactions", "v1beta", "/interactions"],
+  ])("%s + %s (%s)", (base, path, version, expected) => {
+    expect(versionedPath(base, path, version)).toBe(expected);
+  });
+});
+
+/** A body that hands out `chunks` and records whether it was cancelled. */
+function trackedBody(chunks: Uint8Array[]): {
+  body: ReadableStream<Uint8Array>;
+  cancelled: () => boolean;
+} {
+  let cancelled = false;
+  const queue = [...chunks];
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const next = queue.shift();
+      if (next === undefined) controller.close();
+      else controller.enqueue(next);
+    },
+    cancel: () => {
+      cancelled = true;
+    },
+  });
+  return { body, cancelled: () => cancelled };
+}
+
+describe("readBounded", () => {
+  it("returns the whole body when it fits, chunks joined in order", async () => {
+    const res = new Response(trackedBody([Uint8Array.of(1, 2), Uint8Array.of(3)]).body);
+    expect([...(await readBounded(res, 3, "test"))]).toEqual([1, 2, 3]);
+  });
+
+  it("returns an empty array for a response with no body", async () => {
+    expect((await readBounded(new Response(null), 10, "test")).byteLength).toBe(0);
+  });
+
+  it("refuses a Content-Length over the cap without reading a byte", async () => {
+    // highWaterMark 0: the stream asks its source for nothing until somebody reads.
+    let pulls = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(Uint8Array.of(1, 2, 3, 4));
+        },
+        cancel: () => {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const res = new Response(body, { headers: { "content-length": "4" } });
+    const error = await readBounded(res, 3, "test").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({
+      kind: "invalid",
+      code: "response_too_large",
+      shouldRetry: false,
+    });
+    expect(pulls).toBe(0);
+    expect(cancelled).toBe(true);
+  });
+
+  it("stops a body that grows past the cap mid-read and cancels the rest", async () => {
+    // No Content-Length, as with a chunked reply: only the running count can tell.
+    const { body, cancelled } = trackedBody([
+      Uint8Array.of(1, 2),
+      Uint8Array.of(3, 4),
+      Uint8Array.of(5),
+    ]);
+    const error = await readBounded(new Response(body), 3, "test").catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "invalid", code: "response_too_large" });
+    expect(cancelled()).toBe(true);
+  });
+
+  it("accepts a body of exactly the cap", async () => {
+    const res = new Response(trackedBody([Uint8Array.of(1, 2, 3)]).body);
+    expect((await readBounded(res, 3, "test")).byteLength).toBe(3);
+  });
+
+  it("calls a read that dies network, so the caller's one-attempt rule can see it", async () => {
+    const res = new Response(dyingBody(["abc"]));
+    const error = await readBounded(res, 100, "test").catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "network" });
+    expect((error as ProviderError).cause).toBeInstanceOf(TypeError);
+  });
+
+  it("does not wrap a read that failed because the caller stopped", async () => {
+    const controller = new AbortController();
+    const stop = new Error("stopped");
+    controller.abort(stop);
+    const res = new Response(dyingBody([]));
+    await expect(readBounded(res, 100, "test", controller.signal)).rejects.toBeInstanceOf(
+      TypeError,
+    );
+  });
+});
+
+describe("postBytes", () => {
+  it("returns the bytes and the bare media type", async () => {
+    const out = await postBytes({
+      ...opts(
+        fetchReturning(
+          new Response(Uint8Array.of(7, 8), {
+            headers: { "content-type": "Audio/Mpeg; charset=x" },
+          }),
+        ),
+      ),
+      maxBytes: 10,
+    });
+    expect([...out.bytes]).toEqual([7, 8]);
+    expect(out.contentType).toBe("audio/mpeg");
+  });
+
+  it("forwards redirect so a credential never follows a redirect", async () => {
+    let seen: RequestInit | undefined;
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      seen = init;
+      return new Response(Uint8Array.of(1));
+    }) as typeof fetch;
+    await postBytes({ ...opts(fetchImpl), redirect: "error", maxBytes: 10 });
+    expect(seen?.redirect).toBe("error");
+  });
+
+  it("leaves redirect to the runtime when the caller says nothing", async () => {
+    let seen: RequestInit | undefined;
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      seen = init;
+      return new Response(Uint8Array.of(1));
+    }) as typeof fetch;
+    await postBytes({ ...opts(fetchImpl), maxBytes: 10 });
+    expect(seen && "redirect" in seen).toBe(false);
+  });
+
+  it("classifies a non-2xx like postJson and keeps the provider's words by default", async () => {
+    const res = new Response('{"error":{"message":"insufficient_quota for abc"}}', { status: 429 });
+    const error = await postBytes({ ...opts(fetchReturning(res)), maxBytes: 10 }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toMatchObject({ kind: "quota", status: 429 });
+    expect((error as ProviderError).body).toContain("insufficient_quota");
+  });
+
+  it("keeps the kind and the wait but none of the provider's words when asked to redact", async () => {
+    const res = new Response(
+      '{"error":{"message":"The text you sent: Click Settings. is not allowed"}}',
+      { status: 429, headers: { "retry-after": "7" } },
+    );
+    const error = await postBytes({
+      ...opts(fetchReturning(res)),
+      maxBytes: 10,
+      redactErrors: true,
+    }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "rate", status: 429, retryAfterMs: 7000 });
+    const failure = error as ProviderError;
+    expect(failure.body).toBeUndefined();
+    expect(failure.message).toBe("test 429");
+    expect(JSON.stringify(failure)).not.toContain("Click Settings");
+  });
+
+  it("still reads the kind from the body when it redacts it", async () => {
+    const res = new Response('{"error":{"message":"You exceeded your current quota"}}', {
+      status: 429,
+    });
+    const error = await postBytes({
+      ...opts(fetchReturning(res)),
+      maxBytes: 10,
+      redactErrors: true,
+    }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "quota" });
+  });
+
+  it("reads at most 64 KiB of an error body, and still classifies from its head", async () => {
+    // A user-typed base URL can answer with an endless error. The kind is in the head.
+    const head = '{"error":{"message":"You exceeded your current quota"}}';
+    const { body, cancelled } = trackedBody([
+      new TextEncoder().encode(head),
+      new Uint8Array(200 * 1024).fill(32),
+      new Uint8Array(200 * 1024).fill(32),
+    ]);
+    const error = await postBytes({
+      ...opts(fetchReturning(new Response(body, { status: 429 }))),
+      maxBytes: 10,
+    }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "quota" });
+    expect(cancelled()).toBe(true);
+  });
+
+  it("calls a dropped socket network", async () => {
+    const fetchImpl = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch; // a fetch that rejects the way undici does
+    await expect(postBytes({ ...opts(fetchImpl), maxBytes: 10 })).rejects.toMatchObject({
+      kind: "network",
+    });
+  });
+
+  describe("when the send itself fails", () => {
+    // A runtime that refuses a header quotes its whole value in the TypeError.
+    const rejection = new TypeError("Header 'Authorization' has invalid value: 'Bearer SECRET'");
+    const refusing = (() => Promise.reject(rejection)) as unknown as typeof fetch; // a fetch that rejects the way undici does
+    const typed = { ...opts(refusing), url: "https://user:hunter2@host.example/private/path" };
+
+    it("keeps the runtime's rejection and the full address by default, as the chat calls do", async () => {
+      const error = (await postBytes({ ...typed, maxBytes: 10 }).catch(
+        (e: unknown) => e,
+      )) as ProviderError;
+      expect(error).toMatchObject({ kind: "network" });
+      expect(error.cause).toBe(rejection);
+      expect(error.message).toBe(`no response from ${typed.url}`);
+    });
+
+    it("keeps neither when asked to redact: no cause, and only the host", async () => {
+      const error = (await postBytes({ ...typed, maxBytes: 10, redactErrors: true }).catch(
+        (e: unknown) => e,
+      )) as ProviderError;
+      expect(error).toMatchObject({ kind: "network" });
+      expect(error.cause).toBeUndefined();
+      expect(error.message).toBe("no response from https://host.example");
+    });
+
+    it("names no address at all when the address does not parse", async () => {
+      const error = (await postBytes({
+        ...typed,
+        url: "not a url, user:hunter2",
+        maxBytes: 10,
+        redactErrors: true,
+      }).catch((e: unknown) => e)) as ProviderError;
+      expect(error.message).toBe("no response from the server");
+    });
+
+    it("passes the caller's Stop through untouched, redacted or not", async () => {
+      const controller = new AbortController();
+      const stop = new Error("stopped");
+      controller.abort(stop);
+      const stopped = (() => Promise.reject(stop)) as unknown as typeof fetch; // a fetch that rejects the way undici does
+      await expect(
+        postBytes({
+          ...opts(stopped),
+          signal: controller.signal,
+          maxBytes: 10,
+          redactErrors: true,
+        }),
+      ).rejects.toBe(stop);
+    });
+  });
+});
+
+describe("withDeadline", () => {
+  it("returns what the call returns", async () => {
+    expect(await withDeadline("test", 1000, undefined, async () => 42)).toBe(42);
+  });
+
+  it("turns OUR deadline into a timeout", async () => {
+    const error = await withDeadline("test", 20, undefined, (signal) => waitFor(signal)).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({ kind: "timeout", provider: "test" });
+  });
+
+  it("never turns the caller's Stop into a timeout", async () => {
+    const controller = new AbortController();
+    const stop = new Error("stopped");
+    const pending = withDeadline("test", 5000, controller.signal, (signal) => waitFor(signal));
+    controller.abort(stop);
+    await expect(pending).rejects.toBe(stop);
+  });
+
+  it("does not start the call when the caller already stopped", async () => {
+    let started = false;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      withDeadline("test", 1000, controller.signal, async () => {
+        started = true;
+      }),
+    ).rejects.toThrow();
+    expect(started).toBe(false);
+  });
+});
+
+/** A call that waits until its signal aborts, then fails with the signal's reason. */
+function waitFor(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+}

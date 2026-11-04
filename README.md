@@ -132,6 +132,20 @@ each family uses. You can also sign in with `createAuthFlow("opencode-zen", host
 `claude-sonnet-5-5`). Sign in with `createAuthFlow("antigravity", host)` to discover the
 Cloud Code Assist project and hand the token source to `withToken` or `createRegistry`.
 
+### Speech
+
+Text to one audio file, from its own entry point, so a chat-only app loads none of the speech code:
+
+```ts
+import { createSpeechProvider } from "@providerkit/core/speech";
+
+const speech = createSpeechProvider("google", { apiKey });
+const { bytes, mimeType } = await speech.synthesize({ text: "Click Settings." });
+```
+
+`google`, `openai` and `openrouter` can speak, and `openai` reaches any server that copies
+its route through `baseUrl`. A paid call is sent once and never replayed by the package.
+
 ### Set up providers once
 
 ```ts
@@ -168,6 +182,7 @@ drift.
 | [Usage and cost](https://providerkit.dev/guides/usage/)                 | Reconciling cache tokens, cost, savings          |
 | [Sign in to a subscription](https://providerkit.dev/guides/auth/)       | Device code and PKCE sign-in, token refresh      |
 | [Decision models](https://providerkit.dev/guides/decisions/)            | Typed choices, scores and yes/no probabilities   |
+| [Speech](https://providerkit.dev/guides/speech/)                        | Text to one audio clip, one paid request a call  |
 
 The [API reference](https://providerkit.dev/reference/) is generated from the source, so it
 cannot drift either.

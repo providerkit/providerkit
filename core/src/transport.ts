@@ -30,6 +30,13 @@ export interface RequestInit_ {
   onRateLimit?: (reading: RateLimitReading) => void;
   /** Whether the turn already stated its finish. See `SseHooks.finished`. */
   finished?: () => boolean;
+  /**
+   * Set `"error"` on any call that carries a credential to a host the user typed.
+   * A cross-origin redirect keeps custom headers such as `x-goog-api-key`, so a
+   * wrong or hostile address would be handed the key. The redirect then fails
+   * the call instead of following. Absent: the runtime's default (follow).
+   */
+  redirect?: RequestRedirect;
 }
 
 export interface SseHooks {
@@ -73,6 +80,16 @@ export function apiUrl(baseUrl: string, path: string): string {
 }
 
 /**
+ * `path` under the API version a base URL does not already carry: `/v1` (or
+ * `version`) in front, unless the base already ends in a version segment such
+ * as `/v1` or `/v4`. The rule the chat adapters each keep inline.
+ */
+export function versionedPath(baseUrl: string, path: string, version = "v1"): string {
+  const versioned = /\/v\d+[^/]*$/i.test(baseUrl.replace(/\/+$/, ""));
+  return `${versioned ? "" : `/${version}`}${path}`;
+}
+
+/**
  * How long the provider says to wait, read from the RESPONSE rather than from
  * a thrown error. Headers are authoritative: `Retry-After` first, then the
  * vendor reset headers that name a subscription window rather than a
@@ -109,9 +126,16 @@ export function retryAfterFromHeaders(headers: Headers, now = Date.now()): numbe
   return undefined;
 }
 
-/** Turn a non-2xx response into the classified error every caller branches on. */
-async function errorFor(provider: string, res: Response): Promise<ProviderError> {
-  const text = await res.text().catch(() => "");
+/** Most of an error body that is read. Only 2,000 characters are ever kept, and a
+ *  base URL a user typed (a local server, a proxy) is a place an endless error
+ *  body can come from. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+/** Turn a non-2xx response into the classified error every caller branches on.
+ *  `redact` classifies from the body but keeps none of its words: a vendor's
+ *  error can echo what the caller sent. */
+async function errorFor(provider: string, res: Response, redact = false): Promise<ProviderError> {
+  const text = await readErrorText(res);
   const kind = classifyHttp(res.status, text);
   // A window-reset header describes the ACCOUNT, not this failure, and only a
   // throttle or a quota answer is about the window. Claude OAuth stamps the
@@ -124,9 +148,11 @@ async function errorFor(provider: string, res: Response): Promise<ProviderError>
   const asked = aboutWindow
     ? retryAfterFromHeaders(res.headers)
     : parseRateLimitReset(res.headers).retryAfterMs;
-  const message = text
-    ? `${provider} ${res.status}: ${text.slice(0, 500)}`
-    : `${provider} ${res.status} ${res.statusText}`;
+  const message = redact
+    ? `${provider} ${res.status}`
+    : text
+      ? `${provider} ${res.status}: ${text.slice(0, 500)}`
+      : `${provider} ${res.status} ${res.statusText}`;
   const shouldRetryHeader = res.headers.get("x-should-retry");
   const shouldRetry =
     shouldRetryHeader === "false" ? false : shouldRetryHeader === "true" ? true : undefined;
@@ -135,11 +161,35 @@ async function errorFor(provider: string, res: Response): Promise<ProviderError>
     ...reset,
     shouldRetry,
     retryAfterMs: asked ?? parseRetryAfterMs({}, text),
-    body: text.slice(0, 2_000) || undefined,
+    ...(redact ? {} : { body: text.slice(0, 2_000) || undefined }),
   });
 }
 
-async function send(opts: RequestInit_, method = "POST"): Promise<Response> {
+async function readErrorText(res: Response): Promise<string> {
+  try {
+    const { bytes } = await readCapped(res.body, MAX_ERROR_BODY_BYTES);
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return "";
+  }
+}
+
+/** The scheme and host of a URL, nothing a user typed in front of it or after it. */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "the server";
+  }
+}
+
+/**
+ * `redact` keeps a credential out of a failed send. A runtime that refuses a header
+ * (a key with a line break in it, a character outside Latin-1) puts the whole value
+ * in its TypeError, so the raw rejection is not kept as `cause`, and the message names
+ * the host without its path or any user info a base URL carries.
+ */
+async function send(opts: RequestInit_, method = "POST", redact = false): Promise<Response> {
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
   // Serialized outside the catch below: a body that cannot become JSON is a
   // bug of ours, and must not be dressed as a network blip and retried.
@@ -150,6 +200,7 @@ async function send(opts: RequestInit_, method = "POST"): Promise<Response> {
       headers: { "content-type": "application/json", ...opts.headers },
       body,
       signal: opts.signal,
+      ...(opts.redirect ? { redirect: opts.redirect } : {}),
     });
   } catch (err) {
     // An aborted signal passes through untouched: the caller's Stop stays
@@ -160,9 +211,12 @@ async function send(opts: RequestInit_, method = "POST"): Promise<Response> {
     // long run died on its first blip. cc-proxy reads every failed send the
     // same way.
     if (opts.signal?.aborted) throw err;
-    throw new ProviderError(opts.provider, "network", `no response from ${opts.url}`, {
-      cause: err,
-    });
+    throw new ProviderError(
+      opts.provider,
+      "network",
+      `no response from ${redact ? originOf(opts.url) : opts.url}`,
+      redact ? {} : { cause: err },
+    );
   }
 }
 
@@ -178,6 +232,126 @@ export async function postJson<T = unknown>(opts: RequestInit_): Promise<T> {
   const res = await send(opts);
   if (!res.ok) throw await errorFor(opts.provider, res);
   return (await res.json()) as T;
+}
+
+/**
+ * Read a body, keeping at most `maxBytes`. Returns what fit and whether the body
+ * went on past it; the rest is cancelled, never read.
+ */
+async function readCapped(
+  body: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+): Promise<{ bytes: Uint8Array; over: boolean }> {
+  if (!body) return { bytes: new Uint8Array(0), over: false };
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let over = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const room = maxBytes - size;
+      if (value.byteLength > room) {
+        chunks.push(value.subarray(0, room));
+        size = maxBytes;
+        over = true;
+        reader.cancel().catch(() => {});
+        break;
+      }
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return { bytes, over };
+}
+
+/**
+ * Read a whole body, at most `maxBytes`. A `Content-Length` over the cap cancels
+ * before a byte is read, and a body that outgrows the cap cancels mid-read:
+ * `invalid` with `response_too_large`, and `shouldRetry: false`, because the cap
+ * is the caller's and a replay meets it again. A read that dies is `network`,
+ * unless the caller's own `signal` aborted it, which passes through untouched.
+ */
+export async function readBounded(
+  res: Response,
+  maxBytes: number,
+  provider: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const tooLarge = () =>
+    new ProviderError(
+      provider,
+      "invalid",
+      `${provider}: the reply is larger than ${maxBytes} bytes`,
+      { code: "response_too_large", shouldRetry: false },
+    );
+  const declared = res.headers.get("content-length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+    res.body?.cancel().catch(() => {});
+    throw tooLarge();
+  }
+  let read: Awaited<ReturnType<typeof readCapped>>;
+  try {
+    read = await readCapped(res.body, maxBytes);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    throw new ProviderError(provider, "network", `${provider}: the reply was cut off`, {
+      cause: err,
+    });
+  }
+  if (read.over) throw tooLarge();
+  return read.bytes;
+}
+
+/**
+ * POST and return the raw body, bounded. For the endpoints that answer with
+ * bytes (audio) or with JSON too large to trust. Same envelope and error
+ * classification as `postJson`. `redactErrors` keeps the provider's words out of
+ * a failure, and the request's own words too (the full URL, the runtime's rejection):
+ * the kind, status and retry hints survive, the text does not.
+ */
+export async function postBytes(
+  opts: RequestInit_ & { maxBytes: number; redactErrors?: boolean },
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+  const res = await send(opts, "POST", opts.redactErrors);
+  if (!res.ok) throw await errorFor(opts.provider, res, opts.redactErrors);
+  const contentType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  return { bytes: await readBounded(res, opts.maxBytes, opts.provider, opts.signal), contentType };
+}
+
+/**
+ * Run a call that does not stream under one deadline, headers and body together.
+ * The caller's Stop passes through exactly as it arrived; only OUR deadline
+ * becomes `timeout` (invariant 2). A signal that is already aborted never starts
+ * the call.
+ */
+export async function withDeadline<T>(
+  provider: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  signal?.throwIfAborted();
+  const deadline = AbortSignal.timeout(timeoutMs);
+  try {
+    return await run(signal ? AbortSignal.any([signal, deadline]) : deadline);
+  } catch (err) {
+    if (deadline.aborted && !signal?.aborted) {
+      throw new ProviderError(provider, "timeout", `${provider}: no answer in ${timeoutMs} ms`, {
+        cause: err,
+      });
+    }
+    throw err;
+  }
 }
 
 /** Pull the `data:` payload out of one SSE frame, joining continuation lines
