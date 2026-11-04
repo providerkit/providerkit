@@ -2,6 +2,14 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.28.1] - 2026-11-04
+
+### Fixed
+
+- **A Gemini speech reply with `"error": null` and a good clip is a good reply.** Any `error` key, even `null`, turned the clip away as an in-band failure. `null` now means no error. An error object still fails the call, and the usage the reply stated is still kept on that failure.
+- **A cached-token count that cannot be right no longer drops the whole usage.** A string, a negative, a fraction or a count above the input made the kit discard input, output and total as well, so an adopter's ledger lost a charge that was stated correctly. The cached count alone now reads as none cached (`cachedInputTokens: 0`, which never understates what was billed); the counts a charge is made of stay. A total below input plus output still drops the usage whole.
+- **The `maxOutputTokens` note no longer says "unmeasured".** Google enforces it (checked live on 2026-11-03).
+
 ## [0.28.0] - 2026-11-03
 
 ### Added

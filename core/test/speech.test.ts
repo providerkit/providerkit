@@ -1349,6 +1349,46 @@ describe("gemini wire", () => {
   });
 
   it.each([
+    ["more than the input", 20],
+    ["a string", "4"],
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["null", null],
+  ])(
+    "keeps the counts that make a charge when the cached count is %s, and reads it as none",
+    async (_name, cachedCount) => {
+      const result = await gemini(
+        fakeFetch(() =>
+          jsonReply(
+            geminiEnvelope(undefined, {
+              usage: {
+                total_input_tokens: 13,
+                total_output_tokens: 96,
+                total_tokens: 109,
+                total_cached_tokens: cachedCount,
+              },
+            }),
+          ),
+        ),
+      ).synthesize({ text: "Hi." });
+      expect(result.usage).toEqual({
+        inputTokens: 13,
+        cachedInputTokens: 0,
+        outputTokens: 96,
+        totalTokens: 109,
+      });
+    },
+  );
+
+  it("takes a completed reply with `error: null` as a good one", async () => {
+    const result = await gemini(
+      fakeFetch(() => jsonReply(geminiEnvelope(undefined, { error: null }))),
+    ).synthesize({ text: "Hi." });
+    expect(result.format).toBe("wav");
+    expect(result.usage?.totalTokens).toBe(109);
+  });
+
+  it.each([
     ["absent", undefined],
     ["a string", "109"],
     ["a negative count", { total_input_tokens: -1, total_output_tokens: 96, total_tokens: 95 }],
@@ -1358,15 +1398,6 @@ describe("gemini wire", () => {
       { total_input_tokens: 13, total_output_tokens: 96, total_tokens: 100 },
     ],
     ["a missing field", { total_input_tokens: 13, total_output_tokens: 96 }],
-    [
-      "more cached than input",
-      {
-        total_input_tokens: 13,
-        total_output_tokens: 96,
-        total_tokens: 109,
-        total_cached_tokens: 20,
-      },
-    ],
     [
       "a count past the safe range",
       { total_input_tokens: 2 ** 60, total_output_tokens: 1, total_tokens: 2 ** 60 },
