@@ -34,8 +34,9 @@ export interface GeminiSpeechConfig extends SpeechLimits {
   /** "wav" (the default) or "pcm". Gemini makes no other format. */
   format?: SpeechFormat;
   /**
-   * Caps the audio tokens generated. Not sent unless set. Whether a TTS model
-   * honours the cap is unmeasured; the text limit is the real bound on cost.
+   * Caps the audio tokens generated. Not sent unless set. Google enforces it (checked live on
+   * 2026-11-03): a clip cut by it comes back `incomplete`, which is reported as an error that
+   * carries the usage billed. The text limit is still the bound on cost you can rely on.
    */
   maxOutputTokens?: number;
   headers?: Record<string, string>;
@@ -62,15 +63,14 @@ function readUsage(raw: unknown): SpeechUsage | undefined {
   const total = count(usage?.total_tokens);
   if (input === undefined || output === undefined || total === undefined) return undefined;
   if (!Number.isSafeInteger(input + output) || total < input + output) return undefined;
-  let cached = 0;
-  if (usage?.total_cached_tokens !== undefined) {
-    const reported = count(usage.total_cached_tokens);
-    if (reported === undefined || reported > input) return undefined;
-    cached = reported;
-  }
+  // The cached count is a part of the input count and is not what a charge is made of. One that
+  // cannot be right (a string, a negative, more than the input) reads as none cached, because
+  // the type needs a number and none cached never understates what was billed. The counts a
+  // charge is made of stay. Absent also means none.
+  const reported = usage?.total_cached_tokens === undefined ? 0 : count(usage.total_cached_tokens);
   return {
     inputTokens: input,
-    cachedInputTokens: cached,
+    cachedInputTokens: reported !== undefined && reported <= input ? reported : 0,
     outputTokens: output,
     totalTokens: total,
   };
@@ -135,7 +135,9 @@ export function createGeminiSpeechProvider(config: GeminiSpeechConfig): SpeechPr
         // From here on the provider has answered, so it has billed: every failure
         // below carries the usage it stated.
         const usage = readUsage(envelope.usage);
-        if (envelope.error !== undefined) throw inBandFailure(provider, envelope, usage);
+        // `error: null` is "no error", as it is in most JSON APIs: it must not turn a good clip away.
+        if (envelope.error !== undefined && envelope.error !== null)
+          throw inBandFailure(provider, envelope, usage);
         const status = envelope.status;
         if (status === "incomplete") {
           throw unusable(
