@@ -187,13 +187,30 @@ const gemini = (
     ...extra,
   });
 
+// The reply's shape as the live API sent it on 2026-11-03 (the audio bytes are the test's own),
+// so a field the kit does not read yet cannot break the parse.
 const geminiEnvelope = (
   blocks: unknown[] = [{ type: "audio", data: base64(WAV_BYTES), mime_type: "audio/wav" }],
   more: Record<string, unknown> = {},
 ) => ({
+  object: "interaction",
+  model: "gemini-3.8-flash-tts",
   status: "completed",
+  service_tier: "standard",
+  created: "2026-11-03T12:00:00Z",
+  updated: "2026-11-03T12:00:01Z",
   steps: [{ type: "model_output", content: blocks }],
-  usage: { total_input_tokens: 13, total_output_tokens: 96, total_tokens: 109 },
+  usage: {
+    total_tokens: 109,
+    total_input_tokens: 13,
+    input_tokens_by_modality: [{ modality: "text", tokens: 13 }],
+    total_cached_tokens: 0,
+    total_output_tokens: 96,
+    output_tokens_by_modality: [{ modality: "audio", tokens: 96 }],
+    total_tool_use_tokens: 0,
+    total_thought_tokens: 0,
+    initial_input_tokens: 12,
+  },
   ...more,
 });
 

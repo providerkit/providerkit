@@ -177,12 +177,13 @@ interaction is not kept. The reply must say `completed`, the last audio block wi
 that holds a link instead of data is refused and never fetched, and the base64 must be
 strict.
 
-`maxOutputTokens` caps the audio tokens generated. It is not sent unless you set it, and
-nobody has measured whether a speech model honours it. The text limit is the real bound on
-cost.
+`maxOutputTokens` caps the audio tokens generated. It is not sent unless you set it. A live
+call on 2026-11-03 showed Google enforces it: the clip stopped early, the reply said
+`incomplete` and carried the usage billed, and the package reports that as the `incomplete`
+error with that usage. The text limit is still the bound on cost you can rely on.
 
 Google's speech guide spells the voice field `speech_config` and its API reference spells it
-`structured_speech_config`. The package sends the one that has run. The interface is `v1beta`
+`structured_speech_config`. The package sends `speech_config`: a live call on 2026-11-03 showed it changes the voice. The other spelling was accepted too, but a voice sent that way was not tested. The interface is `v1beta`
 and can move. On a key without billing, Google's terms let it use what you send to improve
 its products, outside the EEA, Switzerland and the UK (read 2026-11-02). Read the terms that
 apply to your key.
