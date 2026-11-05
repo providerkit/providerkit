@@ -7,7 +7,7 @@ import { attributionHeaders, type Attribution } from "./attribution.ts";
 import { ProviderError, streamError } from "./errors.ts";
 import { openRouterCostUsd } from "./providers/openai.ts";
 import { withRetry, type RetryOptions } from "./retry.ts";
-import { getJson, postJson } from "./transport.ts";
+import { getJson, postJson, type FetchLike } from "./transport.ts";
 import type { TokenUsage } from "./types.ts";
 import type { ModelRate } from "./usage.ts";
 
@@ -115,7 +115,7 @@ export interface DecisionConfig {
   /** Default: three attempts, transient failures only, Retry-After honoured. */
   retry?: Omit<RetryOptions, "signal">;
   /** Swapped in tests, or to route through a proxy. */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
 }
 
 export interface DecisionClient {

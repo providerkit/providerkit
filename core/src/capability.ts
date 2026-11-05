@@ -17,6 +17,7 @@
 // way settles it for the model actually being served.
 
 import type { JsonWithTools, Provider } from "./types.ts";
+import type { FetchLike } from "./transport.ts";
 
 /** A question the model cannot answer from memory, so a tool call is the only
  *  correct turn. Not making one is a real signal rather than a judgement call. */
@@ -179,7 +180,7 @@ export interface ResolveModelOptions {
   /** Pre-loaded catalog object (useful for tests or offline execution). */
   catalog?: Record<string, unknown>;
   /** Custom fetch implementation (for proxies, custom headers, or tests). */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   /** Max cache age in ms. Defaults to 24 hours (86_400_000 ms). */
   maxAgeMs?: number;
 }

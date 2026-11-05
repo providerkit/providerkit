@@ -18,6 +18,7 @@ export {
   postJson,
   retryAfterFromHeaders,
   streamSse,
+  type FetchLike,
   type RequestInit_,
   type SseHooks,
 } from "./transport.ts";

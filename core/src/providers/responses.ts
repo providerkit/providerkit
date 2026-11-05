@@ -18,7 +18,7 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
-import { streamSse, apiUrl, parseFrame } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
 import { settleToolCalls } from "../tool-args.ts";
 import type {
@@ -47,7 +47,7 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   id?: string;
   effort?: Effort;
   maxTokens?: number;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   /** Extra request headers, where a subscription backend's account id goes
    *  (`ChatGPT-Account-Id`), which those backends reject the request without. */
   headers?: Record<string, string>;

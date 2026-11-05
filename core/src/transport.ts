@@ -11,6 +11,13 @@ import {
   type RateLimitReading,
 } from "./rate-limit.ts";
 
+/**
+ * What a `fetchImpl` option takes: anything called like `fetch` that answers with a `Response`.
+ * Narrower than `FetchLike`, which a runtime may widen (Bun's adds `preconnect`), so a plain
+ * wrapper or a test double fits without a cast. Global `fetch` still fits.
+ */
+export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 export interface RequestInit_ {
   url: string;
   headers?: Record<string, string>;
@@ -19,7 +26,7 @@ export interface RequestInit_ {
   provider: string;
   signal?: AbortSignal;
   /** Swapped in tests, or to route through a proxy. Defaults to global fetch. */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   /** Called when the response headers arrive and on every body read after,
    *  keep-alives included. What the watchdog's idle clock runs on. */
   onActivity?: () => void;

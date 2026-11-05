@@ -18,6 +18,8 @@ export {
   type SpeechUsage,
   type WavInfo,
 } from "./speech-core.ts";
+// The `fetchImpl` option's type, so a speech-only app can type its wrapper without the main entry.
+export type { FetchLike } from "./transport.ts";
 export * from "./providers/openai-speech.ts";
 export * from "./providers/gemini-speech.ts";
 export * from "./providers/speech-factory.ts";

@@ -15,7 +15,7 @@ import {
 } from "../errors.ts";
 import { schemaPrompt, toAntigravityToolSchema, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
-import { streamSse, apiUrl } from "../transport.ts";
+import { streamSse, apiUrl, type FetchLike } from "../transport.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   ChatMessage,
@@ -62,7 +62,7 @@ export interface GeminiConfig extends ProviderFallbackConfig {
    */
   jsonWithTools?: JsonWithTools;
   maxTokens?: number;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   headers?: Record<string, string>;
 }
 
