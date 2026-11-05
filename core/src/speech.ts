@@ -22,5 +22,6 @@ export {
 export type { FetchLike } from "./transport.ts";
 export * from "./providers/openai-speech.ts";
 export * from "./providers/gemini-speech.ts";
+export * from "./providers/elevenlabs-speech.ts";
 export * from "./providers/speech-factory.ts";
 export { SPEECH_PRESET_IDS, type PresetSpeech } from "./presets.ts";

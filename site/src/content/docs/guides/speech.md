@@ -188,6 +188,32 @@ and can move. On a key without billing, Google's terms let it use what you send 
 its products, outside the EEA, Switzerland and the UK (read 2026-11-02). Read the terms that
 apply to your key.
 
+## ElevenLabs
+
+ElevenLabs is not a chat preset, so it has its own constructor instead of a preset row:
+
+```ts
+import { createElevenLabsSpeechProvider, listElevenLabsVoices } from "@providerkit/core/speech";
+
+const voices = await listElevenLabsVoices({ apiKey });
+const speech = createElevenLabsSpeechProvider({ apiKey, voice: voices[0].id });
+const { bytes } = await speech.synthesize({ text: "Click Settings." });
+```
+
+It sends `POST /v1/text-to-speech/{voice_id}` with the key in `xi-api-key`, the text and the
+model (`eleven_multilingual_v2` unless you pass another, such as `eleven_flash_v2_5`). The voice is
+a voice id, not a name: `listElevenLabsVoices` reads the ones the key can use from `GET /v2/voices`,
+with the languages ElevenLabs verified for each. It makes WAV and raw PCM at 24 kHz, MP3 at
+128 kbps and Opus. Those work on every plan; 44.1 kHz PCM and WAV need a Pro plan, so the
+package does not ask for them. ElevenLabs bills per character and states no usage, so
+`characters` is the number to bill by and `usage` stays empty.
+
+A missing or malformed voice id comes back as `invalid` with the code `voice_not_found`, not as
+an unknown model: the fix is another voice. A wrong key is `auth`, no credits is `quota`, a
+throttle or too many calls at once is `rate`. Like the other wires, the error never carries the
+vendor's words, the URL's path or the request. Read from the documentation on 2026-11-05; no
+live call has been made with a real key.
+
 ## Check the wire with a real key
 
 `core/scripts/probe-speech.ts` sends a few short, paid requests and prints what came back,
@@ -208,5 +234,5 @@ only `PROBE_SPEECH_API_KEY`, so a vendor key is never sent to a host you typed.
 - No `Registry.speech`. A registry connection does not serve speech yet.
 - No `language`, `instructions`, `speed`, streaming or `check()`. Both wires detect the
   language from the text, and a field that is accepted and ignored is worse than a missing one.
-- No xAI, Mistral, ElevenLabs, Azure or Groq rows. Each needs its own wire, or a direct
+- No xAI, Mistral, Azure or Groq rows. Each needs its own wire, or a direct
   read of its documentation first.
