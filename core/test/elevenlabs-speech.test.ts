@@ -186,7 +186,111 @@ describe("ElevenLabs speech", () => {
   });
 });
 
+describe("ElevenLabs speech, what the review found", () => {
+  it("refuses a JSON or HTML body as raw PCM", async () => {
+    for (const [body, type] of [
+      ['{"detail":{"code":"oops12"}}', "application/json"],
+      ["<html><body>Gateway</body></html>", "text/html"],
+      ['  {"detail":{"code":"oops12"}}', "application/octet-stream"],
+    ] as const) {
+      const { fetchImpl } = fake(
+        () => new Response(body, { status: 200, headers: { "content-type": type } }),
+      );
+      const error = await createElevenLabsSpeechProvider({ apiKey: "sk", voice: "v", fetchImpl })
+        .synthesize({ text: "Hi", format: "pcm" })
+        .catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "bad_audio" });
+    }
+  });
+
+  it("keeps the code of a reply too large to keep", async () => {
+    const { fetchImpl } = fake(() => audio(new Uint8Array(5_000), "audio/wav"));
+    const error = await createElevenLabsSpeechProvider({
+      apiKey: "sk",
+      voice: "v",
+      maxAudioBytes: 1_000,
+      fetchImpl,
+    })
+      .synthesize({ text: "Hi" })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "response_too_large" });
+  });
+
+  it("reads an older spent-quota 401 as quota, not a wrong key", async () => {
+    const { fetchImpl } = fake(
+      () =>
+        new Response(JSON.stringify({ detail: { status: "quota_exceeded", message: "x" } }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const error = await createElevenLabsSpeechProvider({ apiKey: "sk", voice: "v", fetchImpl })
+      .synthesize({ text: "Hi" })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ kind: "quota", status: 401 });
+  });
+});
+
 describe("listElevenLabsVoices", () => {
+  it("refuses a key that cannot be sent in a header, and a bad max, before any request", async () => {
+    const { calls, fetchImpl } = fake(() => new Response("{}"));
+    for (const apiKey of ["sk_SECRET\nxyz", "sk\u200bkey", ""])
+      await expect(listElevenLabsVoices({ apiKey, fetchImpl })).rejects.toMatchObject({
+        kind: "auth",
+        code: "key_invalid",
+      });
+    for (const max of [0, -1, 1.5, Number.NaN])
+      await expect(listElevenLabsVoices({ apiKey: "sk", max, fetchImpl })).rejects.toThrow(
+        RangeError,
+      );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("stops on a server that keeps saying more with nothing new", async () => {
+    const pages = [
+      { voices: [{ voice_id: "a" }], has_more: true, next_page_token: "same" },
+      { voices: [], has_more: true, next_page_token: "same2" },
+      { voices: [{ voice_id: "b" }], has_more: true, next_page_token: "x" },
+    ];
+    let calls = 0;
+    const fetchImpl: FetchLike = async () => {
+      calls++;
+      return new Response(JSON.stringify(pages[Math.min(calls - 1, 1)]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    expect(await listElevenLabsVoices({ apiKey: "sk", fetchImpl })).toEqual([
+      { id: "a", name: "a", languages: [] },
+    ]);
+    expect(calls).toBe(2);
+    let repeats = 0;
+    const same: FetchLike = async () => {
+      repeats++;
+      return new Response(
+        JSON.stringify({
+          voices: [{ voice_id: `v${repeats}` }],
+          has_more: true,
+          next_page_token: "t",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    await listElevenLabsVoices({ apiKey: "sk", fetchImpl: same });
+    expect(repeats).toBe(2);
+  });
+
+  it("names no URL and keeps no cause when nothing answered", async () => {
+    const fetchImpl: FetchLike = () =>
+      Promise.reject(new TypeError("Header has invalid value: sk"));
+    const error = await listElevenLabsVoices({ apiKey: "sk", fetchImpl }).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({ kind: "network" });
+    expect(String((error as Error).message)).toBe("no response from https://api.elevenlabs.io");
+    expect((error as Error).cause).toBeUndefined();
+  });
+
   it("reads every page and keeps the id, the name, the category and the verified languages", async () => {
     const pages = [
       {

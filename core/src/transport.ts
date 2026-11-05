@@ -13,7 +13,7 @@ import {
 
 /**
  * What a `fetchImpl` option takes: anything called like `fetch` that answers with a `Response`.
- * Narrower than `FetchLike`, which a runtime may widen (Bun's adds `preconnect`), so a plain
+ * Narrower than `typeof fetch`, which a runtime may widen (Bun's adds `preconnect`), so a plain
  * wrapper or a test double fits without a cast. Global `fetch` still fits.
  */
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;

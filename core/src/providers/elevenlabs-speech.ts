@@ -15,7 +15,7 @@ import {
   type SpeechLimits,
   type SpeechProvider,
 } from "../speech-core.ts";
-import { apiUrl, getJson, postBytes, type FetchLike } from "../transport.ts";
+import { apiUrl, getJson, postBytes, withDeadline, type FetchLike } from "../transport.ts";
 
 export interface ElevenLabsSpeechConfig extends SpeechLimits, Attribution {
   apiKey: string;
@@ -94,15 +94,13 @@ export function createElevenLabsSpeechProvider(config: ElevenLabsSpeechConfig): 
         }).catch((error: unknown) => {
           throw redacted(provider, baseUrl, error);
         });
-        // Raw PCM has no header to sniff; every other answer is named by its bytes, so a JSON or
-        // text body that came with a 200 is no audio.
-        if (format !== "pcm" && bytes.byteLength > 0 && !sniffFormat(bytes)) {
-          throw unusable(
-            provider,
-            "unknown",
-            "bad_audio",
-            TEXTUAL.test(contentType) ? "the reply is text, not audio" : "the reply is not audio",
-          );
+        // A JSON or text body that came with a 200 is no audio, whatever was asked for. Every
+        // format but raw PCM is also named by its bytes; PCM has no header to sniff.
+        if (bytes.byteLength > 0 && !sniffFormat(bytes)) {
+          if (TEXTUAL.test(contentType) || startsLikeJson(bytes))
+            throw unusable(provider, "unknown", "bad_audio", "the reply is text, not audio");
+          if (format !== "pcm")
+            throw unusable(provider, "unknown", "bad_audio", "the reply is not audio");
         }
         const result = describeAudio(provider, bytes, format, {
           model,
@@ -118,6 +116,16 @@ export function createElevenLabsSpeechProvider(config: ElevenLabsSpeechConfig): 
 }
 
 const TEXTUAL = /^(application\/(?:[\w.+-]*\+)?json|text\/)/;
+/** First byte that is not blank or a control character is "{" or "<". */
+const startsLikeJson = (bytes: Uint8Array) => {
+  const first = bytes.subarray(0, 16).find((byte) => byte > 0x20);
+  return first === 0x7b || first === 0x3c;
+};
+// A key with a line break or a character outside plain ASCII makes the runtime refuse the header
+// and quote its value in the error, so it is refused before any request.
+const HEADER_SAFE = /^[\x20-\x7e]+$/;
+const MAX_PAGES = 20;
+const PAGE_TIMEOUT_MS = 30_000;
 
 /**
  * The error a caller sees: kind, status and retry timing, never the vendor's words, which can
@@ -130,18 +138,25 @@ function redacted(provider: string, baseUrl: string, error: unknown): unknown {
   if (!(error instanceof ProviderError)) return error;
   if (error.kind === "network")
     return new ProviderError(provider, "network", `no response from ${new URL(baseUrl).origin}`);
-  const voice = /"code"\s*:\s*"(voice_not_found|invalid_voice_id)"/.test(error.body ?? "");
+  // Our own deadline: its words are ours, its cause is only the abort.
+  if (error.kind === "timeout") return new ProviderError(provider, "timeout", error.message);
+  const body = error.body ?? "";
+  const voice = /"code"\s*:\s*"(voice_not_found|invalid_voice_id)"/.test(body);
+  // Older answers say a spent character quota with a 401; it is the balance, not the key.
+  const quota = /"(code|status)"\s*:\s*"quota_exceeded"/.test(body);
   return new ProviderError(
     provider,
-    voice ? "invalid" : error.kind,
+    voice ? "invalid" : quota ? "quota" : error.kind,
     voice
       ? `${provider}: the voice does not exist for this key`
-      : `${provider} ${error.status ?? ""}`.trim(),
+      : error.code
+        ? error.message
+        : `${provider} ${error.status ?? ""}`.trim(),
     {
       status: error.status,
       ...(voice
         ? { code: "voice_not_found", shouldRetry: false }
-        : { shouldRetry: error.shouldRetry }),
+        : { code: error.code, shouldRetry: error.shouldRetry }),
       retryAfterMs: error.retryAfterMs,
       resetAtMs: error.resetAtMs,
       window: error.window,
@@ -162,26 +177,46 @@ export async function listElevenLabsVoices(config: {
 }): Promise<ElevenLabsVoice[]> {
   const provider = "speech:elevenlabs";
   const max = config.max ?? 100;
+  if (!Number.isSafeInteger(max) || max < 1)
+    throw new RangeError(`[providerkit] max must be a positive integer, not ${String(max)}`);
+  if (!HEADER_SAFE.test(config.apiKey))
+    throw new ProviderError(
+      provider,
+      "auth",
+      `${provider}: the API key is empty or holds a character that cannot be sent in a header. Paste the key again`,
+      { code: "key_invalid", shouldRetry: false },
+    );
+  const baseUrl = config.baseUrl ?? DEFAULT_BASE;
   const voices: ElevenLabsVoice[] = [];
+  const seen = new Set<string>();
   let token: string | undefined;
-  do {
-    const url = new URL(apiUrl(config.baseUrl ?? DEFAULT_BASE, "/v2/voices"));
+  // A server that keeps saying "more" with nothing new, or the same token, ends the list: it is
+  // read at most MAX_PAGES times, each page under its own deadline.
+  for (let pages = 0; pages < MAX_PAGES; pages++) {
+    const url = new URL(apiUrl(baseUrl, "/v2/voices"));
     url.searchParams.set("page_size", String(Math.min(100, max - voices.length)));
     url.searchParams.set("include_total_count", "false");
     if (token) url.searchParams.set("next_page_token", token);
     const page = asRecord(
-      await getJson({
-        url: url.href,
-        headers: { "xi-api-key": config.apiKey },
-        provider,
-        redirect: "error",
-        ...(config.signal ? { signal: config.signal } : {}),
-        ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+      await withDeadline(provider, PAGE_TIMEOUT_MS, config.signal, (signal) =>
+        getJson({
+          url: url.href,
+          headers: { "xi-api-key": config.apiKey },
+          provider,
+          redirect: "error",
+          signal,
+          ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+        }),
+      ).catch((error: unknown) => {
+        throw redacted(provider, baseUrl, error);
       }),
     );
+    const before = voices.length;
     for (const raw of Array.isArray(page?.voices) ? page.voices : []) {
       const voice = asRecord(raw);
-      if (typeof voice?.voice_id !== "string" || !voice.voice_id) continue;
+      if (typeof voice?.voice_id !== "string" || !voice.voice_id || seen.has(voice.voice_id))
+        continue;
+      seen.add(voice.voice_id);
       const verified = Array.isArray(voice.verified_languages) ? voice.verified_languages : [];
       voices.push({
         id: voice.voice_id,
@@ -196,10 +231,12 @@ export async function listElevenLabsVoices(config: {
         ],
       });
     }
-    token =
+    const next =
       page?.has_more === true && typeof page.next_page_token === "string"
         ? page.next_page_token
         : undefined;
-  } while (token && voices.length < max);
+    if (!next || next === token || voices.length === before || voices.length >= max) break;
+    token = next;
+  }
   return voices.slice(0, max);
 }
