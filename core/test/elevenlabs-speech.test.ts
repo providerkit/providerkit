@@ -119,26 +119,43 @@ describe("ElevenLabs speech", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("names a missing voice as the voice, and never repeats the vendor's words", async () => {
-    for (const [status, code] of [
-      [404, "voice_not_found"],
-      [400, "invalid_voice_id"],
-    ] as const) {
-      const { fetchImpl } = fake(() => failure(status, code));
-      const error = await createElevenLabsSpeechProvider({ apiKey: "sk", voice: "nope", fetchImpl })
-        .synthesize({ text: "Hello there" })
-        .catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(ProviderError);
-      expect(error).toMatchObject({
-        kind: "invalid",
-        code: "voice_not_found",
-        status,
-        shouldRetry: false,
-      });
-      expect(String((error as Error).message)).not.toContain("Hello there");
-      expect((error as ProviderError).body).toBeUndefined();
-    }
-  });
+  it.each(["code", "status", "both"] as const)(
+    "names a missing voice from %s, without repeating the vendor's words",
+    async (field) => {
+      for (const [status, code] of [
+        [404, "voice_not_found"],
+        [400, "invalid_voice_id"],
+      ] as const) {
+        const apiKey = "sk_test_secret";
+        const { calls, fetchImpl } = fake(() =>
+          Response.json(
+            {
+              detail: {
+                ...(field !== "status" ? { code } : {}),
+                ...(field !== "code" ? { status: code } : {}),
+                message: `Hello there ${apiKey}`,
+              },
+            },
+            { status },
+          ),
+        );
+        const error = await createElevenLabsSpeechProvider({ apiKey, voice: "nope", fetchImpl })
+          .synthesize({ text: "Hello there" })
+          .catch((caught: unknown) => caught);
+        if (!(error instanceof ProviderError)) throw new Error("Expected a provider error");
+        expect(error).toMatchObject({
+          kind: "invalid",
+          code: "voice_not_found",
+          status,
+          shouldRetry: false,
+        });
+        expect(error.message).not.toContain("Hello there");
+        expect(JSON.stringify(error)).not.toContain(apiKey);
+        expect(error.body).toBeUndefined();
+        expect(calls).toHaveLength(1);
+      }
+    },
+  );
 
   it("reads a wrong key as auth, no credits as quota and a throttle as rate, without the body", async () => {
     for (const [status, code, kind] of [
