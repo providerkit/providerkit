@@ -73,6 +73,34 @@ OpenAI says `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` shut down on 2027-01-06
 as the replacement is not served by `/audio/speech`. After that date the `openai` row is
 useful for servers that copy the route, which is the next section.
 
+## ElevenLabs through OpenRouter
+
+Use your OpenRouter key with the existing `openrouter` preset:
+
+```ts
+const speech = createSpeechProvider("openrouter", {
+  apiKey: openRouterKey,
+  model: "elevenlabs/eleven-flash-v2.5",
+  voice: "george",
+});
+const { bytes, mimeType } = await speech.synthesize({ text: "Click Settings." });
+
+mimeType; // "audio/mpeg"
+```
+
+This sends one request to `https://openrouter.ai/api/v1/audio/speech` and asks for MP3.
+It needs no separate ElevenLabs key for the listed voices. Read a model's `supported_voices`
+from `GET /api/v1/models?output_modalities=speech` rather than use a voice from another model.
+OpenRouter model ids use hyphens (`elevenlabs/eleven-flash-v2.5`); direct ElevenLabs ids use
+underscores (`eleven_flash_v2_5`).
+
+Your private cloned or designed voices need your ElevenLabs key connected in
+[OpenRouter's BYOK settings](https://openrouter.ai/docs/guides/overview/auth/byok).
+The voice list from `listElevenLabsVoices` belongs to a direct ElevenLabs key, not an
+OpenRouter key. Checked against OpenRouter's [speech guide](https://openrouter.ai/docs/guides/overview/multimodal/tts),
+[ElevenLabs announcement](https://openrouter.ai/blog/announcements/elevenlabs-on-openrouter/)
+and public model list on 2026-11-05.
+
 ## A server that copies OpenAI's route
 
 Point the `openai` preset at another host with `baseUrl`. A local Kokoro server needs no key:

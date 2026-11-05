@@ -1779,20 +1779,30 @@ describe("createSpeechProvider", () => {
     expect(error.code).toBe("text_too_long");
   });
 
-  it("reaches OpenRouter at /api/v1, asks for mp3, and wants a model", async () => {
+  it("reaches ElevenLabs through OpenRouter with one MP3 request, and wants a model", async () => {
     expect(() => createSpeechProvider("openrouter", { apiKey: KEY })).toThrow(/Pass a model/);
-    const fetchImpl = fakeFetch(() => audioReply(mp3()));
+    const bytes = mp3();
+    const fetchImpl = fakeFetch(() => audioReply(bytes, "audio/mpeg"));
     const speech = createSpeechProvider("openrouter", {
       apiKey: KEY,
-      model: "some/speech-model",
-      voice: "v1",
+      model: "elevenlabs/eleven-flash-v2.5",
+      voice: "george",
       siteName: "App",
       fetchImpl,
     });
-    await speech.synthesize({ text: "Hi." });
+    const result = await speech.synthesize({ text: "Hi." });
     expect(sentUrl(fetchImpl)).toBe("https://openrouter.ai/api/v1/audio/speech");
-    expect(sentBody(fetchImpl)).toMatchObject({ response_format: "mp3" });
+    expect(sentBody(fetchImpl)).toEqual({
+      model: "elevenlabs/eleven-flash-v2.5",
+      input: "Hi.",
+      voice: "george",
+      response_format: "mp3",
+    });
+    expect(sentHeaders(fetchImpl).get("authorization")).toBe(`Bearer ${KEY}`);
     expect(sentHeaders(fetchImpl).get("x-title")).toBe("App");
+    expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({ method: "POST", redirect: "error" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ format: "mp3", mimeType: "audio/mpeg", bytes });
   });
 
   it("names the provider after the preset, in its id and in its errors", async () => {

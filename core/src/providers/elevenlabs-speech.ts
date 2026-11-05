@@ -20,7 +20,7 @@ import { apiUrl, getJson, postBytes, withDeadline, type FetchLike } from "../tra
 export interface ElevenLabsSpeechConfig extends SpeechLimits, Attribution {
   apiKey: string;
   /** Default `eleven_multilingual_v2`, which speaks 29 languages. `eleven_flash_v2_5` is faster
-   *  and costs half the characters. */
+   *  and costs half as much per character. */
   model?: string;
   /** Default `https://api.elevenlabs.io`. A regional host (`https://api.eu.residency.elevenlabs.io`)
    *  is passed whole. */
@@ -141,7 +141,7 @@ function redacted(provider: string, baseUrl: string, error: unknown): unknown {
   // Our own deadline: its words are ours, its cause is only the abort.
   if (error.kind === "timeout") return new ProviderError(provider, "timeout", error.message);
   const body = error.body ?? "";
-  const voice = /"code"\s*:\s*"(voice_not_found|invalid_voice_id)"/.test(body);
+  const voice = /"(code|status)"\s*:\s*"(voice_not_found|invalid_voice_id)"/.test(body);
   // Older answers say a spent character quota with a 401; it is the balance, not the key.
   const quota = /"(code|status)"\s*:\s*"quota_exceeded"/.test(body);
   return new ProviderError(
