@@ -33,6 +33,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import type { FetchLike } from "../transport.ts";
 
 export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** The credential: an API key for `key`/`bearer` presets, an ACCESS TOKEN
@@ -92,7 +93,7 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** Default `service_tier` for every call on the OpenAI and Responses shapes;
    *  `StreamOptions.serviceTier` wins. Anthropic and Gemini presets refuse it. */
   serviceTier?: ServiceTier;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
 }
 
 /** What one adapter for one model takes: a `PresetProviderConfig` without the
@@ -165,7 +166,7 @@ function buildWireAdapter(
   wire: Wire,
   model: string,
   config: PresetAdapterConfig,
-  fetchImpl: typeof fetch | undefined,
+  fetchImpl: FetchLike | undefined,
 ): Provider {
   const headers = { ...preset.headers, ...config.headers };
   const baseUrl = config.baseUrl ?? wire.baseUrl;
@@ -370,7 +371,7 @@ function wrapOpenCodeZen(
         : { messages, tools, opts, renamedRead: false };
 
       const runAttempt = async function* (anonymous: boolean): AsyncIterable<ProviderChunk> {
-        const fetchImpl: typeof fetch = (input, init) => {
+        const fetchImpl: FetchLike = (input, init) => {
           const merged = new Headers(init?.headers);
           if (!callerUa) merged.set("user-agent", OPENCODE_CLI_USER_AGENT);
           merged.set("x-opencode-session", ses);

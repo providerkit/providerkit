@@ -11,7 +11,7 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
-import { streamSse, apiUrl, parseFrame } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
@@ -83,7 +83,7 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    */
   jsonWithTools?: JsonWithTools;
   maxTokens?: number;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   headers?: Record<string, string>;
   /**
    * App attribution for OpenRouter's rankings. The site URL rides as

@@ -2,6 +2,7 @@
 // credential it builds, and the errors a sign-in can end in. Fetch only, no
 // Node built-ins. What differs per vendor stays in flows.ts.
 import { classifyHttp, ProviderError } from "../errors.ts";
+import type { FetchLike } from "../transport.ts";
 
 /** What the host app supplies. Opening a browser and catching a redirect are
  *  the two things a fetch-only package can't do. */
@@ -24,7 +25,7 @@ export interface AuthHost {
     signal: AbortSignal;
   }): Promise<string>;
   /** Replaces `fetch`, for tests. */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   /** How long one request to a sign-in server may take, in ms. Default 30 s. */
   timeoutMs?: number;
 }

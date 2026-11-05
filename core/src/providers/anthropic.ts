@@ -9,7 +9,7 @@ import {
 } from "../errors.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
-import { streamSse, apiUrl, parseFrame } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
@@ -40,7 +40,7 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
   /** Anthropic requires an output ceiling on every request. */
   maxTokens?: number;
   version?: string;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   /** Merged into every request. The subscription backend needs its own beta
    *  headers, and a gateway in front usually wants one of its own. */
   headers?: Record<string, string>;

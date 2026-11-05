@@ -18,7 +18,7 @@ import {
   type SpeechProvider,
   type SpeechUsage,
 } from "../speech-core.ts";
-import { apiUrl, postBytes, versionedPath } from "../transport.ts";
+import { apiUrl, postBytes, versionedPath, type FetchLike } from "../transport.ts";
 
 export interface GeminiSpeechConfig extends SpeechLimits {
   apiKey: string;
@@ -41,7 +41,7 @@ export interface GeminiSpeechConfig extends SpeechLimits {
   maxOutputTokens?: number;
   headers?: Record<string, string>;
   /** Swapped in tests, or to route through a proxy. Defaults to global fetch. */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
 }
 
 const FORMATS: readonly SpeechFormat[] = ["wav", "pcm"];

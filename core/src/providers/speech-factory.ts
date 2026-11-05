@@ -10,6 +10,7 @@ import type { Attribution } from "../attribution.ts";
 import type { SpeechFormat, SpeechLimits, SpeechProvider } from "../speech-core.ts";
 import { createGeminiSpeechProvider } from "./gemini-speech.ts";
 import { createOpenAISpeechProvider } from "./openai-speech.ts";
+import type { FetchLike } from "../transport.ts";
 
 export interface SpeechProviderConfig extends SpeechLimits, Attribution {
   apiKey: string;
@@ -30,7 +31,7 @@ export interface SpeechProviderConfig extends SpeechLimits, Attribution {
   /** The `google` preset only: caps the audio tokens generated. Refused on a wire that has no such field. */
   maxOutputTokens?: number;
   /** Swapped in tests, or to route through a proxy. Defaults to global fetch. */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
 }
 
 /**

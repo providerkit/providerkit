@@ -1733,12 +1733,15 @@ describe("the main entry", () => {
     const speech = await import("../src/speech.ts");
     expect(Object.keys(speech).sort()).toEqual([
       "DEFAULT_SPEECH_LIMITS",
+      "ELEVENLABS_DEFAULT_MODEL",
       "SPEECH_FORMATS",
       "SPEECH_PRESET_IDS",
       "SpeechError",
+      "createElevenLabsSpeechProvider",
       "createGeminiSpeechProvider",
       "createOpenAISpeechProvider",
       "createSpeechProvider",
+      "listElevenLabsVoices",
       "readWav",
     ]);
   });

@@ -17,7 +17,7 @@ import {
   type SpeechLimits,
   type SpeechProvider,
 } from "../speech-core.ts";
-import { apiUrl, postBytes, versionedPath } from "../transport.ts";
+import { apiUrl, postBytes, versionedPath, type FetchLike } from "../transport.ts";
 
 export interface OpenAISpeechConfig extends SpeechLimits, Attribution {
   /** "" sends no Authorization header, for a local server that wants none. */
@@ -36,7 +36,7 @@ export interface OpenAISpeechConfig extends SpeechLimits, Attribution {
   format?: SpeechFormat;
   headers?: Record<string, string>;
   /** Swapped in tests, or to route through a proxy. Defaults to global fetch. */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
 }
 
 // A JSON or text body is an error that arrived with a 200, not audio.
