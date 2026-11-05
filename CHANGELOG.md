@@ -2,6 +2,14 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.29.0] - 2026-11-05
+
+### Added
+
+- **ElevenLabs speech, `createElevenLabsSpeechProvider`, on `@providerkit/core/speech`.** `POST /v1/text-to-speech/{voice_id}` with the key in `xi-api-key` and `eleven_multilingual_v2` unless a `model` is passed (`eleven_flash_v2_5` is faster and costs half the characters). It makes 24 kHz WAV and raw PCM, 128 kbps MP3 and Opus, which every ElevenLabs plan can make; 44.1 kHz PCM and WAV need a Pro plan, so they are not asked for. It is not a chat preset, so it has no preset row and `createSpeechProvider` does not reach it. ElevenLabs bills per character and states no usage, so `characters` is the number to bill by. One request per call, `redirect: "error"`, and the same error rules as the other wires: kind, status and retry hints, never the vendor's words, the URL path or a network cause. A missing or malformed voice id (`voice_not_found`, `invalid_voice_id`) is `invalid` with the code `voice_not_found` instead of an unknown model, because the fix is another voice. Built from ElevenLabs' documentation read on 2026-11-05; no live call has been made.
+- **`listElevenLabsVoices({ apiKey })`** reads the voices a key can use from `GET /v2/voices`, page by page up to `max` (100), with each voice's id, name, category and the languages ElevenLabs verified for it.
+- **`FetchLike`, the type of every `fetchImpl` option**, exported from the main entry and from `@providerkit/core/speech`. It is the call signature of `fetch` alone. `typeof fetch` under Bun's types includes `fetch.preconnect`, so a plain async wrapper or a test double did not type-check and callers grafted `preconnect` onto it. Global `fetch` still fits.
+
 ## [0.28.1] - 2026-11-04
 
 ### Fixed
