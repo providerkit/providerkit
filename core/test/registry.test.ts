@@ -173,14 +173,66 @@ describe("refs", () => {
     const { fetchImpl, sent } = server(() => throttled());
     const providers = createRegistry({
       connections: { go: { preset: "opencode-go", apiKey: "k", fetchImpl } },
-      chains: { default: ["go/mimo-v2.5", "go", "go/mimo-v2.5"] },
+      chains: { default: ["go/glm-5.3-flash", "go", "go/glm-5.3-flash"] },
     });
     await expect(ask(providers.get("default"))).rejects.toMatchObject({ kind: "rate" });
     const rotation = PROVIDER_PRESETS["opencode-go"].rotation;
     expect(sent.map((req) => req.model)).toEqual([
-      "mimo-v2.5",
-      ...rotation.filter((model) => model !== "mimo-v2.5"),
+      "glm-5.3-flash",
+      ...rotation.filter((model) => model !== "glm-5.3-flash"),
     ]);
+  });
+
+  it("moves past a retired model in the middle of a rotation, and benches it", async () => {
+    // The day the first model's monthly limit is spent, the chain reaches a model Go has retired.
+    // OpenCode Go's exact reply for it, measured with a live key on 2026-11-11.
+    const retired = () =>
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "ModelDeprecated",
+            message: "Model mimo-v2.5 has been deprecated. Use mimo-v2.6-flash instead...",
+          },
+        }),
+        { status: 410, headers: { "content-type": "application/json" } },
+      );
+    const spent = () =>
+      new Response(
+        JSON.stringify({
+          type: "error",
+          error: { type: "GoUsageLimitError", message: "Go usage limit exceeded" },
+        }),
+        { status: 429, headers: { "content-type": "application/json" } },
+      );
+    const failing: Record<string, () => Response> = {
+      "mimo-v2.6-flash": spent,
+      "mimo-v2.5": retired,
+    };
+    const { fetchImpl, sent } = server((req) => failing[req.model]?.() ?? turn(req.model));
+    const seen: RegistryCooldownInfo[] = [];
+    const providers = createRegistry({
+      connections: {
+        go: {
+          preset: "opencode-go",
+          apiKey: "k",
+          models: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash"],
+          fetchImpl,
+        },
+      },
+      fallback: { onCooldown: (info) => seen.push(info) },
+    });
+
+    expect(await ask(providers.get("go"))).toBe("glm-5.3-flash");
+    expect(sent.map((req) => req.model)).toEqual(["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash"]);
+    expect(seen).toMatchObject([
+      { ref: "go/mimo-v2.6-flash", kind: "quota" },
+      { ref: "go/mimo-v2.5", kind: "model" },
+    ]);
+
+    // Both stay benched, so the next call goes straight to the model that answers.
+    expect(await ask(providers.get("go"))).toBe("glm-5.3-flash");
+    expect(sent.map((req) => req.model).slice(3)).toEqual(["glm-5.3-flash"]);
   });
 });
 

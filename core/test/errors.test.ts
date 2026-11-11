@@ -133,6 +133,54 @@ describe("the body outranks the status for the 4xx family", () => {
   });
 });
 
+describe("a retired model is model, so a fallback chain moves past it", () => {
+  // OpenCode Go's exact reply for mimo-v2.5, measured with a live key on 2026-11-11.
+  const goDeprecated = JSON.stringify({
+    type: "error",
+    error: {
+      type: "ModelDeprecated",
+      message: "Model mimo-v2.5 has been deprecated. Use mimo-v2.6-flash instead...",
+    },
+  });
+
+  it("reads OpenCode Go's 410 ModelDeprecated as model", () => {
+    expect(classifyHttp(410, goDeprecated)).toBe("model");
+  });
+
+  it("reads the same body inside a 200 stream as model", () => {
+    expect(streamError("opencode-go", JSON.parse(goDeprecated)).kind).toBe("model");
+  });
+
+  it("reads a bare 410 as model", () => {
+    expect(classifyHttp(410, "")).toBe("model");
+  });
+
+  it.each([
+    [400, "The model `llama3-70b-8192` has been decommissioned and is no longer supported."],
+    [400, '{"error":{"message":"The model \\"gpt-4-0314\\" is deprecated"}}'],
+    [403, "This model is no longer available to your organization."],
+    [400, '{"error":{"code":"model_retired"}}'],
+    [404, "You requested a retired model."],
+  ])("reads %i %j as model", (status, body) => {
+    expect(classifyHttp(status, body)).toBe("model");
+  });
+
+  it("keeps the body families invariant 3 orders ahead of it", () => {
+    const retired = "Model mimo-v2.5 has been deprecated.";
+    expect(classifyHttp(400, `prompt is too long. ${retired}`)).toBe("context");
+    expect(classifyHttp(403, `Your plan does not include this. ${retired}`)).toBe("entitlement");
+    expect(classifyHttp(429, `insufficient_quota. ${retired}`)).toBe("quota");
+    expect(classifyHttp(401, `Invalid API key. ${retired}`)).toBe("auth");
+  });
+
+  it("leaves a deprecated parameter invalid, and a 5xx outage overload", () => {
+    expect(classifyHttp(400, "The 'functions' parameter is deprecated. Use 'tools'.")).toBe(
+      "invalid",
+    );
+    expect(classifyHttp(503, "The model is no longer available, try again later")).toBe("overload");
+  });
+});
+
 describe("OpenCode free allowance", () => {
   it.each([
     "FreeUsageLimitError",

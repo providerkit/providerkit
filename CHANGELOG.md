@@ -15,7 +15,13 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 ### Fixed
 
+- **A retired model is `model`, so a fallback chain moves past it.** OpenCode Go answers every call to `mimo-v2.5` with HTTP 410 `ModelDeprecated` ("Model mimo-v2.5 has been deprecated. Use mimo-v2.6-flash instead"). The classifier read that as `invalid`, which has no fallback cooldown, so a `FallbackPool` or registry chain threw on it instead of rotating: one retired model in a rotation ended the whole chain the day the models ahead of it were spent. HTTP 410, and a 4xx or in-band body that names a retired model (`ModelDeprecated`, `model_retired`, "has been deprecated", "has been decommissioned", "is no longer available"), are now `model`, benched for an hour like a missing model. Every wording names the model, so a deprecated parameter stays `invalid`, and a 5xx stays `overload`. The body families invariant 3 orders (context, entitlement, quota, auth) still come first; the new check sits above the 401 and 403 statuses, because the body outranks the status.
+- **`mimo-v2.5` is out of the `opencode-go` preset's `models` and default `rotation`**, which is now `mimo-v2.6-flash`, `glm-5.3-flash`, `qwen3.8-flash`, `longcat-2.0`. Go retired it (measured with a live key on 2026-11-11).
 - **Deepgram's 403 "Project does not have access to the requested model" is `model`, not `auth`.** The key is fine; another model is the fix.
+
+### Documentation
+
+- **On OpenCode Go, `mimo-v2.6-flash` ignores a strict JSON Schema.** On 2026-11-11 it answered a strict `json_schema` request with the schema itself instead of filling it in, on Go and on OpenRouter (`xiaomi/mimo-v2.6-flash`); `glm-5.3-flash`, `qwen3.8-flash` and `longcat-2.0` filled it in, with an image input too. It leads the default rotation, so the registry guide and the README now say to name your own `models` for structured output. No code change: the schema reply is a normal answer, not an error.
 
 Built from Deepgram's and OpenAI's documentation and the replies it shows, read on 2026-11-11. No live call has been made with a real key.
 

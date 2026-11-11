@@ -511,8 +511,14 @@ export const PROVIDER_PRESETS = {
    *
    * Measured 2026-09-27 on /chat/completions: a call without
    * `x-opencode-session` is refused. `mimo-v2.6-flash` passes plain text,
-   * `reasoning_effort: "none"`, tool calls and json_schema; `glm-5.3-flash`
-   * 400s on a tool without a description and on a `thinking` field.
+   * `reasoning_effort: "none"` and tool calls; `glm-5.3-flash` 400s on a tool
+   * without a description and on a `thinking` field.
+   *
+   * Measured 2026-11-11 with a live key: `mimo-v2.5` is retired (every call
+   * answers 410 `ModelDeprecated`), and `mimo-v2.6-flash` ignores a strict
+   * json_schema `response_format` and answers with the schema itself, on Go and
+   * on OpenRouter. `glm-5.3-flash`, `qwen3.8-flash` and `longcat-2.0` fill the
+   * schema in, with an image input too.
    *
    * Go serves three wires, and `routes` picks one from the model id (cc-proxy's
    * table, from Go's own docs): `minimax-` and `qwen` on Anthropic /messages
@@ -539,7 +545,6 @@ export const PROVIDER_PRESETS = {
     defaultModel: "mimo-v2.6-flash",
     models: [
       "mimo-v2.6-flash",
-      "mimo-v2.5",
       "glm-5.3-flash",
       "qwen3.8-flash",
       "longcat-2.0",
@@ -569,11 +574,13 @@ export const PROVIDER_PRESETS = {
       },
     ],
     // Cheapest first, each with its own monthly limit ($60, qwen3.8-flash $30).
-    // All five passed plain text, a described tool call and json_schema on
-    // 2026-09-27; longcat-2.0 ignores reasoning "none", so it goes last.
-    // DeepSeek is left out: on Go it needs the workspace's Global regions
-    // privacy setting, and answers 500 without it.
-    rotation: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
+    // All four passed plain text, a described tool call and json_schema on
+    // 2026-09-27; longcat-2.0 ignores reasoning "none", so it goes last. On
+    // 2026-11-11 mimo-v2.6-flash no longer filled a strict json_schema (see
+    // above), so a caller that needs one names its own `models`. DeepSeek is
+    // left out: on Go it needs the workspace's Global regions privacy setting,
+    // and answers 500 without it.
+    rotation: ["mimo-v2.6-flash", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
   },
   /**
    * OpenCode Zen: free and pay-as-you-go models on `https://opencode.ai/zen/v1`,
