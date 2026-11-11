@@ -23,7 +23,8 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 - **On OpenCode Go, `mimo-v2.6-flash` ignores a strict JSON Schema.** On 2026-11-11 it answered a strict `json_schema` request with the schema itself instead of filling it in, on Go and on OpenRouter (`xiaomi/mimo-v2.6-flash`); `glm-5.3-flash`, `qwen3.8-flash` and `longcat-2.0` filled it in, with an image input too. It leads the default rotation, so the registry guide and the README now say to name your own `models` for structured output. No code change: the schema reply is a normal answer, not an error.
 
-Built from Deepgram's and OpenAI's documentation and the replies it shows, read on 2026-11-11. No live call has been made with a real key.
+Built from Deepgram's and OpenAI's documentation and the replies it shows, read on 2026-11-11. Deepgram was then called live with a real key: a 7.8-second pt-BR recording came back word for word ("15 dias úteis", "artigo 1003") with its duration, `diarize: true` labelled the speaker 0, a broken recording was `invalid`/`audio_invalid` (400), and a wrong key was `auth` (401). OpenAI has not been called with a real key yet.
+- **An OpenAI transcription provider built with no model is `invalid`/`model_required`**, as plain JavaScript can build one, instead of a `TypeError` before the request.
 
 ## [0.29.1] - 2026-11-05
 

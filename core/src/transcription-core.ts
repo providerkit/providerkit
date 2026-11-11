@@ -193,7 +193,7 @@ export function prepareTranscription(
       `the audio is ${audio.size} bytes and the limit is ${defaults.maxAudioBytes}`,
     );
   }
-  const model = (request.model ?? defaults.model).trim();
+  const model = (request.model ?? defaults.model ?? "").trim();
   if (!model) throw refuse(provider, "model_required", "name a model");
   const language = request.language?.trim();
   return { audio, model, ...(language ? { language } : {}), diarize: request.diarize === true };

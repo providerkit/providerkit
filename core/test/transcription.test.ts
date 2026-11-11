@@ -659,6 +659,20 @@ const WIRES = [
   },
 ] as const;
 
+describe("openai wire: no model at all", () => {
+  it("refuses a provider built without a model, as plain JavaScript can, instead of crashing", async () => {
+    const fetchImpl = fakeFetch(() => json(gptTranscribeReply));
+    const config = { apiKey: KEY, fetchImpl } as unknown as Parameters<
+      typeof createOpenAITranscriptionProvider
+    >[0];
+    const error = await failure(
+      createOpenAITranscriptionProvider(config).transcribe({ audio: recording() }),
+    );
+    expect(error).toMatchObject({ kind: "invalid", code: "model_required" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe.each(WIRES)("$name: refused before any request", ({ make, ok }) => {
   const refusal = async (audio: Blob, extra: Extra = {}) => {
     const fetchImpl = fakeFetch(ok);
