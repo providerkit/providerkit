@@ -4,7 +4,7 @@
 //
 // Adapters keep only their per-event mapping; everything about being an HTTP
 // client lives here once.
-import { classifyHttp, parseRetryAfterMs, ProviderError } from "./errors.ts";
+import { classifyHttp, parseRetryAfterMs, ProviderError, type ErrorKind } from "./errors.ts";
 import {
   parseRateLimitReset,
   parseRateLimitResponse,
@@ -198,13 +198,17 @@ function originOf(url: string): string {
  */
 async function send(opts: RequestInit_, method = "POST", redact = false): Promise<Response> {
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
+  // A Blob (a recording) or a FormData (a multipart upload) goes as itself, and fetch writes its
+  // Content-Type: a multipart boundary is one only fetch knows, so a JSON type here would break it.
+  const payload = opts.body;
+  const raw = payload instanceof Blob || payload instanceof FormData;
   // Serialized outside the catch below: a body that cannot become JSON is a
   // bug of ours, and must not be dressed as a network blip and retried.
-  const body = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+  const body = raw || typeof payload === "string" ? payload : JSON.stringify(payload);
   try {
     return await doFetch(opts.url, {
       method,
-      headers: { "content-type": "application/json", ...opts.headers },
+      headers: raw ? { ...opts.headers } : { "content-type": "application/json", ...opts.headers },
       body,
       signal: opts.signal,
       ...(opts.redirect ? { redirect: opts.redirect } : {}),
@@ -358,6 +362,76 @@ export async function withDeadline<T>(
       });
     }
     throw err;
+  }
+}
+
+type ProviderErrorOptions = NonNullable<ConstructorParameters<typeof ProviderError>[3]>;
+
+/** How a capability copies one of its own errors, so a subclass comes back as itself
+ *  with what it carries (the usage a speech or transcription error keeps). */
+export type ErrorRebuild = (err: ProviderError, opts: ProviderErrorOptions) => ProviderError;
+
+const plainCopy: ErrorRebuild = (err, opts) =>
+  new ProviderError(err.provider, err.kind, err.message, opts);
+
+/** Kinds that can land after the vendor started the work it bills for. */
+const REPLAY_UNSAFE: ReadonlySet<ErrorKind> = new Set<ErrorKind>([
+  "network",
+  "timeout",
+  "overload",
+  "unknown",
+]);
+
+/**
+ * @internal The "could the vendor already have billed this?" rule (invariant 16), for every
+ * call that is paid for whole and answered whole: speech and transcription. Kept here, once,
+ * so a new capability or a new failure path cannot forget it.
+ *
+ * - The caller's Stop comes back untouched.
+ * - A timeout, a dead socket, a 5xx or anything unclassified may have landed after
+ *   the vendor started work, so it is marked `shouldRetry: false`, and a vendor's
+ *   `x-should-retry: true` does not undo that: the header says the vendor thinks a
+ *   resend is fine, not that the first call was not billed.
+ * - Every other kind keeps what it came with. A 429 means the vendor refused before
+ *   doing any work, so sending it again is safe, and `Retry-After` is honoured by
+ *   the caller's own retry. `x-should-retry` is believed there, in either direction.
+ */
+export function noReplay(
+  provider: string,
+  error: unknown,
+  signal?: AbortSignal,
+  rebuild: ErrorRebuild = plainCopy,
+): unknown {
+  if (signal?.aborted) return error;
+  const err = ProviderError.from(provider, error);
+  if (!REPLAY_UNSAFE.has(err.kind) || err.shouldRetry === false) return err;
+  return rebuild(err, {
+    status: err.status,
+    code: err.code,
+    retryAfterMs: err.retryAfterMs,
+    resetAtMs: err.resetAtMs,
+    window: err.window,
+    shouldRetry: false,
+    body: err.body,
+    cause: err.cause,
+  });
+}
+
+/**
+ * @internal The one place a paid call runs: under one deadline, once, with `noReplay`
+ * applied to whatever it throws.
+ */
+export async function callOnce<T>(
+  provider: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  call: (signal: AbortSignal) => Promise<T>,
+  rebuild?: ErrorRebuild,
+): Promise<T> {
+  try {
+    return await withDeadline(provider, timeoutMs, signal, call);
+  } catch (error) {
+    throw noReplay(provider, error, signal, rebuild);
   }
 }
 

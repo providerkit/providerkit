@@ -22,6 +22,10 @@
       "types": "./dist/speech.d.ts",
       "default": "./dist/speech.js"
     },
+    "./transcription": {
+      "types": "./dist/transcription.d.ts",
+      "default": "./dist/transcription.js"
+    },
     "./auth": {
       "types": "./dist/auth/index.d.ts",
       "default": "./dist/auth/index.js"

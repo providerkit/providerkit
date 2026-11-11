@@ -2,6 +2,23 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`@providerkit/core/transcription`: one recording to its text.** The inverse of `./speech`, in its own entry point, so an app that only chats loads none of it. That app still carries the `openai` transcription row and the upload path in the shared transport: 416 bytes more, 129 gzipped (`bun build --minify`). `transcribe({ audio, model?, language?, diarize?, signal? })` takes the recording as a `Blob` (a `File` is one) and returns `text`, timed `segments` (`start`, `end`, `text`, and `speaker` only when `diarize` was asked for), `durationSeconds` and `usage` only when the provider states them, and the `model`. `usage` keeps the provider's unit: tokens, or billed seconds. Counts that do not add up are dropped whole.
+- **Deepgram, `createDeepgramTranscriptionProvider`.** `POST /v1/listen` with the recording as the body, its media type as `Content-Type`, `Authorization: Token`, and `nova-3` unless a `model` is passed. Every call asks for `punctuate`, `smart_format` and `utterances`, so `segments` is filled with or without speakers; `diarize: true` adds `diarize_model=latest`. With no `language` it sends `detect_language=true`, because Deepgram would otherwise assume English. Speakers are Deepgram's numbers from 0, and are dropped when `diarize` is off, since Deepgram stamps speaker 0 on every utterance then. Deepgram states no usage; `durationSeconds` is what it bills by. Uploads up to its documented 2 GB. It is not a chat preset, so it has no preset row, like ElevenLabs for speech.
+- **OpenAI, `createOpenAITranscriptionProvider`, and `createTranscriptionProvider(presetId, config)` over a new `transcription` row on the `openai` preset (`TRANSCRIPTION_PRESET_IDS`).** `POST /v1/audio/transcriptions` as multipart, the file named for its media type because OpenAI reads the format from the name. The default model is `gpt-transcribe`, which OpenAI's guide recommends; it takes `languages[]` and every other model takes `language`, both as the two-letter code (`pt-BR` goes as `pt`). Whisper models are asked for `verbose_json` and return timed segments. `diarize: true` asks for `diarized_json` with `chunking_strategy: "auto"`, which only `gpt-4o-transcribe-diarize` answers; any other model's 400 comes back as the error instead of a transcript that reads as one voice. OpenAI says `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` and `gpt-4o-transcribe-diarize` shut down on 2027-02-26. `baseUrl` reaches any host that copies the route, Groq's Whisper included, and the preset's default model does not follow it there.
+- **A paid transcription is never replayed.** One request per call. A timeout, a lost socket, a 5xx and anything unclassified carry `shouldRetry: false`, a vendor's `x-should-retry: true` included; a 429 stays retryable. The rule now lives once in `transport.ts` (`noReplay`, `callOnce`) and speech runs on the same code, so the two capabilities cannot drift.
+- **Transcription errors keep the provider's words.** Unlike speech, nothing the caller sent can come back in them (it is audio), and they name the fix ("Invalid file format. Supported formats: ..."). Failures use the usual kinds, and a refused recording is named by `code`: `audio_invalid` when the vendor could not read it, `audio_too_large` for a 413 or a recording over `maxAudioBytes` (25 MiB by default, Deepgram 2 GB), refused before any upload along with `audio_empty`, `audio_type_missing`, `model_required` and a key that cannot go in a header (`auth`, `key_invalid`). A 200 with no transcript is a `TranscriptionError` (`bad_reply`) that keeps the usage the provider stated. One deadline, `timeoutMs` (600,000, the point where Deepgram itself answers 504), covers the upload, the work and the reply; the reply is read up to 64 MiB; `redirect: "error"` on every call.
+- **The transport sends a `Blob` or a `FormData` body as itself**, with no JSON `Content-Type`, so fetch writes the multipart boundary.
+
+### Fixed
+
+- **Deepgram's 403 "Project does not have access to the requested model" is `model`, not `auth`.** The key is fine; another model is the fix.
+
+Built from Deepgram's and OpenAI's documentation and the replies it shows, read on 2026-11-11. No live call has been made with a real key.
+
 ## [0.29.1] - 2026-11-05
 
 ### Fixed

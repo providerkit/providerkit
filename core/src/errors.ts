@@ -466,6 +466,10 @@ const MODEL_PATTERNS: readonly RegExp[] = [
   // another model in the chain can serve it, so this is `model`, not `invalid`.
   /Privacy settings to use it/i,
   /no endpoints found matching your data policy/i,
+  // Deepgram answers 403 `INSUFFICIENT_PERMISSIONS`, "Project does not have access to the
+  // requested model." On status alone that is a wrong key, but the key is fine: another model is
+  // the fix (its errors page, read 2026-11-11).
+  /does not have access to the requested model/i,
 ];
 
 const AUTH_PATTERNS: readonly RegExp[] = [
