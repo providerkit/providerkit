@@ -718,7 +718,7 @@ describe("model chains — one endpoint, one key, several models", () => {
     await drain(provider.createStream([{ role: "user", content: "hi" }], []));
     expect(fetchImpl.mock.calls.map(([, init]) => modelOf(init))).toEqual([
       "mimo-v2.6-flash",
-      "mimo-v2.5",
+      "glm-5.3-flash",
     ]);
   });
 

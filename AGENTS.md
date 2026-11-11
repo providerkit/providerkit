@@ -57,7 +57,7 @@ size they become `@providerkit/gemini` siblings; `core/` stays put.
 bun install                  # workspace root
 
 cd core
-bun run test                 # vitest, 1,557 tests
+bun run test                 # vitest, 1,644 tests
 bun run typecheck
 bun run lint
 bun run build                # tsc → dist/, ESM only
@@ -80,7 +80,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 - **`core/` is the role, not the identity.** If adapters ever split for bundle size they
   become `@providerkit/gemini` siblings — same scope, no rename, no broken links.
 - **One package, many entry points, decided (v1).** `@providerkit/core` serves chat from `.`,
-  and the rest from subpaths: `./zod`, `./decisions`, `./speech`, `./auth`. A new capability is
+  and the rest from subpaths: `./zod`, `./decisions`, `./speech`, `./transcription`, `./auth`. A new capability is
   an entry point first, never a package. The reasons are measured or recorded: an app that only
   chats pays 1.46 KB for the speech preset rows and nothing for the speech code; a capability in
   its own package could only reach the shared transport, `ProviderError`, error classification
@@ -94,7 +94,7 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
   it costs a chat-only bundle more than about 12 KB minified. Then it follows the rule above:
   a sibling in the same scope that imports core's PUBLIC exports only, so whatever it needs
   becomes public API first. `core/` stays put.
-- **Keep each capability split-ready.** Speech, decisions, zod and auth import the shared modules
+- **Keep each capability split-ready.** Speech, transcription, decisions, zod and auth import the shared modules
   (types, errors, transport, presets, attribution) and never each other's files. ESLint
   enforces it (`no-restricted-imports` in `eslint.config.js`), so a split stays a folder move.
 - **GitHub: org `providerkit`, repo `providerkit/providerkit`.** An org rather than a personal
@@ -114,35 +114,38 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
 ## State
 
-**Built and tested** (1,557 tests; typecheck, lint, build, and the MV3 guard all clean):
+**Built and tested** (1,644 tests; typecheck, lint, build, and the MV3 guard all clean):
 
-| Module                   | What it holds                                                                       |
-| ------------------------ | ----------------------------------------------------------------------------------- |
-| `types.ts`               | the seam — messages, tools, chunks, usage, `stripReasoning`                         |
-| `turn.ts`                | `collectTurn`: a stream into the message to append; `drainStream` on it             |
-| `errors.ts`              | **the merged classifier** — 13 kinds named by what fixes them                       |
-| `retry.ts`               | full-jitter backoff, Retry-After, stream retry, backup-model walker                 |
-| `watchdog.ts`            | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                          |
-| `gate.ts`                | at most N calls at once per connection, first in first out; `withGate`              |
-| `usage.ts`               | cost arithmetic (rates stay with the caller)                                        |
-| `transport.ts`           | fetch + the error envelope, and `parseSseStream` on its own                         |
-| `tool-args.ts`           | truncation salvage + double-escape healing                                          |
-| `tools.ts`               | validated, cancellable, time-bounded tool calls + registry                          |
-| `schema.ts`              | clamp overflow to advertised bounds                                                 |
-| `context.ts`             | `needsCompaction`, `pickCut`, `applyCompaction`, and `repairHistory`                |
-| `providers/anthropic.ts` | Anthropic shape                                                                     |
-| `providers/openai.ts`    | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)                      |
-| `providers/responses.ts` | OpenAI Responses shape, incl. the ChatGPT subscription backend                      |
-| `providers/gemini.ts`    | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output             |
-| `key-pool.ts`            | rotating keys — free round-robin then paid, `withKeyPool` decorator                 |
-| `registry.ts`            | providers and keys set up once; `get(ref)` builds gated, watched chains             |
-| `rate-limit.ts`          | which subscription window bound (5h / weekly / monthly) and when it resets          |
-| `zod.ts`                 | `@providerkit/core/zod` — optional peer, typed tools                                |
-| `decisions.ts`           | `@providerkit/core/decisions`: typed questions, five hosts and live model discovery |
-| `speech.ts`              | `@providerkit/core/speech`: text to one audio clip, on its own entry point          |
-| `speech-core.ts`         | the speech types, `SpeechError`, no-replay, and the byte checks (`readWav`)         |
-| `providers/*-speech.ts`  | the OpenAI-shaped and Gemini speech wires, and `createSpeechProvider`               |
-| `auth/`                  | `@providerkit/core/auth` — sign-in flows and `tokenSource`, fetch only              |
+| Module                         | What it holds                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------ |
+| `types.ts`                     | the seam — messages, tools, chunks, usage, `stripReasoning`                          |
+| `turn.ts`                      | `collectTurn`: a stream into the message to append; `drainStream` on it              |
+| `errors.ts`                    | **the merged classifier** — 13 kinds named by what fixes them                        |
+| `retry.ts`                     | full-jitter backoff, Retry-After, stream retry, backup-model walker                  |
+| `watchdog.ts`                  | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                           |
+| `gate.ts`                      | at most N calls at once per connection, first in first out; `withGate`               |
+| `usage.ts`                     | cost arithmetic (rates stay with the caller)                                         |
+| `transport.ts`                 | fetch + the error envelope, `parseSseStream`, and the no-replay rule for paid calls  |
+| `tool-args.ts`                 | truncation salvage + double-escape healing                                           |
+| `tools.ts`                     | validated, cancellable, time-bounded tool calls + registry                           |
+| `schema.ts`                    | clamp overflow to advertised bounds                                                  |
+| `context.ts`                   | `needsCompaction`, `pickCut`, `applyCompaction`, and `repairHistory`                 |
+| `providers/anthropic.ts`       | Anthropic shape                                                                      |
+| `providers/openai.ts`          | OpenAI shape (serves OpenRouter, DeepSeek, GLM, Kimi, Groq, …)                       |
+| `providers/responses.ts`       | OpenAI Responses shape, incl. the ChatGPT subscription backend                       |
+| `providers/gemini.ts`          | Gemini REST/SSE — no SDK, thought signatures, thoughts billed as output              |
+| `key-pool.ts`                  | rotating keys — free round-robin then paid, `withKeyPool` decorator                  |
+| `registry.ts`                  | providers and keys set up once; `get(ref)` builds gated, watched chains              |
+| `rate-limit.ts`                | which subscription window bound (5h / weekly / monthly) and when it resets           |
+| `zod.ts`                       | `@providerkit/core/zod` — optional peer, typed tools                                 |
+| `decisions.ts`                 | `@providerkit/core/decisions`: typed questions, five hosts and live model discovery  |
+| `speech.ts`                    | `@providerkit/core/speech`: text to one audio clip, on its own entry point           |
+| `speech-core.ts`               | the speech types, `SpeechError`, and the byte checks (`readWav`)                     |
+| `providers/*-speech.ts`        | the OpenAI-shaped and Gemini speech wires, and `createSpeechProvider`                |
+| `transcription.ts`             | `@providerkit/core/transcription`: one recording to its text, on its own entry point |
+| `transcription-core.ts`        | the transcription types, `TranscriptionError`, the pre-request checks, audio codes   |
+| `providers/*-transcription.ts` | the Deepgram and OpenAI-shaped wires, and `createTranscriptionProvider`              |
+| `auth/`                        | `@providerkit/core/auth` — sign-in flows and `tokenSource`, fetch only               |
 
 Scope of `auth/`: it signs in and refreshes. Token storage and sign-in screens stay in the app.
 
@@ -242,16 +245,17 @@ un-learned.
     stream and stops reading never reaches it. Released twice, a slot lets one call in past the
     cap. `gate.test.ts` ends a stream every way a stream can end and checks the count after each.
 
-16. **A paid synthesis is never replayed.** A chat stream retries only while nothing was
-    emitted, because a failed stream has cost nothing. A speech reply arrives whole, so that rule
-    has nothing to hold on to: a timeout or a dead socket can land after the vendor started
-    billing. `synthesize()` sends one HTTP request. A timeout, a lost socket, a 5xx and anything
-    unclassified carry `shouldRetry: false` (`noReplay`, applied in one place so a new failure
-    path cannot forget it). The vendor's own `x-should-retry: true` does not undo that: it says a
-    resend is fine for the vendor, not that the first call went unbilled. A 429 stays retryable
-    because it refused before doing any work, and the header is believed there. No fallback
-    model, no second key, no token-renewal replay. `speech.test.ts` counts the fetches on every
-    failure.
+16. **A paid synthesis or transcription is never replayed.** A chat stream retries only while
+    nothing was emitted, because a failed stream has cost nothing. A speech or transcription reply
+    arrives whole, so that rule has nothing to hold on to: a timeout or a dead socket can land
+    after the vendor started billing. `synthesize()` and `transcribe()` each send one HTTP request.
+    A timeout, a lost socket, a 5xx and anything unclassified carry `shouldRetry: false`
+    (`noReplay` in `transport.ts`, applied in one place for both, so a new failure path or a new
+    capability cannot forget it). The vendor's own `x-should-retry: true` does not undo that: it
+    says a resend is fine for the vendor, not that the first call went unbilled. A 429 stays
+    retryable because it refused before doing any work, and the header is believed there. No
+    fallback model, no second key, no token-renewal replay. `speech.test.ts` and
+    `transcription.test.ts` count the fetches on every failure.
 17. **Audio is labelled by its bytes, not by the request.** Servers ignore `response_format`, so
     `format` comes from the signature (WAV, FLAC, Ogg Opus, mp3, ADTS AAC), and an empty body, a
     JSON body or bytes nobody recognises is an error. Rate, channels and duration are stated only
@@ -265,6 +269,8 @@ un-learned.
     (`SpeechError.usage`), because the charge happened. A failed send keeps no `cause` and names
     only the host: a runtime that refuses a header quotes its value, key included. A key outside
     printable ASCII is refused before any request (`key_invalid`).
+    A transcription error is the exception, and keeps the vendor's words: what was sent is audio,
+    which no error repeats, and the words name the fix ("Invalid file format"). The key rule holds.
 
 ## Next
 

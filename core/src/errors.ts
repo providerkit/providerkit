@@ -466,6 +466,33 @@ const MODEL_PATTERNS: readonly RegExp[] = [
   // another model in the chain can serve it, so this is `model`, not `invalid`.
   /Privacy settings to use it/i,
   /no endpoints found matching your data policy/i,
+  // Deepgram answers 403 `INSUFFICIENT_PERMISSIONS`, "Project does not have access to the
+  // requested model." On status alone that is a wrong key, but the key is fine: another model is
+  // the fix (its errors page, read 2026-11-11).
+  /does not have access to the requested model/i,
+];
+
+/** An optional model id after the word "model", quoted or not: "model `gpt-4`", "Model mimo-v2.5". */
+const MODEL_ID = String.raw`(?:\s+[\x60'"\\]*[\w./:@-]+[\x60'"\\]*)?`;
+
+/**
+ * A model the vendor has retired. OpenCode Go answers HTTP 410 `ModelDeprecated`, "Model
+ * mimo-v2.5 has been deprecated. Use mimo-v2.6-flash instead" (measured 2026-11-11). Read as
+ * `invalid` it had no fallback cooldown, so the pool threw instead of moving on, and one retired
+ * id in a rotation ended the whole chain the day the models ahead of it were spent. The fix is
+ * another model. Each wording names the model, so a deprecated PARAMETER stays `invalid`.
+ */
+const RETIRED_MODEL_PATTERNS: readonly RegExp[] = [
+  /\bmodel[_\s-]?(?:deprecated|retired|decommissioned)\b/i,
+  new RegExp(
+    String.raw`\bmodel\b${MODEL_ID}\s+(?:has\s+been|was|is(?:\s+now)?)\s+(?:deprecated|retired|removed|decommissioned|discontinued|sunset)\b`,
+    "i",
+  ),
+  new RegExp(
+    String.raw`\bmodel\b${MODEL_ID}\s+is\s+no\s+longer\s+(?:available|supported|served)\b`,
+    "i",
+  ),
+  /\b(?:deprecated|retired|decommissioned|discontinued) model\b/i,
 ];
 
 const AUTH_PATTERNS: readonly RegExp[] = [
@@ -600,9 +627,15 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
   if (clientError && matches(ENTITLEMENT_PATTERNS, text)) return "entitlement";
   if (clientError && matches(QUOTA_PATTERNS, text)) return "quota";
   if (matches(MODEL_PATTERNS, text)) return "model";
-  if (code === 401 || code === 403 || matches(AUTH_PATTERNS, text)) return "auth";
+  if (matches(AUTH_PATTERNS, text)) return "auth";
+  // Below every body family invariant 3 orders, and above the statuses: a body that names the key
+  // is about the key, and a 403 that names a retired model is about the model. Not on a 5xx,
+  // where "no longer available" is an outage, and an hour's bench would be the wrong fix.
+  if (clientError && matches(RETIRED_MODEL_PATTERNS, text)) return "model";
+  if (code === 401 || code === 403) return "auth";
   if (code === 402) return "quota";
-  if (code === 404) return "model";
+  // 410 Gone: the id existed and was withdrawn. Another model is the fix, as for a 404.
+  if (code === 404 || code === 410) return "model";
   if (code === 429) return "rate";
   if (matches(CONTENT_PATTERNS, text)) return "content";
   // 529 is Anthropic's own "overloaded". 409 is how several gateways say

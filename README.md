@@ -86,9 +86,14 @@ import { createPresetProvider } from "@providerkit/core";
 const provider = createPresetProvider("opencode-go", { apiKey });
 ```
 
-By default it tries `mimo-v2.6-flash`, then `mimo-v2.5`, `glm-5.3-flash`,
-`qwen3.8-flash` and `longcat-2.0`. Pass `models: [...]` to set your own order, and
-`fallbacks` to add another provider after the last model.
+By default it tries `mimo-v2.6-flash`, then `glm-5.3-flash`, `qwen3.8-flash` and
+`longcat-2.0`. Pass `models: [...]` to set your own order, and `fallbacks` to add another
+provider after the last model. A model Go has retired answers 410, and the chain moves on to
+the next one.
+
+For structured output, pick your own `models`. On 2026-11-11 `mimo-v2.6-flash` ignored a strict
+JSON Schema and answered with the schema itself; `glm-5.3-flash`, `qwen3.8-flash` and
+`longcat-2.0` filled it in.
 
 Go serves three wires, and the preset picks one from the model id: `minimax-` and `qwen`
 models on Anthropic Messages, `gpt-`, `grok-` and `muse-spark-` models on Responses, and
@@ -97,7 +102,7 @@ everything else on chat completions. A chain can mix them:
 ```ts
 const provider = createPresetProvider("opencode-go", {
   apiKey,
-  models: ["muse-spark-1.3-contributor", "mimo-v2.5"],
+  models: ["muse-spark-1.3-contributor", "mimo-v2.6-flash"],
 });
 ```
 
@@ -146,6 +151,21 @@ const { bytes, mimeType } = await speech.synthesize({ text: "Click Settings." })
 `google`, `openai` and `openrouter` can speak, and `openai` reaches any server that copies
 its route through `baseUrl`. A paid call is sent once and never replayed by the package.
 
+### Transcription
+
+One recording to its text, the other direction, from its own entry point too:
+
+```ts
+import { createDeepgramTranscriptionProvider } from "@providerkit/core/transcription";
+
+const listen = createDeepgramTranscriptionProvider({ apiKey });
+const { text, segments } = await listen.transcribe({ audio: file, language: "pt-BR" });
+```
+
+Deepgram and OpenAI transcribe, and the `openai` preset reaches any server that copies its
+route through `baseUrl`. Pass `diarize: true` to label who speaks each segment. A paid call is
+sent once and never replayed by the package.
+
 ### Set up providers once
 
 ```ts
@@ -183,6 +203,7 @@ drift.
 | [Sign in to a subscription](https://providerkit.dev/guides/auth/)       | Device code and PKCE sign-in, token refresh      |
 | [Decision models](https://providerkit.dev/guides/decisions/)            | Typed choices, scores and yes/no probabilities   |
 | [Speech](https://providerkit.dev/guides/speech/)                        | Text to one audio clip, one paid request a call  |
+| [Transcription](https://providerkit.dev/guides/transcription/)          | A recording to its text, with who spoke when     |
 
 The [API reference](https://providerkit.dev/reference/) is generated from the source, so it
 cannot drift either.

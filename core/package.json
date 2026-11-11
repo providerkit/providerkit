@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/core",
-  "version": "0.29.1",
+  "version": "0.30.0",
   "description": "The layer under your agent loop: one seam for every LLM provider, plus the failure handling you only learn in production.",
   "type": "module",
   "license": "MIT",
@@ -21,6 +21,10 @@
     "./speech": {
       "types": "./dist/speech.d.ts",
       "default": "./dist/speech.js"
+    },
+    "./transcription": {
+      "types": "./dist/transcription.d.ts",
+      "default": "./dist/transcription.js"
     },
     "./auth": {
       "types": "./dist/auth/index.d.ts",

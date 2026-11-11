@@ -38,8 +38,24 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ["**/decisions*", "**/zod*", "**/auth/**"],
+              group: ["**/decisions*", "**/zod*", "**/auth/**", "**/*transcription*"],
               message: "Speech imports the shared modules only, never another capability.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ["core/src/transcription*.ts", "core/src/providers/*transcription*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/decisions*", "**/zod*", "**/auth/**", "**/*speech*"],
+              message: "Transcription imports the shared modules only, never another capability.",
             },
           ],
         },
@@ -54,8 +70,9 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ["**/speech*", "**/providers/*speech*"],
-              message: "A capability imports the shared modules only, never speech.",
+              group: ["**/*speech*", "**/*transcription*"],
+              message:
+                "A capability imports the shared modules only, never speech or transcription.",
             },
           ],
         },

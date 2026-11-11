@@ -20,6 +20,7 @@
  */
 import type { ImageLimits } from "./image.ts";
 import type { SpeechFormat, SpeechShape } from "./speech-core.ts";
+import type { TranscriptionShape } from "./transcription-core.ts";
 
 export type PresetShape = "anthropic" | "openai" | "responses" | "gemini";
 
@@ -79,6 +80,22 @@ export interface PresetSpeech {
   defaultFormat?: SpeechFormat;
 }
 
+/**
+ * What a preset's endpoint can do besides chat: turn a recording into text. Absent means it
+ * cannot, or that nobody has read its documentation yet. `createTranscriptionProvider` (from
+ * `@providerkit/core/transcription`) is what reads this. Like `PresetSpeech`, these are facts
+ * about the vendor's own host, and none of them follow a caller who sets `baseUrl`.
+ */
+export interface PresetTranscription {
+  shape: TranscriptionShape;
+  /** Defaults to the preset's own `baseUrl`. */
+  baseUrl?: string;
+  /** The model the vendor recommends, when it names one. */
+  defaultModel?: string;
+  /** Representative model ids, as in `ProviderPreset.models`. */
+  models?: readonly string[];
+}
+
 export interface ProviderPreset {
   /** Adapter wire format. */
   shape: PresetShape;
@@ -136,6 +153,8 @@ export interface ProviderPreset {
   noSampling?: boolean;
   /** Text to speech on this endpoint. See `PresetSpeech`. */
   speech?: PresetSpeech;
+  /** Speech to text on this endpoint. See `PresetTranscription`. */
+  transcription?: PresetTranscription;
 }
 
 export const PROVIDER_PRESETS = {
@@ -180,6 +199,21 @@ export const PROVIDER_PRESETS = {
         "cedar",
       ],
       maxInputChars: 4096,
+    },
+    // Source: OpenAI's speech-to-text guide and transcription reference, read 2026-11-11. The
+    // guide recommends `gpt-transcribe`, and says the other four shut down on 2027-02-26. Only
+    // `gpt-4o-transcribe-diarize` labels speakers, and only Whisper gives timed segments without
+    // them. Remove the four ids after that date.
+    transcription: {
+      shape: "openai",
+      defaultModel: "gpt-transcribe",
+      models: [
+        "gpt-transcribe",
+        "gpt-4o-transcribe",
+        "gpt-4o-mini-transcribe",
+        "gpt-4o-transcribe-diarize",
+        "whisper-1",
+      ],
     },
   },
   google: {
@@ -477,8 +511,14 @@ export const PROVIDER_PRESETS = {
    *
    * Measured 2026-09-27 on /chat/completions: a call without
    * `x-opencode-session` is refused. `mimo-v2.6-flash` passes plain text,
-   * `reasoning_effort: "none"`, tool calls and json_schema; `glm-5.3-flash`
-   * 400s on a tool without a description and on a `thinking` field.
+   * `reasoning_effort: "none"` and tool calls; `glm-5.3-flash` 400s on a tool
+   * without a description and on a `thinking` field.
+   *
+   * Measured 2026-11-11 with a live key: `mimo-v2.5` is retired (every call
+   * answers 410 `ModelDeprecated`), and `mimo-v2.6-flash` ignores a strict
+   * json_schema `response_format` and answers with the schema itself, on Go and
+   * on OpenRouter. `glm-5.3-flash`, `qwen3.8-flash` and `longcat-2.0` fill the
+   * schema in, with an image input too.
    *
    * Go serves three wires, and `routes` picks one from the model id (cc-proxy's
    * table, from Go's own docs): `minimax-` and `qwen` on Anthropic /messages
@@ -505,7 +545,6 @@ export const PROVIDER_PRESETS = {
     defaultModel: "mimo-v2.6-flash",
     models: [
       "mimo-v2.6-flash",
-      "mimo-v2.5",
       "glm-5.3-flash",
       "qwen3.8-flash",
       "longcat-2.0",
@@ -535,11 +574,13 @@ export const PROVIDER_PRESETS = {
       },
     ],
     // Cheapest first, each with its own monthly limit ($60, qwen3.8-flash $30).
-    // All five passed plain text, a described tool call and json_schema on
-    // 2026-09-27; longcat-2.0 ignores reasoning "none", so it goes last.
-    // DeepSeek is left out: on Go it needs the workspace's Global regions
-    // privacy setting, and answers 500 without it.
-    rotation: ["mimo-v2.6-flash", "mimo-v2.5", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
+    // All four passed plain text, a described tool call and json_schema on
+    // 2026-09-27; longcat-2.0 ignores reasoning "none", so it goes last. On
+    // 2026-11-11 mimo-v2.6-flash no longer filled a strict json_schema (see
+    // above), so a caller that needs one names its own `models`. DeepSeek is
+    // left out: on Go it needs the workspace's Global regions privacy setting,
+    // and answers 500 without it.
+    rotation: ["mimo-v2.6-flash", "glm-5.3-flash", "qwen3.8-flash", "longcat-2.0"],
   },
   /**
    * OpenCode Zen: free and pay-as-you-go models on `https://opencode.ai/zen/v1`,
@@ -836,3 +877,8 @@ export const PRESET_IDS = Object.keys(PROVIDER_PRESETS) as ProviderPresetId[];
 
 /** The presets that can speak, for a screen that offers exactly those. */
 export const SPEECH_PRESET_IDS = PRESET_IDS.filter((id) => "speech" in PROVIDER_PRESETS[id]);
+
+/** The presets that can transcribe, for a screen that offers exactly those. */
+export const TRANSCRIPTION_PRESET_IDS = PRESET_IDS.filter(
+  (id) => "transcription" in PROVIDER_PRESETS[id],
+);

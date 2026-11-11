@@ -22,13 +22,33 @@ const provider = providers.get("go");
 and one credential.
 
 `get("go")` runs every model the connection has, in order. With no `model` or `models` set,
-`opencode-go` uses its own list: `mimo-v2.6-flash`, then `mimo-v2.5`, `glm-5.3-flash`,
-`qwen3.8-flash` and `longcat-2.0`. Each model has its own watchdog. The models sit in one fallback
-pool: when one fails before it sends anything, the pool benches it for a while and the next one
-answers.
+`opencode-go` uses its own list: `mimo-v2.6-flash`, then `glm-5.3-flash`, `qwen3.8-flash` and
+`longcat-2.0`. Each model has its own watchdog. The models sit in one fallback pool: when one
+fails before it sends anything, the pool benches it for a while and the next one answers. That
+includes a model Go has retired: it answers 410, and the pool benches it for an hour and moves on.
 
 Calling `get` on every request is fine. Each chain is built once, the first time a call needs it,
 and then shared.
+
+## Structured output on Go
+
+Not every model on Go follows a strict JSON Schema. On 2026-11-11, asked for a strict
+`json_schema` response, `mimo-v2.6-flash` answered with the schema itself
+(`{"type":"object","properties":{...}}`) instead of filling it in, on Go and on OpenRouter
+(`xiaomi/mimo-v2.6-flash`). `glm-5.3-flash`, `qwen3.8-flash` and `longcat-2.0` filled it in, with
+an image in the prompt too. `mimo-v2.6-flash` leads the default list, so for structured output
+name your own:
+
+```ts
+const providers = createRegistry({
+  connections: {
+    go: { preset: "opencode-go", apiKey: goKey, models: ["glm-5.3-flash", "qwen3.8-flash"] },
+  },
+});
+```
+
+The schema reply arrives as a normal answer, not an error, so the pool does not move past it.
+Validate what comes back, as with any model's JSON.
 
 ## Refs
 
