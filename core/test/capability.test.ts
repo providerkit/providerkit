@@ -116,7 +116,7 @@ describe("probeJsonWithTools", () => {
     const provider: Provider = {
       id: "fake",
       model: "m",
-      // eslint-disable-next-line require-yield
+      // oxlint-disable-next-line require-yield
       async *createStream() {
         throw new Error("401 invalid api key");
       },

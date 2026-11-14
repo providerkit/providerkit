@@ -61,8 +61,8 @@
     "typecheck": "tsc --noEmit && tsc -p test && tsc -p scripts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src test",
-    "format": "prettier --write .",
+    "lint": "oxlint -c ../.oxlintrc.json src test",
+    "format": "oxfmt",
     "check:presets": "bun run scripts/refresh-presets.ts",
     "probe:model": "bun run scripts/probe-model.ts",
     "probe:speech": "bun run scripts/probe-speech.ts",
@@ -84,7 +84,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.2",
     "zod": "^4.3.6"
   },

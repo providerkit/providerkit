@@ -69,7 +69,9 @@ describe("ElevenLabs speech", () => {
     const url = new URL(calls[0]!.url);
     expect(url.origin + url.pathname).toBe("https://api.elevenlabs.io/v1/text-to-speech/voice%2F1");
     expect(url.searchParams.get("output_format")).toBe("wav_24000");
-    expect((calls[0]!.init?.headers as Record<string, string>)["xi-api-key"]).toBe("sk_test");
+    expect((calls[0]!.init?.headers as Record<string, string> | undefined)?.["xi-api-key"]).toBe(
+      "sk_test",
+    );
     expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({
       text: "Click Settings.",
       model_id: "eleven_multilingual_v2",
@@ -344,9 +346,9 @@ describe("listElevenLabsVoices", () => {
     ]);
     expect(new URL(urls[0]!).pathname).toBe("/v2/voices");
     expect(new URL(urls[1]!).searchParams.get("next_page_token")).toBe("next");
-    expect((fetchImpl.mock.calls[0]![1]?.headers as Record<string, string>)["xi-api-key"]).toBe(
-      "sk",
-    );
+    expect(
+      (fetchImpl.mock.calls[0]![1]?.headers as Record<string, string> | undefined)?.["xi-api-key"],
+    ).toBe("sk");
   });
 
   it("throws auth for a wrong key", async () => {

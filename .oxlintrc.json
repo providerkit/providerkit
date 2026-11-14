@@ -1,0 +1,59 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "extends": ["./node_modules/@gusnips/oxlint/react.json"],
+  "plugins": [],
+  "ignorePatterns": ["site/.astro/**", "site/src/content/docs/reference/**"],
+  "rules": {
+    "react/unsupported-syntax": "warn"
+  },
+  "overrides": [
+    {
+      "files": ["core/src/speech*.ts", "core/src/providers/*speech*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/decisions*", "**/zod*", "**/auth/**", "**/*transcription*"],
+                "message": "Speech imports the shared modules only, never another capability."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["core/src/transcription*.ts", "core/src/providers/*transcription*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/decisions*", "**/zod*", "**/auth/**", "**/*speech*"],
+                "message": "Transcription imports the shared modules only, never another capability."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["core/src/decisions*.ts", "core/src/zod*.ts", "core/src/auth/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["**/*speech*", "**/*transcription*"],
+                "message": "A capability imports the shared modules only, never speech or transcription."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

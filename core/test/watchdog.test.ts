@@ -161,9 +161,10 @@ describe("watchChunks", () => {
     vi.advanceTimersByTime(1_000); // the deadline fires
     const failing = watchChunks(
       watch,
+      // A generator that throws before its first yield.
+      // oxlint-disable-next-line require-yield
       (async function* () {
         throw new Error("aborted");
-        yield 1;
       })(),
     );
     await expect(collect(failing)).rejects.toMatchObject({ kind: "timeout" });
