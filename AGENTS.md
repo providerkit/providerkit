@@ -69,6 +69,11 @@ bun run build
 
 Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
 
+`core` compiles with TypeScript 7 (`tsc`), and lint is oxlint: one `.oxlintrc.json` at the root, which every
+`lint` script reads (`oxlint -c ../.oxlintrc.json`, since oxlint does not look for a config upward).
+`site` keeps `typescript` 5.9.3 on purpose: `astro check` and TypeDoc call the TypeScript compiler API, which
+TypeScript 7 does not ship. Move it when both do.
+
 ## Naming and publishing — decided
 
 - **npm: `@providerkit/core`.** The bare name is permanently unavailable — npm rejects it
@@ -95,8 +100,8 @@ Root shortcuts: `bun run test`, `bun run build`, `bun run dev:site`.
   a sibling in the same scope that imports core's PUBLIC exports only, so whatever it needs
   becomes public API first. `core/` stays put.
 - **Keep each capability split-ready.** Speech, transcription, decisions, zod and auth import the shared modules
-  (types, errors, transport, presets, attribution) and never each other's files. ESLint
-  enforces it (`no-restricted-imports` in `eslint.config.js`), so a split stays a folder move.
+  (types, errors, transport, presets, attribution) and never each other's files. oxlint
+  enforces it (`no-restricted-imports` in `.oxlintrc.json`), so a split stays a folder move.
 - **GitHub: org `providerkit`, repo `providerkit/providerkit`.** An org rather than a personal
   repo, so maintainers can be added later without a transfer.
 - Release scripts match the other packages in `dev/packages`:

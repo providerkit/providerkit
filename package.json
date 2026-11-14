@@ -14,7 +14,7 @@
     "build": "bun run --filter @providerkit/core build",
     "test": "bun run --filter @providerkit/core test",
     "typecheck": "bun run build && bun run --filter '*' typecheck",
-    "lint": "eslint core/src core/test core/scripts site/src brand",
+    "lint": "oxlint core/src core/test core/scripts site/src brand",
     "format": "prettier --write .",
     "dev:site": "bun run build && bun run --filter providerkit-site dev",
     "build:site": "bun run build && bun run --filter providerkit-site build",
@@ -27,11 +27,9 @@
     "release:alpha": "bun run --filter @providerkit/core release:alpha"
   },
   "devDependencies": {
-    "@eslint/js": "^9.17.0",
+    "@gusnips/oxlint": "^0.2.0",
     "@resvg/resvg-js": "^2.6.2",
-    "eslint": "^9.17.0",
-    "eslint-plugin-react-hooks": "^7.0.0",
-    "prettier": "^3.4.2",
-    "typescript-eslint": "^8.18.2"
+    "oxlint": "1.93.0",
+    "prettier": "^3.4.2"
   }
 }
