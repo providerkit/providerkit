@@ -15,11 +15,11 @@
     "test": "bun run --filter @providerkit/core test",
     "typecheck": "bun run build && bun run --filter '*' typecheck",
     "lint": "oxlint core/src core/test core/scripts site/src brand",
-    "format": "prettier --write .",
+    "format": "oxfmt",
     "dev:site": "bun run build && bun run --filter providerkit-site dev",
     "build:site": "bun run build && bun run --filter providerkit-site build",
     "brand:assets": "bun run brand/generate.ts",
-    "format:check": "prettier --check .",
+    "format:check": "oxfmt --check",
     "release": "bun run --filter @providerkit/core release",
     "release:patch": "bun run --filter @providerkit/core release:patch",
     "release:minor": "bun run --filter @providerkit/core release:minor",
@@ -29,7 +29,7 @@
   "devDependencies": {
     "@gusnips/oxlint": "^0.2.0",
     "@resvg/resvg-js": "^2.6.2",
-    "oxlint": "1.93.0",
-    "prettier": "^3.4.2"
+    "oxfmt": "0.78.0",
+    "oxlint": "1.93.0"
   }
 }

@@ -46,7 +46,10 @@ export interface ImagePart {
 /** A file's media type: anything but an image's, because an image is an
  *  `ImagePart`, which every adapter can send. */
 export type FileMimeType =
-  `application/${string}` | `audio/${string}` | `video/${string}` | `text/${string}`;
+  | `application/${string}`
+  | `audio/${string}`
+  | `video/${string}`
+  | `text/${string}`;
 
 /**
  * A file the model reads (a PDF, a recording, a video) as base64 bytes,

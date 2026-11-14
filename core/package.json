@@ -62,7 +62,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "oxlint -c ../.oxlintrc.json src test",
-    "format": "prettier --write .",
+    "format": "oxfmt",
     "check:presets": "bun run scripts/refresh-presets.ts",
     "probe:model": "bun run scripts/probe-model.ts",
     "probe:speech": "bun run scripts/probe-speech.ts",

@@ -394,7 +394,7 @@ lands — that is the whole point, and it is how the other four repos get it.
 
 ## House rules
 
-- 2-space, printWidth 100, double quotes (matches `.prettierrc`).
+- 2-space, printWidth 100, double quotes (matches `.oxfmtrc.json`).
 - Source imports keep real `.ts` extensions; `rewriteRelativeImportExtensions` emits `.js`.
 - No `as any` / `as unknown as T`. Fix the type.
 - Comments explain **why**, especially the non-obvious production reason. That is most of the
