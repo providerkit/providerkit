@@ -16,3 +16,7 @@ site/src/content/docs/reference/
 # codebases. This repo is public — they stay on disk and out of it.
 PRODUCT.md
 ROADMAP.local.md
+
+# Reference repositories stay local. Track only our research notes beside them.
+/refs/*/
+/refs/*.local.md
