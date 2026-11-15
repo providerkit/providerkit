@@ -66,6 +66,8 @@ export class ExecutionTree {
   private readonly broken = new AbortController();
   private readonly timer;
   private writes = Promise.resolve();
+  private toolBarrier = Promise.resolve();
+  private toolsSettled = Promise.resolve();
   private checkpointFailure: Extract<RunState, { status: "failed" }> | undefined;
 
   constructor(
@@ -110,6 +112,29 @@ export class ExecutionTree {
       throw new Halt({ status: "limited", limit: "maxDepth" });
     if ([...snapshots(this.root)].length - 1 >= this.root.tree.limits.maxChildren)
       throw new Halt({ status: "limited", limit: "maxChildren" });
+  }
+
+  async invokeTool<T>(
+    parallel: boolean,
+    signal: AbortSignal,
+    invoke: () => Promise<T>,
+  ): Promise<T> {
+    // Safe calls share a barrier. A serial call waits for all prior calls and
+    // becomes the barrier for later ones, across every specialist in this tree.
+    const previous = parallel ? this.toolBarrier : this.toolsSettled;
+    const work = previous.then(() => {
+      signal.throwIfAborted();
+      return untilAbort(invoke(), signal);
+    });
+    const settled = work.then(
+      () => {},
+      () => {},
+    );
+    this.toolsSettled = Promise.all([this.toolsSettled, settled]).then(() => {});
+    if (!parallel) this.toolBarrier = this.toolsSettled;
+    // Cancelling a queued call must return without waiting for another child.
+    // This cannot stop external effects that ignore their signal.
+    return untilAbort(work, signal);
   }
 
   async save(): Promise<void> {

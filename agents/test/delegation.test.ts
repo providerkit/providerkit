@@ -267,6 +267,73 @@ describe("specialist delegation", () => {
     ]);
   });
 
+  it.each([
+    [false, false, true],
+    [undefined, undefined, true],
+    [true, true, false],
+    [true, false, true],
+    [false, true, true],
+    [true, true, true],
+  ])(
+    "coordinates ordinary tools across two specialists (safe: %s/%s, host: %s)",
+    async (firstSafe, secondSafe, hostAllows) => {
+      vi.useFakeTimers();
+      const trace: string[] = [];
+      const checks = new Map<string, string[]>();
+      const specialists = [firstSafe, secondSafe].map((isConcurrencySafe, index) => {
+        const name = index === 0 ? "a" : "b";
+        const provider = wire([calls(call(name)), text(`${name} done`)]).provider;
+        return defineAgent({
+          ...base,
+          id: name,
+          provider,
+          tools: [
+            defineTool({
+              name,
+              description: name,
+              inputSchema: { type: "object" },
+              isConcurrencySafe,
+              async run() {
+                trace.push(`${name}:start`);
+                await new Promise<void>((resolve) => setTimeout(resolve, 10));
+                trace.push(`${name}:end`);
+                return "written";
+              },
+            }),
+          ],
+        });
+      });
+      const root = defineAgent({
+        ...base,
+        id: "root",
+        provider: wire([calls(call("coordinate")), text("done")]).provider,
+        treeLimits: { maxParallel: 2 },
+        tools: [
+          coordinator(specialists, async (context) =>
+            context.join(specialists.map((agent) => context.child(agent.id, agent, "work"))),
+          ),
+        ],
+      });
+      const work = root.run("work", {
+        host: {
+          canRunConcurrently: () => hostAllows === true,
+          beforeTool(request) {
+            checks.set(request.call.name, [...trace]);
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      expect((await work).status).toBe("completed");
+      const parallel = firstSafe && secondSafe && hostAllows;
+      expect(trace).toEqual(
+        parallel
+          ? ["a:start", "b:start", "a:end", "b:end"]
+          : ["a:start", "a:end", "b:start", "b:end"],
+      );
+      if (!parallel) expect(checks.get("b")).toEqual(["a:start", "a:end"]);
+    },
+  );
+
   it("treats delegation as a barrier between host-approved ordinary tool batches", async () => {
     const order: string[] = [];
     const childWire = wire([text("child result")], async () => {

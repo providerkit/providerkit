@@ -283,7 +283,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       model: CompletedModel,
       index: number,
       request: ToolRequest,
-      tool?: Tool,
+      tool: Tool | undefined,
+      parallel: boolean,
     ): Promise<void> {
       active();
       let result: ToolResult;
@@ -306,44 +307,44 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           content: `Call ${RESULT_TOOL_NAME} alone, after the other tool results arrive.`,
         };
       } else {
-        const approval =
-          approved?.request.operationId === request.operationId ? approved : undefined;
-        if (tool.needsApproval && !approval)
-          fail(
-            "approval_required",
-            "This tool needs a host-approved decision.",
-            request.operationId,
-          );
-        function checkExpiry(): void {
-          if (approval && approval.scope.expiresAt <= Date.now())
+        const outcome = await scope.tree.invokeTool(parallel, signal, async () => {
+          active();
+          const approval =
+            approved?.request.operationId === request.operationId ? approved : undefined;
+          if (tool.needsApproval && !approval)
             fail(
-              "approval_expired",
-              "The approval expired. Request a new decision before running this tool.",
+              "approval_required",
+              "This tool needs a host-approved decision.",
               request.operationId,
             );
-        }
-        checkExpiry();
-        await untilAbort(
-          Promise.resolve(host?.beforeTool?.(immutableCopy(request), immutableCopy(approval))),
-          signal,
-        );
-        active();
-        checkExpiry();
-        emit({ type: "tool_start", request });
-        active();
-        // A synchronous observer can delay invocation past the approval's expiry.
-        checkExpiry();
-        const outcome = await untilAbort(
-          tool.invoke(copyData(request.arguments), {
+          function checkExpiry(): void {
+            if (approval && approval.scope.expiresAt <= Date.now())
+              fail(
+                "approval_expired",
+                "The approval expired. Request a new decision before running this tool.",
+                request.operationId,
+              );
+          }
+          checkExpiry();
+          await untilAbort(
+            Promise.resolve(host?.beforeTool?.(immutableCopy(request), immutableCopy(approval))),
+            signal,
+          );
+          active();
+          checkExpiry();
+          emit({ type: "tool_start", request });
+          active();
+          // A synchronous observer can delay invocation past the approval's expiry.
+          checkExpiry();
+          return tool.invoke(copyData(request.arguments), {
             ...options.context,
             runId: snapshot.runId,
             attemptId: snapshot.attemptId,
             operationId: request.operationId,
             callId: request.call.id,
             signal,
-          }),
-          signal,
-        );
+          });
+        });
         // Core reports an aborted invocation as data. It must not buy another model turn.
         if (!outcome.ok) active();
         result = outcome.ok
@@ -493,7 +494,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           !tool.needsApproval &&
           !tool.isTerminal &&
           host?.canRunConcurrently?.(immutableCopy(request)) === true;
-        if (parallel(request, tool)) {
+        const concurrent = parallel(request, tool);
+        if (concurrent) {
           for (
             let next = index + 1;
             next < calls.length && batch.length < Math.min(limits.parallelTools, capacity);
@@ -516,7 +518,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           };
         await save();
         const settled = await Promise.allSettled(
-          batch.map((job) => runTool(model, job.index, job.request, job.tool)),
+          batch.map((job) => runTool(model, job.index, job.request, job.tool, concurrent)),
         );
         const rejected = settled.find((result) => result.status === "rejected");
         if (rejected?.status === "rejected") throw rejected.reason;
