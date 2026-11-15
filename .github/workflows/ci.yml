@@ -59,13 +59,13 @@ jobs:
       # Node, Workers, Deno and an MV3 service worker. A single Node built-in
       # or `process` reference in core/src silently breaks MV3, and nothing
       # else in CI would catch it — the tests run in Bun, where it all works.
-      - name: Portability guard (no Node built-ins in core/src)
+      - name: Portability guard (no Node built-ins in portable sources)
         run: |
-          if grep -rnE 'from "node:|require\(|\bprocess\.env|\bBuffer\b|__dirname' core/src; then
-            echo "::error::core/src must stay free of Node built-ins — see AGENTS.md invariants"
+          if grep -rnE 'from "node:|require\(|\bprocess\.env|\bBuffer\b|__dirname' core/src agents/src; then
+            echo "::error::core/src and agents/src must stay free of Node built-ins. See AGENTS.md."
             exit 1
           fi
-          echo "core/src is clean"
+          echo "Portable sources are clean"
 
       # Builds core, then the site against core's published exports — so the
       # site build doubles as a check that the package bundles for a browser.

@@ -12,6 +12,22 @@
   },
   "overrides": [
     {
+      "files": ["agents/src/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../**/core/**", "@providerkit/core/src/**", "@providerkit/core/dist/**"],
+                "message": "Agents use core's public exports, never its private files."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "files": ["site/**/*.tsx"],
       "rules": {
         "react/purity": "off",
