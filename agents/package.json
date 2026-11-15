@@ -9,12 +9,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./runs": {
+      "types": "./dist/runs.d.ts",
+      "default": "./dist/runs.js"
     }
   },
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
     "src",
+    "examples",
     "README.md",
     "LICENSE"
   ],
@@ -28,14 +33,26 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit && tsc -p test",
-    "lint": "oxlint -c ../.oxlintrc.json src test",
-    "test": "vitest run"
+    "lint": "oxlint -c ../.oxlintrc.json src test examples",
+    "test": "vitest run",
+    "sync:docs": "cp ../LICENSE .",
+    "prepublishOnly": "bun run lint && bun run build && bun run typecheck && bun run sync:docs",
+    "release": "bun publish --access public"
   },
   "peerDependencies": {
-    "@providerkit/core": "^0.30.0"
+    "@providerkit/core": "^0.30.0",
+    "@gusnips/server": "^0.19.0"
+  },
+  "peerDependenciesMeta": {
+    "@gusnips/server": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@providerkit/core": "workspace:*",
+    "@gusnips/server": "^0.19.0",
+    "@types/pg": "^8.15.0",
+    "pg": "^8.16.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   },

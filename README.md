@@ -34,8 +34,12 @@ providerkit is that knowledge, as a library.
 
 ## What this is not
 
-**Not an agent framework.** There is no loop here, no prompt, no memory, no graph. Your
-loop is where your product lives; it should stay yours. This is everything underneath it.
+**Core is not an agent framework.** `@providerkit/core` handles provider calls, not the agent loop,
+prompts, memory or workflow graphs.
+
+For a shared loop, specialists and background runs, use the separate
+[`@providerkit/agents` package](https://github.com/providerkit/providerkit/tree/main/agents).
+It uses core's public API and leaves application prompts, authorization and storage policy with you.
 
 ## Use
 
@@ -234,12 +238,13 @@ vendor SDKs for this package (−5,033 more) and ships with the release that car
 
 ```
 core/     the npm package `@providerkit/core`
+agents/   the separate `@providerkit/agents` SDK
 site/     providerkit.dev (Astro + Starlight), also open source
 brand/    the mark, the OG card, and the generator for both
 ```
 
-`bun install`, then `cd core && bun run test`. See [AGENTS.md](./AGENTS.md) for the layout,
-the invariants worth not regressing, and what is left to build.
+Run `bun install`, then `bun run build`. See [AGENTS.md](./AGENTS.md) for the layout and package
+checks. Run only the test file relevant to your change; the full suite is a separate manual check.
 
 ## Status
 

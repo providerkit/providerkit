@@ -5,6 +5,6 @@
     "rootDir": "..",
     "lib": ["ES2024", "DOM"]
   },
-  "include": ["./**/*", "../src/**/*"],
+  "include": ["./**/*", "../src/**/*", "../examples/**/*"],
   "exclude": []
 }
