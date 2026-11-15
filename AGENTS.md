@@ -2,9 +2,12 @@ Entry point for AI agents working on this repo.
 
 # providerkit
 
-**The layer under an LLM agent loop.** One seam for every provider, plus the failure
-handling you only learn in production. Deliberately **not** an agent framework: no loop, no
-prompts, no memory, no graph — those are where a product lives and they stay in the app.
+**`@providerkit/core` is the layer under an LLM agent loop.** It handles provider calls and failures,
+not agent orchestration, prompts, memory or graphs.
+
+`agents/` is the separate, experimental `@providerkit/agents` package. It uses core's public exports
+for a shared agent loop and specialist execution. Application prompts, authorization and retention
+stay with the app; durable execution uses the host's existing run service, not a new scheduler.
 
 MIT · open source · `providerkit.dev`
 
@@ -39,6 +42,7 @@ providerkit/            ← repo root (this folder), git root
 ├── core/               ← the npm package `providerkit`
 │   ├── src/
 │   └── test/
+├── agents/             ← separate experimental `@providerkit/agents`, using core's public API
 ├── site/               ← providerkit.dev — Astro + Starlight, open source
 │   └── src/content/docs/  ← the docs, as plain markdown (guides/ is hand-written,
 │                             reference/ is TypeDoc output and gitignored)
@@ -84,9 +88,9 @@ TypeScript 7 does not ship. Move it when both do.
   is set to `public` so a release can't silently go private.
 - **`core/` is the role, not the identity.** If adapters ever split for bundle size they
   become `@providerkit/gemini` siblings — same scope, no rename, no broken links.
-- **One package, many entry points, decided (v1).** `@providerkit/core` serves chat from `.`,
-  and the rest from subpaths: `./zod`, `./decisions`, `./speech`, `./transcription`, `./auth`. A new capability is
-  an entry point first, never a package. The reasons are measured or recorded: an app that only
+- **One core package, many entry points, decided (v1).** `@providerkit/core` serves chat from `.`,
+  and the rest from subpaths: `./zod`, `./decisions`, `./speech`, `./transcription`, `./auth`. Within the
+  provider layer, a new capability is an entry point first, never a package. The reasons are measured or recorded: an app that only
   chats pays 1.46 KB for the speech preset rows and nothing for the speech code; a capability in
   its own package could only reach the shared transport, `ProviderError`, error classification
   and preset table by making them public API that core could never change again; every extra
@@ -102,6 +106,10 @@ TypeScript 7 does not ship. Move it when both do.
 - **Keep each capability split-ready.** Speech, transcription, decisions, zod and auth import the shared modules
   (types, errors, transport, presets, attribution) and never each other's files. oxlint
   enforces it (`no-restricted-imports` in `.oxlintrc.json`), so a split stays a folder move.
+- **The agent layer is separate.** `@providerkit/agents` composes core's public API; it does not
+  split any provider capability. Its main entry stays portable. The optional durable-run binding
+  stays on its own export and uses a host-supplied run service. Build and release the standalone
+  SDK before any app migration; app-specific adoption is separate work.
 - **GitHub: org `providerkit`, repo `providerkit/providerkit`.** An org rather than a personal
   repo, so maintainers can be added later without a transfer.
 - Release scripts match the other packages in `dev/packages`:

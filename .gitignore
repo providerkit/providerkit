@@ -6,6 +6,7 @@ dist
 # Copied in at publish time from the repo root — one source of truth.
 core/README.md
 core/LICENSE
+agents/LICENSE
 
 # Astro's generated types, and the TypeDoc reference — both rebuilt by
 # `bun run build:site`, so committing them would just add noise to every diff.
