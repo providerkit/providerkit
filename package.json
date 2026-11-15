@@ -27,7 +27,7 @@
     "release:alpha": "bun run --filter @providerkit/core release:alpha"
   },
   "devDependencies": {
-    "@gusnips/oxlint": "^0.2.0",
+    "@gusnips/oxlint": "^0.2.2",
     "@resvg/resvg-js": "^2.6.2",
     "oxfmt": "0.78.0",
     "oxlint": "1.93.0"

@@ -2,11 +2,24 @@
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "extends": ["./node_modules/@gusnips/oxlint/react.json"],
   "plugins": [],
+  "jsPlugins": [{ "name": "react-hooks-js", "specifier": "@gusnips/oxlint/react-hooks" }],
   "ignorePatterns": ["site/.astro/**", "site/src/content/docs/reference/**"],
   "rules": {
-    "react/unsupported-syntax": "warn"
+    "react/unsupported-syntax": "warn",
+    "react-hooks-js/purity": "off",
+    "react-hooks-js/config": "off",
+    "react-hooks-js/gating": "off"
   },
   "overrides": [
+    {
+      "files": ["site/**/*.tsx"],
+      "rules": {
+        "react/purity": "off",
+        "react-hooks-js/purity": "error",
+        "react-hooks-js/config": "error",
+        "react-hooks-js/gating": "error"
+      }
+    },
     {
       "files": ["core/src/speech*.ts", "core/src/providers/*speech*.ts"],
       "rules": {
