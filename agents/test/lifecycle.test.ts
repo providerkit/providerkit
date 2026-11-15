@@ -120,6 +120,11 @@ describe("portable agent lifecycle", () => {
     expect(wire.reads).toBe(1);
     expect(events).toEqual(["model_chunk", "model_chunk", "model_chunk", "state"]);
     expect(result.usage).toMatchObject(usage);
+    expect(result.treeUsage).toEqual(result.usage);
+    expect(result.snapshot.format).toBe(2);
+    await expect(
+      agent.resume({ ...result.snapshot, format: 1 }, { host: { authorizeResume } }),
+    ).rejects.toThrow("Invalid agent snapshot");
     expect(checkpoints[0]?.models[0]?.status).toBe("running");
     expect(checkpoints.at(-1)?.state.status).toBe("completed");
     const restored = await agent.resume(JSON.parse(JSON.stringify(result.snapshot)), {

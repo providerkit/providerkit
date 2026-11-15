@@ -1,6 +1,8 @@
 import { parseToolArgs, type TokenUsage, type ToolCall, type Turn } from "@providerkit/core";
 import type {
   ApprovalScope,
+  ChildPathStep,
+  DelegationExecution,
   ModelExecution,
   PendingApproval,
   RunLimits,
@@ -10,6 +12,7 @@ import type {
   ToolExecution,
   ToolRequest,
   ToolResult,
+  TreeLimits,
 } from "./types.ts";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -66,7 +69,7 @@ export function immutableCopy<T>(value: T): T {
 }
 
 /** Object key order can change when a host stores JSON; array order cannot. */
-function equalData(left: unknown, right: unknown): boolean {
+export function equalData(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (Array.isArray(left) && Array.isArray(right)) {
     return (
@@ -105,13 +108,49 @@ function isLimits(value: unknown): value is RunLimits {
   );
 }
 
+export function readTreeLimits(value: unknown = {}): TreeLimits {
+  if (!isRecord(value)) throw new TypeError("Tree limits must be an object.");
+  const limits = {
+    maxParallel: value.maxParallel ?? 4,
+    maxChildren: value.maxChildren ?? 32,
+    maxDepth: value.maxDepth ?? 4,
+    modelCalls: value.modelCalls ?? 128,
+    elapsedMs: value.elapsedMs ?? 300_000,
+  };
+  if (!isTreeLimits(limits))
+    throw new TypeError("Tree limits must be finite integers; elapsedMs must fit a timer.");
+  return limits;
+}
+
+function isTreeLimits(value: unknown): value is TreeLimits {
+  return (
+    isRecord(value) &&
+    positive(value.maxParallel) &&
+    finite(value.maxChildren) &&
+    Number.isSafeInteger(value.maxChildren) &&
+    finite(value.maxDepth) &&
+    Number.isSafeInteger(value.maxDepth) &&
+    positive(value.modelCalls) &&
+    positive(value.elapsedMs) &&
+    value.elapsedMs <= 2_147_483_647
+  );
+}
+
+function isPath(value: unknown): value is ChildPathStep[] {
+  return (
+    Array.isArray(value) &&
+    value.every((step) => isRecord(step) && [step.operationId, step.key, step.runId].every(isId))
+  );
+}
+
 export function checkOptions(value: unknown): asserts value is RunOptions {
   if (
     !isRecord(value) ||
     !optional(value.runId, isId) ||
     !optional(value.signal, (signal) => signal instanceof AbortSignal) ||
     !optional(value.context, isRecord) ||
-    !optional(value.onEvent, (fn) => typeof fn === "function")
+    !optional(value.onEvent, (fn) => typeof fn === "function") ||
+    !optional(value.approvalPath, isPath)
   ) {
     throw new TypeError("Invalid run options.");
   }
@@ -124,6 +163,7 @@ export function checkOptions(value: unknown): asserts value is RunOptions {
       "resolveApproval",
       "beforeTool",
       "canRunConcurrently",
+      "child",
     ]) {
       if (!optional(value.host[key], (fn) => typeof fn === "function")) {
         throw new TypeError(`host.${key} must be a function.`);
@@ -236,7 +276,9 @@ function isToolExecution(value: unknown): value is ToolExecution {
   return (
     value.status === "pending" ||
     (isId(value.attemptId) &&
-      (value.status === "running" || (value.status === "completed" && isToolResult(value.result))))
+      (value.status === "running" ||
+        value.status === "delegating" ||
+        (value.status === "completed" && isToolResult(value.result))))
   );
 }
 
@@ -261,9 +303,18 @@ function isState(value: unknown): value is RunState {
     case "completed":
       return serializable(value.candidate);
     case "suspended":
-      return isApproval(value.approval);
+      return isApproval(value.approval) && isPath(value.path);
     case "limited":
-      return ["turns", "toolCalls", "elapsedMs", "outputTokens"].some((v) => v === value.limit);
+      return [
+        "turns",
+        "toolCalls",
+        "elapsedMs",
+        "outputTokens",
+        "maxChildren",
+        "maxDepth",
+        "modelCalls",
+        "treeElapsedMs",
+      ].some((v) => v === value.limit);
     case "failed":
       return (
         isRecord(value.error) &&
@@ -276,15 +327,36 @@ function isState(value: unknown): value is RunState {
   }
 }
 
+function isDelegationJournal(value: unknown): value is DelegationExecution {
+  return (
+    isRecord(value) &&
+    isId(value.operationId) &&
+    Array.isArray(value.children) &&
+    value.children.every(
+      (child) =>
+        isRecord(child) &&
+        isId(child.key) &&
+        optional(child.reference, isId) &&
+        isSnapshot(child.snapshot),
+    )
+  );
+}
+
 function isSnapshot(value: unknown): value is RunSnapshot {
   return (
     isRecord(value) &&
-    value.format === 1 &&
+    value.format === 2 &&
     [value.agentId, value.version, value.runId, value.attemptId, value.input].every(isId) &&
     positive(value.startedAt) &&
     isLimits(value.limits) &&
     Array.isArray(value.models) &&
     value.models.every(isModel) &&
+    Array.isArray(value.delegations) &&
+    value.delegations.every(isDelegationJournal) &&
+    isRecord(value.tree) &&
+    isId(value.tree.runId) &&
+    positive(value.tree.startedAt) &&
+    isTreeLimits(value.tree.limits) &&
     isState(value.state)
   );
 }
@@ -295,6 +367,118 @@ export function modelId(runId: string, index: number): string {
 
 export function toolId(model: string, index: number): string {
   return `${model}/tool/${index + 1}`;
+}
+
+export function childRunId(operationId: string, key: string): string {
+  return `${operationId}/child/${encodeURIComponent(key)}`;
+}
+
+/** Check global reservations from saved local journals, including work not yet sent. */
+export function checkTree(root: RunSnapshot): void {
+  let children = 0;
+  let models = 0;
+  function visit(node: RunSnapshot, depth: number): void {
+    if (!equalData(node.tree, root.tree) || node.startedAt < root.tree.startedAt)
+      throw new TypeError("The child belongs to a different tree or deadline.");
+    if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
+    models += node.models.length;
+    if (
+      new Set(node.delegations.map((journal) => journal.operationId)).size !==
+      node.delegations.length
+    )
+      throw new TypeError("Duplicate delegation journal.");
+    for (const journal of node.delegations) {
+      const tool = node.models
+        .flatMap((model) => (model.status === "completed" ? model.tools : []))
+        .find((tool) => tool.id === journal.operationId);
+      if (!tool || (tool.status !== "delegating" && tool.status !== "completed"))
+        throw new TypeError("The delegation journal does not match its tool call.");
+      if (new Set(journal.children.map((child) => child.key)).size !== journal.children.length)
+        throw new TypeError("Duplicate child key.");
+      for (const child of journal.children) {
+        if (
+          child.snapshot.runId !== childRunId(journal.operationId, child.key) ||
+          child.snapshot.startedAt < node.startedAt
+        )
+          throw new TypeError("Invalid child identity or start time.");
+        if (
+          (tool.status === "completed" || node.state.status === "completed") &&
+          (child.snapshot.state.status === "running" || child.snapshot.state.status === "suspended")
+        )
+          throw new TypeError("A completed delegation cannot contain unfinished children.");
+        children++;
+        visit(child.snapshot, depth + 1);
+      }
+    }
+    for (const model of node.models) {
+      if (
+        model.status === "completed" &&
+        model.tools.some(
+          (tool) =>
+            tool.status === "delegating" &&
+            !node.delegations.some((journal) => journal.operationId === tool.id),
+        )
+      )
+        throw new TypeError("A delegation is missing its child journal.");
+    }
+  }
+  if (root.runId === root.tree.runId && root.startedAt !== root.tree.startedAt)
+    throw new TypeError("The root start time does not match its tree.");
+  visit(root, 0);
+  if (children > root.tree.limits.maxChildren || models > root.tree.limits.modelCalls)
+    throw new TypeError("The snapshot exceeds its tree limits.");
+}
+
+/** A host cache may fill a missing receipt, never erase or replace a known effect. */
+export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): void {
+  if (
+    previous.runId !== next.runId ||
+    previous.input !== next.input ||
+    previous.startedAt !== next.startedAt ||
+    previous.agentId !== next.agentId ||
+    previous.version !== next.version ||
+    !equalData(previous.tree, next.tree)
+  )
+    throw new TypeError("The child host returned a different child.");
+  if (previous.models.length > next.models.length)
+    throw new TypeError("The child host dropped saved model receipts.");
+  if (
+    previous.state.status !== "running" &&
+    previous.state.status !== "suspended" &&
+    !equalData(previous.state, next.state)
+  )
+    throw new TypeError("The child host replaced a settled outcome.");
+  for (const [index, model] of previous.models.entries()) {
+    const saved = next.models[index];
+    if (!saved || saved.id !== model.id || saved.attemptId !== model.attemptId)
+      throw new TypeError("The child host changed a model operation.");
+    if (model.status !== "completed") continue;
+    if (saved.status !== "completed" || !equalData(model.turn, saved.turn))
+      throw new TypeError("The child host replaced a completed model receipt.");
+    for (const [position, tool] of model.tools.entries()) {
+      const restored = saved.tools[position];
+      if (
+        !restored ||
+        (tool.status === "completed" && !equalData(tool, restored)) ||
+        (tool.status === "running" &&
+          (restored.status === "pending" ||
+            restored.status === "delegating" ||
+            restored.attemptId !== tool.attemptId))
+      )
+        throw new TypeError("The child host replaced a tool receipt.");
+    }
+  }
+  for (const journal of previous.delegations) {
+    const saved = next.delegations.find((entry) => entry.operationId === journal.operationId);
+    if (!saved || saved.children.length < journal.children.length)
+      throw new TypeError("The child host dropped a delegation receipt.");
+    for (const [index, child] of journal.children.entries()) {
+      const restored = saved.children[index];
+      if (!restored || restored.key !== child.key)
+        throw new TypeError("The child host changed child admission order.");
+      checkChildProgress(child.snapshot, restored.snapshot);
+    }
+  }
 }
 
 /** Validate the journal as well as its fields, so a cursor cannot skip unrecorded work. */
@@ -396,7 +580,29 @@ export function readSnapshot(
       throw new TypeError("The completed result does not match its recorded turn.");
     }
   }
+  checkTree(raw);
   if (raw.state.status === "suspended") {
+    let leaf = raw;
+    for (const [index, step] of raw.state.path.entries()) {
+      const journal = leaf.delegations.find((journal) => journal.operationId === step.operationId);
+      const child = journal?.children.find((child) => child.key === step.key);
+      if (
+        !child ||
+        child.snapshot.runId !== step.runId ||
+        child.snapshot.state.status !== "suspended" ||
+        !equalData(child.snapshot.state.path, raw.state.path.slice(index + 1)) ||
+        !equalData(child.snapshot.state.approval, raw.state.approval)
+      )
+        throw new TypeError("The approval path does not match a suspended child.");
+      leaf = child.snapshot;
+    }
+    if (
+      leaf.state.status !== "suspended" ||
+      leaf.state.path.length !== 0 ||
+      !equalData(leaf.state.approval, raw.state.approval)
+    )
+      throw new TypeError("The approval path does not match the leaf decision.");
+    const last = leaf.models.at(-1);
     if (last?.status !== "completed")
       throw new TypeError("The approval does not match the pending tool call.");
     const { request } = raw.state.approval;
@@ -408,9 +614,9 @@ export function readSnapshot(
       !completeArguments(call.arguments) ||
       (last.turn.finishReason !== "stop" && last.turn.finishReason !== "tool_calls") ||
       tool?.status !== "pending" ||
-      request.runId !== raw.runId ||
-      request.agentId !== agentId ||
-      request.version !== version ||
+      request.runId !== leaf.runId ||
+      request.agentId !== leaf.agentId ||
+      request.version !== leaf.version ||
       request.operationId !== tool.id ||
       !equalData(request.call, call) ||
       !equalData(request.arguments, parseToolArgs(call.arguments))

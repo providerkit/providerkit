@@ -11,6 +11,24 @@ import type {
   Turn,
 } from "@providerkit/core";
 
+import type {
+  AGENT_RUNTIME,
+  AgentRuntime,
+  Delegation,
+  SpecialistToolOptions,
+} from "./delegation.ts";
+
+/** Tree limits count the root too, except maxChildren and maxDepth (root depth is zero). */
+export interface TreeLimits {
+  maxParallel: number;
+  maxChildren: number;
+  maxDepth: number;
+  /** SDK admissions only. Provider-internal retries stay in core. */
+  modelCalls: number;
+  /** Includes queueing and waiting for approval, across resumed attempts. */
+  elapsedMs: number;
+}
+
 /** Limits for one run, not a whole tree of delegated runs. Cancellation is cooperative:
  * an admitted call can still finish or incur a charge after the signal aborts. */
 export interface RunLimits {
@@ -34,9 +52,11 @@ export interface AgentConfig {
   instructions: string;
   /** Already composed with whatever routing, retries and watchdog the caller needs. */
   provider: Provider;
-  /** Core tools. Use output for a terminal tool; user-supplied terminal tools are refused. */
-  tools?: readonly Tool[];
+  /** Core tools or delegation descriptors. Terminal tools use the output contract. */
+  tools?: readonly (Tool | Delegation)[];
   limits?: Partial<RunLimits>;
+  /** Applies when this agent is the root. Descendants share the root's limits. */
+  treeLimits?: Partial<TreeLimits>;
 }
 
 export type AgentDefinition<T = string> = AgentConfig & { output?: ResultSchema<T> };
@@ -47,6 +67,9 @@ export interface Agent<T = string> {
   run(input: string, options?: RunOptions): Promise<RunOutcome<T>>;
   /** Structural validation is not authorization. A host must authorize every resume. */
   resume(snapshot: unknown, options: ResumeOptions): Promise<RunOutcome<T>>;
+  asTool(options: SpecialistToolOptions<T>): Delegation;
+  /** @internal Execution is scoped explicitly, never through global current-run state. */
+  readonly [AGENT_RUNTIME]: AgentRuntime<T>;
 }
 
 export interface ToolRequest {
@@ -68,6 +91,26 @@ export interface ApprovalScope {
 export interface PendingApproval {
   request: ToolRequest;
   scope: ApprovalScope;
+}
+
+export interface ChildPathStep {
+  operationId: string;
+  key: string;
+  runId: string;
+}
+
+export interface ChildEnvelope {
+  snapshot: RunSnapshot;
+  /** An opaque host execution segment, not an independently owned SDK run. */
+  reference?: string;
+}
+
+export interface ChildRequest extends ChildEnvelope {
+  key: string;
+  parentRunId: string;
+  operationId: string;
+  /** A stored SDK child needs resuming, not replay of a successful host segment. */
+  resume: boolean;
 }
 
 /** Host callbacks are trusted code, never functions reconstructed from a client snapshot.
@@ -92,6 +135,11 @@ export interface AgentHost {
   beforeTool?: (request: ToolRequest, approval?: PendingApproval) => void | Promise<void>;
   /** Both this callback and the tool's isConcurrencySafe flag must allow batching. */
   canRunConcurrently?: (request: ToolRequest) => boolean;
+  /** Optional in-process child binding under this root's lease and cancellation.
+   * A host may return a saved envelope. To resume a suspended SDK child it must call
+   * execute in a new/resumable segment, not treat a cached suspension as completion.
+   * execute may be called once, and must settle before the hook returns. */
+  child?: (request: ChildRequest, execute: () => Promise<ChildEnvelope>) => Promise<ChildEnvelope>;
 }
 
 export interface RunOptions {
@@ -108,6 +156,8 @@ export interface ResumeOptions extends Omit<RunOptions, "runId"> {
   host: AgentHost & { authorizeResume: NonNullable<AgentHost["authorizeResume"]> };
   /** JSON evidence for resolveApproval, never a trusted approve flag. */
   decision?: unknown;
+  /** Exact path from the suspended outcome. Required for descendant decision evidence. */
+  approvalPath?: readonly ChildPathStep[];
 }
 
 export interface RunFailure {
@@ -116,13 +166,21 @@ export interface RunFailure {
   operationId?: string;
 }
 
-export type LimitReason = "turns" | "toolCalls" | "elapsedMs" | "outputTokens";
+export type LimitReason =
+  | "turns"
+  | "toolCalls"
+  | "elapsedMs"
+  | "outputTokens"
+  | "maxChildren"
+  | "maxDepth"
+  | "modelCalls"
+  | "treeElapsedMs";
 
 export type RunState =
   | { status: "running" }
   /** Saves the original result input, not a validator's potentially non-JSON return value. */
   | { status: "completed"; candidate: unknown }
-  | { status: "suspended"; approval: PendingApproval }
+  | { status: "suspended"; approval: PendingApproval; path: ChildPathStep[] }
   | { status: "cancelled" }
   | { status: "limited"; limit: LimitReason }
   | { status: "failed"; error: RunFailure };
@@ -134,6 +192,8 @@ export type ToolResult =
 export type ToolExecution =
   | { id: string; status: "pending" }
   | { id: string; status: "running"; attemptId: string }
+  /** Pure coordination can replay. Its children keep their own effect journals. */
+  | { id: string; status: "delegating"; attemptId: string }
   | { id: string; status: "completed"; attemptId: string; result: ToolResult };
 
 export type ModelExecution =
@@ -147,10 +207,16 @@ export type ModelExecution =
       tools: ToolExecution[];
     };
 
+export interface DelegationExecution {
+  operationId: string;
+  /** Admission order is the deterministic join/approval order. Receipts are never removed. */
+  children: (ChildEnvelope & { key: string })[];
+}
+
 /** JSON-serializable execution journal. Contains private prompts, arguments and results;
  * the host owns storage, access and retention. Never accept it as proof of permission. */
 export interface RunSnapshot {
-  format: 1;
+  format: 2;
   agentId: string;
   version: string;
   runId: string;
@@ -159,6 +225,9 @@ export interface RunSnapshot {
   input: string;
   limits: RunLimits;
   models: ModelExecution[];
+  delegations: DelegationExecution[];
+  /** Identical in every node. Admissions are counted from the journals, including running work. */
+  tree: { runId: string; startedAt: number; limits: TreeLimits };
   state: RunState;
 }
 
@@ -174,7 +243,7 @@ export type OperationReceipt =
       source?: Turn["source"];
     }
   | {
-      kind: "tool";
+      kind: "tool" | "delegation";
       id: string;
       callId: string;
       attemptId: string;
@@ -186,6 +255,8 @@ interface RunRecord {
   runId: string;
   attemptId: string;
   usage: TokenUsage;
+  /** This run and all descendants, deduplicated by stable model receipt IDs. */
+  treeUsage: TokenUsage;
   /** Whole settled turns only. An unfinished tool round remains in snapshot.models. */
   history: ChatMessage[];
   receipts: OperationReceipt[];
@@ -195,7 +266,7 @@ interface RunRecord {
 export type RunOutcome<T = string> = RunRecord &
   (
     | { status: "completed"; output: T }
-    | { status: "suspended"; approval: PendingApproval }
+    | { status: "suspended"; approval: PendingApproval; path: ChildPathStep[] }
     | { status: "cancelled" }
     | { status: "limited"; limit: LimitReason }
     | { status: "failed"; error: RunFailure }

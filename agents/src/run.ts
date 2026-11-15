@@ -11,9 +11,28 @@ import {
   type Tool,
 } from "@providerkit/core";
 import {
+  AGENT_RUNTIME,
+  executeDelegation,
+  isDelegation,
+  specialistTool,
+  type AgentRuntime,
+  type ApprovalEvidence,
+  type Delegation,
+} from "./delegation.ts";
+import {
+  ExecutionTree,
+  Halt,
+  authorizeTree,
+  fail,
+  treeUsage,
+  untilAbort,
+  type ExecutionScope,
+} from "./tree.ts";
+import {
   checkOptions,
   completeArguments,
   copyData,
+  equalData,
   immutableCopy,
   isId,
   isRecord,
@@ -21,6 +40,7 @@ import {
   isUsage,
   modelId,
   readLimits,
+  readTreeLimits,
   readSnapshot,
   readTurn,
   toolId,
@@ -34,11 +54,9 @@ import type {
   OperationReceipt,
   PendingApproval,
   ResultSchema,
-  RunFailure,
   RunOptions,
   RunOutcome,
   RunSnapshot,
-  RunState,
   ToolRequest,
   ToolResult,
 } from "./types.ts";
@@ -47,35 +65,6 @@ import type {
 export const RESULT_TOOL_NAME = "submit_result";
 
 type CompletedModel = Extract<ModelExecution, { status: "completed" }>;
-type StopState = Extract<RunState, { status: "failed" | "cancelled" | "limited" }>;
-
-class Halt extends Error {
-  constructor(readonly state: StopState) {
-    super(state.status);
-  }
-}
-
-function fail(code: string, message: string, operationId?: string): never {
-  throw new Halt({ status: "failed", error: { code, message, operationId } });
-}
-
-/** This is the run's wall-clock/caller cancellation, not a provider retry or watchdog.
- * A provider or tool that ignores its signal can still finish externally after we stop. */
-async function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  let onAbort = () => {};
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_resolve, reject) => {
-        onAbort = () => reject(signal.reason);
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      }),
-    ]);
-  } finally {
-    signal.removeEventListener("abort", onAbort);
-  }
-}
 
 function historyOf(snapshot: RunSnapshot, instructions: string): ChatMessage[] {
   const history: ChatMessage[] = [
@@ -121,11 +110,13 @@ function recordOf(snapshot: RunSnapshot, instructions: string) {
       const call = model.turn.message.toolCalls?.[index];
       if (!call || tool.status === "pending") continue;
       receipts.push({
-        kind: "tool",
+        kind: saved.delegations.some((journal) => journal.operationId === tool.id)
+          ? "delegation"
+          : "tool",
         id: tool.id,
         callId: call.id,
         attemptId: tool.attemptId,
-        status: tool.status,
+        status: tool.status === "delegating" ? "running" : tool.status,
         ...(tool.status === "completed" ? { result: tool.result } : {}),
       });
     }
@@ -134,6 +125,7 @@ function recordOf(snapshot: RunSnapshot, instructions: string) {
     runId: saved.runId,
     attemptId: saved.attemptId,
     usage,
+    treeUsage: treeUsage(saved),
     receipts,
     history: historyOf(saved, instructions),
     snapshot: saved,
@@ -154,6 +146,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     throw new TypeError("An agent needs an id, version, instructions and provider.");
   }
   const limits = readLimits(definition.limits);
+  const treeLimits = readTreeLimits(definition.treeLimits);
   const output = definition.output && {
     schema: copyData(definition.output.schema),
     validate: definition.output.validate,
@@ -169,7 +162,12 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
   const tools = [...(definition.tools ?? [])];
   if (
     new Set(tools.map((tool) => tool.name)).size !== tools.length ||
-    tools.some((tool) => !isId(tool.name) || tool.name === RESULT_TOOL_NAME || tool.isTerminal)
+    tools.some(
+      (tool) =>
+        !isId(tool.name) ||
+        tool.name === RESULT_TOOL_NAME ||
+        (!isDelegation(tool) && tool.isTerminal),
+    )
   ) {
     throw new TypeError(
       `Use unique tool names and the output contract for terminal results. ${RESULT_TOOL_NAME} is reserved.`,
@@ -190,7 +188,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       }),
     );
   }
-  const registry = new ToolRegistry(tools);
+  const registry = new ToolRegistry(tools.filter((tool): tool is Tool => !isDelegation(tool)));
+  const delegations = new Map(tools.filter(isDelegation).map((tool) => [tool.name, tool]));
 
   function validateResult(candidate: unknown): T | string {
     if (output) return output.validate(copyData(candidate));
@@ -202,28 +201,30 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
   async function execute(
     snapshot: RunSnapshot,
     options: RunOptions,
-    decision?: unknown,
+    scope: ExecutionScope,
+    evidence?: ApprovalEvidence,
   ): Promise<RunOutcome<T | string>> {
     const host = options.host;
     const deadline = snapshot.startedAt + limits.elapsedMs;
     const timeout = new AbortController();
-    const signal = AbortSignal.any(
-      options.signal ? [options.signal, timeout.signal] : [timeout.signal],
-    );
+    const signal = AbortSignal.any([
+      scope.tree.signal,
+      timeout.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
     const timer = setTimeout(
       () => timeout.abort(new Error("The run reached its time limit.")),
       Math.max(0, deadline - Date.now()),
     );
-    let writes = Promise.resolve();
-    let checkpointError: RunFailure | undefined;
+    let release = () => {};
     let approved: PendingApproval | undefined;
     let completed: { output: T | string } | undefined;
 
     function active(): void {
+      scope.tree.active();
       if (options.signal?.aborted) throw new Halt({ status: "cancelled" });
       if (timeout.signal.aborted || Date.now() >= deadline)
         throw new Halt({ status: "limited", limit: "elapsedMs" });
-      if (checkpointError) throw new Halt({ status: "failed", error: checkpointError });
     }
 
     function emit(event: AgentEvent): void {
@@ -234,22 +235,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       }
     }
 
-    async function save(): Promise<void> {
-      const saved = immutableCopy(snapshot);
-      // Capture at enqueue time and serialize writes: a slow older write cannot erase a receipt.
-      writes = writes.then(async () => {
-        await host?.checkpoint?.(saved);
-      });
-      try {
-        await writes;
-      } catch (error) {
-        checkpointError ??= {
-          code: "checkpoint_failed",
-          message: `Checkpoint failed: ${messageOf(error)}. Reconcile stored state before resuming.`,
-        };
-        throw new Halt({ status: "failed", error: checkpointError });
-      }
-    }
+    const save = () => scope.tree.save();
 
     function usedTools(): number {
       return snapshot.models.reduce(
@@ -368,6 +354,59 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       active();
     }
 
+    async function runDelegation(
+      model: CompletedModel,
+      index: number,
+      request: ToolRequest,
+      descriptor: Delegation,
+    ): Promise<void> {
+      let journal = snapshot.delegations.find((entry) => entry.operationId === request.operationId);
+      if (!journal) {
+        journal = { operationId: request.operationId, children: [] };
+        snapshot.delegations.push(journal);
+      }
+      model.tools[index] = {
+        id: request.operationId,
+        attemptId: snapshot.attemptId,
+        status: "delegating",
+      };
+      await save();
+      active();
+      if (!completeArguments(request.call.arguments)) {
+        await finishTool(model, index, request, {
+          ok: false,
+          kind: "invalid_input",
+          content: "Tool arguments must be one complete JSON object. Send the full object again.",
+        });
+        return;
+      }
+      await untilAbort(Promise.resolve(host?.beforeTool?.(immutableCopy(request))), signal);
+      active();
+      emit({ type: "tool_start", request });
+      active();
+      // Coordination is pure and is the only place children can start. Lend once
+      // for this entire barrier, including ignored children and overlapping joins.
+      release();
+      let result: ToolResult;
+      try {
+        result = await executeDelegation(
+          descriptor,
+          journal,
+          snapshot,
+          request.arguments,
+          options,
+          scope,
+          signal,
+          active,
+          evidence,
+        );
+      } finally {
+        release = await scope.tree.gate.acquire(signal);
+      }
+      active();
+      await finishTool(model, index, request, result);
+    }
+
     async function handleTurn(model: CompletedModel): Promise<void> {
       active();
       const { message, finishReason } = model.turn;
@@ -409,8 +448,15 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         }
         active();
         const capacity = limits.toolCalls - usedTools();
-        if (capacity <= 0) throw new Halt({ status: "limited", limit: "toolCalls" });
+        if (capacity <= 0 && model.tools[index]?.status === "pending")
+          throw new Halt({ status: "limited", limit: "toolCalls" });
         const request = requestFor(model, index);
+        const descriptor = delegations.get(request.call.name);
+        if (descriptor) {
+          await runDelegation(model, index, request, descriptor);
+          index++;
+          continue;
+        }
         const tool = registry.get(request.call.name);
         if (
           tool?.needsApproval &&
@@ -433,7 +479,11 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
               "The host must supply an actor, resource version and future approval expiry.",
               request.operationId,
             );
-          snapshot.state = { status: "suspended", approval: { request: copyData(request), scope } };
+          snapshot.state = {
+            status: "suspended",
+            approval: { request: copyData(request), scope },
+            path: [],
+          };
           return;
         }
 
@@ -489,6 +539,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       active();
       if (snapshot.models.length >= limits.turns)
         throw new Halt({ status: "limited", limit: "turns" });
+      scope.tree.reserveModel();
       const model: ModelExecution = {
         id: modelId(snapshot.runId, snapshot.models.length),
         attemptId: snapshot.attemptId,
@@ -501,7 +552,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       async function* observed(): AsyncIterable<ProviderChunk> {
         const stream = provider.createStream(
           historyOf(snapshot, instructions),
-          copyData(registry.definitions()),
+          copyData(tools.map((tool) => tool.definition())),
           {
             signal,
             sessionId: snapshot.runId,
@@ -543,6 +594,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
 
     try {
       if (snapshot.state.status === "running" || snapshot.state.status === "suspended") {
+        release = await scope.tree.gate.acquire(signal);
+        active();
         for (const model of snapshot.models) {
           const interrupted =
             model.status === "running"
@@ -555,7 +608,11 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
               interrupted.id,
             );
         }
-        if (snapshot.state.status === "suspended") {
+        if (snapshot.state.status === "suspended" && snapshot.state.path.length > 0) {
+          // Replay only pure coordination. Evidence follows its exact path to one leaf.
+          snapshot.state = { status: "running" };
+        }
+        if (snapshot.state.status === "suspended" && evidence) {
           active();
           const approval = snapshot.state.approval;
           if (approval.scope.expiresAt <= Date.now())
@@ -577,7 +634,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           await save();
           active();
           const answer = await untilAbort(
-            Promise.resolve(host.resolveApproval(immutableCopy(approval), immutableCopy(decision))),
+            Promise.resolve(
+              host.resolveApproval(immutableCopy(approval), immutableCopy(evidence.decision)),
+            ),
             signal,
           );
           active();
@@ -617,37 +676,31 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       await save();
     } catch (error) {
       let failure = error;
-      if (!(failure instanceof Halt)) {
-        try {
-          active();
-        } catch (stopped) {
-          failure = stopped;
-        }
+      try {
+        active();
+      } catch (stopped) {
+        failure = stopped;
       }
-      if (checkpointError) {
-        snapshot.state = { status: "failed", error: checkpointError };
-      } else if (failure instanceof Halt) {
-        snapshot.state = failure.state;
-      } else {
-        snapshot.state = {
-          status: "failed",
-          error: { code: "execution_failed", message: messageOf(failure) },
-        };
-      }
-      if (!checkpointError) {
-        try {
-          await save();
-        } catch (saveError) {
-          snapshot.state =
-            saveError instanceof Halt
-              ? saveError.state
-              : {
-                  status: "failed",
-                  error: { code: "checkpoint_failed", message: messageOf(saveError) },
-                };
-        }
+      snapshot.state =
+        failure instanceof Halt
+          ? failure.state
+          : {
+              status: "failed",
+              error: { code: "execution_failed", message: messageOf(failure) },
+            };
+      try {
+        await save();
+      } catch (saveError) {
+        snapshot.state =
+          saveError instanceof Halt
+            ? saveError.state
+            : {
+                status: "failed",
+                error: { code: "checkpoint_failed", message: messageOf(saveError) },
+              };
       }
     } finally {
+      release();
       clearTimeout(timer);
     }
     emit({
@@ -665,32 +718,26 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     return { ...record, ...state };
   }
 
-  return {
-    id,
-    version,
-    async run(input, options = {}) {
-      if (!isId(input)) throw new TypeError("Give the agent a non-empty text input.");
-      checkOptions(options);
-      return execute(
-        {
-          format: 1,
-          agentId: id,
-          version,
-          runId: options.runId ?? crypto.randomUUID(),
-          attemptId: crypto.randomUUID(),
-          startedAt: Date.now(),
-          input,
-          limits: copyData(limits),
-          models: [],
-          state: { status: "running" },
-        },
-        options,
-      );
+  const runtime: AgentRuntime<T | string> = {
+    execute,
+    create(input, runId, tree) {
+      const startedAt = Date.now();
+      return {
+        format: 2,
+        agentId: id,
+        version,
+        runId,
+        attemptId: crypto.randomUUID(),
+        startedAt,
+        input,
+        limits: copyData(limits),
+        models: [],
+        delegations: [],
+        state: { status: "running" },
+        tree: tree ? copyData(tree) : { runId, startedAt, limits: copyData(treeLimits) },
+      };
     },
-    async resume(raw, options) {
-      checkOptions(options);
-      if (!options.host?.authorizeResume)
-        throw new TypeError("Resume requires a trusted host.authorizeResume callback.");
+    restore(raw, tree) {
       const snapshot = readSnapshot(
         raw,
         id,
@@ -698,9 +745,88 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         limits,
         output ? RESULT_TOOL_NAME : undefined,
       );
-      await options.host.authorizeResume(immutableCopy(snapshot));
-      snapshot.attemptId = crypto.randomUUID();
-      return execute(snapshot, options, options.decision);
+      if (
+        tree
+          ? !equalData(snapshot.tree, tree)
+          : snapshot.tree.runId !== snapshot.runId || !equalData(snapshot.tree.limits, treeLimits)
+      )
+        throw new TypeError("The snapshot tree does not match this root or its limits.");
+      for (const model of snapshot.models) {
+        if (model.status !== "completed") continue;
+        for (const [index, tool] of model.tools.entries()) {
+          const call = model.turn.message.toolCalls?.[index];
+          const descriptor = call && delegations.get(call.name);
+          const journal = snapshot.delegations.find((entry) => entry.operationId === tool.id);
+          if (descriptor && tool.status !== "pending") {
+            if (!journal || tool.status === "running")
+              throw new TypeError(
+                "A delegation needs its own child journal, not an ordinary effect marker.",
+              );
+          } else if (journal)
+            throw new TypeError("The saved delegation is not in this agent definition.");
+          if (!journal || !descriptor) continue;
+          for (const entry of journal.children) {
+            const agent = descriptor.specialists.find(
+              (agent) =>
+                agent.id === entry.snapshot.agentId && agent.version === entry.snapshot.version,
+            );
+            if (!agent)
+              throw new TypeError("The saved child is not a registered specialist version.");
+            entry.snapshot = agent[AGENT_RUNTIME].restore(entry.snapshot, snapshot.tree);
+          }
+        }
+      }
+      if (snapshot.state.status === "completed") validateResult(snapshot.state.candidate);
+      return snapshot;
+    },
+    hydrate(snapshot) {
+      const record = recordOf(snapshot, instructions);
+      const state = record.snapshot.state;
+      if (state.status === "running") throw new Error("A child has not settled yet.");
+      return state.status === "completed"
+        ? { ...record, status: "completed", output: validateResult(state.candidate) }
+        : { ...record, ...state };
     },
   };
+
+  async function root(snapshot: RunSnapshot, options: RunOptions, evidence?: ApprovalEvidence) {
+    const tree = new ExecutionTree(snapshot, options);
+    try {
+      return await execute(snapshot, options, { tree, depth: 0 }, evidence);
+    } finally {
+      tree.close();
+    }
+  }
+
+  const agent: Agent<T | string> = {
+    id,
+    version,
+    [AGENT_RUNTIME]: runtime,
+    asTool(options) {
+      return specialistTool(agent, options);
+    },
+    async run(input, options = {}) {
+      if (!isId(input)) throw new TypeError("Give the agent a non-empty text input.");
+      checkOptions(options);
+      return root(runtime.create(input, options.runId ?? crypto.randomUUID()), options);
+    },
+    async resume(raw, options) {
+      checkOptions(options);
+      const snapshot = runtime.restore(raw);
+      let evidence: ApprovalEvidence | undefined;
+      if (options.decision !== undefined || options.approvalPath !== undefined) {
+        if (
+          snapshot.state.status !== "suspended" ||
+          !equalData(options.approvalPath ?? [], snapshot.state.path)
+        )
+          throw new TypeError("The decision path must match the exposed pending approval.");
+        if (options.decision !== undefined)
+          evidence = copyData({ path: snapshot.state.path, decision: options.decision });
+      }
+      await authorizeTree(snapshot, options.host);
+      snapshot.attemptId = crypto.randomUUID();
+      return root(snapshot, options, evidence);
+    },
+  };
+  return Object.freeze(agent);
 }
