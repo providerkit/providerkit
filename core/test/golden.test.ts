@@ -1,3 +1,4 @@
+import * as hostedProviders from "../src/hosted.ts";
 // Golden transcripts: one turn and five failures on four vendors' wires, and
 // one turn that ran a hosted search, asked the same questions on all four.
 //
@@ -567,7 +568,7 @@ const VENDORS: Vendor[] = [
     kimiId: "functions.search:0",
     hosted: {
       create: (fetchImpl) =>
-        createOpenAIProvider({
+        hostedProviders.createOpenAIProvider({
           apiKey: "k",
           model: "openai/gpt-5",
           baseUrl: "https://openrouter.ai/api",
@@ -585,7 +586,11 @@ const VENDORS: Vendor[] = [
       unapplied: {
         tool: { type: "web_search", allowedDomains: ["cats.example"] },
         create: (fetchImpl) =>
-          createOpenAIProvider({ apiKey: "k", model: "gpt-5-search-preview", fetchImpl }),
+          hostedProviders.createOpenAIProvider({
+            apiKey: "k",
+            model: "gpt-5-search-preview",
+            fetchImpl,
+          }),
       },
       cited: { text: LINK, anchor: "marker" },
     },
@@ -607,6 +612,12 @@ const VENDORS: Vendor[] = [
     history: anthropicHistory,
     kimiId: "functions_search_0",
     hosted: {
+      create: (fetchImpl) =>
+        hostedProviders.createAnthropicProvider({
+          apiKey: "k",
+          model: "claude-sonnet-5",
+          fetchImpl,
+        }),
       serves: ["web_search", "web_fetch", "code_execution"],
       turn: ANTHROPIC_HOSTED_TURN,
       records: true,
@@ -646,6 +657,8 @@ const VENDORS: Vendor[] = [
     history: geminiHistory,
     kimiId: "functions.search:0",
     hosted: {
+      create: (fetchImpl) =>
+        hostedProviders.createGeminiProvider({ apiKey: "k", model: "gemini-3.5-pro", fetchImpl }),
       serves: ["web_search", "web_fetch", "code_execution", "file_search"],
       turn: GEMINI_HOSTED_TURN,
       records: true,
@@ -678,6 +691,8 @@ const VENDORS: Vendor[] = [
     history: responsesHistory,
     kimiId: "functions.search:0",
     hosted: {
+      create: (fetchImpl) =>
+        hostedProviders.createResponsesProvider({ apiKey: "k", model: "gpt-5", fetchImpl }),
       serves: ["web_search", "code_execution", "file_search", "image_generation"],
       turn: RESPONSES_HOSTED_TURN,
       records: true,

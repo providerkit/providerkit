@@ -12,7 +12,7 @@
 // go stale, and where one model id is served by several hosts at different
 // prices it is the only figure that names the host that answered. When it is
 // present it wins; the caller's rate prices everything else.
-import { HOSTED_TOOL_TYPES, type HostedToolType } from "./hosted.ts";
+import { HOSTED_TOOL_TYPES, type HostedToolType } from "./hosted/types.ts";
 import type { TokenUsage } from "./types.ts";
 import { EMPTY_USAGE } from "./types.ts";
 

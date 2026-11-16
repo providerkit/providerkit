@@ -1,3 +1,4 @@
+import * as hosted from "../src/hosted.ts";
 // Golden transcripts for the Gemini adapter: real `?alt=sse` frame sequences
 // replayed through it, asserting the normalized chunks and the request it
 // builds. Same shape as providers.test.ts, plus the signal the fetch must see.
@@ -825,6 +826,8 @@ const groundedTurn = (segment: { startIndex?: number; endIndex: number; text: st
 ];
 
 describe("gemini hosted tools", () => {
+  const provider = (fetchImpl: typeof fetch, config: Record<string, unknown> = {}) =>
+    hosted.createGeminiProvider({ apiKey: "k", model: "gemini-3-pro", fetchImpl, ...config });
   const search = { hostedTools: [{ type: "web_search" as const }] };
   const fn: ToolDefinition = { name: "save", description: "save", inputSchema: { type: "object" } };
 
@@ -1269,7 +1272,7 @@ describe("gemini hosted tools", () => {
     });
     // …and only to the provider that made them.
     const history: ChatMessage[] = [...HI, turn.message, { role: "user", content: "thanks" }];
-    expect(toGeminiContents(history, "gemini").contents[1]).toEqual({
+    expect(hosted.toGeminiContents(history, "gemini").contents[1]).toEqual({
       role: "model",
       parts: [
         { text: "Running it. " },
@@ -1280,7 +1283,7 @@ describe("gemini hosted tools", () => {
         { text: "Done." },
       ],
     });
-    expect(toGeminiContents(history, "zen").contents[1]).toEqual({
+    expect(hosted.toGeminiContents(history, "zen").contents[1]).toEqual({
       role: "model",
       parts: [{ text: "Running it. Done." }],
     });

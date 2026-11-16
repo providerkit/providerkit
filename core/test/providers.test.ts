@@ -1,3 +1,4 @@
+import * as hosted from "../src/hosted.ts";
 // Golden transcripts: real SSE frame sequences replayed through each adapter,
 // asserting the normalized chunks they must produce.
 import { describe, expect, it } from "vitest";
@@ -1849,7 +1850,7 @@ const ANTHROPIC_SEARCH_TURN = [
 
 describe("anthropic hosted tools", () => {
   const claude = (fetchImpl: typeof fetch, config: Record<string, unknown> = {}) =>
-    createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", fetchImpl, ...config });
+    hosted.createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", fetchImpl, ...config });
   const search: StreamOptions = { hostedTools: [{ type: "web_search" }] };
 
   it("sends each tool in its pinned version, with the beta it needs beside the caller's own", async () => {
@@ -2377,7 +2378,7 @@ describe("anthropic hosted tools", () => {
       claude(recorder(ANTHROPIC_SEARCH_TURN).fetchImpl).createStream(QUESTION, [], search),
     );
     const history: ChatMessage[] = [...QUESTION, message, { role: "user", content: "thanks" }];
-    expect(toAnthropicMessages(history, "anthropic").messages[1]).toEqual({
+    expect(hosted.toAnthropicMessages(history, "anthropic").messages[1]).toEqual({
       role: "assistant",
       content: [
         {
@@ -2390,7 +2391,7 @@ describe("anthropic hosted tools", () => {
         { type: "text", text: "Cats sleep 12 to 16 hours.", citations: [LOCATION] },
       ],
     });
-    expect(toAnthropicMessages(history, "zai").messages[1]).toEqual({
+    expect(hosted.toAnthropicMessages(history, "zai").messages[1]).toEqual({
       role: "assistant",
       content: [{ type: "text", text: "Cats sleep 12 to 16 hours." }],
     });
@@ -2439,7 +2440,7 @@ const OPENROUTER_SEARCH_TURN = [
 
 describe("openai-shape hosted web search", () => {
   const openRouter = (fetchImpl: typeof fetch) =>
-    createOpenAIProvider({
+    hosted.createOpenAIProvider({
       apiKey: "k",
       model: "openai/gpt-5",
       baseUrl: "https://openrouter.ai/api",
@@ -2479,7 +2480,7 @@ describe("openai-shape hosted web search", () => {
     "honors prompt-only JSON beside hosted-only tools from the %s setting",
     async (setting) => {
       const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
-      const provider = createOpenAIProvider({
+      const provider = hosted.createOpenAIProvider({
         apiKey: "k",
         model: "openai/gpt-5",
         baseUrl: "https://openrouter.ai/api",
@@ -2523,7 +2524,7 @@ describe("openai-shape hosted web search", () => {
 
   it("asks OpenAI's search models through web_search_options, which take no restriction", async () => {
     const searcher = (fetchImpl: typeof fetch) =>
-      createOpenAIProvider({ apiKey: "k", model: "gpt-5-search-preview", fetchImpl });
+      hosted.createOpenAIProvider({ apiKey: "k", model: "gpt-5-search-preview", fetchImpl });
     const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
     await collect(
       searcher(fetchImpl).createStream(QUESTION, [], {
@@ -2559,11 +2560,9 @@ describe("openai-shape hosted web search", () => {
       const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
       await expect(
         collect(
-          createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl, ...config }).createStream(
-            QUESTION,
-            [],
-            { hostedTools: [tool] },
-          ),
+          hosted
+            .createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl, ...config })
+            .createStream(QUESTION, [], { hostedTools: [tool] }),
         ),
       ).rejects.toMatchObject({ kind: "invalid" });
       expect(seen).toHaveLength(0);
@@ -2573,12 +2572,14 @@ describe("openai-shape hosted web search", () => {
   it("lets a preset say what its endpoint runs", async () => {
     const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
     await collect(
-      createPresetProvider("groq", {
-        apiKey: "k",
-        model: "compound",
-        servesHostedTools: ["web_search"],
-        fetchImpl,
-      }).createStream(QUESTION, [], { hostedTools: [{ type: "web_search" }] }),
+      hosted
+        .createPresetProvider("groq", {
+          apiKey: "k",
+          model: "compound",
+          servesHostedTools: ["web_search"],
+          fetchImpl,
+        })
+        .createStream(QUESTION, [], { hostedTools: [{ type: "web_search" }] }),
     );
     expect(seen[0]!.body.web_search_options).toEqual({});
   });

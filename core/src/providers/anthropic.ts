@@ -13,25 +13,13 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
-import {
-  hostedCounts,
-  hostedReplay,
-  HostedRecorder,
-  isRecord,
-  planHostedTools,
-  queryInput,
-  servedAt,
-  type Citation,
-  type HostedCallDelta,
-  type HostedInput,
-  type HostedTool,
-  type HostedToolType,
-} from "../hosted.ts";
+import type { HostedToolType } from "../hosted/types.ts";
+import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
-import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   JsonOutput,
   ChatMessage,
@@ -99,6 +87,7 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
    *  and older accept it, and get it. */
   explicitNone?: boolean;
   /**
+   * For providers imported from `@providerkit/core/hosted`.
    * The hosted tools this endpoint runs. Defaults to web search, web fetch and
    * code execution on api.anthropic.com and to none anywhere else: Bedrock,
    * Vertex and the Anthropic-compatible gateways each run a different set, or
@@ -110,274 +99,6 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 
-/** The hosted types this wire has a shape for, and the fields it applies. */
-const ANTHROPIC_FIELDS: Partial<Record<HostedToolType, readonly string[]>> = {
-  web_search: ["allowedDomains", "blockedDomains", "maxUses", "userLocation"],
-  web_fetch: ["allowedDomains", "blockedDomains", "maxUses", "maxContentTokens"],
-  // `fileIds` would ride as container_upload blocks in the prompt, not on the
-  // tool; until that is built it is refused rather than dropped.
-  code_execution: [],
-};
-const ANTHROPIC_SENDS = Object.keys(ANTHROPIC_FIELDS);
-
-/** The names Anthropic's server tools answer to. A function tool under one of
- *  them, beside the hosted tool, is a request the API refuses. */
-const RESERVED_NAMES: Partial<Record<HostedToolType, readonly string[]>> = {
-  web_search: ["web_search"],
-  web_fetch: ["web_fetch"],
-  code_execution: ["code_execution", "bash_code_execution", "text_editor_code_execution"],
-};
-
-/** A paused turn resumed this many times without finishing is a vendor stuck
- *  pausing: PydanticAI's cap (models/_continuation.py:92-106). */
-const MAX_PAUSES = 10;
-
-/**
- * One hosted tool on the wire, and the beta header its version needs. Pinned
- * to the versions the model calls directly: the 2026-02-09 and 2026-03-18 web
- * tools route their calls through code execution and come back uncited
- * (PydanticAI anthropic/_citations.py:73-100). Shapes from Vercel's AI SDK
- * (Apache-2.0), anthropic-prepare-tools.ts:167-173,313-330,368-383.
- */
-function anthropicHostedTool(provider: string, tool: HostedTool): { wire: unknown; beta?: string } {
-  switch (tool.type) {
-    case "web_search":
-      return {
-        wire: {
-          type: "web_search_20250305",
-          name: "web_search",
-          max_uses: tool.maxUses,
-          allowed_domains: tool.allowedDomains,
-          blocked_domains: tool.blockedDomains,
-          ...(tool.userLocation
-            ? { user_location: { type: "approximate", ...tool.userLocation } }
-            : {}),
-        },
-      };
-    case "web_fetch":
-      return {
-        wire: {
-          type: "web_fetch_20250910",
-          name: "web_fetch",
-          max_uses: tool.maxUses,
-          allowed_domains: tool.allowedDomains,
-          blocked_domains: tool.blockedDomains,
-          max_content_tokens: tool.maxContentTokens,
-        },
-        beta: "web-fetch-2025-09-10",
-      };
-    case "code_execution":
-      return {
-        wire: { type: "code_execution_20250825", name: "code_execution" },
-        beta: "code-execution-2025-08-25",
-      };
-    default:
-      // planHostedTools only passes the types in ANTHROPIC_FIELDS.
-      throw new ProviderError(
-        provider,
-        "invalid",
-        `${provider}: no Anthropic shape for ${tool.type}`,
-      );
-  }
-}
-
-/** The headers with this request's betas added to any the caller set, as one
- *  comma-separated `anthropic-beta`, whatever case the caller wrote it in. */
-function withBetas(
-  headers: Record<string, string>,
-  betas: readonly string[],
-): Record<string, string> {
-  if (betas.length === 0) return headers;
-  const out: Record<string, string> = {};
-  const merged: string[] = [];
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.toLowerCase() !== "anthropic-beta") out[name] = value;
-    else
-      merged.push(
-        ...value
-          .split(",")
-          .map((beta) => beta.trim())
-          .filter(Boolean),
-      );
-  }
-  for (const beta of betas) if (!merged.includes(beta)) merged.push(beta);
-  out["anthropic-beta"] = merged.join(",");
-  return out;
-}
-
-function str(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function parseJson(json: string): unknown {
-  try {
-    return JSON.parse(json);
-  } catch {
-    return undefined;
-  }
-}
-
-/** The seam's type for a server tool name; undefined for the server tools this
- *  adapter never asks for (tool search, MCP, the advisor). */
-function serverToolType(name: string): HostedToolType | undefined {
-  if (name === "web_search" || name === "web_fetch") return name;
-  if (RESERVED_NAMES.code_execution?.includes(name)) return "code_execution";
-  return undefined;
-}
-
-/** What a server tool was asked to do. Code execution 20250825 runs as two
- *  tools, a shell and a file editor, so both read as code runs. */
-function serverToolInput(name: string, input: unknown): HostedInput {
-  if (!isRecord(input)) return {};
-  switch (name) {
-    case "web_search":
-      return queryInput([str(input.query)]);
-    case "web_fetch": {
-      const url = str(input.url);
-      return url ? { url } : {};
-    }
-    case "bash_code_execution": {
-      const code = str(input.command);
-      return code ? { code, language: "bash" } : {};
-    }
-    case "text_editor_code_execution": {
-      const path = str(input.path);
-      const code = str(input.file_text);
-      return { ...(path ? { path } : {}), ...(code ? { code } : {}) };
-    }
-    case "code_execution": {
-      const code = str(input.code);
-      return code ? { code, language: "python" } : {};
-    }
-    default:
-      return {};
-  }
-}
-
-/** A result block: `web_search_tool_result`, `bash_code_execution_tool_result`… */
-function isResultBlock(block: Record<string, unknown>): boolean {
-  return typeof block.type === "string" && block.type.endsWith("_tool_result");
-}
-
-/** What a server tool's result block says it did. An `*_error` content is a
- *  failed call, kept as data with the vendor's code (invariant 7). A shell
- *  that exits non-zero still ran: that is the program failing, not the tool. */
-function serverToolResult(block: Record<string, unknown>): Omit<HostedCallDelta, "index"> {
-  const { content } = block;
-  if (Array.isArray(content)) {
-    const sources = content.flatMap((result) => {
-      const url = isRecord(result) ? str(result.url) : undefined;
-      const title = isRecord(result) ? str(result.title) : undefined;
-      return url ? [{ type: "url" as const, url, ...(title ? { title } : {}) }] : [];
-    });
-    return { status: "completed", output: { sources } };
-  }
-  if (!isRecord(content)) return { status: "completed" };
-  const kind = str(content.type) ?? "";
-  if (kind.endsWith("_error")) return { status: "failed", error: str(content.error_code) ?? kind };
-  if (kind === "web_fetch_result") {
-    const url = str(content.url);
-    const title = isRecord(content.content) ? str(content.content.title) : undefined;
-    return {
-      status: "completed",
-      output: url ? { sources: [{ type: "url", url, ...(title ? { title } : {}) }] } : {},
-    };
-  }
-  if (kind === "bash_code_execution_result" || kind === "code_execution_result") {
-    const files = (Array.isArray(content.content) ? content.content : []).flatMap((file) => {
-      const id = isRecord(file) ? str(file.file_id) : undefined;
-      return id ? [{ id }] : [];
-    });
-    const stdout = str(content.stdout);
-    const stderr = str(content.stderr);
-    return {
-      status: "completed",
-      output: {
-        ...(stdout ? { stdout } : {}),
-        ...(stderr ? { stderr } : {}),
-        ...(typeof content.return_code === "number" ? { exitCode: content.return_code } : {}),
-        ...(files.length > 0 ? { files } : {}),
-      },
-    };
-  }
-  const viewed = str(content.content);
-  return { status: "completed", ...(viewed ? { output: { stdout: viewed } } : {}) };
-}
-
-/**
- * A text block's citations as the seam's: one claim per source over the whole
- * block, because Anthropic cites whole blocks (PydanticAI
- * anthropic/_citations.py:197-198). Only web search locations name a page;
- * the document kinds point into the prompt and stay in the vendor's record.
- */
-function blockCitations(raw: readonly unknown[], start: number, end: number): Citation[] {
-  return raw.flatMap((citation): Citation[] => {
-    if (!isRecord(citation) || citation.type !== "web_search_result_location") return [];
-    const url = str(citation.url);
-    if (!url) return [];
-    const title = str(citation.title);
-    const excerpt = str(citation.cited_text);
-    const source = {
-      type: "url" as const,
-      url,
-      ...(title ? { title } : {}),
-      ...(excerpt ? { excerpt } : {}),
-    };
-    return [{ source, start, end, anchor: "claim" }];
-  });
-}
-
-/**
- * The code execution container of the turn still open: everything after the
- * last user message. A request inside that turn has to name the container its
- * earlier responses ran in, or the code it already ran is gone (PydanticAI
- * anthropic/_native_tools.py:128-147).
- */
-function openTurnContainer(messages: readonly ChatMessage[], provider: string): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
-    if (message.role === "user") return undefined;
-    if (message.role === "assistant" && message.hostedItems?.provider === provider) {
-      if (message.hostedItems.container) return message.hostedItems.container;
-    }
-  }
-  return undefined;
-}
-
-/** The paused blocks as the last assistant message, which is how Anthropic is
- *  told to carry on with the turn it paused. */
-function resumeWith(messages: AnthropicMessage[], blocks: readonly unknown[]): AnthropicMessage[] {
-  const last = messages.at(-1);
-  return last?.role === "assistant"
-    ? [...messages.slice(0, -1), { role: "assistant", content: [...last.content, ...blocks] }]
-    : [...messages, { role: "assistant", content: [...blocks] }];
-}
-
-/** The prompt of a turn's last model pass, cache included, when the vendor
- *  lists its passes. A server tool loop bills the sum of its passes, which is
- *  more than the window ever held. Ported from PydanticAI (MIT),
- *  anthropic/_response.py:180-196. */
-function lastPassTokens(usage: AnthropicUsage | undefined): number | undefined {
-  const passes = usage?.iterations ?? [];
-  for (let i = passes.length - 1; i >= 0; i--) {
-    const pass = passes[i]!;
-    if (pass.type === "message" || pass.type === "fallback_message") {
-      return (
-        (pass.input_tokens ?? 0) +
-        (pass.cache_read_input_tokens ?? 0) +
-        (pass.cache_creation_input_tokens ?? 0)
-      );
-    }
-  }
-  return undefined;
-}
-
-/** The counts Anthropic states, by the seam's types. */
-const STATED_COUNTS = [
-  ["web_search_requests", "web_search"],
-  ["web_fetch_requests", "web_fetch"],
-  ["code_execution_requests", "code_execution"],
-] as const;
 const DEFAULT_VERSION = "2023-06-01";
 /** Anthropic rejects a request without one, so a default is not optional. */
 const DEFAULT_MAX_TOKENS = 8_192;
@@ -621,7 +342,7 @@ function anthropicIds(): (id: string) => string {
   };
 }
 
-interface AnthropicMessage {
+export interface AnthropicMessage {
   role: string;
   content: unknown[];
 }
@@ -629,6 +350,15 @@ interface AnthropicMessage {
 export function toAnthropicMessages(
   messages: readonly ChatMessage[],
   provider = "anthropic",
+): { system?: unknown[]; messages: AnthropicMessage[] } {
+  return anthropicMessages(messages, provider);
+}
+
+/** @internal Hosted replay stays outside the plain converter. */
+export function anthropicMessages(
+  messages: readonly ChatMessage[],
+  provider = "anthropic",
+  replay?: HostedCodecs["anthropic"]["replay"],
 ): {
   system?: unknown[];
   messages: AnthropicMessage[];
@@ -682,17 +412,9 @@ export function toAnthropicMessages(
     // the model keeps the search results it read and the code it ran, and
     // each text block keeps the citations it was given. Its text and calls
     // come from the message, so an id `repairHistory` renamed still pairs.
-    const replayed = hostedReplay(message, provider);
+    const replayed = replay?.(message, provider, toolUse);
     if (replayed) {
-      pushBlocks(
-        "assistant",
-        replayed.map((entry) => {
-          if ("call" in entry) return toolUse(entry.call);
-          if ("item" in entry) return entry.item;
-          const { citations } = entry.slot;
-          return { type: "text", text: entry.text, ...(citations ? { citations } : {}) };
-        }),
-      );
+      pushBlocks("assistant", replayed);
       continue;
     }
     const blocks: unknown[] = [];
@@ -705,7 +427,7 @@ export function toAnthropicMessages(
   return { ...(blocks ? { system: blocks } : {}), messages: out };
 }
 
-interface AnthropicUsage {
+export interface AnthropicUsage {
   input_tokens?: number;
   output_tokens?: number;
   cache_read_input_tokens?: number;
@@ -727,7 +449,7 @@ interface AnthropicUsage {
     | null;
 }
 
-interface AnthropicEvent {
+export interface AnthropicEvent {
   type?: string;
   message?: {
     usage?: AnthropicUsage;
@@ -750,6 +472,11 @@ interface AnthropicEvent {
 }
 
 export function createAnthropicProvider(config: AnthropicConfig): Provider {
+  return anthropicProvider(config);
+}
+
+/** @internal Shared by the plain and hosted entry points. */
+export function anthropicProvider(config: AnthropicConfig, codecs?: HostedCodecs): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "anthropic";
   const instanceSessionId = config.sessionHeader
@@ -766,13 +493,14 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
       validateMaxAttempts(opts.maxAttempts);
+      if (!codecs) refuseHostedTools(id, opts, messages);
       const model = opts.model ?? config.model;
       const maxTokens = opts.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
       const effort = opts.effort ?? config.effort;
       // Repaired first: a result with no call, a call with no result, or an id
       // used twice is a 400 that loses the turn. See repairHistory.
       const sent = repairHistory(messages).messages;
-      const { system, messages: body } = toAnthropicMessages(sent, id);
+      const { system, messages: body } = anthropicMessages(sent, id, codecs?.anthropic.replay);
 
       // Anthropic's own `service_tier` means auto or standard_only, not this.
       if (opts.serviceTier) {
@@ -805,44 +533,17 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       const named = typeof opts.toolChoice === "object" ? opts.toolChoice.name : undefined;
       const offered =
         unforced && named !== undefined ? tools.filter((tool) => tool.name === named) : tools;
-      const hosted = planHostedTools(
-        id,
-        {
-          name: "Anthropic",
-          serves: (
-            config.servesHostedTools ??
-            servedAt(baseUrl, "api.anthropic.com", ["web_search", "web_fetch", "code_execution"])
-          ).filter((type) => ANTHROPIC_SENDS.includes(type)),
-          fields: ANTHROPIC_FIELDS,
-          refuse(tool) {
-            // TanStack's rule (MIT, ai-anthropic tools/web-search-tool.ts:12-18).
-            if (
-              (tool.type === "web_search" || tool.type === "web_fetch") &&
-              tool.allowedDomains !== undefined &&
-              tool.blockedDomains !== undefined
-            ) {
-              return "Anthropic takes allowedDomains or blockedDomains, not both. Set one, or mark the tool optional.";
-            }
-            const taken = offered.find((fn) => RESERVED_NAMES[tool.type]?.includes(fn.name));
-            return taken
-              ? `a function tool is named ${taken.name}, which Anthropic keeps for this hosted tool. Rename the function tool.`
-              : undefined;
-          },
-        },
-        opts,
-      );
-      const hostedWire = hosted.map((tool) => anthropicHostedTool(id, tool));
-      if (offered.length > 0 || hostedWire.length > 0) {
+      const hosted = codecs?.anthropic.plan(config, baseUrl, id, offered, opts);
+      if (offered.length > 0 || (hosted?.tools.length ?? 0) > 0) {
         request.tools = [
           ...offered.map((tool) => ({
             name: tool.name,
             description: tool.description,
             input_schema: toAnthropicToolSchema(tool.inputSchema),
           })),
-          ...hostedWire.map(({ wire }) => wire),
+          ...(hosted?.tools ?? []),
         ];
       }
-      const betas = hostedWire.flatMap(({ beta }) => (beta ? [beta] : []));
       const choice =
         opts.toolChoice && opts.toolChoice !== "auto" && !unforced
           ? toAnthropicToolChoice(opts.toolChoice)
@@ -906,26 +607,11 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       // Summed over the passes of a paused turn: each pass is a response of its
       // own, and each is billed.
       const billed = { fresh: 0, cached: 0, written: 0, output: 0 };
-      const statedCounts: Partial<Record<HostedToolType, number>> = {};
-      let contextTokens: number | undefined;
       let toolCall: ToolCallIdentity | null = null;
       let sawToolCall = false;
       let blockIndex = -1;
-      // The answer's length so far, in JS string units: where a hosted call
-      // sits in it, and the span a text block's citations cover.
-      let length = 0;
-      const recorder = new HostedRecorder();
-      // The vendor's record of the turn, for `hostedItems`: its server blocks
-      // as they came, its text as `{ length }`, its function calls as `{ call }`.
-      const items: unknown[] = [];
-      let recordedCalls = 0;
-      let container = openTurnContainer(sent, id);
-      // Every block of the passes so far, thinking and signatures included, to
-      // send back when the turn pauses. Kept for this call only: the signatures
-      // are what lets the model pick its own turn back up.
-      const resumed: unknown[] = [];
+      const hostedStream = codecs?.anthropic.stream(sent, id);
       const usageChunk = (): ProviderChunk => {
-        const hostedCalls = hostedCounts(recorder.shown(), statedCounts);
         return {
           type: "usage",
           usage: {
@@ -933,47 +619,22 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             cachedInputTokens: billed.cached,
             cacheWriteTokens: billed.written,
             outputTokens: billed.output,
-            ...(hostedCalls ? { hostedCalls } : {}),
-            ...(contextTokens !== undefined ? { contextTokens } : {}),
+            ...hostedStream?.usage(),
           },
         };
       };
-      // The end of the turn, before its finish: a hosted call that never got a
-      // result fails, and leaves the record, because Anthropic pairs every
-      // server block with its result and a lone one is a 400 on the next send.
-      function* closeTurn(): Generator<ProviderChunk> {
-        const unsettled = recorder.unsettled();
-        const failed = recorder.settle();
-        if (failed.length > 0) yield { type: "delta", hosted: failed };
-        const kept = items.filter(
-          (item) =>
-            !(
-              isRecord(item) &&
-              item.type === "server_tool_use" &&
-              unsettled.has(str(item.id) ?? "")
-            ),
-        );
-        if (kept.some((item) => isRecord(item) && "type" in item)) {
-          yield {
-            type: "delta",
-            hostedItems: { provider: id, items: kept, ...(container ? { container } : {}) },
-          };
-        }
-      }
-      const headers = withBetas(
-        {
-          "anthropic-version": config.version ?? DEFAULT_VERSION,
-          ...(config.bearer
-            ? { authorization: `Bearer ${config.apiKey}` }
-            : { "x-api-key": config.apiKey }),
-          ...attributionHeaders(config, config.headers),
-          ...(config.sessionHeader
-            ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
-            : {}),
-          ...config.headers,
-        },
-        betas,
-      );
+      const baseHeaders = {
+        "anthropic-version": config.version ?? DEFAULT_VERSION,
+        ...(config.bearer
+          ? { authorization: `Bearer ${config.apiKey}` }
+          : { "x-api-key": config.apiKey }),
+        ...attributionHeaders(config, config.headers),
+        ...(config.sessionHeader
+          ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
+          : {}),
+        ...config.headers,
+      };
+      const headers = codecs?.anthropic.headers(baseHeaders, hosted?.betas ?? []) ?? baseHeaders;
 
       // One pass per response. A server tool loop that runs long ends its
       // response on `pause_turn`, and the turn goes on only once the paused
@@ -990,16 +651,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         let cached = 0;
         let written = 0;
         let output = 0;
-        let servers: AnthropicUsage["server_tool_use"];
-        let open:
-          | { block: Record<string, unknown>; json: string; start: number; citations: unknown[] }
-          | undefined;
-        const blocks: unknown[] = [];
-        const payload = {
-          ...request,
-          ...(resumed.length > 0 ? { messages: resumeWith(body, resumed) } : {}),
-          ...(container ? { container } : {}),
-        };
+        const payload = hostedStream?.payload(request, body) ?? request;
 
         read: for await (const data of streamSse({
           url: apiUrl(baseUrl, "/v1/messages"),
@@ -1015,6 +667,7 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
           finished: () => stopped,
         })) {
           const event = parseFrame<AnthropicEvent>(data, id);
+          if (hostedStream) yield* hostedStream.event(event);
 
           switch (event.type) {
             // A failure the backend reports after its headers went out. Classified
@@ -1029,21 +682,17 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
               cached = usage?.cache_read_input_tokens ?? 0;
               written = usage?.cache_creation_input_tokens ?? 0;
               fresh = usage?.input_tokens ?? 0;
-              servers = usage?.server_tool_use ?? servers;
-              contextTokens = lastPassTokens(usage) ?? contextTokens;
-              container = event.message?.container?.id ?? container;
               break;
             }
 
             case "content_block_start": {
               blockIndex += 1;
               const block: Record<string, unknown> = { ...event.content_block };
-              open = { block, json: "", start: length, citations: [] };
               if (block.type === "tool_use") {
                 toolCall = {
                   index: blockIndex,
-                  id: str(block.id) ?? "",
-                  name: str(block.name) ?? "",
+                  id: typeof block.id === "string" ? block.id : "",
+                  name: typeof block.name === "string" ? block.name : "",
                 };
                 // Checked here, because this block is the only place this shape
                 // states a call's id and name.
@@ -1053,23 +702,6 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
                   type: "delta",
                   toolCalls: [{ index: toolCall.index, id: toolCall.id, name: toolCall.name }],
                 };
-              } else if (block.type === "server_tool_use") {
-                const name = str(block.name) ?? "";
-                const type = serverToolType(name);
-                if (type) {
-                  // Whole here on some versions, in deltas of its own on others
-                  // (Vercel anthropic-language-model.ts:2635-2643).
-                  const whole = isRecord(block.input) && Object.keys(block.input).length > 0;
-                  const input = whole ? serverToolInput(name, block.input) : undefined;
-                  yield {
-                    type: "delta",
-                    hosted: [recorder.start(str(block.id), type, length, input)],
-                  };
-                }
-              } else if (isResultBlock(block)) {
-                // A result arrives whole, in the block that opens it.
-                const done = recorder.end(str(block.tool_use_id), serverToolResult(block));
-                if (done) yield { type: "delta", hosted: [done] };
               }
               break;
             }
@@ -1077,23 +709,13 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
             case "content_block_delta": {
               const delta = event.delta;
               if (delta?.type === "text_delta" && delta.text) {
-                length += delta.text.length;
-                if (open) open.block.text = (str(open.block.text) ?? "") + delta.text;
                 yield { type: "delta", content: delta.text };
               } else if (delta?.type === "thinking_delta" && delta.thinking) {
-                if (open) open.block.thinking = (str(open.block.thinking) ?? "") + delta.thinking;
                 yield { type: "delta", reasoning: delta.thinking };
-              } else if (delta?.type === "signature_delta" && open) {
-                open.block.signature = delta.signature;
-              } else if (delta?.type === "citations_delta" && open) {
-                // It arrives ahead of the text it cites, so it is placed when
-                // the block ends and its span is known.
-                open.citations.push(delta.citation);
               } else if (delta?.type === "input_json_delta") {
                 // Buffered per block. A server tool's input is the vendor's to
                 // run, and fed into a function call's arguments it corrupts
                 // them (TanStack ai-anthropic text.ts:1706-1710).
-                if (open) open.json += delta.partial_json ?? "";
                 if (toolCall) {
                   yield {
                     type: "delta",
@@ -1106,36 +728,6 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
 
             case "content_block_stop": {
               toolCall = null;
-              if (!open) break;
-              const { block, json, start, citations } = open;
-              open = undefined;
-              // An empty text block holds nothing, and sent back it is a 400.
-              const size = block.type === "text" ? (str(block.text)?.length ?? 0) : undefined;
-              if (size !== undefined) {
-                if (citations.length > 0) {
-                  block.citations = citations;
-                  const cited = blockCitations(citations, start, length);
-                  if (cited.length > 0) yield { type: "delta", citations: cited };
-                }
-                if (size > 0) {
-                  items.push({ length: size, ...(citations.length > 0 ? { citations } : {}) });
-                }
-              } else if (block.type === "tool_use") {
-                if (json) block.input = parseToolArgs(json);
-                items.push({ call: recordedCalls++ });
-              } else if (block.type === "server_tool_use") {
-                // Kept exactly as the vendor wrote it: this goes back to it.
-                if (json) block.input = parseJson(json) ?? block.input;
-                const index = recorder.indexOf(str(block.id));
-                if (index !== undefined && json) {
-                  const input = serverToolInput(str(block.name) ?? "", block.input);
-                  yield { type: "delta", hosted: [{ index, input }] };
-                }
-                items.push(block);
-              } else if (isResultBlock(block)) {
-                items.push(block);
-              }
-              if (size !== 0) blocks.push(block);
               break;
             }
 
@@ -1147,18 +739,15 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
               cached = event.usage?.cache_read_input_tokens ?? cached;
               written = event.usage?.cache_creation_input_tokens ?? written;
               output = event.usage?.output_tokens ?? output;
-              servers = event.usage?.server_tool_use ?? servers;
-              contextTokens = lastPassTokens(event.usage) ?? contextTokens;
-              container = event.delta?.container?.id ?? container;
               const reason = event.delta?.stop_reason;
               if (!reason) break;
               stopped = true;
-              if (reason === "pause_turn") {
+              if (reason === "pause_turn" && hostedStream) {
                 paused = true;
                 break;
               }
               const stated = mapStopReason(id, reason);
-              yield* closeTurn();
+              if (hostedStream) yield* hostedStream.close();
               // Anthropic-compatible gateways can end a tool turn on
               // `end_turn`, and a caller reading that as done never runs the
               // tool. Only `stop` is promoted: a length cut may be what broke
@@ -1182,29 +771,17 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
         billed.cached += cached;
         billed.written += written;
         billed.output += output;
-        for (const [field, type] of STATED_COUNTS) {
-          const count = servers?.[field];
-          if (count !== undefined) statedCounts[type] = (statedCounts[type] ?? 0) + count;
-        }
         // A gateway that states its stop reason and then skips `message_stop`,
         // or whose socket dies after the reason, still finished the turn, and
         // still billed it.
         if (!stopped && !ended) throw streamCut(id);
+        hostedStream?.endPass(paused, pauses);
         if (!paused) {
           yield usageChunk();
           return;
         }
-        if (pauses >= MAX_PAUSES) {
-          throw new ProviderError(
-            id,
-            "overload",
-            `${id}: the turn paused ${pauses + 1} times without finishing`,
-            { code: "pause_turn" },
-          );
-        }
-        resumed.push(...blocks);
       }
     },
   };
-  return withConfiguredFallbacks(provider, config);
+  return configuredFallbacks(provider, config, codecs);
 }

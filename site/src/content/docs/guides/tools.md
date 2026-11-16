@@ -118,12 +118,14 @@ schema's limits, clamping to the limit and submitting beats rejecting and losing
 ## Hosted tools
 
 Some tools run on the vendor's side, inside the model's own turn: web search, web fetch, code
-execution, file search and image generation. You ask for them by type, and your loop runs none
-of them.
+execution, file search and image generation. Import your provider from `@providerkit/core/hosted`
+and ask for the tools by type. Your loop runs none of them.
 
 ```ts
 import { collectTurn } from "@providerkit/core";
+import { createPresetProvider } from "@providerkit/core/hosted";
 
+const provider = createPresetProvider("google", { apiKey });
 const turn = await collectTurn(
   provider.createStream(history, [], { hostedTools: [{ type: "web_search" }] }),
 );
@@ -132,6 +134,19 @@ turn.message.content; // the answer
 turn.message.citations; // the pages it cites, and where in the answer
 turn.message.hostedCalls; // what the vendor ran: the search, its query, the pages it found
 ```
+
+The same import provides `createAnthropicProvider`, `createResponsesProvider`,
+`createGeminiProvider`, `createOpenAIProvider`, `presetAdapter` and `createRegistry`.
+Their arguments stay the same. Preset model chains, fallback specs and registry connections
+keep the opt-in, including adapters rebuilt for key rotation or token refresh.
+Hand-built fallback providers keep their own setup, so import their constructors from `/hosted`
+too. Use `withConfiguredFallbacks` from `/hosted` when adding preset fallback specs separately.
+
+Constructors from `@providerkit/core` stay plain. They refuse `hostedTools` and same-provider
+`hostedItems` replay with an `invalid` error before any request, even with `optional: true`
+or `toolChoice: "none"`. Importing `/hosted` does not change any plain provider instance.
+The base entry still exports the hosted types, but bundles none of the hosted encoders or parsers.
+`planHostedTools` and `hostedRefused`, for custom adapters, now come from `/hosted` too.
 
 A hosted call is never a tool call. It never lands in `toolCalls`, never makes the finish
 `tool_calls`, and never gets a `tool` message back. When one fails, the turn goes on: the call
@@ -182,6 +197,8 @@ These are refused too:
 - on Anthropic, a function tool named `web_search`, `web_fetch`, `code_execution`,
   `bash_code_execution` or `text_editor_code_execution`;
 - on Gemini 2, hosted tools beside function tools. Gemini 3 runs both;
+- on Gemini, file search beside another hosted tool. Send them on separate calls, or mark a
+  conflicting tool optional;
 - any hosted tool on Antigravity.
 
 ### Citations

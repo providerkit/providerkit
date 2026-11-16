@@ -143,9 +143,14 @@ Cloud Code Assist project and hand the token source to `withToken` or `createReg
 
 ### Hosted tools
 
-Let the vendor search the web, fetch a page or run code inside its own turn:
+Let the vendor search the web, fetch a page or run code inside its own turn.
+Import the provider from `/hosted`, so plain chat apps load none of its encoders or parsers:
 
 ```ts
+import { collectTurn } from "@providerkit/core";
+import { createPresetProvider } from "@providerkit/core/hosted";
+
+const provider = createPresetProvider("google", { apiKey });
 const turn = await collectTurn(
   provider.createStream(history, [], { hostedTools: [{ type: "web_search" }] }),
 );
@@ -153,8 +158,9 @@ const turn = await collectTurn(
 
 `turn.message.citations` holds the pages the answer cites and where each one sits in the text,
 and `turn.message.hostedCalls` holds what the vendor ran. None of it is a tool call your loop
-has to run. An adapter that can't run a tool, or can't apply one of its settings, such as a
-domain filter, refuses the request before sending anything, unless you mark the tool `optional`.
+has to run. Constructors from the base import refuse `hostedTools` with an `invalid` error
+before sending a request. With `/hosted`, an adapter that can't run a tool or apply one of its
+settings, such as a domain filter, refuses unless you mark that tool `optional`.
 The [tools guide](https://providerkit.dev/guides/tools/#hosted-tools) says which adapter runs
 what, and how each call is billed.
 

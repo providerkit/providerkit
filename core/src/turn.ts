@@ -9,7 +9,7 @@
 // turn that said nothing is not judged here: that is `requireContent`'s call
 // (invariant 13), made where the retry that can fix it still can.
 import { ProviderError } from "./errors.ts";
-import type { Citation, HostedCall, HostedItems, HostedToolType } from "./hosted.ts";
+import type { Citation, HostedCall, HostedItems, HostedToolType } from "./hosted/types.ts";
 import {
   EMPTY_USAGE,
   type ChatMessage,

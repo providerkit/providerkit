@@ -1,3 +1,4 @@
+import * as hosted from "../src/hosted.ts";
 // Golden transcripts for the Responses shape: real event sequences replayed
 // through the adapter, asserting the normalized chunks they must produce.
 import { describe, expect, it } from "vitest";
@@ -1243,6 +1244,8 @@ const SEARCH_TURN = [
 ];
 
 describe("responses hosted tools", () => {
+  const provider = (over: Partial<Parameters<typeof createResponsesProvider>[0]> = {}) =>
+    hosted.createResponsesProvider({ apiKey: "k", model: "gpt-5.6", ...over });
   const search = { hostedTools: [{ type: "web_search" as const }] };
 
   it("sends each tool with every field it set, and asks for each one's results", async () => {

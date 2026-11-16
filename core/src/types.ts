@@ -13,7 +13,7 @@ import type {
   HostedItems,
   HostedTool,
   HostedToolType,
-} from "./hosted.ts";
+} from "./hosted/types.ts";
 import type { RateLimitReading } from "./rate-limit.ts";
 
 /**
@@ -489,9 +489,13 @@ export interface StreamOptions {
    * any request, unless the tool is `optional`. `toolChoice: "none"` sends
    * none; a forced choice with any is refused.
    *
+   * Import the provider constructor from `@providerkit/core/hosted` first.
+   * Plain constructors refuse this option before any request, even with
+   * `optional` or `toolChoice: "none"`; they include no hosted codecs.
+   *
    * A custom Provider that can't run them must refuse them the same way
-   * (`planHostedTools` does it): ignored, they become an answer that never
-   * searched, with nothing to say so.
+   * (`planHostedTools` from `@providerkit/core/hosted` does it): ignored, they
+   * become an answer that never searched, with nothing to say so.
    */
   hostedTools?: readonly HostedTool[];
 }
