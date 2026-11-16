@@ -10,6 +10,11 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
+//
+// Hosted tool shapes, include values and item fields follow Vercel's AI SDK
+// (Apache-2.0, Copyright 2023 Vercel, Inc.: openai-responses-prepare-tools.ts,
+// openai-responses-language-model.ts, map-openai-responses-annotation.ts); the
+// marker-span check follows PydanticAI (MIT). See THIRD_PARTY_NOTICES.
 import { repairHistory } from "../context.ts";
 import {
   fileRefused,
@@ -18,6 +23,20 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
+import {
+  codePointIndex,
+  hostedCounts,
+  HostedRecorder,
+  planHostedTools,
+  queryInput,
+  servedAt,
+  type Citation,
+  type HostedCall,
+  type HostedCallDelta,
+  type HostedInput,
+  type HostedTool,
+  type HostedToolType,
+} from "../hosted.ts";
 import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
 import { settleToolCalls } from "../tool-args.ts";
@@ -83,6 +102,264 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   replayReasoning?: boolean;
   /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
   serviceTier?: ServiceTier;
+  /**
+   * The hosted tools this endpoint runs. Defaults to web search, code
+   * execution, file search and image generation on api.openai.com, and to
+   * none anywhere else, the ChatGPT backend included, until someone checks
+   * that endpoint. One that ignores a tool answers unsearched without saying so.
+   */
+  servesHostedTools?: readonly HostedToolType[];
+}
+
+/** The hosted types this wire has a shape for, and the fields it applies. No
+ *  use cap on web search, and no fetch tool, on this wire. */
+const RESPONSES_FIELDS: Partial<Record<HostedToolType, readonly string[]>> = {
+  web_search: ["allowedDomains", "blockedDomains", "userLocation"],
+  code_execution: ["fileIds"],
+  file_search: ["storeIds", "maxResults"],
+  image_generation: ["size", "quality", "format", "background"],
+};
+const RESPONSES_SENDS = Object.keys(RESPONSES_FIELDS);
+
+/** The output each hosted tool needs asked for by name, or it comes back
+ *  without its sources, logs or results. */
+const RESPONSES_INCLUDES: Partial<Record<HostedToolType, string>> = {
+  web_search: "web_search_call.action.sources",
+  code_execution: "code_interpreter_call.outputs",
+  file_search: "file_search_call.results",
+};
+
+/** One hosted tool on the wire. Shapes from Vercel's AI SDK (Apache-2.0),
+ *  openai-responses-prepare-tools.ts:238-381. */
+function responsesHostedTool(provider: string, tool: HostedTool): unknown {
+  switch (tool.type) {
+    case "web_search":
+      return {
+        type: "web_search",
+        ...(tool.allowedDomains || tool.blockedDomains
+          ? {
+              filters: {
+                allowed_domains: tool.allowedDomains,
+                blocked_domains: tool.blockedDomains,
+              },
+            }
+          : {}),
+        ...(tool.userLocation
+          ? { user_location: { type: "approximate", ...tool.userLocation } }
+          : {}),
+      };
+    case "code_execution":
+      return { type: "code_interpreter", container: { type: "auto", file_ids: tool.fileIds } };
+    case "file_search":
+      return {
+        type: "file_search",
+        vector_store_ids: tool.storeIds,
+        max_num_results: tool.maxResults,
+      };
+    case "image_generation":
+      return {
+        type: "image_generation",
+        size: tool.size,
+        quality: tool.quality,
+        output_format: tool.format,
+        background: tool.background,
+      };
+    default:
+      // planHostedTools only passes the types in RESPONSES_FIELDS.
+      throw new ProviderError(
+        provider,
+        "invalid",
+        `${provider}: no Responses shape for ${tool.type}`,
+      );
+  }
+}
+
+/** The seam's type for a hosted output item, or undefined for any other item. */
+const HOSTED_ITEMS: Record<string, HostedToolType> = {
+  web_search_call: "web_search",
+  code_interpreter_call: "code_execution",
+  file_search_call: "file_search",
+  image_generation_call: "image_generation",
+};
+
+/** A generated image's media type, read off its first bytes: the format the
+ *  request asked for is a wish, the bytes are the image. */
+function imageType(base64: string, asked: HostedTool | undefined): ImagePart["mimeType"] {
+  if (base64.startsWith("iVBORw0KGgo")) return "image/png";
+  if (base64.startsWith("/9j/")) return "image/jpeg";
+  if (base64.startsWith("UklGR")) return "image/webp";
+  if (base64.startsWith("R0lGOD")) return "image/gif";
+  // ponytail: unrecognized bytes fall back to the format asked for, PNG by
+  // default, which is the API's own default. Upgrade: refuse them.
+  switch (asked?.type === "image_generation" ? asked.format : undefined) {
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    default:
+      return "image/png";
+  }
+}
+
+/** What a web search did, from its `action`: the queries it ran, or the page
+ *  it opened or searched within. */
+function webSearchInput(action: ResponsesItem["action"]): HostedInput | undefined {
+  if (action?.type === "search") return queryInput(action.queries ?? [action.query]);
+  return action?.url ? { url: action.url } : undefined;
+}
+
+/** What a hosted item says it did. `.added` states only its id and type;
+ *  `.done` states the whole call. A status other than `completed` on `.done`
+ *  is a failed call, kept as data (invariant 7). */
+function hostedItemDelta(
+  item: ResponsesItem,
+  done: boolean,
+  asked: HostedTool | undefined,
+): Omit<HostedCallDelta, "index"> {
+  const failed = done && item.status !== undefined && item.status !== "completed";
+  let status: HostedCall["status"] = "running";
+  if (failed) status = "failed";
+  else if (done) status = "completed";
+  const error = failed ? (item.error?.code ?? item.error?.message ?? item.status) : undefined;
+  const base = { status, ...(error ? { error } : {}) };
+  switch (item.type) {
+    case "web_search_call": {
+      const action = item.action;
+      const input = webSearchInput(action);
+      const sources = (action?.sources ?? []).flatMap((source) =>
+        source.type === "url" && source.url ? [{ type: "url" as const, url: source.url }] : [],
+      );
+      return {
+        ...base,
+        ...(input && Object.keys(input).length > 0 ? { input } : {}),
+        ...(done && sources.length > 0 ? { output: { sources } } : {}),
+      };
+    }
+    case "code_interpreter_call": {
+      const logs = (item.outputs ?? []).flatMap((out) =>
+        out.type === "logs" && out.logs ? [out.logs] : [],
+      );
+      const files = (item.outputs ?? []).flatMap((out) =>
+        out.type === "image" && out.url
+          ? [{ url: out.url, ...(item.container_id ? { containerId: item.container_id } : {}) }]
+          : [],
+      );
+      return {
+        ...base,
+        input: { ...(item.code ? { code: item.code } : {}), language: "python" },
+        ...(done && (logs.length > 0 || files.length > 0)
+          ? {
+              output: {
+                ...(logs.length > 0 ? { stdout: logs.join("\n") } : {}),
+                ...(files.length > 0 ? { files } : {}),
+              },
+            }
+          : {}),
+      };
+    }
+    case "file_search_call": {
+      const input = queryInput(item.queries ?? []);
+      const sources = (item.results ?? []).map((result) => ({
+        type: "file" as const,
+        ...(result.file_id ? { fileId: result.file_id } : {}),
+        ...(result.filename ? { title: result.filename } : {}),
+        ...(result.text ? { excerpt: result.text } : {}),
+      }));
+      return {
+        ...base,
+        ...(Object.keys(input).length > 0 ? { input } : {}),
+        ...(done && sources.length > 0 ? { output: { sources } } : {}),
+      };
+    }
+    default: {
+      const image = done && item.result ? item.result : undefined;
+      return {
+        ...base,
+        ...(item.revised_prompt ? { input: { prompt: item.revised_prompt } } : {}),
+        ...(image
+          ? {
+              output: {
+                images: [{ type: "image", mimeType: imageType(image, asked), data: image }],
+              },
+            }
+          : {}),
+      };
+    }
+  }
+}
+
+/** An annotation Responses attached to a part of the answer. */
+interface ResponsesAnnotation {
+  type?: string;
+  url?: string;
+  title?: string;
+  file_id?: string;
+  filename?: string;
+  container_id?: string;
+  start_index?: number;
+  end_index?: number;
+  index?: number;
+}
+
+/**
+ * One annotation as a citation, its offsets moved from the part's code points
+ * to the turn's JS indices. A URL citation selects the link the model wrote,
+ * so its span is kept only while it still contains the URL (PydanticAI, MIT,
+ * openai/_citations.py:112-118); a span that doesn't check out is dropped and
+ * the source kept. Mapping from Vercel's AI SDK (Apache-2.0),
+ * map-openai-responses-annotation.ts:11-74.
+ */
+function annotationCitation(
+  annotation: ResponsesAnnotation,
+  text: string,
+  part: { start: number; end: number } | undefined,
+): Citation | undefined {
+  const partText = part ? text.slice(part.start, part.end) : "";
+  const at = (points: number | undefined) =>
+    part && points !== undefined ? codePointIndex(partText, points) : undefined;
+  const span = (start: number | undefined, end: number | undefined, contains?: string) =>
+    part &&
+    start !== undefined &&
+    end !== undefined &&
+    start < end &&
+    (contains === undefined || partText.slice(start, end).includes(contains))
+      ? { start: part.start + start, end: part.start + end, anchor: "marker" as const }
+      : {};
+  switch (annotation.type) {
+    case "url_citation": {
+      if (!annotation.url) return undefined;
+      const source = {
+        type: "url" as const,
+        url: annotation.url,
+        ...(annotation.title ? { title: annotation.title } : {}),
+      };
+      return {
+        source,
+        ...span(at(annotation.start_index), at(annotation.end_index), annotation.url),
+      };
+    }
+    case "file_citation":
+    case "container_file_citation": {
+      if (!annotation.file_id && !annotation.filename) return undefined;
+      const source = {
+        type: "file" as const,
+        ...(annotation.file_id ? { fileId: annotation.file_id } : {}),
+        ...(annotation.filename ? { title: annotation.filename } : {}),
+        ...(annotation.container_id ? { containerId: annotation.container_id } : {}),
+      };
+      // A file citation marks one point, where the model referred to the file.
+      const point = at(annotation.index);
+      if (annotation.type === "file_citation") {
+        return point === undefined || !part
+          ? { source }
+          : { source, start: part.start + point, end: part.start + point, anchor: "marker" };
+      }
+      return { source, ...span(at(annotation.start_index), at(annotation.end_index)) };
+    }
+    default:
+      // `file_path` names a file code wrote, not a source of the answer.
+      return undefined;
+  }
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -284,12 +561,36 @@ interface ResponsesItem {
   name?: string;
   arguments?: string;
   encrypted_content?: string;
+  /** A hosted item's state: `in_progress`, `searching`, `completed`, `failed`… */
+  status?: string;
+  error?: { code?: string; message?: string } | null;
+  /** `web_search_call`: what the search did, sources included when asked for. */
+  action?: {
+    type?: string;
+    query?: string | null;
+    queries?: string[] | null;
+    url?: string | null;
+    sources?: { type?: string; url?: string }[] | null;
+  } | null;
+  /** `code_interpreter_call` */
+  code?: string | null;
+  container_id?: string;
+  outputs?: { type?: string; logs?: string; url?: string }[] | null;
+  /** `file_search_call` */
+  queries?: string[] | null;
+  results?: { file_id?: string; filename?: string; text?: string }[] | null;
+  /** `image_generation_call`: the image, as base64. */
+  result?: string | null;
+  revised_prompt?: string | null;
 }
 
 interface ResponsesEvent {
   type?: string;
   delta?: string;
   item_id?: string;
+  /** Which part of a message item a text delta or annotation belongs to. */
+  content_index?: number;
+  annotation?: ResponsesAnnotation;
   /** xAI keys argument events by the CALL id instead of the item id. */
   call_id?: string;
   /** The whole argument string, on `function_call_arguments.done`. */
@@ -373,7 +674,12 @@ function codexHeaders(limits: CodexRateLimits): Headers {
   return headers;
 }
 
-function usageChunk(usage: ResponsesUsage): ProviderChunk {
+/** The usage record, with the hosted calls the stream showed: this shape bills
+ *  them per call and states no count of its own. */
+function usageChunk(
+  usage: ResponsesUsage,
+  hostedCalls?: Partial<Record<HostedToolType, number>>,
+): ProviderChunk {
   return {
     type: "usage",
     usage: {
@@ -386,6 +692,7 @@ function usageChunk(usage: ResponsesUsage): ProviderChunk {
       ...(usage.output_tokens_details?.reasoning_tokens !== undefined
         ? { reasoningTokens: usage.output_tokens_details.reasoning_tokens }
         : {}),
+      ...(hostedCalls ? { hostedCalls } : {}),
     },
   };
 }
@@ -448,7 +755,32 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         store: false,
       };
       if (instructions) request.instructions = instructions;
-      if (config.replayReasoning) request.include = ["reasoning.encrypted_content"];
+      // Hosted items are never sent back: `store` is off, so the backend has
+      // no copy to reference, and their results ride in the answer instead.
+      const hosted = planHostedTools(
+        id,
+        {
+          name: "Responses",
+          serves: (
+            config.servesHostedTools ??
+            servedAt(baseUrl, "api.openai.com", [
+              "web_search",
+              "code_execution",
+              "file_search",
+              "image_generation",
+            ])
+          ).filter((type) => RESPONSES_SENDS.includes(type)),
+          fields: RESPONSES_FIELDS,
+        },
+        opts,
+      );
+      // Merged, not overwritten: the reasoning items and each hosted tool's
+      // results are asked for in the same list.
+      const include = [
+        ...(config.replayReasoning ? ["reasoning.encrypted_content"] : []),
+        ...hosted.flatMap((tool) => RESPONSES_INCLUDES[tool.type] ?? []),
+      ];
+      if (include.length > 0) request.include = include;
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) request.max_output_tokens = maxTokens;
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
@@ -465,22 +797,27 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         request.reasoning =
           level === "none" ? { effort: "none" } : { effort: level, summary: "auto" };
       }
-      if (requestTools.length > 0) {
+      if (requestTools.length > 0 || hosted.length > 0) {
         // Flat here — no nested `function` envelope, unlike chat/completions.
-        request.tools = requestTools.map((tool) => ({
-          type: "function",
-          name: tool.name,
-          description: tool.description,
-          parameters: withoutPatterns(tool.inputSchema),
-          // Said either way, never left to the default. Strict demands every
-          // property required and every object closed; on a schema that is not
-          // already shaped that way the backend makes optional arguments
-          // mandatory, and the model starts filling in parameters nobody asked
-          // for (cc-proxy, 0.1.15). Where the schema already qualifies, the
-          // enforcement is free.
-          strict: isStrictSchema(tool.inputSchema),
-        }));
-        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
+        request.tools = [
+          ...requestTools.map((tool) => ({
+            type: "function",
+            name: tool.name,
+            description: tool.description,
+            parameters: withoutPatterns(tool.inputSchema),
+            // Said either way, never left to the default. Strict demands every
+            // property required and every object closed; on a schema that is not
+            // already shaped that way the backend makes optional arguments
+            // mandatory, and the model starts filling in parameters nobody asked
+            // for (cc-proxy, 0.1.15). Where the schema already qualifies, the
+            // enforcement is free.
+            strict: isStrictSchema(tool.inputSchema),
+          })),
+          ...hosted.map((tool) => responsesHostedTool(id, tool)),
+        ];
+        if (requestTools.length > 0 && opts.parallelToolCalls === false) {
+          request.parallel_tool_calls = false;
+        }
       }
       // The cache affinity key. Without one the backend spreads a
       // conversation's turns across cache shards, and a re-sent prefix misses.
@@ -528,6 +865,36 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         reasoningItems.length
           ? [{ type: "delta", reasoningItems: { provider: id, items: reasoningItems } }]
           : [];
+      // Hosted calls, by item id. The answer so far, and where each part of it
+      // starts, so an annotation's offsets can be placed and checked.
+      const recorder = new HostedRecorder();
+      let text = "";
+      const parts = new Map<string, { start: number; end: number }>();
+      // Waiting annotations, by the message item they belong to.
+      const annotations = new Map<string, { part: string; annotation: ResponsesAnnotation }[]>();
+      const partKey = (event: ResponsesEvent) =>
+        `${event.item_id ?? ""}:${event.content_index ?? 0}`;
+      const asked = (type: HostedToolType) => hosted.find((tool) => tool.type === type);
+      // An annotation is placed once its part is whole: when its message item
+      // ends, or, for every item still waiting, when the turn does.
+      function* cite(item?: string): Generator<ProviderChunk> {
+        const due =
+          item === undefined ? [...annotations.values()].flat() : (annotations.get(item) ?? []);
+        if (item === undefined) annotations.clear();
+        else annotations.delete(item);
+        const citations = due.flatMap(({ part, annotation }) => {
+          const citation = annotationCitation(annotation, text, parts.get(part));
+          return citation ? [citation] : [];
+        });
+        if (citations.length > 0) yield { type: "delta", citations };
+      }
+      // The end of the turn: a hosted call the backend never finished fails,
+      // and every annotation still waiting is placed.
+      function* closeHosted(): Generator<ProviderChunk> {
+        const failed = recorder.settle();
+        if (failed.length > 0) yield { type: "delta", hosted: failed };
+        yield* cite();
+      }
 
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
@@ -550,10 +917,56 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
           produced = true;
         }
 
+        // Every step a hosted call reports (in progress, searching,
+        // interpreting, generating) goes out as a status delta: progress the
+        // watchdog's progress clock can see while the vendor's tool works.
+        if (
+          /^response\.(web_search|file_search|code_interpreter|image_generation)_call\.\w+$/.test(
+            event.type ?? "",
+          )
+        ) {
+          const index = recorder.indexOf(event.item_id);
+          if (index !== undefined) yield { type: "delta", hosted: [{ index, status: "running" }] };
+          continue;
+        }
+
         switch (event.type) {
           case "response.output_text.delta":
-            if (event.delta) yield { type: "delta", content: event.delta };
+            if (event.delta) {
+              const key = partKey(event);
+              const part = parts.get(key) ?? { start: text.length, end: text.length };
+              text += event.delta;
+              part.end = text.length;
+              parts.set(key, part);
+              yield { type: "delta", content: event.delta };
+            }
             break;
+
+          case "response.output_text.annotation.added":
+            if (event.annotation) {
+              const item = event.item_id ?? "";
+              const waiting = annotations.get(item) ?? [];
+              waiting.push({ part: partKey(event), annotation: event.annotation });
+              annotations.set(item, waiting);
+            }
+            break;
+
+          case "response.code_interpreter_call_code.delta": {
+            const index = recorder.indexOf(event.item_id);
+            if (index !== undefined && event.delta) {
+              yield { type: "delta", hosted: [{ index, codeDelta: event.delta }] };
+            }
+            break;
+          }
+
+          // The whole program, which wins over the deltas it repeats.
+          case "response.code_interpreter_call_code.done": {
+            const index = recorder.indexOf(event.item_id);
+            if (index !== undefined && event.code !== undefined) {
+              yield { type: "delta", hosted: [{ index, input: { code: event.code } }] };
+            }
+            break;
+          }
 
           // Two names for the same stream: `reasoning_summary_text` is the
           // redacted summary the API returns, `reasoning_text` the raw trace
@@ -565,6 +978,17 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 
           case "response.output_item.added": {
             const item = event.item;
+            const type = item?.type ? HOSTED_ITEMS[item.type] : undefined;
+            if (item && type) {
+              // A hosted call, never a function call: no tool for the loop to
+              // run, and no part in the finish reason.
+              const started = recorder.start(item.id, type, text.length);
+              yield {
+                type: "delta",
+                hosted: [{ ...started, ...hostedItemDelta(item, false, asked(type)) }],
+              };
+              break;
+            }
             if (item?.type !== "function_call") break;
             // OpenAI names the item (`fc_…`) and keys argument deltas by it;
             // xAI's Grok sends no item id at all and keys them by `call_id`.
@@ -629,6 +1053,19 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             // backend's own record, and it only means something complete.
             if (config.replayReasoning && item?.type === "reasoning") {
               reasoningItems.push(item);
+              break;
+            }
+            const type = item?.type ? HOSTED_ITEMS[item.type] : undefined;
+            if (item && type) {
+              const delta = hostedItemDelta(item, true, asked(type));
+              // A backend that sends only the finished item still ran it.
+              const done =
+                recorder.end(item.id, delta) ?? recorder.whole(item.id, type, text.length, delta);
+              yield { type: "delta", hosted: [done] };
+              break;
+            }
+            if (item?.type === "message") {
+              yield* cite(item.id);
               break;
             }
             if (item?.type !== "function_call") break;
@@ -716,8 +1153,9 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
               const minted = settleToolCalls(id, calls);
               if (minted.length > 0) yield { type: "delta", toolCalls: minted };
             }
+            yield* closeHosted();
             yield* reasoningChunk();
-            if (response?.usage) yield usageChunk(response.usage);
+            if (response?.usage) yield usageChunk(response.usage, hostedCounts(recorder.shown()));
             yield { type: "finish", finishReason };
             return;
           }
@@ -730,9 +1168,10 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             // A turn that ran out of output tokens still billed for its input,
             // and this event carries usage in the same shape as `completed`.
             const finishReason = incompleteFinish(id, event.response?.incomplete_details?.reason);
+            yield* closeHosted();
             yield* reasoningChunk();
             const usage = event.response?.usage;
-            if (usage) yield usageChunk(usage);
+            if (usage) yield usageChunk(usage, hostedCounts(recorder.shown()));
             yield { type: "finish", finishReason };
             return;
           }
