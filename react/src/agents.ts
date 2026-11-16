@@ -604,12 +604,14 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       const held = requests.get(agentEvent.request.id);
       if (held?.decision || held?.closed) return [];
     }
+    // Tool retries have their own attempt ids; they do not replace the run's model/state epoch.
     const executionAttempt =
-      "attemptId" in agentEvent
+      agentEvent.type === "state" ||
+      agentEvent.type === "model_chunk" ||
+      agentEvent.type === "handoff" ||
+      (agentEvent.type === "operation_restart" && agentEvent.kind === "model")
         ? agentEvent.attemptId
-        : agentEvent.type === "tool_start" || agentEvent.type === "tool_result"
-          ? agentEvent.request.attemptId
-          : undefined;
+        : undefined;
     if (executionAttempt !== undefined) {
       let held = runAttempts.get(speaker);
       if (held?.old.has(executionAttempt)) return [];
@@ -928,13 +930,20 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
             if (record.request.ask.type !== "question")
               parts.push(requestPart(record, ended || tool.status === "completed"));
           }
-          if (tool.status !== "pending")
+          const attemptId = tool.status === "pending" ? tool.previousAttemptId : tool.attemptId;
+          if (attemptId) {
+            const old = new Set([
+              ...tool.interrupted.map((item) => item.attemptId),
+              ...tool.retries.map((item) => item.attemptId),
+            ]);
             operations.set(tool.id, {
-              attemptId: tool.attemptId,
-              attempt: tool.interrupted.length + 1,
-              old: new Set(tool.interrupted.map((item) => item.attemptId)),
+              attemptId,
+              // A pending replacement has no new attempt yet. Its next start advances this count.
+              attempt: old.size + (tool.status === "pending" ? 0 : 1),
+              old,
               completed: tool.status === "completed" || ended,
             });
+          }
           const call = toolCalls[index];
           if (call && (tool.status !== "pending" || questions.length)) {
             const activity = activityOf({

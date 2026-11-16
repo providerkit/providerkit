@@ -366,6 +366,180 @@ function team(together: boolean) {
 
 afterEach(() => vi.useRealTimers());
 
+describe("loop extension projection", () => {
+  async function retried() {
+    let calls = 0;
+    const agent = defineAgent({
+      id: "retry-projection",
+      version: "1",
+      instructions: "Answer the person.",
+      provider: fake([turn({ calls: [call("lookup")] }), turn({ text: ["Answer after retry"] })]),
+      tools: [
+        defineTool({
+          name: "lookup",
+          description: "Read a value.",
+          inputSchema: { type: "object" },
+          isReadOnly: true,
+          run: async () => {
+            if (++calls === 1) throw new Error("The first read failed.");
+            return "Found it";
+          },
+          summarize: (value: string) => value,
+        }),
+      ],
+      toolRetries: {
+        identity: "read-retries",
+        tools: { lookup: { maxAttempts: 2, replay: "read-only" } },
+      },
+    });
+    const saved = await withSaves(agent, "Read", { beforeTool() {} });
+    expect(saved.outcome.status).toBe("completed");
+    expect(calls).toBe(2);
+    return saved;
+  }
+
+  it("keeps later model output after a tool changes its own attempt", async () => {
+    const { events, outcome } = await retried();
+    const projector = createAgentProjector({ messageId: "answer", runId: outcome.runId });
+    const view = play(project(projector, events));
+    expect(view.run.status).toBe("completed");
+    expect(
+      view.messages[0]?.parts.filter((part) => part.type === "text").map((part) => part.text),
+    ).toContain("Answer after retry");
+  });
+
+  it.each(["pending", "running"] as const)(
+    "rejects a failed tool attempt after a %s retry snapshot",
+    async (status) => {
+      const { events, outcome, saves } = await retried();
+      const saved = saves.find(({ snapshot }) => {
+        const model = snapshot.models[0];
+        return (
+          model?.status === "completed" &&
+          model.tools.some((tool) => tool.status === status && tool.retries.length === 1)
+        );
+      });
+      const stale = events.find((event) => event.type === "tool_start");
+      if (!saved || !stale)
+        throw new Error("The retry checkpoints or first tool event are missing.");
+      const projector = createAgentProjector({ messageId: "answer", runId: outcome.runId });
+      let view = play(opening(projector, saved.snapshot));
+      expect(projector.event(stale)).toEqual([]);
+      view = play(project(projector, events.slice(saved.after), "s1", saved.after), view);
+      expect(view.run.status).toBe("completed");
+      expect(
+        view.messages[0]?.parts.filter((part) => part.type === "text").map((part) => part.text),
+      ).toContain("Answer after retry");
+    },
+  );
+
+  it("never projects a rejected guarded answer from events or checkpoints", async () => {
+    const agent = defineAgent({
+      id: "guarded-projection",
+      version: "1",
+      instructions: "Answer the person.",
+      provider: fake([turn({ text: ["PRIVATE_GUARDED_REPLY"] })]),
+      guardrails: { identity: "reject-output", modelOutput: () => ({ allow: false }) },
+    });
+    const { events, saves, outcome } = await withSaves(agent, "Hello");
+    expect(outcome.status).toBe("failed");
+    const projector = createAgentProjector({ messageId: "answer", runId: outcome.runId });
+    expect(JSON.stringify(project(projector, events))).not.toContain("PRIVATE_GUARDED_REPLY");
+    for (const { snapshot } of saves)
+      expect(JSON.stringify(projector.snapshot(snapshot))).not.toContain("PRIVATE_GUARDED_REPLY");
+  });
+
+  it("projects structured handoff output only through the target-aware host callback", async () => {
+    const sourceValidator = vi.fn((value: unknown) => {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        !("source" in value) ||
+        typeof value.source !== "string"
+      )
+        throw new Error("The source result is required.");
+      return { source: value.source };
+    });
+    const validateTarget = (value: unknown) => {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        !("answer" in value) ||
+        typeof value.answer !== "string"
+      )
+        throw new Error("An answer is required.");
+      return { answer: "Checked answer" };
+    };
+    const target = defineAgent({
+      id: "structured-target",
+      version: "1",
+      instructions: "Submit an answer.",
+      provider: fake([turn({ calls: [call("submit_result", { answer: "RAW_TARGET" })] })]),
+      output: { schema: { type: "object" }, validate: validateTarget },
+    });
+    const source = defineAgent({
+      id: "structured-source",
+      version: "1",
+      instructions: "Transfer the conversation.",
+      provider: fake([turn({ calls: [call("transfer")] })]),
+      tools: [defineHandoff({ name: "transfer", description: "Transfer", to: target })],
+      output: { schema: { type: "object" }, validate: sourceValidator },
+    });
+    const outcome = await source.run("Answer");
+    expect(outcome.status).toBe("completed");
+    expect(outcome.activeAgent).toEqual({ id: target.id, version: target.version });
+    expect(sourceValidator).not.toHaveBeenCalled();
+    const safe = createAgentProjector({ messageId: "answer", runId: outcome.runId });
+    expect(JSON.stringify(safe.snapshot(outcome.snapshot))).not.toContain("RAW_TARGET");
+    const output = vi.fn((candidate: unknown): DisplayPart[] => [
+      { type: "data", id: "result", kind: "answer", data: validateTarget(candidate) },
+    ]);
+    const shown = createAgentProjector({ messageId: "answer", runId: outcome.runId, output });
+    expect(shown.snapshot(outcome.snapshot).parts).toContainEqual({
+      type: "data",
+      id: "result",
+      kind: "answer",
+      data: { answer: "Checked answer" },
+    });
+    expect(output).toHaveBeenCalledWith({ answer: "RAW_TARGET" });
+    expect(shown.run(outcome.snapshot).owner?.agentId).toBe(target.id);
+  });
+
+  it("keeps saved compaction summaries separate from answer text", async () => {
+    const agent = defineAgent({
+      id: "compact-projection",
+      version: "1",
+      instructions: "Answer the person.",
+      provider: fake([turn({ text: ["Public answer"] })]),
+      compaction: {
+        identity: "summary",
+        contextWindow: 1_000,
+        keepTokens: 5,
+        summarize: {
+          provider: fake([turn({ text: ["PRIVATE_COMPACTION_SUMMARY"] })]),
+          instructions: "Summarize the earlier facts.",
+          maxTokens: 40,
+        },
+      },
+    });
+    const outcome = await agent.run({
+      messages: [
+        { role: "user", content: "Old question ".repeat(30) },
+        { role: "assistant", content: "Old answer ".repeat(30) },
+        { role: "user", content: "New question" },
+      ],
+    });
+    expect(outcome.status).toBe("completed");
+    expect(outcome.snapshot.compactions).toHaveLength(1);
+    const projector = createAgentProjector({ messageId: "answer", runId: outcome.runId });
+    const message = projector.snapshot(outcome.snapshot);
+    expect(JSON.stringify(message)).not.toContain("PRIVATE_COMPACTION_SUMMARY");
+    expect(message.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([
+      "Public answer",
+    ]);
+  });
+});
+
 describe("request journals and attempts", () => {
   it("projects sibling questions, partial answers and closed receipts from real SDK runs", async () => {
     const makeChild = (id: string) =>
