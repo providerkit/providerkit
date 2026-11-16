@@ -17,6 +17,10 @@
     "./mcp": {
       "types": "./dist/mcp.d.ts",
       "default": "./dist/mcp.js"
+    },
+    "./evals": {
+      "types": "./dist/evals.d.ts",
+      "default": "./dist/evals.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -26,6 +30,7 @@
     "examples",
     "README.md",
     "LICENSE",
+    "LICENSE-APACHE-2.0",
     "THIRD_PARTY_NOTICES.md"
   ],
   "sideEffects": false,
