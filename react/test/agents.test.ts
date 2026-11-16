@@ -1352,7 +1352,8 @@ describe("createAgentProjector", () => {
           ending === "failed" ? new Error("provider down") : turn({ text: ["Done."] }),
         ]),
         tools: [tool("search", async () => "pages")],
-        ...(ending === "limited" ? { limits: { turns: 1 } } : {}),
+        // Local turn exhaustion allows a final answer; the tree budget is a hard stop.
+        ...(ending === "limited" ? { treeLimits: { modelCalls: 1 } } : {}),
       });
       const seen = record();
       const outcome = await lead.run("Search for tides.", {
@@ -1375,7 +1376,7 @@ describe("createAgentProjector", () => {
       expect(view.messages[0]?.state).toBe(ending === "failed" ? "failed" : "stopped");
       const errors = {
         failed: { code: "execution_failed", message: "The agent stopped because of an error." },
-        limited: { code: "turns", message: "The agent stopped because it reached a limit." },
+        limited: { code: "modelCalls", message: "The agent stopped because it reached a limit." },
         stopped: undefined,
       };
       expect(view.run.error).toEqual(errors[ending]);
