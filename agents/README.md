@@ -577,6 +577,157 @@ carry too. Send a browser the display data your server builds. When it needs the
 `toClientMessages(result.history)`, which leaves out the provider-owned fields. Replace inline
 bytes with references, and serve the bytes from a route that checks access.
 
+## Remember facts across conversations
+
+A session keeps one conversation. Memory keeps facts for later conversations with the same
+person. Start with the process-local reference store:
+
+```ts
+const store = createMemoryStore();
+```
+
+It loses everything when the process ends. For production, implement `MemoryStore` over your
+own storage. The SDK adds no database, vector index, embedding calls or paid extraction.
+
+```ts
+import { createMemoryStore, defineAgent, memoryTools } from "@providerkit/agents";
+
+const store = createMemoryStore();
+const notes = memoryTools();
+const helper = defineAgent({
+  id: "helper",
+  version: "1",
+  instructions: "Use saved facts only when they help answer the person.",
+  provider,
+  memory: true,
+  tools: [notes.search, notes.save, notes.forget],
+});
+
+// Get these ids from authentication, never from model arguments or unchecked request data.
+const scope = await store.access({ tenantId: workspace.id, userId: person.id }, { signal });
+await helper.run("How do I take my coffee?", { memory: { store, scope }, signal, host });
+```
+
+`memory: true` enables recall only. Register the tools you want; none is added automatically.
+Reuse the **same tool objects** on a creator and its helper template when allowing generated
+helpers to use memory. The helper's admitted tool list still applies. A host template can enable
+recall independently, but a model cannot choose another store, scope or retention period.
+
+### Scope and versions
+
+Every scope names a `tenantId`, even in a single-tenant app. Optional `userId`, `sessionId` and
+`namespace` match exactly; omitting one never widens a read. Ids are nonempty, at most 200 characters
+and contain no control characters. The store's `access` returns the scope with an erasure
+`revision`. That revision prevents work started before an erasure from putting the data back.
+It is not permission: your host must check ownership and current access.
+
+`MemoryBinding.scope` is the only writable scope and must name a person. `shared` holds exact,
+read-only scopes in the same tenant. There may be at most eight scopes altogether. The binding
+is frozen into `snapshot.tree.memory` and inherited by specialists. Resume must supply the same
+scopes, revisions and `keepForMs`, before authorization callbacks run. The store itself stays in
+memory, not in the snapshot. `keepForMs` sets expiry on tool-created notes; the host owns cleanup.
+
+The three tools use the normal journal, guards, approvals, limits and host `beforeTool` check:
+
+- `memory_search({ query, limit? })` reads up to ten notes. Its result includes note keys and
+  versions in at most 4,000 characters. Large notes return a preview marked `truncated: true`,
+  with their key and version intact. If some matches do not fit, search with a smaller `limit`.
+  Queries contain 1 to 500 characters.
+- `memory_save({ notes: [{ text, version: null }] })` creates a note with an operation-derived key.
+  Supply `key` and `version: null` to create a named note. To replace one, supply its current
+  version from search. A call saves at most five notes, atomically. Each accepts 1,000 characters
+  by default; `memoryTools({ maxNoteChars })` raises that up to 16,000.
+- `memory_forget({ notes: [{ key, version }] })` deletes up to ten notes, atomically. A stale
+  version refuses the whole call. It never erases a conversation or another person's notes.
+
+Only one writer can win a note-version race. Search again after a conflict. The store must never
+reuse versions, even after delete/recreate. Interrupted writes are **not replayed**. A timeout or
+lost reply needs host reconciliation, not another write. Search can use the existing explicit
+read-only recovery policy. `memoryTools({ needsApproval: true })` requires approval for save and
+forget; the host can require it through `needsApproval` too. Store exception text is not shown
+to the model or saved in the journal.
+
+### Recall and resume
+
+Recall runs once per agent run, before its first model call. It searches using the first 2,000
+characters of the new input. A handoff keeps the source's latest user input across further
+transfers, including accepted messages sent while it ran. Transfer notices never become recall
+queries. An ordinary delegated task uses its own input.
+`memory: { limit, maxChars, onError }` changes the defaults of five matches and 4,000 characters.
+The ceilings are 20 matches and 16,000 characters, including the complete block's framing.
+Notes that do not fit are omitted whole. Search results from another scope always fail closed.
+
+Recall is stored in `snapshot.recall` and passes the existing checkpoint/progress barrier before
+any model sees it. Resume reuses that record without searching again, including a recorded read
+failure. `onError: "continue"` is the default; `"fail"` stops before the model when the store is
+unavailable. Neither mode permits another scope's data or an erased access revision.
+
+The block is user-role data, not system instructions or authorization. JSON quoting and escaped
+opening brackets prevent stored tags from closing the block. This is not a prompt-injection
+security boundary: host tool checks and guards still matter. Recall stays separate from the full
+conversation, session append and steering positions. Compaction reattaches the same recorded
+block without changing those records. An already-running model may still quote a recalled fact.
+
+### Save facts after a run
+
+Ingestion is an explicit host action. No observer hook writes memory or makes an extraction call:
+
+```ts
+const saved = await ingestMemory(result, {
+  memory: { store, scope },
+  notes: [{ key: "answer-style", text: "Prefers short answers", version: null }],
+});
+```
+
+Import `ingestMemory` from the main entry. Pass a completed root outcome from authoritative
+server state, after its final checkpoint and session append. Choose and authorize the facts in
+host code. The SDK removes memory tool rounds from the ingestion transcript, but answers may
+still quote earlier notes. The original conversation remains unchanged. An ingestion request
+accepts at most 20 notes and 1,000,000 UTF-8 JSON bytes, transcript included.
+
+The store must implement `ingest` and `receipt` together. It must atomically check note versions
+and the erasure revision, write the notes and commit a receipt keyed by the exact access and
+logical run id. It computes a fingerprint of the complete request. The same request returns the
+original receipt, even after later edits; different content for that run must conflict. A string
+id or an in-process flag without that transaction is not idempotency.
+
+`status: "saved"` carries the store's receipt. `"refused"` means a version conflict or erasure.
+`"unknown"` means the write may have committed. The SDK never retries it. Query
+`store.receipt({ access: scope, runId: result.runId }, { signal })` and reconcile with the original
+request on the host. A missing receipt while an old call can still finish is not proof of no write.
+Keep paid extraction outside these methods and under its own explicit execution policy.
+
+### Erase a person's memory
+
+```ts
+await store.erase({ tenantId: workspace.id, userId: person.id }, { signal });
+```
+
+This operation covers exactly that tenant and person, across their sessions and namespaces.
+The store must remove notes, ingestion receipts and derived data, then invalidate every old
+access revision atomically. A late write or ingestion using an old revision must throw
+`MemoryErasedError`, even if that namespace had no notes when erasure ran.
+
+**The host must also cancel active runs and erase their snapshots, checkpoints, event logs,
+session messages and any other copies.** Those records can contain recalled notes and quoted
+answers. Deleting store records cannot withdraw data already sent to a model. Apply your own
+access rules and retention schedule to every copy. Resume authorization must reject erased runs;
+reusing an old binding alone cannot recall information already sent.
+
+The reference store uses a linear word search with Unicode and accent handling. It has no vector
+ranking, automatic consolidation or notebook merge. Run
+`await checkMemoryStore({ disposable: createMemoryStore() })` to check the contract. The helper
+writes and erases test records, so supply a disposable store only. A passing check cannot prove
+that a production adapter enforces your authorization or transaction boundaries.
+
+For background jobs, set `createBackgroundAgent({ ..., memory: owner => openMemory(owner) })`.
+The factory checks the authenticated owner at start and the stored owner in the worker. Start
+freezes scopes without recalling; the worker recalls under the existing lease. A changed scope
+or erasure revision is refused before continuation claims. Ingestion stays a separate explicit
+host action, never a worker completion hook.
+
+See [the offline memory example](examples/memory.ts). It uses no live provider or store.
+
 ## Tools and checked output
 
 Pass core `Tool` instances in `tools`. Their input validation, timeouts and error outcomes remain
@@ -710,6 +861,122 @@ input, history or agent is refused. Every admitted child settles before the dele
 A child key becomes part of the child's run ID and of every operation ID under it. Progress events
 carry those IDs, and a screen that shows the run may send them to a browser. So key children by
 position or by a fixed name, such as `topic-1`, and never by their input.
+
+## Helpers the model creates
+
+Let an agent split a task among helpers:
+
+```ts
+await explainer.run("When does a database index help?");
+```
+
+The host supplies a template. The model writes each helper's task and optional instructions,
+then selects tools and a model alias from the host's menu. It cannot add code, credentials,
+permissions, hosted capabilities or higher run limits.
+
+```ts
+import { defineAgent, subagentTool } from "@providerkit/agents";
+
+const helper = defineAgent({
+  id: "helper",
+  version: "1",
+  instructions: "Answer only the task you receive.",
+  provider,
+  tools: [lookup],
+});
+const explainer = defineAgent({
+  id: "explainer",
+  version: "1",
+  instructions: "Ask helpers about separate parts of the question, then combine their answers.",
+  provider,
+  tools: [
+    lookup,
+    subagentTool({
+      name: "create_helpers",
+      description: "Start helpers for separate parts of the question.",
+      agent: helper,
+    }),
+  ],
+});
+```
+
+A model call to `create_helpers` takes `{ agents: [{ name, task, instructions?, tools?, model? }] }`.
+`name` is private text: 1 to 64 letters, digits, `_` or `-`, unique among helpers admitted by this
+creation tool in this run. A new helper needs a new name. `tools` contains registered tool names. Omitted tools means
+none; `defaultTools: "all"` grants the currently available set. A tool must be the **same object**
+on both the creator and the template, and enabled on the creator. Two tools with the same name
+are not interchangeable. The template's own tool-selection policy still applies.
+
+Handoffs and ordinary delegations cannot be granted. The checked-output tool `submit_result`
+stays available when the template needs it. Several helpers in one call run in parallel under
+the existing tree limit. Their results return in declaration order. Separate creation calls
+in one turn still run one after another, like other delegations.
+
+Use `agent: "self"` to reuse the creator's recorded instructions and model settings. Its
+instruction callbacks do not run again. Explicit templates resolve their own callbacks once.
+The helper gets no parent history, session or inbox. Its host instructions come first, followed
+by the model-written instructions. These instructions are not permission to use a tool.
+Forking a conversation and continuing a helper by name are not exposed by this tool. Use a
+host-defined delegation when you need to choose or forward history.
+
+### Bound helper creation
+
+Defaults are `maxPerCall: 4`, `maxPerRun: 8` and `maxLevels: 1`. Set `maxPerRun: 0` to refuse
+creation. Counts must be whole numbers up to 1,024. Only `maxPerRun` accepts zero. The entire
+model-supplied batch must fit in 65,536 UTF-8 JSON bytes (`SUBAGENT_SPEC_BYTES`). Unknown fields,
+unknown aliases, repeated names and oversized batches are refused before any child starts.
+
+Recursive creation needs `maxLevels` greater than one, and the helper must receive this same
+creation tool in its `tools` list. Every ancestor's creation ceiling still applies. Root
+`treeLimits` always bound depth, total children, model calls, parallel work and elapsed time.
+A preflight shortage of child slots returns tool feedback. A racing admission can still reach
+the tree's hard limit. Waiting or resuming never refreshes a budget.
+
+`models` maps aliases to `{ description, settings }`. The host writes these settings; the model
+only selects a key. Choices cannot set `hostedTools`, `toolChoice` or observer callbacks. The
+template owns its provider and hosted capabilities. Hidden provider changes require a version
+change, as with other agents. Hosted calls still cannot replay after an interruption.
+
+Optional `prepare(draft, context)` is trusted, pure admission policy. It may rewrite the task
+or instructions, remove requested tools, lower `limits`, or return `{ refuse: "Reason" }`.
+It cannot change the name or model alias, add tools the model did not request or raise the
+template's limits. Invalid or thrown policy results fail closed. The context contains the
+private `call`, child `depth`, created-helper `level`, `grantable` names and cancellation `signal`.
+One prepared definition must also fit in 65,536 UTF-8 JSON bytes.
+
+### Saved work and permissions
+
+The admitted definition, template configuration, model choice and task are saved in the ordinary
+child journal before execution. Resume uses that record, never another model call to recreate
+the helper. It refuses changed definitions, revoked tools or model aliases, and changed approved
+arguments after admission. Completed children are reused. `prepare` never runs again for an
+admitted child; it can run again for a helper that was refused or not yet saved. Keep effects
+out of it. Bump the relevant agent version when callback code or hidden provider behavior changes.
+
+All template guards, lifecycle hooks, result checks, tool serialization and usage accounting
+still apply. `needsApproval: true` on `subagentTool` gates the creation call only. Each helper's
+own approvals, questions and client results stay in its own request journal. They reach the
+host through the normal request paths. `ToolRequest.subagent` carries the private model-written
+name so host policy can recognize created helpers; it is not an authorization claim.
+`beforeTool` must still check current access immediately before every action, including after
+resume. A saved allowlist is not current permission.
+
+A helper's own model/result failure or local limit becomes a `failed` result for the parent.
+Suspension, cancellation, tree-wide limits, guard failures and host/journal failures keep their
+existing stopping behavior. Results are `{ name, runId, status: "completed", output }`,
+`{ name, runId, status: "failed", error }` or `{ name, status: "refused", error }`.
+`output` is the template's checked, JSON-serializable candidate, not a validator's transformed
+application object. `summarize(results)` is an optional pure callback; by default, the parent
+gets JSON in declaration order. The tool succeeds when at least one helper completes.
+
+The private record lives at `delegations[].children[].snapshot.subagent`. The existing `child`
+event adds only `subagent: true`; its key is positional (`helper-1`, for example), and its agent
+id belongs to the host template. It carries no model-written name, instructions or task. Display
+helpers under a host-written label. Only expose a model-written name or output after your own
+explicit display check. Raw tool events, snapshots and request records still contain private
+prompts and must stay on the server.
+
+See [the offline helper example](examples/subagents.ts). It creates two helpers without an API key.
 
 ## Hand off a conversation
 
@@ -1393,6 +1660,8 @@ bun run test test/recovery.test.ts
 bun run test test/lifecycle.test.ts
 bunx vitest run test/definition.test.ts
 bunx vitest run test/delegation.test.ts
+bunx vitest run test/subagents.test.ts
+bunx vitest run test/memory.test.ts
 bunx vitest run test/handoff.test.ts
 bunx vitest run test/structured-handoff.test.ts
 bunx vitest run test/steering.test.ts
@@ -1404,6 +1673,8 @@ bunx vitest run test/tool-retry.test.ts
 bun examples/guardrails.ts
 bun examples/basic.ts
 bun examples/specialists.ts
+bun examples/subagents.ts
+bun examples/memory.ts
 bun examples/conversation.ts
 bun examples/handoff.ts
 bun examples/structured-handoff.ts

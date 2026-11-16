@@ -8,6 +8,7 @@ import type {
 } from "@gusnips/server/runs";
 import { createProgress, type EventDurability } from "./progress.ts";
 export type { EventDurability, ProgressGap } from "./progress.ts";
+import { checkMemoryBinding, readMemoryBinding, type MemoryBinding } from "./memory.ts";
 import { AGENT_RUNTIME } from "./delegation.ts";
 import {
   checkOptions,
@@ -106,6 +107,9 @@ export interface BackgroundOptions<T> {
    * from a request is not authorization. `start` reads its history inside the authenticated
    * request; the worker gets it again, with the stored owner, to append the turn. */
   session?: (owner: string, id: string) => Session | Promise<Session>;
+  /** Authenticate scopes in start and again in the worker. A changed erasure revision refuses
+   * resume; this factory never recalls notes or ingests a completed run automatically. */
+  memory?: (owner: string) => MemoryBinding | Promise<MemoryBinding>;
   /** How many of the session's newest messages `start` loads. */
   historyLimit?: number;
   /** Runs once in `start`, before the run is saved. See RunOptions.prepareHistory. */
@@ -182,6 +186,13 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
   if (options.session !== undefined && typeof options.session !== "function")
     throw new TypeError("The session option must be a factory: (owner, id) => Session.");
   checkOptions({ historyLimit, prepareHistory });
+  if (options.memory !== undefined && typeof options.memory !== "function")
+    throw new TypeError("The memory option must be a trusted owner-to-binding factory.");
+  async function memoryFor(owner: string, signal: AbortSignal) {
+    return options.memory
+      ? readMemoryBinding(await untilAbort(Promise.resolve(options.memory(owner)), signal))
+      : undefined;
+  }
   const runtime = agent[AGENT_RUNTIME];
 
   async function sessionFor(owner: string, id: string, signal: AbortSignal): Promise<Session> {
@@ -326,6 +337,8 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     const session = snapshot.session
       ? await sessionFor(run.owner, snapshot.session.id, run.signal)
       : undefined;
+    const memory = await memoryFor(run.owner, signal);
+    checkMemoryBinding(snapshot, memory);
     run.signal.throwIfAborted();
     if (initial.continuation)
       await untilAbort(
@@ -404,6 +417,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     const result = await agent.resume(snapshot, {
       signal,
       context: trusted.context,
+      memory,
       host,
       ...(session ? { session } : {}),
       answers,
@@ -453,9 +467,10 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
         start.sessionId === undefined
           ? undefined
           : await sessionFor(owner, start.sessionId, signal);
+      const memory = await memoryFor(owner, signal);
       const snapshot = await runtime.open(
         input,
-        { ...start, session, historyLimit, prepareHistory, signal },
+        { ...start, memory, session, historyLimit, prepareHistory, signal },
         crypto.randomUUID(),
       );
       signal.throwIfAborted();

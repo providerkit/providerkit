@@ -11,12 +11,30 @@ import {
   type Tool,
 } from "@providerkit/core";
 import {
+  bindMemoryTool,
+  checkMemoryBinding,
+  isMemoryTool,
+  memoryPolicy,
+  memoryScopes,
+  MEMORY_TOOL_NAMES,
+  readMemoryBinding,
+  recallMemory,
+  withMemoryRecall,
+} from "./memory.ts";
+import {
   allModels,
   compactionDefinition,
   compactionId,
   compactionPlan,
   modelConversation,
 } from "./compaction.ts";
+import {
+  bindSubagentTool,
+  checkSubagentChildren,
+  subagentInstructions,
+  subagentLimits,
+  type SubagentCreation,
+} from "./subagents.ts";
 import { checkRetryTool, readToolRetryPolicy, retryBudget, toolAttempts } from "./tool-retry.ts";
 import {
   GuardChecks,
@@ -231,6 +249,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     throw new TypeError("An agent needs an id, version, instructions and provider.");
   }
   const settings = readModelSettings(definition.modelSettings);
+  const memory = memoryPolicy(definition.memory);
   const compaction = compactionDefinition(definition.compaction);
   const summarizer = definition.compaction?.summarize?.provider;
   const toolRetries = readToolRetryPolicy(definition.toolRetries);
@@ -261,7 +280,15 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
   ) {
     throw new TypeError("An output contract needs an object schema and a runtime validator.");
   }
-  const tools = [...(definition.tools ?? [])];
+  const registeredTools = [...(definition.tools ?? [])];
+  const needsMemory = !!memory || registeredTools.some(isMemoryTool);
+  if (registeredTools.some((tool) => MEMORY_TOOL_NAMES.includes(tool.name) && !isMemoryTool(tool)))
+    throw new TypeError(
+      "memory_search, memory_save and memory_forget are reserved. Register tools from memoryTools().",
+    );
+  const tools = registeredTools.map((tool) =>
+    isDelegation(tool) ? bindSubagentTool(tool, () => agent) : tool,
+  );
   if (
     new Set(tools.map((tool) => tool.name)).size !== tools.length ||
     tools.some((tool) => !isId(tool.name) || tool.name === RESULT_TOOL_NAME)
@@ -358,6 +385,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     start: RunStart,
     options: RunOptions,
     runId: string,
+    source?: RunDefinition,
   ): Promise<RunDefinition> {
     const signal = options.signal ?? new AbortController().signal;
     const run: RunContext = Object.freeze({
@@ -368,8 +396,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       context: Object.freeze({ ...options.context }),
       signal,
     });
-    const text: unknown =
-      typeof instructions === "function"
+    const text: unknown = source
+      ? source.instructions
+      : typeof instructions === "function"
         ? await untilAbort(Promise.resolve(instructions(run)), signal)
         : instructions;
     if (typeof text !== "string") throw new TypeError("instructions must return a string.");
@@ -382,7 +411,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
               : selection,
           );
     }
-    const allowed = await select(enabledTools);
+    const allowed = source ? source.enabledTools : await select(enabledTools);
     const selected =
       options.enabledTools === undefined ? allowed : await select(options.enabledTools);
     if (selected.some((name) => name !== RESULT_TOOL_NAME && !allowed.includes(name)))
@@ -400,7 +429,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       onRateLimit: _onRateLimit,
       ...modelSettings
     } = {
-      ...settings,
+      ...(source ? source.modelSettings : settings),
       ...readModelSettings(options.modelSettings),
     };
     const choice = modelSettings.toolChoice;
@@ -433,6 +462,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     );
     return {
       instructions: text,
+      ...(memory ? { memory: copyData(memory) } : {}),
       modelSettings,
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
@@ -495,6 +525,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             ? `${snapshot.attemptId}/tool-attempt/${tool.retries.length + tool.interrupted.length + 1}`
             : snapshot.attemptId,
       operationId: tool.id,
+      ...(snapshot.subagent ? { subagent: snapshot.subagent.spec.name } : {}),
       call,
       arguments: parseToolArgs(call.arguments),
     };
@@ -637,6 +668,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     answers?: Readonly<Record<string, unknown>>,
   ): Promise<RunOutcome<T | string | H>> {
     const host = options.host;
+    const limits = snapshot.limits;
     const deadline = snapshot.startedAt + limits.elapsedMs;
     const timeout = new AbortController();
     const signal = AbortSignal.any([
@@ -1010,19 +1042,33 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           const decision = [...records]
             .reverse()
             .find((record) => !record.closed && record.decision)?.decision;
-          return tool.invoke(copyData(request.arguments), {
-            ...options.context,
-            answers: immutableCopy(answers),
-            decision: immutableCopy(decision),
-            runId: snapshot.runId,
-            attemptId: request.attemptId,
-            operationId: request.operationId,
-            callId: request.call.id,
-            signal,
-          });
+          return bindMemoryTool(tool, options.memory, snapshot, request).invoke(
+            copyData(request.arguments),
+            {
+              ...options.context,
+              answers: immutableCopy(answers),
+              decision: immutableCopy(decision),
+              runId: snapshot.runId,
+              attemptId: request.attemptId,
+              operationId: request.operationId,
+              callId: request.call.id,
+              signal,
+            },
+          );
         });
         // Core reports an aborted invocation as data. It must not buy another model turn.
         if (!outcome.ok) active();
+        if (
+          !outcome.ok &&
+          isMemoryTool(tool) &&
+          outcome.cause instanceof Error &&
+          outcome.cause.name === "MemoryScopeError"
+        )
+          fail(
+            "memory_scope_violation",
+            "Memory returned another scope's data. Fix the store before continuing.",
+            request.operationId,
+          );
         if (!outcome.ok && outcome.kind === "failed" && isInputRequired(outcome.cause)) {
           if (model.tools[index]?.retries.length)
             fail(
@@ -1698,7 +1744,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       // run with no model operation left running and nothing to reconcile.
       const request = await requestOf(
         snapshot.definition.instructions,
-        modelConversation(snapshot),
+        withMemoryRecall(snapshot, modelConversation(snapshot)),
         loadMedia,
       );
       active();
@@ -1923,6 +1969,38 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         active();
         const last = snapshot.models.at(-1);
         snapshot.state = { status: "running" };
+        checkMemoryBinding(snapshot, options.memory);
+        if (needsMemory && !options.memory)
+          fail("memory_missing", "Supply authenticated memory access before starting this agent.");
+        if (
+          !options.memory?.scope &&
+          tools.some(
+            (tool) =>
+              isMemoryTool(tool) &&
+              !tool.isReadOnly &&
+              snapshot.definition.enabledTools.includes(tool.name),
+          )
+        )
+          fail(
+            "memory_missing",
+            "Memory writes need an authenticated person's writable scope. Disable save and forget for shared-only access.",
+          );
+        if (memory && options.memory && !snapshot.recall) {
+          snapshot.recall = await recallMemory(
+            snapshot,
+            options.memory,
+            signal,
+            scope.handoffInput,
+          );
+          // No model sees recall until the existing progress/checkpoint barrier confirms it.
+          await save();
+          active();
+        }
+        if (snapshot.recall?.status === "failed" && memory?.onError === "fail")
+          fail(
+            "memory_unavailable",
+            "Memory could not be read. Check the store before starting a new run.",
+          );
         if (last?.status === "running") await handleTurn(await nextTurn(last));
         else if (last?.status === "completed") {
           await recoverTools(last);
@@ -2005,9 +2083,30 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     runId: string,
     tree?: RunSnapshot["tree"],
     options: RunOptions = {},
+    subagent?: SubagentCreation,
   ): Promise<RunSnapshot> {
     const frozen = freeze(start);
-    const resolved = await resolveDefinition(frozen, options, runId);
+    const spec = subagent?.record.spec;
+    const resolved = await resolveDefinition(
+      frozen,
+      spec
+        ? {
+            ...options,
+            enabledTools: spec.tools,
+            modelSettings: subagent.record.policy.models[spec.model ?? ""]?.settings,
+          }
+        : options,
+      runId,
+      subagent?.source,
+    );
+    const record = subagent
+      ? { ...copyData(subagent.record), base: copyData(resolved) }
+      : undefined;
+    if (spec)
+      resolved.instructions = subagentInstructions(resolved.instructions, spec.instructions);
+    const childLimits = spec ? subagentLimits(limits, spec.limits) : limits;
+    if (inlineBytes(frozen.history, frozen.input) > childLimits.inlineBytes)
+      throw new TypeError("The helper input exceeds its admitted inline byte limit.");
     const { history, input, session } = frozen;
     const startedAt = Date.now();
     return {
@@ -2018,27 +2117,79 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       attemptId: crypto.randomUUID(),
       startedAt,
       definition: resolved,
+      ...(record ? { subagent: record } : {}),
       history: copyData(history),
       input: copyData(input),
       inputs: [],
       guards: [],
       compactions: [],
       ...(session ? { session: copyData(session) } : {}),
-      limits: copyData(limits),
+      limits: copyData(childLimits),
       models: [],
       delegations: [],
       state: { status: "running" },
-      tree: tree ? copyData(tree) : { runId, startedAt, limits: copyData(treeLimits) },
+      tree: tree
+        ? copyData(tree)
+        : {
+            runId,
+            startedAt,
+            limits: copyData(treeLimits),
+            ...(options.memory ? { memory: memoryScopes(options.memory) } : {}),
+          },
     };
   }
 
   const runtime: AgentRuntime<T | string | H> = {
     handoffs: [...handoffs.values()],
+    tools: Object.freeze(registeredTools),
+    enabledTools: Array.isArray(enabledTools) ? Object.freeze([...enabledTools]) : undefined,
+    limits: immutableCopy(limits),
+    configuration() {
+      const { onActivity: _activity, onRateLimit: _rateLimit, ...modelSettings } = settings;
+      return immutableCopy({
+        id,
+        version,
+        provider: { id: provider.id, model: provider.model },
+        instructions: typeof instructions === "string" ? instructions : null,
+        enabledTools: Array.isArray(enabledTools) ? enabledTools : null,
+        modelSettings,
+        limits,
+        output: output?.schema ?? null,
+        stopAtTools,
+        recovery,
+        guardrails: guardPolicy,
+        compaction,
+        toolRetries,
+        ...(memory ? { memory } : {}),
+        tools: tools.map((tool) => ({
+          definition: tool.definition(),
+          needsApproval: tool.needsApproval === true,
+          ...(isDelegation(tool)
+            ? {
+                kind: "delegation",
+                specialists: tool.specialists.map(({ id, version }) => ({ id, version })),
+              }
+            : isHandoff(tool)
+              ? { kind: "handoff", target: handoffRef(tool.target()) }
+              : isClientTool(tool)
+                ? { kind: "client", resultSchema: tool.resultSchema }
+                : {
+                    kind: "tool",
+                    isReadOnly: tool.isReadOnly === true,
+                    isConcurrencySafe: tool.isConcurrencySafe === true,
+                    isTerminal: tool.isTerminal === true,
+                  }),
+        })),
+      });
+    },
     execute,
     answerRequests,
     freeze,
     create,
     async open(input, options, runId) {
+      options = { ...options, memory: readMemoryBinding(options.memory) };
+      if (needsMemory && !options.memory)
+        throw new TypeError("This agent needs authenticated memory access in RunOptions.memory.");
       // Everything before the snapshot exists runs outside the journal: a paid summarizer in
       // prepareHistory can run again if the process dies before the first checkpoint.
       const signal = options.signal ?? new AbortController().signal;
@@ -2084,15 +2235,19 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       }
       return create(start, runId, undefined, options);
     },
-    restore(raw, tree) {
+    restore(raw, tree, subagent) {
+      if (isRecord(raw) && (!equalData(raw.subagent, subagent) || (subagent && !tree)))
+        throw new TypeError("Restore a model-created helper through its owning creation tool.");
       const snapshot = readSnapshot(
         raw,
         id,
         version,
-        limits,
+        subagent ? subagentLimits(limits, subagent.spec.limits) : limits,
         output ? RESULT_TOOL_NAME : undefined,
       );
       checkNames(snapshot.definition.enabledTools);
+      if (!equalData(snapshot.definition.memory, memory))
+        throw new TypeError("Restore the same memory recall policy before resuming.");
       if (
         !equalData(snapshot.definition.compaction, compaction) ||
         !equalData(snapshot.definition.toolRetries?.policy ?? null, toolRetries)
@@ -2154,6 +2309,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           if (journal.kind !== (call && handoffs.has(call.name) ? "handoff" : "delegation"))
             throw new TypeError("The saved delegation kind does not match its registered tool.");
           if (journal.kind === "handoff") checkHandoffTargets(agent);
+          checkSubagentChildren(descriptor, snapshot, journal);
           for (const entry of journal.children) {
             const agent = descriptor.specialists.find(
               (agent) =>
@@ -2161,7 +2317,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             );
             if (!agent)
               throw new TypeError("The saved child is not a registered specialist version.");
-            entry.snapshot = agent[AGENT_RUNTIME].restore(entry.snapshot, snapshot.tree);
+            entry.snapshot = agent[AGENT_RUNTIME].restore(
+              entry.snapshot,
+              snapshot.tree,
+              entry.snapshot.subagent,
+            );
           }
         }
       }
@@ -2259,6 +2419,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     },
     async run(input, options = {}) {
       checkOptions(options);
+      options = { ...options, memory: readMemoryBinding(options.memory) };
       return root(
         await runtime.open(input, options, options.runId ?? crypto.randomUUID()),
         options,
@@ -2266,7 +2427,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     },
     async resume(raw, options) {
       checkOptions(options, "resume");
+      options = { ...options, memory: readMemoryBinding(options.memory) };
       const snapshot = runtime.restore(raw);
+      checkMemoryBinding(snapshot, options.memory);
       if (options.session && options.session.id !== snapshot.session?.id)
         throw new TypeError(
           snapshot.session

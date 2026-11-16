@@ -11,7 +11,15 @@ import {
   type ToolCall,
   type Turn,
 } from "@providerkit/core";
+import {
+  checkMemorySnapshot,
+  isMemoryPolicy,
+  isMemoryRecall,
+  isMemoryScopes,
+  readMemoryBinding,
+} from "./memory.ts";
 import { allModels, checkCompactions, isCompactionDefinition } from "./compaction.ts";
+import { isSubagentRecord } from "./subagents.ts";
 import { isToolRetryDefinition, retryBudget, toolAttempts } from "./tool-retry.ts";
 import { GUARD_STAGES } from "./extensions.ts";
 import { INPUT_LIMITS, inputBytes, readQueuedInput, type RunInput } from "./steering.ts";
@@ -533,6 +541,7 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     isGuardDefinition(value.guardrails) &&
     isCompactionDefinition(value.compaction) &&
     isToolRetryDefinition(value.toolRetries) &&
+    optional(value.memory, isMemoryPolicy) &&
     isRecoveryDefinition(value.recovery)
   );
 }
@@ -552,6 +561,7 @@ export function checkOptions(
   ) {
     throw new TypeError("Invalid run options.");
   }
+  readMemoryBinding(value.memory);
   if (!optional(value.session, isSession))
     throw new TypeError("A session needs an id and load and append functions.");
   if (!optional(value.historyLimit, positive))
@@ -637,6 +647,7 @@ function isRequest(value: unknown): value is ToolRequest {
     isRecord(value) &&
     [value.agentId, value.version, value.runId, value.attemptId, value.operationId].every(isId) &&
     isCall(value.call) &&
+    optional(value.subagent, isId) &&
     isRecord(value.arguments)
   );
 }
@@ -902,6 +913,11 @@ function isSnapshot(value: unknown): value is RunSnapshot {
     [value.agentId, value.version, value.runId, value.attemptId].every(isId) &&
     positive(value.startedAt) &&
     isRunDefinition(value.definition) &&
+    optional(value.recall, isMemoryRecall) &&
+    optional(
+      value.subagent,
+      (record) => isSubagentRecord(record) && isRunDefinition(record.base),
+    ) &&
     Array.isArray(value.history) &&
     value.history.every(isAgentMessage) &&
     isTurnContent(value.input) &&
@@ -921,6 +937,7 @@ function isSnapshot(value: unknown): value is RunSnapshot {
     isId(value.tree.runId) &&
     positive(value.tree.startedAt) &&
     isTreeLimits(value.tree.limits) &&
+    optional(value.tree.memory, isMemoryScopes) &&
     isState(value.state)
   );
 }
@@ -948,7 +965,17 @@ export function checkTree(root: RunSnapshot): void {
     depth: number,
     path: ChildPathStep[],
     conversation: boolean,
+    createdLevel: number,
+    createdCeiling: number,
   ): void {
+    if (node.subagent) {
+      createdLevel++;
+      createdCeiling = Math.min(createdCeiling, node.subagent.policy.maxLevels);
+      if (createdLevel > createdCeiling || node.session)
+        throw new TypeError(
+          "A helper exceeds its recursive creation permission or carries a session.",
+        );
+    }
     if (!conversation && node.inputs.length)
       throw new TypeError("A delegated specialist cannot receive the root conversation's inbox.");
     for (const input of node.inputs) {
@@ -1018,6 +1045,8 @@ export function checkTree(root: RunSnapshot): void {
             { operationId: journal.operationId, key: child.key, runId: child.snapshot.runId },
           ],
           conversation && journal.kind === "handoff",
+          createdLevel,
+          createdCeiling,
         );
       }
     }
@@ -1040,7 +1069,7 @@ export function checkTree(root: RunSnapshot): void {
   }
   if (root.runId === root.tree.runId && root.startedAt !== root.tree.startedAt)
     throw new TypeError("The root start time does not match its tree.");
-  visit(root, 0, [], true);
+  visit(root, 0, [], true, 0, Infinity);
   if (inputIds.size > INPUT_LIMITS.count || inputSize > INPUT_LIMITS.bytes)
     throw new TypeError("The snapshot exceeds its input count or byte limit.");
   if (children > root.tree.limits.maxChildren || models > root.tree.limits.modelCalls)
@@ -1076,6 +1105,9 @@ export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): vo
   if (
     previous.runId !== next.runId ||
     !equalData(previous.definition, next.definition) ||
+    !equalData(previous.subagent, next.subagent) ||
+    (previous.recall !== undefined && !equalData(previous.recall, next.recall)) ||
+    !equalData(previous.limits, next.limits) ||
     !equalData(previous.history, next.history) ||
     !equalData(previous.input, next.input) ||
     !equalData(previous.session, next.session) ||
@@ -1385,6 +1417,7 @@ export function readSnapshot(
           request.call.runId !== raw.runId ||
           request.call.agentId !== raw.agentId ||
           request.call.version !== raw.version ||
+          request.call.subagent !== raw.subagent?.spec.name ||
           !equalData(request.call.call, call) ||
           !completeArguments(call.arguments) ||
           !equalData(
@@ -1513,6 +1546,7 @@ export function readSnapshot(
       throw new TypeError("The completed result does not match its recorded turn.");
     }
   }
+  checkMemorySnapshot(raw);
   checkCompactions(raw);
   for (const entry of raw.compactions) {
     if (

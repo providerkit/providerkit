@@ -17,7 +17,15 @@ import type {
   Turn,
 } from "@providerkit/core";
 
+import type {
+  AgentMemory,
+  MemoryBinding,
+  MemoryPolicy,
+  MemoryRecall,
+  MemoryScopes,
+} from "./memory.ts";
 import type { ClientTool } from "./request.ts";
+import type { SubagentRecord } from "./subagents.ts";
 import type { InputInbox, InputReceipt, RunInput } from "./steering.ts";
 import type { Handoff } from "./handoff.ts";
 import type {
@@ -307,6 +315,8 @@ export interface RunDefinition {
   guardrails: GuardDefinition | null;
   compaction: CompactionDefinition | null;
   toolRetries: ToolRetryDefinition | null;
+  /** Recall policy only. Memory tools are explicit registered tools, never implicit grants. */
+  memory?: MemoryPolicy;
 }
 
 export interface AgentConfig<H = unknown> {
@@ -323,6 +333,8 @@ export interface AgentConfig<H = unknown> {
   guardrails?: Guardrails;
   compaction?: CompactionPolicy;
   toolRetries?: ToolRetryPolicy;
+  /** Bounded recall, recorded before the first model call. Requires host-supplied memory. */
+  memory?: AgentMemory | true;
   /** Host-only observer. Runs before RunOptions.onLifecycle at each boundary. */
   onLifecycle?: LifecycleHook;
   /** Core tools, client tools, delegations or handoffs. Terminal tools and handoffs
@@ -357,6 +369,8 @@ export interface Agent<T = string> {
 }
 
 export interface ToolRequest {
+  /** Private model-written name, for host policy only. Never a public label or permission. */
+  subagent?: string;
   agentId: string;
   version: string;
   runId: string;
@@ -539,6 +553,8 @@ export interface RunOptions {
   enabledTools?: EnabledTools;
   /** Passed to tools with reserved runId, attemptId, operationId, callId and signal supplied by the loop. */
   context?: ToolContext;
+  /** Trusted binding from authentication. Never select a scope from model arguments. */
+  memory?: MemoryBinding;
   host?: AgentHost;
   /** Best-effort progress from the one stream reader. Observer errors do not stop work. */
   onEvent?: (event: AgentEvent) => void | Promise<void>;
@@ -692,6 +708,10 @@ export interface RunSnapshot {
   startedAt: number;
   /** Resolved once before the first checkpoint. Resume never reruns definition callbacks. */
   definition: RunDefinition;
+  /** Present only for model-created helpers. Private definition and frozen host capabilities. */
+  subagent?: SubagentRecord;
+  /** Private model-input data, recorded once. Never part of the session transcript. */
+  recall?: MemoryRecall;
   /** The conversation before the new turn, repaired once when the run was created and never
    * read again, so every request starts with the same bytes. Never a system message. */
   history: AgentMessage[];
@@ -709,7 +729,7 @@ export interface RunSnapshot {
   models: ModelExecution[];
   delegations: DelegationExecution[];
   /** Identical in every node. Admissions are counted from the journals, including running work. */
-  tree: { runId: string; startedAt: number; limits: TreeLimits };
+  tree: { runId: string; startedAt: number; limits: TreeLimits; memory?: MemoryScopes };
   state: RunState;
 }
 
@@ -807,6 +827,8 @@ export type AgentEvent =
    * saved copy, stays silent. */
   | {
       type: "child";
+      /** A model-created helper. Its private name, instructions and task are not display data. */
+      subagent?: true;
       parentRunId: string;
       operationId: string;
       key: string;

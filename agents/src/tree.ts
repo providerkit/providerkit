@@ -11,6 +11,7 @@ import type {
   RunSnapshot,
   RunState,
   ToolExecution,
+  UserContent,
 } from "./types.ts";
 
 export type StopState = Exclude<RunState, { status: "running" | "completed" }>;
@@ -34,6 +35,8 @@ export function isLocalStop(state: RunState): boolean {
         "incomplete_turn",
         "missing_result",
         "empty_output",
+        "memory_missing",
+        "memory_unavailable",
       ].includes(state.error.code))
   );
 }
@@ -204,6 +207,14 @@ export class ExecutionTree {
       throw new Halt({ status: "limited", limit: "modelCalls" });
   }
 
+  /** Preflight only. reserveChild rechecks against the live journal at each admission. */
+  childRoom(depth: number): number {
+    this.active();
+    return depth > this.root.tree.limits.maxDepth
+      ? 0
+      : this.root.tree.limits.maxChildren - ([...snapshots(this.root)].length - 1);
+  }
+
   reserveChild(depth: number): void {
     this.active();
     if (depth > this.root.tree.limits.maxDepth)
@@ -289,4 +300,7 @@ export interface ExecutionScope {
   tree: ExecutionTree;
   depth: number;
   path: ChildPathStep[];
+  /** Latest real user input along this handoff chain, rebuilt from the source journals.
+   * A handoff's own input is an SDK transfer notice, not a recall query. */
+  handoffInput?: UserContent;
 }

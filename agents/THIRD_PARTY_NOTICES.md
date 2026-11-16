@@ -11,7 +11,18 @@ block has a short comment that names its source. Their copyright notices and lic
   `packages/ai-harness/src/log.ts`,
   `packages/ai-harness/src/session/turn-parts.ts` (`steering` and `joinSteers`) and
   `packages/ai/src/interrupt-serialization.ts`, `packages/ai/src/utilities/tool-result.ts`
-  and `packages/ai-compaction/src/index.ts` (`evictOldest`, `summarizeOldest` and checkpoint reuse).
+  and `packages/ai-compaction/src/index.ts` (`evictOldest`, `summarizeOldest` and checkpoint reuse),
+  plus `packages/ai-harness/src/first-party/agents.ts` (`allowedTools`),
+  `packages/ai-memory/src/internal/store.ts` (`sameScope`, `lexicalOverlap`, `defaultRenderMemory`)
+  and `packages/ai-memory/src/testkit/contract.ts`.
+- Used in: `src/memory.ts`, `src/memory-store.ts` and `test/memory.test.ts`, exact scope matching,
+  word ranking, JSON-quoted memory and the disposable store contract check. Changed: all four
+  scope dimensions match exactly; empty labels are refused; words support Unicode and accent
+  folding. Version checks and erasure generations are atomic. Ingestion is explicit and commits
+  a receipt with its writes. Recall is journaled user data, never system instructions.
+- Used in: `src/subagents.ts`, limiting helper tools to the creator's available tools.
+  Changed: exact tool object identity replaces glob matching. Grants and host configuration
+  live in child snapshots instead of an in-memory tool map; hidden tools cannot be invoked.
 - Used in: `src/compaction.ts` and `src/run.ts`, a saved model-only view separate from the full
   transcript, usage plus new-message estimates and checkpoint-before-apply.
   Changed: core owns the cut and tool pairing; unread steers stay verbatim. Summary calls use
@@ -174,6 +185,73 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+## PydanticAI Harness and Vstorm
+
+- Sources: [pydantic/pydantic-ai](https://github.com/pydantic/pydantic-ai),
+  `src/pydantic_ai_harness/pydantic_ai_harness/sub_agents/_toolset.py` (`create_agent`,
+  `_build_created` and replay reconstruction), `_control.py` (`DynamicAgentSpec`, name validation
+  and the tool-free default), and `tests/harness/sub_agents/test_task_control.py` and
+  `test_dbos.py`, and `src/pydantic_ai_harness/pydantic_ai_harness/memory/_capability.py`
+  (user-role memory snapshots and `_neutralize`).
+- Used in: `src/memory.ts`, keeping recalled data out of system instructions and neutralizing
+  stored framing tags. Changed: every `<` is escaped inside JSON text. One bounded recall lives
+  in the run journal and is reattached to the model view after compaction, not to session history.
+- Used in: `src/subagents.ts` and `test/subagents.test.ts`, names, model menus, bounded creation
+  and rebuilding from saved definitions without asking the model again. Changed: versioned
+  host templates run through providerkit's existing child journal, guards and limits. Names are
+  private; positional keys identify children. Host policy can narrow grants, never add authority.
+- PydanticAI Harness's `THIRD_PARTY_NOTICES.md` identifies dynamic agents as a port of
+  [vstorm-co/subagents-pydantic-ai](https://github.com/vstorm-co/subagents-pydantic-ai).
+  Both notices are retained below.
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2026 Pydantic Services Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+```text
+MIT License
+
+Copyright (c) 2026 Vstorm
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## Microsoft Agent Framework
