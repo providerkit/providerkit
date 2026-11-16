@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   defineTool,
   type ChatMessage,
+  type HostedTool,
   type Provider,
   type ProviderChunk,
   type StreamOptions,
@@ -165,6 +166,161 @@ describe("model settings", () => {
     await agent.run("Answer", { modelSettings: { maxTokens: undefined } });
     expect(wire.requests[0]?.options).toMatchObject({ maxTokens: 100, stopSequences: ["END"] });
   });
+
+  it.each(["agent", "run"] as const)(
+    "preserves %s hosted settings through a frozen checkpoint and JSON resume",
+    async (source) => {
+      const hostedTools: HostedTool[] = [
+        {
+          type: "web_search",
+          optional: false,
+          allowedDomains: ["docs.example.com"],
+          blockedDomains: ["other.example.com"],
+          maxUses: 0,
+          userLocation: {
+            city: "Boston",
+            region: "MA",
+            country: "US",
+            timezone: "America/New_York",
+          },
+        },
+        {
+          type: "web_fetch",
+          optional: true,
+          allowedDomains: ["docs.example.com"],
+          blockedDomains: [],
+          maxUses: 2,
+          maxContentTokens: 100,
+        },
+        { type: "code_execution", fileIds: ["file-one"] },
+        { type: "file_search", storeIds: ["store-one"], maxResults: 3 },
+        {
+          type: "image_generation",
+          size: "1024x1536",
+          quality: "high",
+          format: "webp",
+          background: "transparent",
+        },
+      ];
+      const expected = structuredClone(hostedTools);
+      const wire = fake([calls("write"), text()]);
+      const write = tool("write", { needsApproval: true });
+      const agent = defineAgent({
+        ...base,
+        provider: wire.provider,
+        tools: [write],
+        modelSettings: { hostedTools: source === "agent" ? hostedTools : [{ type: "web_search" }] },
+      });
+      if (source === "agent") hostedTools.length = 0;
+      const checkpoint = vi.fn((snapshot: RunSnapshot) => {
+        expect(snapshot.definition.modelSettings.hostedTools).toEqual(expected);
+        // Mutating the caller's list cannot edit the resolved definition or a later call.
+        hostedTools.length = 0;
+      });
+      const pending = await agent.run("Write", {
+        modelSettings: { hostedTools: source === "run" ? hostedTools : undefined },
+        host: { ...approval, checkpoint },
+      });
+      expect(pending.status).toBe("suspended");
+      const definition = checkpoint.mock.calls[0]?.[0].definition;
+      const search = definition?.modelSettings.hostedTools?.[0];
+      expect(Object.isFrozen(definition)).toBe(true);
+      expect(Object.isFrozen(definition?.modelSettings.hostedTools)).toBe(true);
+      expect(Object.isFrozen(search)).toBe(true);
+      if (search?.type !== "web_search") throw new Error("Expected the saved search settings");
+      expect(Object.isFrozen(search.allowedDomains)).toBe(true);
+      expect(Object.isFrozen(search.userLocation)).toBe(true);
+      const roundtrip = JSON.parse(JSON.stringify(pending.snapshot));
+      expect(roundtrip.definition.modelSettings.hostedTools).toEqual(expected);
+      const rebuilt = defineAgent({
+        ...base,
+        provider: wire.provider,
+        tools: [write],
+        modelSettings: { hostedTools: [] },
+      });
+      const result = await rebuilt.resume(roundtrip, {
+        host: { ...approval, authorizeResume },
+        decision: "ticket",
+      });
+      expect(result.status).toBe("completed");
+      expect(result.snapshot.definition.modelSettings.hostedTools).toEqual(expected);
+      expect(wire.requests.map(({ options }) => options.hostedTools)).toEqual([expected, expected]);
+    },
+  );
+
+  it("lets an empty hosted override clear the agent's hosted settings", async () => {
+    const wire = fake([text()]);
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      modelSettings: { hostedTools: [{ type: "web_search" }] },
+    });
+    const result = await agent.run("Answer", { modelSettings: { hostedTools: [] } });
+    expect(result.status).toBe("completed");
+    expect(result.snapshot.definition.modelSettings.hostedTools).toEqual([]);
+    expect(wire.requests[0]?.options.hostedTools).toEqual([]);
+  });
+
+  it.each([
+    { hostedTools: null },
+    { hostedTools: { type: "web_search" } },
+    { hostedTools: [null] },
+    { hostedTools: new Array(1) },
+    { hostedTools: [{ type: "unknown" }] },
+    { hostedTools: [{ type: "web_search" }, { type: "web_search", optional: true }] },
+    { hostedTools: [{ type: "web_search", optional: "yes" }] },
+    { hostedTools: [{ type: "web_search", allowedDomains: "example.com" }] },
+    { hostedTools: [{ type: "web_search", blockedDomains: [1] }] },
+    { hostedTools: [{ type: "web_search", allowedDomains: new Array(1) }] },
+    { hostedTools: [{ type: "web_search", maxUses: -1 }] },
+    { hostedTools: [{ type: "web_search", maxUses: 1.5 }] },
+    { hostedTools: [{ type: "web_search", maxUses: Infinity }] },
+    { hostedTools: [{ type: "web_search", userLocation: "Boston" }] },
+    { hostedTools: [{ type: "web_search", userLocation: { city: 1 } }] },
+    { hostedTools: [{ type: "web_search", userLocation: { city: () => "Boston" } }] },
+    { hostedTools: [{ type: "web_search", userLocation: { latitude: 42 } }] },
+    { hostedTools: [{ type: "web_search", userLocation: new Date(0) }] },
+    { hostedTools: [{ type: "web_search", unknown: true }] },
+    { hostedTools: [{ type: "web_fetch", userLocation: {} }] },
+    { hostedTools: [{ type: "web_fetch", maxContentTokens: 0 }] },
+    { hostedTools: [{ type: "code_execution", fileIds: [""] }] },
+    { hostedTools: [{ type: "file_search" }] },
+    { hostedTools: [{ type: "file_search", storeIds: [null] }] },
+    { hostedTools: [{ type: "file_search", storeIds: ["store"], maxResults: 1.5 }] },
+    { hostedTools: [{ type: "image_generation", size: "small" }] },
+    { hostedTools: [{ type: "image_generation", quality: ["high"] }] },
+    { hostedTools: [{ type: "image_generation", format: "gif" }] },
+    { hostedTools: [{ type: "image_generation", background: "white" }] },
+  ])(
+    "rejects malformed hosted configuration, overrides and snapshots (%j)",
+    async (modelSettings) => {
+      const wire = fake([text()]);
+      // Exercise the untyped boundary without casting malformed data into the public contract.
+      expect(() =>
+        Reflect.apply(defineAgent, undefined, [
+          { ...base, provider: wire.provider, modelSettings },
+        ]),
+      ).toThrow("modelSettings");
+      const agent = defineAgent({ ...base, provider: wire.provider });
+      const checkpoint = vi.fn();
+      await expect(
+        Reflect.apply(agent.run, agent, ["Answer", { modelSettings, host: { checkpoint } }]),
+      ).rejects.toThrow("modelSettings");
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(wire.requests).toHaveLength(0);
+      const valid = await agent.run("Answer");
+      const authorize = vi.fn();
+      await expect(
+        agent.resume(
+          { ...valid.snapshot, definition: { ...valid.snapshot.definition, modelSettings } },
+          { host: { authorizeResume: authorize, checkpoint } },
+        ),
+      ).rejects.toThrow("Invalid agent snapshot");
+      expect(authorize).not.toHaveBeenCalled();
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(wire.requests).toHaveLength(1);
+    },
+  );
 
   it("keeps observer callbacks live and outside the JSON snapshot", async () => {
     const wire = fake([text()]);
