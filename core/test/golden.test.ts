@@ -1,4 +1,5 @@
-// Golden transcripts — one turn and five failures, on four vendors' wires.
+// Golden transcripts — one turn and five failures, on four vendors' wires, and
+// one turn that ran a hosted search, asked the same questions on all four.
 //
 // Every other suite here asks ONE adapter whether it reads its own vendor
 // correctly. This one asks all four the same question: given the same turn, do
@@ -17,10 +18,12 @@
 import { describe, expect, it } from "vitest";
 import { repairHistory } from "../src/context.ts";
 import { ProviderError, classify } from "../src/errors.ts";
+import { HOSTED_TOOL_TYPES, type HostedTool, type HostedToolType } from "../src/hosted.ts";
 import { createAnthropicProvider } from "../src/providers/anthropic.ts";
 import { createGeminiProvider } from "../src/providers/gemini.ts";
 import { createOpenAIProvider } from "../src/providers/openai.ts";
 import { createResponsesProvider } from "../src/providers/responses.ts";
+import { withStreamRetry } from "../src/retry.ts";
 import { collectTurn } from "../src/turn.ts";
 import type {
   ChatMessage,
@@ -28,9 +31,10 @@ import type {
   Provider,
   ProviderChunk,
   StreamOptions,
+  ToolChoice,
   ToolDefinition,
 } from "../src/types.ts";
-import { streamWatch, watchChunks } from "../src/watchdog.ts";
+import { streamWatch, watchChunks, withWatchdog } from "../src/watchdog.ts";
 
 const encoder = new TextEncoder();
 
@@ -231,6 +235,99 @@ const RESPONSES_REFUSED = wire(
   `event: error\ndata: {"type":"error","error":{"type":"invalid_request_error","code":null,"message":"${REFUSED}","param":null}}`,
 );
 
+// ── one hosted search, four ways ──────────────────────────────────────────
+//
+// The vendor searched, read one page, and answered with a claim and a link to
+// it. Each wire says that differently: Anthropic in server blocks with a
+// citation over the claim's whole block, Gemini in server parts with grounding
+// counted in UTF-8 bytes, Responses in an output item with an annotation on
+// the link counted in code points, OpenRouter in an annotation and a count and
+// nothing else. The emoji makes those three units disagree.
+
+const SOURCE_URL = "https://cats.example/sleep";
+const CLAIM = "Cats 🐈 sleep 12 to 16 hours a day.";
+const LINK = `([cats.example](${SOURCE_URL}))`;
+const ANSWER = `${CLAIM} ${LINK}`;
+/** Where the link starts, and how long it is, in code points. */
+const LINK_AT = [...ANSWER].indexOf("(");
+const LINK_END = LINK_AT + [...LINK].length;
+const QUERY = "how long do cats sleep";
+
+/** The bytes of `turn` up to the end of the frame holding `marker`. */
+const through = (turn: string, marker: string) =>
+  turn.slice(0, turn.indexOf("\n\n", turn.indexOf(marker)) + 2);
+
+const OPENAI_HOSTED_TURN = crlf(
+  wire(
+    `data: {"id":"gen-1","choices":[{"index":0,"delta":{"role":"assistant","content":"${CLAIM}"},"finish_reason":null}]}`,
+    `data: {"choices":[{"index":0,"delta":{"content":" ${LINK}","annotations":[{"type":"url_citation","url_citation":{"url":"${SOURCE_URL}","title":"Cat sleep","start_index":${LINK_AT},"end_index":${LINK_END},"content":"Cats sleep 12 to 16 hours a day."}}]},"finish_reason":"stop"}]}`,
+    'data: {"choices":[],"usage":{"prompt_tokens":2037,"completion_tokens":42,"cost":0.0123,"server_tool_use_details":{"web_search_requests":1}}}',
+    "data: [DONE]",
+  ),
+);
+
+const ANTHROPIC_RESULT = `[{"type":"web_search_result","url":"${SOURCE_URL}","title":"Cat sleep","encrypted_content":"EqgfCioIARgB","page_age":null}]`;
+const ANTHROPIC_HOSTED_TURN = wire(
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_2","usage":{"input_tokens":2037,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}',
+  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}',
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\": \\"${QUERY}\\"}"}}`,
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+  `event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":${ANTHROPIC_RESULT}}}`,
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+  'event: ping\ndata: {"type":"ping"}',
+  'event: content_block_start\ndata: {"type":"content_block_start","index":2,"content_block":{"citations":[],"type":"text","text":""}}',
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":2,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","cited_text":"Cats sleep 12 to 16 hours a day.","url":"${SOURCE_URL}","title":"Cat sleep","encrypted_index":"Eo8BCioIAhgB"}}}`,
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"${CLAIM}"}}`,
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":2}',
+  'event: content_block_start\ndata: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}',
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":" ${LINK}"}}`,
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":3}',
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42,"server_tool_use":{"web_search_requests":1,"web_fetch_requests":0}}}',
+  'event: message_stop\ndata: {"type":"message_stop"}',
+);
+
+const GEMINI_HOSTED_TURN = wire(
+  `data: {"candidates":[{"content":{"parts":[{"toolCall":{"id":"srv_1","toolType":"GOOGLE_SEARCH_WEB","args":{"query":"${QUERY}"}},"thoughtSignature":"sig_a"}],"role":"model"},"index":0}]}`,
+  'data: {"candidates":[{"content":{"parts":[{"toolResponse":{"id":"srv_1","toolType":"GOOGLE_SEARCH_WEB","response":{"ok":true}},"thoughtSignature":"sig_b"}],"role":"model"},"index":0}]}',
+  `data: {"candidates":[{"content":{"parts":[{"text":"${CLAIM}"}],"role":"model"},"index":0}]}`,
+  `data: {"candidates":[{"content":{"parts":[{"text":" ${LINK}"}],"role":"model"},"finishReason":"STOP","index":0,"groundingMetadata":{"webSearchQueries":["${QUERY}"],"groundingChunks":[{"web":{"uri":"${SOURCE_URL}","title":"Cat sleep"}}],"groundingSupports":[{"segment":{"endIndex":${new TextEncoder().encode(CLAIM).length},"text":"${CLAIM}"},"groundingChunkIndices":[0]}]}}],"usageMetadata":{"promptTokenCount":2037,"candidatesTokenCount":42,"toolUsePromptTokenCount":300}}`,
+);
+
+const RESPONSES_HOSTED_TURN = wire(
+  'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_2"}}',
+  'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"in_progress"}}',
+  'event: response.web_search_call.searching\ndata: {"type":"response.web_search_call.searching","output_index":0,"item_id":"ws_1"}',
+  `event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":0,"item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"${QUERY}","sources":[{"type":"url","url":"${SOURCE_URL}"}]}}}`,
+  'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","status":"in_progress","role":"assistant","content":[]}}',
+  `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"${CLAIM}"}`,
+  `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":" ${LINK}"}`,
+  `event: response.output_text.annotation.added\ndata: {"type":"response.output_text.annotation.added","item_id":"msg_1","output_index":1,"content_index":0,"annotation_index":0,"annotation":{"type":"url_citation","url":"${SOURCE_URL}","title":"Cat sleep","start_index":${LINK_AT},"end_index":${LINK_END}}}`,
+  'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"msg_1"}}',
+  'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":2037,"output_tokens":42}}}',
+);
+
+/** A code run Gemini cut off at its deadline: the failure as data. */
+const GEMINI_TIMED_OUT = wire(
+  'data: {"candidates":[{"content":{"parts":[{"executableCode":{"language":"PYTHON","code":"while True: pass"}}],"role":"model"},"index":0}]}',
+  'data: {"candidates":[{"content":{"parts":[{"codeExecutionResult":{"outcome":"OUTCOME_DEADLINE_EXCEEDED"}}],"role":"model"},"index":0}]}',
+  'data: {"candidates":[{"content":{"parts":[{"text":"It ran too long."}],"role":"model"},"finishReason":"STOP","index":0}]}',
+);
+
+/** One tool of each type, with only what the type requires set. */
+const PLAIN: Record<HostedToolType, HostedTool> = {
+  web_search: { type: "web_search" },
+  web_fetch: { type: "web_fetch" },
+  code_execution: { type: "code_execution" },
+  file_search: { type: "file_search", storeIds: ["store_1"] },
+  image_generation: { type: "image_generation" },
+};
+const SEARCH: StreamOptions = { hostedTools: [PLAIN.web_search] };
+
+/** The tool list a request body carries, whatever the wire calls its entries. */
+const toolsOf = (body: Record<string, unknown>) =>
+  ((body.tools ?? []) as Record<string, unknown>[]).filter((tool) => typeof tool === "object");
+
 // ── the history that went out, four ways ──────────────────────────────────
 //
 // What a request carries, in the order it carries it, with each wire's nesting
@@ -406,7 +503,54 @@ interface Vendor {
   /** How this wire spells Kimi's `functions.search:0`. Anthropic's id pattern
    *  takes only [A-Za-z0-9_-]. */
   kimiId: string;
+  hosted: HostedVendor;
 }
+
+/** The same vendor, at an endpoint that runs hosted tools, and how its wire
+ *  carries them. */
+interface HostedVendor {
+  /** The endpoint, when it is not `create`'s: OpenRouter, on the chat wire. */
+  create?(fetchImpl: typeof fetch): Provider;
+  /** The hosted types that endpoint runs. */
+  serves: HostedToolType[];
+  /** The search turn, as this wire streams it. */
+  turn: string;
+  /** Whether this wire states a record of each hosted call. The chat wire
+   *  states only citations and a count: the one gap in this matrix. */
+  records: boolean;
+  /** Whether a request body carries a hosted tool of `type`. */
+  sends(body: Record<string, unknown>, type: HostedToolType): boolean;
+  /** A tool with a field this wire can't apply, and the endpoint to ask. */
+  unapplied: { tool: HostedTool; create?(fetchImpl: typeof fetch): Provider };
+  /** What the citation's span covers here, and what it is anchored to. */
+  cited: { text: string; anchor: "claim" | "marker" };
+  /** The bytes through the first hosted call the wire states, and the call's tool. */
+  committed?: { bytes: string; opts: StreamOptions };
+  /** A turn whose hosted call failed, its tool, and the code it failed with. */
+  failed?: { turn: string; opts: StreamOptions; error: string };
+  /** What marks the vendor's own hosted items in a request, on a wire that
+   *  sends them back. Responses keeps none (`store` is off), nor does chat. */
+  replays?: string;
+}
+
+/** The wire's name for each hosted type, per wire. */
+const ANTHROPIC_NAMES: Partial<Record<HostedToolType, string>> = {
+  web_search: "web_search_20250305",
+  web_fetch: "web_fetch_20250910",
+  code_execution: "code_execution_20250825",
+};
+const GEMINI_KEYS: Partial<Record<HostedToolType, string>> = {
+  web_search: "googleSearch",
+  web_fetch: "urlContext",
+  code_execution: "codeExecution",
+  file_search: "fileSearch",
+};
+const RESPONSES_NAMES: Partial<Record<HostedToolType, string>> = {
+  web_search: "web_search",
+  code_execution: "code_interpreter",
+  file_search: "file_search",
+  image_generation: "image_generation",
+};
 
 const VENDORS: Vendor[] = [
   {
@@ -421,6 +565,30 @@ const VENDORS: Vendor[] = [
     takesServiceTier: true,
     history: openAIHistory,
     kimiId: "functions.search:0",
+    hosted: {
+      create: (fetchImpl) =>
+        createOpenAIProvider({
+          apiKey: "k",
+          model: "openai/gpt-5",
+          baseUrl: "https://openrouter.ai/api",
+          id: "openrouter",
+          fetchImpl,
+        }),
+      serves: ["web_search"],
+      turn: OPENAI_HOSTED_TURN,
+      records: false,
+      sends: (body, type) =>
+        type === "web_search" &&
+        (toolsOf(body).some((tool) => tool.type === "openrouter:web_search") ||
+          "web_search_options" in body),
+      // OpenAI's own search models take a location, and nothing that restricts.
+      unapplied: {
+        tool: { type: "web_search", allowedDomains: ["cats.example"] },
+        create: (fetchImpl) =>
+          createOpenAIProvider({ apiKey: "k", model: "gpt-5-search-preview", fetchImpl }),
+      },
+      cited: { text: LINK, anchor: "marker" },
+    },
   },
   {
     name: "anthropic",
@@ -438,6 +606,28 @@ const VENDORS: Vendor[] = [
     takesServiceTier: false,
     history: anthropicHistory,
     kimiId: "functions_search_0",
+    hosted: {
+      serves: ["web_search", "web_fetch", "code_execution"],
+      turn: ANTHROPIC_HOSTED_TURN,
+      records: true,
+      sends: (body, type) => {
+        const name = ANTHROPIC_NAMES[type];
+        return name !== undefined && toolsOf(body).some((tool) => tool.type === name);
+      },
+      // Container uploads are not built, so file ids would ride nowhere.
+      unapplied: { tool: { type: "code_execution", fileIds: ["file_1"] } },
+      cited: { text: CLAIM, anchor: "claim" },
+      committed: { bytes: through(ANTHROPIC_HOSTED_TURN, '"server_tool_use"'), opts: SEARCH },
+      failed: {
+        turn: ANTHROPIC_HOSTED_TURN.replace(
+          ANTHROPIC_RESULT,
+          '{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}',
+        ),
+        opts: SEARCH,
+        error: "max_uses_exceeded",
+      },
+      replays: '"server_tool_use"',
+    },
   },
   {
     name: "gemini",
@@ -455,6 +645,25 @@ const VENDORS: Vendor[] = [
     takesServiceTier: false,
     history: geminiHistory,
     kimiId: "functions.search:0",
+    hosted: {
+      serves: ["web_search", "web_fetch", "code_execution", "file_search"],
+      turn: GEMINI_HOSTED_TURN,
+      records: true,
+      sends: (body, type) => {
+        const key = GEMINI_KEYS[type];
+        return key !== undefined && toolsOf(body).some((tool) => key in tool);
+      },
+      // Gemini's search takes no domain filter.
+      unapplied: { tool: { type: "web_search", allowedDomains: ["cats.example"] } },
+      cited: { text: CLAIM, anchor: "claim" },
+      committed: { bytes: through(GEMINI_HOSTED_TURN, '"toolCall"'), opts: SEARCH },
+      failed: {
+        turn: GEMINI_TIMED_OUT,
+        opts: { hostedTools: [PLAIN.code_execution] },
+        error: "OUTCOME_DEADLINE_EXCEEDED",
+      },
+      replays: '"toolCall"',
+    },
   },
   {
     name: "responses",
@@ -468,6 +677,33 @@ const VENDORS: Vendor[] = [
     takesServiceTier: true,
     history: responsesHistory,
     kimiId: "functions.search:0",
+    hosted: {
+      serves: ["web_search", "code_execution", "file_search", "image_generation"],
+      turn: RESPONSES_HOSTED_TURN,
+      records: true,
+      sends: (body, type) => {
+        const name = RESPONSES_NAMES[type];
+        return name !== undefined && toolsOf(body).some((tool) => tool.type === name);
+      },
+      // This wire's search has no use cap.
+      unapplied: { tool: { type: "web_search", maxUses: 2 } },
+      cited: { text: LINK, anchor: "marker" },
+      committed: {
+        bytes: through(
+          RESPONSES_HOSTED_TURN,
+          '"web_search_call","id":"ws_1","status":"in_progress"',
+        ),
+        opts: SEARCH,
+      },
+      failed: {
+        turn: RESPONSES_HOSTED_TURN.replace(
+          '"status":"completed","action"',
+          '"status":"failed","action"',
+        ),
+        opts: SEARCH,
+        error: "failed",
+      },
+    },
   },
 ];
 
@@ -521,10 +757,11 @@ const theTurn = (vendor: Vendor): Turn => ({
   finishReason: "tool_calls",
 });
 
-async function assemble(stream: AsyncIterable<ProviderChunk>): Promise<Turn> {
+/** collectTurn, failing on any delta that arrives after the finish chunk. */
+async function drain(stream: AsyncIterable<ProviderChunk>) {
   let finished = false;
   let afterFinish = 0;
-  const { message, usage, finishReason } = await collectTurn(
+  const turn = await collectTurn(
     (async function* () {
       for await (const chunk of stream) {
         if (chunk.type === "delta" && finished) afterFinish += 1;
@@ -537,6 +774,11 @@ async function assemble(stream: AsyncIterable<ProviderChunk>): Promise<Turn> {
   // A UI closes the message on `finish`. A delta after it renders into a turn
   // that is already sealed, or into nothing at all.
   expect(afterFinish, "a delta arrived after the finish chunk").toBe(0);
+  return turn;
+}
+
+async function assemble(stream: AsyncIterable<ProviderChunk>): Promise<Turn> {
+  const { message, usage, finishReason } = await drain(stream);
   return {
     text: message.content,
     reasoning: message.reasoning ?? "",
@@ -1034,5 +1276,193 @@ describe.each(VENDORS)("$name", (vendor) => {
     const talking = streamWatch({ provider: vendor.name, ...clocks });
     await assemble(watchChunks(talking, ask(vendor.create(serving(vendor.turn)))));
     expect(talking.firstChunkMs()).not.toBeNull();
+  });
+});
+
+describe.each(VENDORS)("$name, hosted tools", (vendor) => {
+  const { hosted } = vendor;
+  const create = hosted.create ?? vendor.create;
+  const searched = async () => (await drain(ask(create(serving(hosted.turn)), SEARCH))).message;
+
+  it("sends each hosted type or refuses it before any request, and never drops one", async () => {
+    // A gateway that ignores a tool it doesn't know answers unsearched, on the
+    // happy path, where nothing retries and nothing logs.
+    for (const type of HOSTED_TOOL_TYPES) {
+      const { sent, fetchImpl } = recording(hosted.turn);
+      const stream = ask(create(fetchImpl), { hostedTools: [PLAIN[type]] });
+      if (hosted.serves.includes(type)) {
+        await drain(stream);
+        expect(hosted.sends(sent[0]!, type), type).toBe(true);
+      } else {
+        expect(await thrownBy(stream), type).toMatchObject({ kind: "invalid" });
+        expect(sent, type).toHaveLength(0);
+      }
+    }
+    // Silence sends none, on every wire.
+    const silence = recording(hosted.turn);
+    await drain(ask(create(silence.fetchImpl)));
+    for (const type of HOSTED_TOOL_TYPES) expect(hosted.sends(silence.sent[0]!, type)).toBe(false);
+  });
+
+  it("refuses a field the wire can't apply, and drops an optional tool whole", async () => {
+    // Sent without its domain filter or use cap, the tool would do more than
+    // the caller allowed. Optional drops the tool, which only does less.
+    const { tool, create: at = create } = hosted.unapplied;
+    const refused = recording(hosted.turn);
+    expect(await thrownBy(ask(at(refused.fetchImpl), { hostedTools: [tool] }))).toMatchObject({
+      kind: "invalid",
+    });
+    expect(refused.sent).toHaveLength(0);
+    const optional = recording(hosted.turn);
+    await drain(ask(at(optional.fetchImpl), { hostedTools: [{ ...tool, optional: true }] }));
+    expect(hosted.sends(optional.sent[0]!, tool.type)).toBe(false);
+  });
+
+  it("assembles one search turn into the same answer as every other wire", async () => {
+    const { message, usage, finishReason } = await drain(ask(create(serving(hosted.turn)), SEARCH));
+    expect({
+      text: message.content,
+      citations: (message.citations ?? []).map(({ source }) => ({
+        url: source.url,
+        title: source.title,
+      })),
+      // A search is never a tool call for the loop to run.
+      toolCalls: message.toolCalls ?? [],
+      webSearches: usage.hostedCalls?.web_search,
+      finishReason,
+    }).toEqual({
+      text: ANSWER,
+      citations: [{ url: SOURCE_URL, title: "Cat sleep" }],
+      toolCalls: [],
+      webSearches: 1,
+      finishReason: "stop",
+    });
+    // A record of the search itself, on the three wires that state one.
+    const records = message.hostedCalls?.map((call) => ({
+      type: call.type,
+      status: call.status,
+      query: call.input?.query,
+      sources: call.output?.sources?.map((source) => source.url),
+      at: call.at,
+    }));
+    expect(records).toEqual(
+      hosted.records
+        ? [{ type: "web_search", status: "completed", query: QUERY, sources: [SOURCE_URL], at: 0 }]
+        : undefined,
+    );
+  });
+
+  it("never retries a stream past a hosted call, and the reader keeps what arrived", async () => {
+    // The chat wire states no hosted call, so nothing hosted can commit it.
+    if (!hosted.committed) return;
+    const { bytes, opts } = hosted.committed;
+    let fetches = 0;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetches += 1;
+      return dying(bytes)(input, init);
+    }) as unknown as typeof fetch;
+    const delivered: ProviderChunk[] = [];
+    const err = await thrownBy(
+      (async function* () {
+        // Retried past it, the vendor reruns and rebills its search, and the
+        // reader sees the search twice (invariants 1 and 16).
+        for await (const chunk of withStreamRetry(
+          (signal) => ask(withWatchdog(create(fetchImpl)), { ...opts, signal }),
+          { maxAttempts: 3, sleep: async () => {} },
+        )) {
+          delivered.push(chunk);
+          yield chunk;
+        }
+      })(),
+    );
+    expect(classify(err)).toBe("network");
+    expect(fetches).toBe(1);
+    expect(delivered.some((chunk) => chunk.hosted?.length)).toBe(true);
+  });
+
+  it("takes its own hosted turn back as the same bytes every time, and other wires take its text", async () => {
+    const message = await searched();
+    const history: ChatMessage[] = [
+      { role: "user", content: QUERY },
+      message,
+      { role: "user", content: "and dogs?" },
+    ];
+    const own = recording(vendor.turn);
+    const provider = create(own.fetchImpl);
+    await drain(provider.createStream(history, TOOLS));
+    await drain(provider.createStream(history, TOOLS));
+    // Byte for byte: the prompt cache is a prefix cache (invariant 14).
+    expect(own.raw[1]).toBe(own.raw[0]);
+    // The vendor's own record goes back to the wire that made it, and only there.
+    if (hosted.replays) expect(own.raw[0]).toContain(hosted.replays);
+    for (const other of VENDORS) {
+      if (other === vendor) continue;
+      const theirs = recording(other.turn);
+      await drain(other.create(theirs.fetchImpl).createStream(history, TOOLS));
+      expect(other.history(theirs.raw[0]!), other.name).toEqual([
+        { user: QUERY },
+        { assistant: ANSWER },
+        { user: "and dogs?" },
+      ]);
+      if (other.hosted.replays) expect(theirs.raw[0]).not.toContain(other.hosted.replays);
+    }
+  });
+
+  it("sends an edited hosted turn back as plain text", async () => {
+    // A citation sent back over edited text vouches for words its source
+    // never backed, so an answer that no longer fits its record goes as text.
+    const message = await searched();
+    const edited = { ...message, content: `${message.content} Edited.` };
+    const { raw, fetchImpl } = recording(vendor.turn);
+    await drain(
+      create(fetchImpl).createStream(
+        [{ role: "user", content: QUERY }, edited, { role: "user", content: "and dogs?" }],
+        TOOLS,
+      ),
+    );
+    expect(vendor.history(raw[0]!)).toEqual([
+      { user: QUERY },
+      { assistant: edited.content },
+      { user: "and dogs?" },
+    ]);
+    if (hosted.replays) expect(raw[0]).not.toContain(hosted.replays);
+  });
+
+  it("sends no hosted tool when the choice is none, and refuses one beside a forced choice", async () => {
+    const none = recording(hosted.turn);
+    await drain(ask(create(none.fetchImpl), { ...SEARCH, toolChoice: "none" }));
+    expect(hosted.sends(none.sent[0]!, "web_search")).toBe(false);
+    // Anthropic's `any` and Responses' `required` can be met by a vendor tool,
+    // Gemini's ANY cannot: the pair has no one meaning, so no wire takes it.
+    const forced: ToolChoice[] = ["required", { name: "search" }];
+    for (const toolChoice of forced) {
+      const { sent, fetchImpl } = recording(hosted.turn);
+      expect(await thrownBy(ask(create(fetchImpl), { ...SEARCH, toolChoice }))).toMatchObject({
+        kind: "invalid",
+      });
+      expect(sent).toHaveLength(0);
+    }
+  });
+
+  it("completes a turn whose hosted call failed, with the failure as data", async () => {
+    // The chat wire states no hosted call, so it has none to fail.
+    if (!hosted.failed) return;
+    const { turn, opts, error } = hosted.failed;
+    const { message, finishReason } = await drain(ask(create(serving(turn)), opts));
+    expect(message.hostedCalls?.[0]).toMatchObject({ status: "failed", error });
+    expect(message.content).not.toBe("");
+    expect(message.toolCalls).toBeUndefined();
+    expect(finishReason).toBe("stop");
+  });
+
+  it("keeps each citation on the characters it covers, past an emoji", async () => {
+    // Anthropic places its blocks in the text itself, Gemini counts UTF-8
+    // bytes, OpenAI counts code points. gemini.test.ts pins the byte
+    // conversion on an answer that repeats its claim, where matching the text
+    // alone can't stand in for it.
+    const message = await searched();
+    const [citation] = message.citations ?? [];
+    expect(citation?.anchor).toBe(hosted.cited.anchor);
+    expect(message.content.slice(citation?.start, citation?.end)).toBe(hosted.cited.text);
   });
 });
