@@ -10,6 +10,9 @@ import {
   toGeminiContents,
 } from "../src/providers/gemini.ts";
 import { collectTurn } from "../src/turn.ts";
+import { withStreamRetry } from "../src/retry.ts";
+import { costUsd } from "../src/usage.ts";
+import { withWatchdog } from "../src/watchdog.ts";
 import type {
   ChatMessage,
   Effort,
@@ -827,21 +830,20 @@ describe("gemini hosted tools", () => {
 
   it("sends each built-in, and none of them when the tool choice is none", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
-    await collect(
-      provider(fetchImpl).createStream(HI, [], {
-        hostedTools: [
-          { type: "web_search" },
-          { type: "web_fetch" },
-          { type: "code_execution" },
-          { type: "file_search", storeIds: ["fileSearchStores/cats"], maxResults: 3 },
-        ],
-      }),
-    );
-    expect(seen[0]!.body.tools).toEqual([
-      { googleSearch: {} },
-      { urlContext: {} },
-      { codeExecution: {} },
-      { fileSearch: { fileSearchStoreNames: ["fileSearchStores/cats"], topK: 3 } },
+    const tools: HostedTool[] = [
+      { type: "web_search" },
+      { type: "web_fetch" },
+      { type: "code_execution" },
+      { type: "file_search", storeIds: ["fileSearchStores/cats"], maxResults: 3 },
+    ];
+    for (const tool of tools) {
+      await collect(provider(fetchImpl).createStream(HI, [], { hostedTools: [tool] }));
+    }
+    expect(seen.map(({ body }) => body.tools)).toEqual([
+      [{ googleSearch: {} }],
+      [{ urlContext: {} }],
+      [{ codeExecution: {} }],
+      [{ fileSearch: { fileSearchStoreNames: ["fileSearchStores/cats"], topK: 3 } }],
     ]);
     // `NONE` stops only function calls here, so `none` leaves the built-ins out.
     const none = recorder(TEXT_TURN);
@@ -851,6 +853,56 @@ describe("gemini hosted tools", () => {
     expect(none.seen[0]!.body.tools).toEqual([
       { functionDeclarations: [expect.objectContaining({ name: "save" })] },
     ]);
+  });
+
+  it.each([
+    ["web_search", { googleSearch: {} }],
+    ["web_fetch", { urlContext: {} }],
+    ["code_execution", { codeExecution: {} }],
+  ] as const)(
+    "refuses File Search beside %s and drops only an optional conflicting tool",
+    async (type, expectedTool) => {
+      const file: HostedTool = { type: "file_search", storeIds: ["fileSearchStores/cats"] };
+      const other: HostedTool = { type };
+      const refused = recorder(TEXT_TURN);
+      await expect(
+        collect(provider(refused.fetchImpl).createStream(HI, [], { hostedTools: [file, other] })),
+      ).rejects.toMatchObject({ kind: "invalid", message: expect.stringContaining("file_search") });
+      expect(refused.seen).toHaveLength(0);
+
+      const keepFile = recorder(TEXT_TURN);
+      await collect(
+        provider(keepFile.fetchImpl).createStream(HI, [], {
+          hostedTools: [file, { ...other, optional: true }],
+        }),
+      );
+      expect(keepFile.seen[0]!.body.tools).toEqual([
+        { fileSearch: { fileSearchStoreNames: ["fileSearchStores/cats"] } },
+      ]);
+
+      const keepOther = recorder(TEXT_TURN);
+      await collect(
+        provider(keepOther.fetchImpl).createStream(HI, [], {
+          hostedTools: [{ ...file, optional: true }, other],
+        }),
+      );
+      expect(keepOther.seen[0]!.body.tools).toEqual([expectedTool]);
+    },
+  );
+
+  it("never drops a required restriction to resolve an optional File Search conflict", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await expect(
+      collect(
+        provider(fetchImpl).createStream(HI, [], {
+          hostedTools: [
+            { type: "file_search", storeIds: ["fileSearchStores/cats"], optional: true },
+            { type: "web_search", maxUses: 1 },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(seen).toHaveLength(0);
   });
 
   it("asks Gemini 3 to run built-ins beside functions, and refuses the mix on Gemini 2", async () => {
@@ -957,6 +1009,214 @@ describe("gemini hosted tools", () => {
     );
     expect(kept.message.citations).toEqual([
       { source: { type: "url", url: SOURCE_URL, title: "cats.example" } },
+    ]);
+  });
+
+  it.each([false, true])("honors citation partIndex with streamed parts: %s", async (streamed) => {
+    const claim = "Same 🐈 claim.";
+    const call = { toolCall: { id: "s", toolType: "GOOGLE_SEARCH_WEB", args: { query: "cats" } } };
+    const result = { toolResponse: { id: "s", toolType: "GOOGLE_SEARCH_WEB", response: {} } };
+    const frames = streamed
+      ? [
+          candidate([{ text: claim.slice(0, 5) }]),
+          candidate([{ text: claim.slice(5) }]),
+          candidate([call, result, { text: claim.slice(0, 5) }]),
+          candidate([{ text: claim.slice(5) }]),
+        ]
+      : [candidate([{ text: claim }, call, result, { text: claim }])];
+    frames.push(
+      j({
+        candidates: [
+          {
+            finishReason: "STOP",
+            groundingMetadata: {
+              webSearchQueries: ["cats"],
+              groundingChunks: [{ web: { uri: SOURCE_URL } }],
+              groundingSupports: [
+                {
+                  segment: { partIndex: 3, startIndex: 0, endIndex: bytes(claim), text: claim },
+                  groundingChunkIndices: [0],
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    const turn = await collectTurn(
+      provider(recorder(frames).fetchImpl).createStream(HI, [fn], search),
+    );
+    expect(turn.message.content).toBe(claim + claim);
+    expect(turn.message.citations).toEqual([
+      {
+        source: { type: "url", url: SOURCE_URL },
+        start: claim.length,
+        end: claim.length * 2,
+        anchor: "claim",
+      },
+    ]);
+  });
+
+  it.each([
+    ["gemini-3-flash-preview", true, ["cats", "dogs", "cats", "", "  "], 2],
+    ["gemini-4-pro", true, ["cats", "dogs", "cats"], 2],
+    ["gemini-2.5-pro", true, ["cats", "dogs"], 1],
+    ["gemini-2.5-pro", false, ["cats", "dogs"], 0],
+    ["gemini-3-flash-preview", true, ["", "  "], 0],
+  ] as const)(
+    "counts billable searches on %s, web sources: %s, queries: %j",
+    async (model, web, queries, count) => {
+      const frames = [
+        j({
+          candidates: [
+            {
+              content: { parts: [{ text: "An answer." }] },
+              finishReason: "STOP",
+              groundingMetadata: {
+                webSearchQueries: queries,
+                groundingChunks: web ? [{ web: { uri: SOURCE_URL } }] : [],
+              },
+            },
+          ],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+        }),
+      ];
+      const turn = await collectTurn(
+        provider(recorder(frames).fetchImpl, { model }).createStream(HI, [], search),
+      );
+      // The one summary record is display data, not the number of billed queries.
+      expect(turn.message.hostedCalls).toHaveLength(1);
+      expect(turn.usage.hostedCalls?.web_search ?? 0).toBe(count);
+      expect(
+        costUsd(turn.usage, { input: 0, output: 0, cacheRead: 0, hosted: { web_search: 0.25 } }),
+      ).toBe(count * 0.25);
+    },
+  );
+
+  it.each([1, 2])(
+    "fills %s explicit File Search calls without counting grounding again",
+    async (count) => {
+      // PydanticAI's Gemini 3 fixture returns empty FILE_SEARCH responses and
+      // supplies the retrieved passages later, in grounding metadata.
+      const frames = [
+        candidate(
+          Array.from({ length: count }, (_, index) => [
+            {
+              toolCall: {
+                id: `file_${index}`,
+                toolType: "FILE_SEARCH",
+                args: { query: "Capital of France" },
+              },
+            },
+            { toolResponse: { id: `file_${index}`, toolType: "FILE_SEARCH", response: {} } },
+          ]).flat(),
+        ),
+        j({
+          candidates: [
+            {
+              content: { parts: [{ text: "Paris." }] },
+              finishReason: "STOP",
+              groundingMetadata: {
+                groundingChunks: [
+                  { retrievedContext: { text: "Paris is the capital of France." } },
+                ],
+              },
+            },
+          ],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+        }),
+      ];
+      const turn = await collectTurn(
+        provider(recorder(frames).fetchImpl).createStream(HI, [], {
+          hostedTools: [{ type: "file_search", storeIds: ["fileSearchStores/geography"] }],
+        }),
+      );
+      expect(turn.message.hostedCalls).toEqual(
+        Array.from({ length: count }, (_, index) => ({
+          id: `file_${index}`,
+          type: "file_search",
+          status: "completed",
+          input: { query: "Capital of France" },
+          output: { sources: [{ type: "file", excerpt: "Paris is the capital of France." }] },
+          at: 0,
+        })),
+      );
+      expect(turn.usage.hostedCalls).toEqual({ file_search: count });
+      expect(
+        costUsd(turn.usage, { input: 0, output: 0, cacheRead: 0, hosted: { file_search: 0.25 } }),
+      ).toBe(count * 0.25);
+    },
+  );
+
+  it.each([
+    ['print(file_search.query(query="Capital of France"))\n', "Capital of France"],
+    ["print(file_search.query(query='France\\'s capital'))\n", "France's capital"],
+  ])("recognizes a Gemini 2.5 code-shaped File Search: %s", async (code, query) => {
+    // Ported from PydanticAI's test_google_model_file_search_tool_stream.yaml
+    // (MIT): there is no codeExecutionResult, only retrievedContext grounding.
+    const frames = [
+      candidate([{ executableCode: { language: "PYTHON", code } }]),
+      j({
+        candidates: [
+          {
+            content: { parts: [{ text: "Paris." }] },
+            finishReason: "STOP",
+            groundingMetadata: {
+              groundingChunks: [{ retrievedContext: { text: "Paris is the capital of France." } }],
+            },
+          },
+        ],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+      }),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(frames).fetchImpl, { model: "gemini-2.5-pro" }).createStream(HI, [], {
+        hostedTools: [{ type: "file_search", storeIds: ["fileSearchStores/geography"] }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "file_search",
+        status: "completed",
+        input: { query },
+        output: { sources: [{ type: "file", excerpt: "Paris is the capital of France." }] },
+        at: 0,
+      },
+    ]);
+    expect(turn.usage.hostedCalls).toEqual({ file_search: 1 });
+    expect(turn.message.hostedItems?.items[0]).toEqual({
+      executableCode: { language: "PYTHON", code },
+    });
+    expect(turn.finishReason).toBe("stop");
+  });
+
+  it("commits paid hosted work before validating a later function call in the same frame", async () => {
+    const { seen, fetchImpl } = recorder([
+      candidate([
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\\n" } },
+        { functionCall: { id: "broken", args: {} } },
+      ]),
+    ]);
+    const chunks: ProviderChunk[] = [];
+    await expect(
+      (async () => {
+        for await (const chunk of withStreamRetry(
+          (signal) =>
+            withWatchdog(provider(fetchImpl)).createStream(HI, [fn], {
+              hostedTools: [{ type: "code_execution" }],
+              signal,
+            }),
+          { maxAttempts: 2, sleep: async () => {} },
+        ))
+          chunks.push(chunk);
+      })(),
+    ).rejects.toMatchObject({ kind: "overload" });
+    expect(seen).toHaveLength(1);
+    expect(chunks.flatMap((chunk) => chunk.hosted ?? [])).toMatchObject([
+      { type: "code_execution", status: "running" },
+      { status: "completed", output: { stdout: "34\\n" } },
     ]);
   });
 
@@ -1071,6 +1331,65 @@ describe("gemini hosted tools", () => {
         { functionCall: { id: "call_1", name: "save", args: { n: 1 } }, thoughtSignature: "sig_c" },
       ],
     });
+  });
+
+  it("reconciles URL-context results onto server calls without hiding failed pages", async () => {
+    const blockedUrl = "https://paywall.example";
+    const extraUrl = "https://other.example";
+    const frames = [
+      candidate([
+        {
+          toolCall: {
+            id: "fetch",
+            toolType: "URL_CONTEXT",
+            args: { urls: [SOURCE_URL, blockedUrl] },
+          },
+        },
+        { toolResponse: { id: "fetch", toolType: "URL_CONTEXT", response: {} } },
+      ]),
+      j({
+        candidates: [
+          {
+            content: { parts: [{ text: "One page could not be read." }] },
+            finishReason: "STOP",
+            urlContextMetadata: {
+              urlMetadata: [
+                { retrievedUrl: SOURCE_URL, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS" },
+                { retrievedUrl: blockedUrl, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_PAYWALL" },
+                { retrievedUrl: extraUrl, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS" },
+              ],
+            },
+          },
+        ],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+      }),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(frames).fetchImpl).createStream(HI, [fn], {
+        hostedTools: [{ type: "web_fetch" }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "fetch",
+        type: "web_fetch",
+        status: "failed",
+        at: 0,
+        input: { url: SOURCE_URL },
+        output: { sources: [{ type: "url", url: SOURCE_URL }] },
+        error: "URL_RETRIEVAL_STATUS_PAYWALL",
+      },
+      {
+        id: "hosted_1",
+        type: "web_fetch",
+        status: "completed",
+        at: 0,
+        input: { url: extraUrl },
+        output: { sources: [{ type: "url", url: extraUrl }] },
+      },
+    ]);
+    expect(turn.usage.hostedCalls).toEqual({ web_fetch: 2 });
+    expect(turn.finishReason).toBe("stop");
   });
 
   it("reads URL context as one fetch per page, a failed one as data", async () => {

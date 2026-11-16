@@ -20,6 +20,7 @@ import {
 } from "../errors.ts";
 import {
   hostedCounts,
+  hostedRefused,
   hostedReplay,
   HostedRecorder,
   planHostedTools,
@@ -140,6 +141,12 @@ function serverToolType(toolType: string | undefined): HostedToolType | undefine
   return undefined;
 }
 
+function serverToolUrls(args: Record<string, unknown> | undefined): string[] {
+  return [args?.url, ...(Array.isArray(args?.urls) ? args.urls : [])].filter(
+    (url): url is string => typeof url === "string" && !!url,
+  );
+}
+
 function serverToolInput(args: Record<string, unknown> | undefined): HostedInput {
   if (!args) return {};
   const text = (value: unknown) => (typeof value === "string" ? value : undefined);
@@ -147,8 +154,20 @@ function serverToolInput(args: Record<string, unknown> | undefined): HostedInput
     Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
   const search = queryInput([text(args.query), ...list(args.queries)]);
   if (Object.keys(search).length > 0) return search;
-  const url = text(args.url) ?? list(args.urls)[0];
+  const url = serverToolUrls(args)[0];
   return url ? { url } : {};
+}
+
+// File Search can arrive as executable code with its result in grounding, not
+// as a code run. Ported from PydanticAI (MIT), _FILE_SEARCH_QUERY_PATTERN.
+const FILE_SEARCH_QUERY = /file_search\.query\(query=(["'])((?:\\.|(?!\1)[^\\])*)\1\)/;
+
+/** Text fragments of one response Part, with its offset in the flat answer.
+ *  Non-text Parts occupy empty slots so grounding's partIndex keeps its meaning. */
+interface GeminiTextPart {
+  text: string;
+  at: number;
+  thought: boolean;
 }
 
 /**
@@ -159,19 +178,25 @@ function serverToolInput(args: Record<string, unknown> | undefined): HostedInput
  * source and no span. Ported from PydanticAI (MIT), models/google.py:2347-2405.
  */
 function segmentSpan(
-  text: string,
+  answer: string,
   segment: GroundingSegment | undefined,
+  parts: readonly (GeminiTextPart | undefined)[],
 ): { start: number; end: number } | undefined {
   if (!segment?.text) return undefined;
+  const part = segment.partIndex === undefined ? undefined : parts[segment.partIndex];
+  // An explicit Part index never falls back to a different Part's words.
+  if (segment.partIndex !== undefined && (!part || part.thought)) return undefined;
+  const text = part?.text ?? answer;
+  const offset = part?.at ?? 0;
   const said = segment.text;
   const start = utf8Index(text, segment.startIndex ?? 0);
   const end = utf8Index(text, segment.endIndex ?? 0);
   if (start !== undefined && end !== undefined && start < end && text.slice(start, end) === said) {
-    return { start, end };
+    return { start: offset + start, end: offset + end };
   }
   const at = text.indexOf(said);
   return at !== -1 && text.indexOf(said, at + 1) === -1
-    ? { start: at, end: at + said.length }
+    ? { start: offset + at, end: offset + at + said.length }
     : undefined;
 }
 
@@ -544,7 +569,8 @@ interface GeminiPart {
 }
 
 interface GroundingSegment {
-  /** UTF-8 byte offsets into the answer. */
+  /** Offsets count UTF-8 bytes in the named Part, or the answer when absent. */
+  partIndex?: number;
   startIndex?: number;
   endIndex?: number;
   text?: string;
@@ -626,7 +652,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // Not `!isGemini3`: `gemini-flash-latest` and models newer than 3 are not
       // Gemini 3 either, and they must get a level.
       const isGemini2 = /gemini-2/i.test(model);
-      const hosted = planHostedTools(
+      let hosted = planHostedTools(
         id,
         {
           name: "Gemini",
@@ -652,6 +678,28 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         },
         opts,
       );
+
+      // File Search cannot share a request with other built-ins (Google's
+      // File Search guide, limitations). Apply this after field refusals so an
+      // optional sibling never excuses a required tool's unsupported setting.
+      const fileSearch = hosted.find((tool) => tool.type === "file_search");
+      const otherHosted = hosted.filter((tool) => tool !== fileSearch);
+      if (fileSearch && otherHosted.length > 0) {
+        if (otherHosted.some((tool) => !tool.optional)) {
+          if (!fileSearch.optional) {
+            throw hostedRefused(
+              id,
+              "Gemini",
+              "file_search",
+              "File Search can't run beside other hosted tools. Send it on a separate call, " +
+                "or mark a conflicting tool optional.",
+            );
+          }
+          hosted = otherHosted;
+        } else {
+          hosted = [fileSearch];
+        }
+      }
 
       const generationConfig: Record<string, unknown> = {};
       if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
@@ -808,6 +856,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       const recorder = new HostedRecorder();
       // The answer so far, thoughts left out: what grounding offsets count into.
       let text = "";
+      const textParts: (GeminiTextPart | undefined)[] = [];
       // The model turn's parts, for `hostedItems`: the built-in parts as they
       // came, its text as `{ length }`, its function calls as `{ call }`.
       const items: unknown[] = [];
@@ -819,32 +868,50 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       let lastCode: string | undefined;
       let lastServer: string | undefined;
       const openParts = new Map<string, unknown>();
-      // A search a server-side call already opened, which grounding then fills.
+      // Calls that late grounding or URL metadata fills, never a second run.
       let searchIndex: number | undefined;
-      let fetchedByCall = false;
+      const fileSearches = new Map<string, number>();
+      const fetches = new Map<string, { index: number; urls: string[] }>();
       // The last of each that the stream stated: Gemini repeats them as it goes.
       let grounding: GroundingMetadata | undefined;
+      const searchQueries = new Set<string>();
+      let returnedWebSource = false;
       let urlContext:
         | { urlMetadata?: { retrievedUrl?: string; urlRetrievalStatus?: string }[] }
         | undefined;
       let lastUsage: TokenUsage | undefined;
-      const withCounts = (usage: TokenUsage): TokenUsage => {
-        const hostedCalls = hostedCounts(recorder.shown());
-        return hostedCalls ? { ...usage, hostedCalls } : usage;
-      };
       const searched = hosted.some((tool) => tool.type === "web_search");
       const fileSearched = hosted.some((tool) => tool.type === "file_search");
+      const withCounts = (usage: TokenUsage): TokenUsage => {
+        // Google bills unique non-empty queries on Gemini 3+, but only one
+        // grounded prompt on Gemini 2.5, and only when it returns a web source.
+        // Ported from PydanticAI (MIT), _set_web_search_usage.
+        const billableSearches = isGemini2
+          ? Number(searchQueries.size > 0 && returnedWebSource)
+          : searchQueries.size;
+        const hostedCalls = hostedCounts(
+          recorder.shown(),
+          searched && grounding ? { web_search: billableSearches } : undefined,
+        );
+        return hostedCalls ? { ...usage, hostedCalls } : usage;
+      };
 
       // A built-in tool's part as its hosted delta (`delta` absent when the
       // part changes no record), or undefined for any other part.
       const builtIn = (part: GeminiPart, at: number): { delta?: HostedCallDelta } | undefined => {
         if (part.executableCode) {
           const { code, language } = part.executableCode;
-          const started = recorder.start(undefined, "code_execution", at, {
-            ...(code ? { code } : {}),
-            ...(language ? { language: language.toLowerCase() } : {}),
-          });
-          lastCode = started.id;
+          const fileQuery = fileSearched && code?.match(FILE_SEARCH_QUERY);
+          const started = fileQuery
+            ? recorder.start(undefined, "file_search", at, {
+                query: fileQuery[2]!.replace(/\\([\\'"])/g, "$1"),
+              })
+            : recorder.start(undefined, "code_execution", at, {
+                ...(code ? { code } : {}),
+                ...(language ? { language: language.toLowerCase() } : {}),
+              });
+          if (fileQuery) fileSearches.set(started.id, started.index);
+          else lastCode = started.id;
           openParts.set(started.id, part);
           return { delta: started };
         }
@@ -876,7 +943,13 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
           lastServer = started.id;
           openParts.set(started.id, part);
           if (type === "web_search") searchIndex ??= started.index;
-          if (type === "web_fetch") fetchedByCall = true;
+          if (type === "file_search") fileSearches.set(started.id, started.index);
+          if (type === "web_fetch") {
+            fetches.set(started.id, {
+              index: started.index,
+              urls: serverToolUrls(part.toolCall.args),
+            });
+          }
           return { delta: started };
         }
         if (part.toolResponse) {
@@ -896,7 +969,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         if (grounding) {
           const sources = (grounding.groundingChunks ?? []).map(chunkSource);
           for (const support of grounding.groundingSupports ?? []) {
-            const span = segmentSpan(text, support.segment);
+            const span = segmentSpan(text, support.segment, textParts);
             for (const at of support.groundingChunkIndices ?? []) {
               const source = sources[at];
               if (source) citations.push({ source, ...(span ? { ...span, anchor: "claim" } : {}) });
@@ -926,29 +999,54 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
             );
           }
           if (fileSearched && files.length > 0) {
-            deltas.push(
-              recorder.whole(undefined, "file_search", 0, {
-                status: "completed",
-                output: { sources: files },
-              }),
-            );
+            const result = { status: "completed" as const, output: { sources: files } };
+            if (fileSearches.size > 0) {
+              // Gemini 3 sends empty server responses; Gemini 2.5 exposes the
+              // query as executable code. Both get their passages here.
+              for (const [key, index] of fileSearches) {
+                deltas.push(recorder.end(key, result) ?? { index, output: result.output });
+              }
+            } else {
+              deltas.push(recorder.whole(undefined, "file_search", 0, result));
+            }
           }
         }
-        if (!fetchedByCall) {
-          for (const { retrievedUrl: url, urlRetrievalStatus: status } of urlContext?.urlMetadata ??
-            []) {
+        const retrieved = urlContext?.urlMetadata ?? [];
+        const matchedUrls = new Set<string>();
+        for (const [key, { index, urls }] of fetches) {
+          // One server invocation can fetch several URLs. Metadata is the
+          // authoritative result, even after an empty toolResponse completed it.
+          const results = retrieved.filter(
+            (entry) => entry.retrievedUrl && urls.includes(entry.retrievedUrl),
+          );
+          if (results.length === 0) continue;
+          const sources: Source[] = [];
+          const errors = new Set<string>();
+          for (const { retrievedUrl: url, urlRetrievalStatus: status } of results) {
             if (!url) continue;
-            const ok = status === "URL_RETRIEVAL_STATUS_SUCCESS";
-            deltas.push(
-              recorder.whole(undefined, "web_fetch", 0, {
-                status: ok ? "completed" : "failed",
-                input: { url },
-                ...(ok
-                  ? { output: { sources: [{ type: "url", url }] } }
-                  : { error: status ?? "URL_RETRIEVAL_STATUS_UNSPECIFIED" }),
-              }),
-            );
+            matchedUrls.add(url);
+            if (status === "URL_RETRIEVAL_STATUS_SUCCESS") sources.push({ type: "url", url });
+            else errors.add(status ?? "URL_RETRIEVAL_STATUS_UNSPECIFIED");
           }
+          const result = {
+            status: errors.size > 0 ? ("failed" as const) : ("completed" as const),
+            ...(sources.length > 0 ? { output: { sources } } : {}),
+            ...(errors.size > 0 ? { error: [...errors].join(", ") } : {}),
+          };
+          deltas.push(recorder.end(key, result) ?? { index, ...result });
+        }
+        for (const { retrievedUrl: url, urlRetrievalStatus: status } of retrieved) {
+          if (!url || matchedUrls.has(url)) continue;
+          const ok = status === "URL_RETRIEVAL_STATUS_SUCCESS";
+          deltas.push(
+            recorder.whole(undefined, "web_fetch", 0, {
+              status: ok ? "completed" : "failed",
+              input: { url },
+              ...(ok
+                ? { output: { sources: [{ type: "url", url }] } }
+                : { error: status ?? "URL_RETRIEVAL_STATUS_UNSPECIFIED" }),
+            }),
+          );
         }
         const dropped = new Set([...recorder.unsettled()].map((key) => openParts.get(key)));
         deltas.push(...recorder.settle());
@@ -1026,19 +1124,34 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
 
             const candidate = chunk.candidates?.[0];
             if (!candidate) continue;
-            if (candidate.groundingMetadata) grounding = candidate.groundingMetadata;
+            if (candidate.groundingMetadata) {
+              grounding = candidate.groundingMetadata;
+              for (const query of grounding.webSearchQueries ?? []) {
+                if (query.trim()) searchQueries.add(query);
+              }
+              returnedWebSource ||= (grounding.groundingChunks ?? []).some(
+                (source) => !!source.web?.uri,
+              );
+            }
             if (candidate.urlContextMetadata) urlContext = candidate.urlContextMetadata;
 
-            // One chunk can carry several parts of each kind. They are coalesced
-            // per kind so the seam sees one reasoning delta and one content delta
-            // per chunk, in that order, rather than interleaved fragments. A
-            // hosted call states its own place in the text, so it can follow.
+            // Coalesce text per frame, but emit hosted work at once: validating
+            // a later function call can throw, and must never hide a paid run
+            // from retry and fallback (invariant 19).
             let reasoning = "";
             let content = "";
             const toolCalls: ToolCallDelta[] = [];
-            const hostedDeltas: HostedCallDelta[] = [];
-            for (const part of candidate.content?.parts ?? []) {
-              if (part.text) {
+            for (const [partIndex, part] of (candidate.content?.parts ?? []).entries()) {
+              if (part.text !== undefined) {
+                const previous = textParts.at(-1);
+                const thought = !!part.thought;
+                // The first text Part may continue the preceding frame. A
+                // second Part in this frame, or a change of kind, starts anew.
+                if (partIndex === 0 && previous && previous.thought === thought) {
+                  previous.text += part.text;
+                } else {
+                  textParts.push({ text: part.text, at: text.length + content.length, thought });
+                }
                 if (part.thought) {
                   reasoning += part.text;
                   continue;
@@ -1057,9 +1170,13 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
                 }
                 continue;
               }
+              textParts.push(undefined);
               const ran = builtIn(part, text.length + content.length);
               if (ran) {
-                if (ran.delta) hostedDeltas.push(ran.delta);
+                if (ran.delta) {
+                  emitted = true;
+                  yield { type: "delta", hosted: [ran.delta] };
+                }
                 items.push(part);
                 builtInParts.add(part);
                 continue;
@@ -1096,10 +1213,6 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
               sawFunctionCalls = true;
               emitted = true;
               yield { type: "delta", toolCalls };
-            }
-            if (hostedDeltas.length > 0) {
-              emitted = true;
-              yield { type: "delta", hosted: hostedDeltas };
             }
 
             if (candidate.finishReason) {
