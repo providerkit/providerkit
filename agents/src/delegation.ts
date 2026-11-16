@@ -1,4 +1,5 @@
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
+import { conversationOf, inputOf, readInput } from "./input.ts";
 import {
   checkChildProgress,
   checkTree,
@@ -9,9 +10,11 @@ import {
   isId,
   isRecord,
 } from "./snapshot.ts";
-import { fail, Halt, untilAbort, type ExecutionScope } from "./tree.ts";
+import { emitEvent, fail, Halt, untilAbort, type ExecutionScope } from "./tree.ts";
 import type {
   Agent,
+  AgentInput,
+  AgentMessage,
   ChildEnvelope,
   ChildPathStep,
   DelegationExecution,
@@ -19,6 +22,7 @@ import type {
   RunOutcome,
   RunSnapshot,
   ToolResult,
+  UserContent,
 } from "./types.ts";
 
 /** Internal symbol holds no execution state. Every invocation receives its own scope. */
@@ -29,9 +33,29 @@ export interface ApprovalEvidence {
   decision: unknown;
 }
 
+/** @internal What a new run starts from, checked: the history before the new turn, the turn,
+ * and the session the history came from. */
+export interface RunStart {
+  history: AgentMessage[];
+  input: UserContent;
+  session?: RunSnapshot["session"];
+}
+
 /** @internal */
 export interface AgentRuntime<T> {
-  create(input: string, runId: string, tree?: RunSnapshot["tree"]): RunSnapshot;
+  /** A new root run's snapshot: the input normalized, the session read once and the history
+   * prepared, repaired and frozen, before anything is saved. */
+  open(input: AgentInput, options: RunOptions, runId: string): Promise<RunSnapshot>;
+  /** The history repaired with this agent's tools and the inline bytes checked: the exact form
+   * a snapshot stores, so a saved child can be compared with a new request for its key. */
+  freeze(start: RunStart): RunStart;
+  /** Resolves the run definition once, then creates a snapshot from the repaired history. */
+  create(
+    start: RunStart,
+    runId: string,
+    tree?: RunSnapshot["tree"],
+    options?: RunOptions,
+  ): Promise<RunSnapshot>;
   restore(raw: unknown, tree?: RunSnapshot["tree"]): RunSnapshot;
   hydrate(snapshot: RunSnapshot): RunOutcome<T>;
   execute(
@@ -54,9 +78,18 @@ export type Joined<H extends readonly ChildHandle<unknown>[]> = {
 };
 
 export interface DelegationContext {
-  child<T>(key: string, agent: Agent<T>, input: string): ChildHandle<T>;
+  /** `key` becomes part of the child's run id and of every operation id under it, which
+   * progress events carry and a display layer may send to a browser. Key by position or a
+   * fixed name ("topic-1"), never by the input. The input is checked like `run`'s, except
+   * that provider-owned fields are kept: coordinator code is trusted. A child never gets the
+   * parent's session. */
+  child<T>(key: string, agent: Agent<T>, input: AgentInput): ChildHandle<T>;
   /** Settles in caller order, not completion order. No child may outlive this barrier. */
   join<const H extends readonly ChildHandle<unknown>[]>(handles: H): Promise<Joined<H>>;
+  /** The parent's conversation before this tool call: no system prompt and no unfinished
+   * round. Frozen. A child sees none of it unless you forward it, for example
+   * `{ messages: [...context.conversation, { role: "user", content: task }] }`. */
+  readonly conversation: readonly AgentMessage[];
 }
 
 export interface DelegationSpec<I, O> {
@@ -182,14 +215,29 @@ export async function executeDelegation(
 ): Promise<ToolResult> {
   let open = true;
   const started = new Map<string, Promise<void>>();
+  const requested = new Map<string, { agentId: string; version: string; start: RunStart }>();
+  // Resolve new child definitions in admission order, without delaying children already
+  // running. No half-resolved definition can appear in another child's root checkpoint.
+  let admissions = Promise.resolve();
   const handles = new WeakSet<ChildHandle<unknown>>();
+  // Computed again on a replay from the same settled rounds, so a coordinator that forwards it
+  // asks for the same child input and reuses the saved child.
+  const conversation = immutableCopy(conversationOf(parent));
+  // A specialist never loads or appends its parent's conversation.
+  const {
+    session: _session,
+    historyLimit: _historyLimit,
+    prepareHistory: _prepareHistory,
+    modelSettings: _modelSettings,
+    enabledTools: _enabledTools,
+    ...inherited
+  } = options;
 
-  function child<T>(key: string, agent: Agent<T>, input: string): ChildHandle<T> {
+  function child<T>(key: string, agent: Agent<T>, input: AgentInput): ChildHandle<T> {
     if (!open)
       throw new Error("This delegation has ended; start children only inside its coordinator.");
     active();
-    if (!isId(key) || !isId(input))
-      throw new TypeError("A child needs a non-empty key and text input.");
+    if (!isId(key)) throw new TypeError("A child needs a non-empty key.");
     if (!descriptor.specialists.includes(agent))
       fail(
         "unregistered_specialist",
@@ -197,30 +245,60 @@ export async function executeDelegation(
         journal.operationId,
       );
     const runtime = agent[AGENT_RUNTIME];
+    const start = runtime.freeze(readInput(input, "trusted"));
+    const prior = requested.get(key);
+    if (
+      prior &&
+      (prior.agentId !== agent.id ||
+        prior.version !== agent.version ||
+        !equalData(prior.start, start))
+    )
+      fail(
+        "child_key_conflict",
+        "This child key already belongs to another agent, version or input.",
+        journal.operationId,
+      );
+    requested.set(key, { agentId: agent.id, version: agent.version, start });
+    const runId = childRunId(journal.operationId, key);
     let entry = journal.children.find((saved) => saved.key === key);
     const resume = entry !== undefined;
-    if (entry) {
-      if (
-        entry.snapshot.agentId !== agent.id ||
+    if (
+      entry &&
+      (entry.snapshot.agentId !== agent.id ||
         entry.snapshot.version !== agent.version ||
-        entry.snapshot.input !== input
-      )
-        fail(
-          "child_key_conflict",
-          "This child key already belongs to another agent, version or input.",
-          journal.operationId,
-        );
-    } else {
-      scope.tree.reserveChild(scope.depth + 1);
-      entry = {
-        key,
-        snapshot: runtime.create(input, childRunId(journal.operationId, key), parent.tree),
-      };
-      journal.children.push(entry);
-    }
-    const saved = entry;
+        !equalData(entry.snapshot.history, start.history) ||
+        !equalData(entry.snapshot.input, start.input))
+    )
+      fail(
+        "child_key_conflict",
+        "This child key already belongs to another agent, version or input.",
+        journal.operationId,
+      );
     if (!started.has(key)) {
+      let admitted: Promise<ChildEnvelope & { key: string }>;
+      if (entry) admitted = Promise.resolve(entry);
+      else {
+        scope.tree.reserveChild(scope.depth + 1);
+        admitted = admissions.then(async () => {
+          const snapshot = await runtime.create(start, runId, parent.tree, {
+            ...inherited,
+            signal,
+          });
+          active();
+          // Recheck after the async definition, and push without an await: children in
+          // another delegation may have used the tree's last admission in the meantime.
+          scope.tree.reserveChild(scope.depth + 1);
+          entry = { key, snapshot };
+          journal.children.push(entry);
+          return entry;
+        });
+        admissions = admitted.then(
+          () => {},
+          () => {},
+        );
+      }
       const work = async () => {
+        const saved = await admitted;
         if (
           saved.snapshot.state.status !== "running" &&
           saved.snapshot.state.status !== "suspended"
@@ -241,9 +319,21 @@ export async function executeDelegation(
             throw new Error("A host child may execute once, before its hook returns.");
           execution = (async () => {
             if (resume) saved.snapshot.attemptId = crypto.randomUUID();
+            // Sent here, not where the child is admitted, so it always comes with a run: the
+            // child's own state event follows it. A settled child that is reused, or one the host
+            // serves from a saved copy without running it, never gets this far, and a row for it
+            // would wait for a status that no event brings. Once per key: `started` and the
+            // execute-once check above both guard it.
+            emitEvent(options, {
+              type: "child",
+              parentRunId: parent.runId,
+              ...step,
+              agentId: agent.id,
+              version: agent.version,
+            });
             const result = await runtime.execute(
               saved.snapshot,
-              { ...options, signal },
+              { ...inherited, signal },
               { tree: scope.tree, depth: scope.depth + 1 },
               childEvidence,
             );
@@ -321,8 +411,8 @@ export async function executeDelegation(
         } catch (stopped) {
           failure = stopped;
         }
-        if (saved.snapshot.state.status === "running") {
-          saved.snapshot.state =
+        if (entry?.snapshot.state.status === "running") {
+          entry.snapshot.state =
             failure instanceof Halt
               ? failure.state
               : {
@@ -339,9 +429,11 @@ export async function executeDelegation(
     const pending = started.get(key);
     const handle = Object.freeze({
       key,
-      runId: saved.snapshot.runId,
+      runId,
       async join(): Promise<RunOutcome<T>> {
         await pending;
+        const saved = journal.children.find((child) => child.key === key);
+        if (!saved) throw new Error("The child ended before its definition was resolved.");
         return runtime.hydrate(saved.snapshot);
       },
     });
@@ -359,7 +451,10 @@ export async function executeDelegation(
   let result: ToolResult | undefined;
   let failure: { error: unknown } | undefined;
   try {
-    result = await untilAbort(descriptor.execute(raw, Object.freeze({ child, join })), signal);
+    result = await untilAbort(
+      descriptor.execute(raw, Object.freeze({ child, join, conversation })),
+      signal,
+    );
   } catch (error) {
     failure = { error };
   } finally {
@@ -374,7 +469,7 @@ export async function executeDelegation(
         );
         if (!agent)
           fail("unregistered_specialist", "The saved child is not a registered specialist.");
-        child(entry.key, agent, entry.snapshot.input);
+        child(entry.key, agent, inputOf(entry.snapshot));
       }
     } catch (error) {
       failure ??= { error };

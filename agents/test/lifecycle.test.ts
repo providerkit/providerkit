@@ -121,10 +121,11 @@ describe("portable agent lifecycle", () => {
     expect(events).toEqual(["model_chunk", "model_chunk", "model_chunk", "state"]);
     expect(result.usage).toMatchObject(usage);
     expect(result.treeUsage).toEqual(result.usage);
-    expect(result.snapshot.format).toBe(2);
-    await expect(
-      agent.resume({ ...result.snapshot, format: 1 }, { host: { authorizeResume } }),
-    ).rejects.toThrow("Invalid agent snapshot");
+    expect(result.snapshot.format).toBe(3);
+    for (const format of [1, 2])
+      await expect(
+        agent.resume({ ...result.snapshot, format }, { host: { authorizeResume } }),
+      ).rejects.toThrow("Invalid agent snapshot");
     expect(checkpoints[0]?.models[0]?.status).toBe("running");
     expect(checkpoints.at(-1)?.state.status).toBe("completed");
     const restored = await agent.resume(JSON.parse(JSON.stringify(result.snapshot)), {
@@ -399,7 +400,8 @@ describe("portable agent lifecycle", () => {
     expect(result.status).toBe("cancelled");
     expect(later).not.toHaveBeenCalled();
     expect(wire.requests).toBe(1);
-    expect(result.history).toHaveLength(2);
+    // The unfinished tool round stays out; outcome.history carries no system prompt (0.2.0).
+    expect(result.history).toEqual([{ role: "user", content: "Work" }]);
     const cancelled = await agent.run("Work", { signal: controller.signal });
     expect(cancelled.status).toBe("cancelled");
     expect(wire.requests).toBe(1);
@@ -425,13 +427,15 @@ describe("portable agent lifecycle", () => {
     expect(result.snapshot.models[0]?.status).toBe("running");
   });
 
-  it.each(["turns", "toolCalls"] as const)("admits no work past the %s limit", async (limit) => {
+  it.each(["turns", "toolCalls"] as const)("executes no tools past the %s limit", async (limit) => {
     const run = vi.fn(async () => "done");
     const wire = fake([
       calls(
         call("read", "{}", "first"),
         ...(limit === "toolCalls" ? [call("read", "{}", "second")] : []),
       ),
+      // The 0.2.0 final tool-free turn is allowed to answer, never to run another tool.
+      calls(call("read", "{}", "past-limit")),
     ]);
     const agent = defineAgent({
       ...base,
@@ -443,7 +447,7 @@ describe("portable agent lifecycle", () => {
       status: "limited",
       limit,
     });
-    expect(wire.requests).toBe(1);
+    expect(wire.requests).toBe(limit === "turns" ? 2 : 1);
     expect(run).toHaveBeenCalledTimes(1);
   });
 
@@ -576,7 +580,7 @@ describe("portable agent lifecycle", () => {
     if (reason === "expired" || reason === "elapsed")
       expect(resolveApproval).not.toHaveBeenCalled();
     if (reason === "denied")
-      expect(result.history[3]).toMatchObject({
+      expect(result.history[2]).toMatchObject({
         role: "tool",
         content: expect.stringContaining("denied"),
       });

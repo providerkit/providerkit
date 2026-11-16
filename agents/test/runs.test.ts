@@ -3,8 +3,17 @@ import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createRuns } from "@gusnips/server/runs";
-import { defineTool, type Provider, type ProviderChunk } from "@providerkit/core";
-import { defineAgent, defineDelegation, type Agent } from "../src/index.ts";
+import { defineTool, type ChatMessage, type Provider, type ProviderChunk } from "@providerkit/core";
+import {
+  createMemorySession,
+  defineAgent,
+  defineDelegation,
+  type Agent,
+  type AgentMessage,
+  type InputPart,
+  type RunContext,
+  type Session,
+} from "../src/index.ts";
 import { AGENT_RUNTIME } from "../src/delegation.ts";
 import {
   BackgroundEnqueueError,
@@ -316,7 +325,7 @@ describe("background binding on local Postgres", () => {
           checkpoint: null,
           input: {
             format: 1,
-            snapshot: { format: 2, agentId: "test", version: "1", state: { status: "running" } },
+            snapshot: { format: 3, agentId: "test", version: "1", state: { status: "running" } },
           },
         });
         await enqueue(id);
@@ -345,6 +354,272 @@ describe("background binding on local Postgres", () => {
     expect(wire.calls()).toBe(1);
     expect(await runs.drive(id, background.handlers)).toBe("skipped");
   });
+
+  it.each(["before preparation", "after preparation"] as const)(
+    "does not save or enqueue a start cancelled %s",
+    async (stage) => {
+      const controller = new AbortController();
+      const reason = new Error("Creation cancelled");
+      const create = vi.fn(runs.create);
+      const enqueue = vi.fn(async (_id: string) => {});
+      const wire = fake(() => answer("must not run"));
+      const instructions = vi.fn(() => {
+        controller.abort(reason);
+        return base.instructions;
+      });
+      const background = createBackgroundAgent({
+        agent: defineAgent({
+          ...base,
+          instructions: stage === "before preparation" ? base.instructions : instructions,
+          provider: wire.provider,
+        }),
+        kind: "cancelled-start",
+        runs: { ...runs, create },
+        enqueue,
+        policy: closedPolicy,
+      });
+      if (stage === "before preparation") controller.abort(reason);
+      await expect(background.start("alice", "Work", { signal: controller.signal })).rejects.toBe(
+        reason,
+      );
+      expect(create).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(wire.calls()).toBe(0);
+      expect(instructions).toHaveBeenCalledTimes(stage === "before preparation" ? 0 : 1);
+    },
+  );
+
+  it("returns and queues the saved id when creation is cancelled after the row exists", async () => {
+    const controller = new AbortController();
+    const wire = fake(() => answer("done"));
+    const enqueue = vi.fn(async (_id: string) => {});
+    const background = createBackgroundAgent({
+      agent: defineAgent({ ...base, provider: wire.provider }),
+      kind: "saved-before-cancellation",
+      runs: {
+        ...runs,
+        async create(spec) {
+          const saved = await runs.create(spec);
+          controller.abort(new Error("Request disconnected after save"));
+          return saved;
+        },
+      },
+      enqueue,
+      policy: closedPolicy,
+    });
+    const { id } = await background.start("alice", "Work", { signal: controller.signal });
+    expect(controller.signal.aborted).toBe(true);
+    expect(enqueue).toHaveBeenCalledExactlyOnceWith(id);
+    expect((await background.read("alice", id)).status).toBe("queued");
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    expect((await background.read("alice", id)).outcome?.status).toBe("completed");
+  });
+
+  it("keeps media-loader credentials out of saved failures and state events", async () => {
+    const credential = "Bearer synthetic-private-upload-key";
+    const wire = fake(() => answer("must not run"));
+    const background = bind(
+      defineAgent({ ...base, provider: wire.provider }),
+      (context) => ({
+        ...closedPolicy(context),
+        loadMedia() {
+          // Header validation errors can quote the credential before any request is sent.
+          throw new TypeError(`Invalid Authorization header: ${credential}`);
+        },
+      }),
+      "media-loader-failure",
+    );
+    const { id } = await background.start("alice", [
+      { type: "media", id: "photo", mimeType: "image/png" },
+    ]);
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    const result = await background.read("alice", id);
+    expect(result.outcome).toMatchObject({
+      status: "failed",
+      error: {
+        code: "media_unavailable",
+        message: "The media could not be loaded. Check file access before trying again.",
+      },
+    });
+    const row = await runs.read(id, "alice");
+    expect(row?.checkpoint).toMatchObject({ state: { status: "failed" } });
+    expect(JSON.stringify(row)).not.toContain(credential);
+    const events = [];
+    for await (const event of background.observe("alice", id)) events.push(event);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "agent", data: expect.objectContaining({ type: "state" }) }),
+    );
+    expect(JSON.stringify(events)).not.toContain(credential);
+    expect(wire.calls()).toBe(0);
+    expect(result.snapshot.models).toEqual([]);
+  });
+
+  it("starts in a session inside the request and appends the turn from the worker", async () => {
+    const png = "iVBORw0KGgoAAAAN";
+    const before: AgentMessage[] = [
+      { role: "user", content: "My name is Ana." },
+      { role: "assistant", content: "Hello, Ana." },
+    ];
+    const thread = createMemorySession({ id: "thread-1", messages: before });
+    const asked: string[] = [];
+    function session(owner: string, id: string): Session {
+      asked.push(`${owner}:${id}`);
+      if (owner !== "alice" || id !== thread.id) throw new Error("This conversation is not yours.");
+      return thread;
+    }
+    const requests: ChatMessage[][] = [];
+    const agent = defineAgent({
+      ...base,
+      provider: {
+        id: "fake",
+        model: "fake",
+        async *createStream(history) {
+          requests.push(structuredClone(history));
+          yield answer("A photo of Ana.");
+        },
+      },
+    });
+    const background = createBackgroundAgent({
+      agent,
+      kind: "session",
+      runs,
+      enqueue,
+      session,
+      policy: (context) => ({
+        ...closedPolicy(context),
+        async loadMedia(ref) {
+          if (context.owner !== "alice" || ref.id !== "photo") throw new Error("No such photo.");
+          return png;
+        },
+      }),
+    });
+    const turn: InputPart[] = [
+      { type: "text", text: "Who is in this photo?" },
+      { type: "media", id: "photo", mimeType: "image/png" },
+    ];
+    await expect(background.start("bob", turn, { sessionId: "thread-1" })).rejects.toThrow(
+      /not yours/,
+    );
+    const { id } = await background.start("alice", turn, { sessionId: "thread-1" });
+    expect((await runs.read(id, "alice"))?.input).toMatchObject({
+      snapshot: { history: before, input: turn, session: { id: "thread-1", revision: "1" } },
+    });
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    expect(requests[0]?.slice(1)).toEqual([
+      ...before,
+      {
+        role: "user",
+        content: [turn[0], { type: "image", mimeType: "image/png", data: png }],
+      },
+    ]);
+    const saved = await background.read("alice", id);
+    expect(saved.outcome).toMatchObject({
+      status: "completed",
+      session: { id: "thread-1", status: "saved", revision: "2" },
+    });
+    expect((await thread.load({ signal: new AbortController().signal })).messages).toEqual([
+      ...before,
+      ...(saved.outcome?.newMessages ?? []),
+    ]);
+    // The worker asked again with the stored owner, never the request's.
+    expect(asked).toEqual(["bob:thread-1", "alice:thread-1", "alice:thread-1"]);
+    expect(JSON.stringify(await runs.read(id, "alice"))).not.toContain(png);
+    await expect(bind(agent).start("alice", "Hi", { sessionId: "thread-1" })).rejects.toThrow(
+      /session factory/,
+    );
+  });
+
+  it("freezes the definition in start with request context and per-run settings", async () => {
+    const instructions = vi.fn((run: RunContext) => `Reply in ${run.context.locale}.`);
+    const enabledTools = vi.fn(() => ["read"]);
+    const requests: ChatMessage[][] = [];
+    const agent = defineAgent({
+      ...base,
+      instructions,
+      enabledTools,
+      modelSettings: { maxTokens: 100 },
+      tools: [
+        defineTool({
+          name: "read",
+          description: "Read",
+          inputSchema: { type: "object" },
+          run: async () => "read",
+        }),
+      ],
+      provider: {
+        id: "definition",
+        model: "fake",
+        async *createStream(history, tools, options) {
+          requests.push(structuredClone(history));
+          expect(options?.maxTokens).toBe(27);
+          expect(tools.map((tool) => tool.name)).toEqual(["read"]);
+          yield answer("done");
+        },
+      },
+    });
+    const background = bind(
+      agent,
+      (context) => ({ ...closedPolicy(context), context: { locale: "es" } }),
+      "definition",
+    );
+    const transientSettings = { maxTokens: 50, onActivity: () => {} };
+    await expect(
+      background.start("alice", "Answer", { modelSettings: transientSettings }),
+    ).rejects.toThrow("cannot keep observers");
+    const { id } = await background.start("alice", "Answer", {
+      context: { locale: "en", db: pool },
+      modelSettings: { maxTokens: 27 },
+      enabledTools: ["read"],
+    });
+    expect((await background.read("alice", id)).snapshot.definition).toMatchObject({
+      instructions: "Reply in en.",
+      modelSettings: { maxTokens: 27 },
+      enabledTools: ["read"],
+    });
+    expect(instructions).toHaveBeenCalledOnce();
+    expect(enabledTools).toHaveBeenCalledOnce();
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    expect((await background.read("alice", id)).outcome?.status).toBe("completed");
+    expect(requests[0]?.[0]).toEqual({ role: "system", content: "Reply in en." });
+    expect(instructions).toHaveBeenCalledOnce();
+    expect(enabledTools).toHaveBeenCalledOnce();
+    expect(JSON.stringify(await runs.read(id, "alice"))).not.toContain('"db"');
+  });
+
+  it.each(["instructions", "modelSettings", "enabledTools"] as const)(
+    "refuses a checkpoint whose resolved %s differ from its saved input",
+    async (field) => {
+      const wire = fake(() => answer("must not run"));
+      const background = bind(
+        defineAgent({
+          ...base,
+          provider: wire.provider,
+          tools: [
+            defineTool({
+              name: "read",
+              description: "Read",
+              inputSchema: { type: "object" },
+              run: async () => "read",
+            }),
+          ],
+        }),
+        closedPolicy,
+        `changed-${field}`,
+      );
+      const { id } = await background.start("alice", "Answer");
+      const changed = (await background.read("alice", id)).snapshot;
+      if (field === "instructions") changed.definition.instructions = "Different text.";
+      else if (field === "modelSettings") changed.definition.modelSettings.maxTokens = 5;
+      else changed.definition.enabledTools = [];
+      await pool.query(`UPDATE ${schema}.runs SET checkpoint=$2::json WHERE id=$1`, [
+        id,
+        JSON.stringify(changed),
+      ]);
+      await expect(background.read("alice", id)).rejects.toThrow("another logical run");
+      expect(await runs.drive(id, background.handlers)).toBe("failed");
+      expect(wire.calls()).toBe(0);
+    },
+  );
 
   it("reports the saved id when enqueue fails and lets the sweep recover it", async () => {
     const wire = fake(() => answer("done"));

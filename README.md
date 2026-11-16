@@ -41,6 +41,10 @@ For a shared loop, specialists and background runs, use the separate
 [`@providerkit/agents` package](https://github.com/providerkit/providerkit/tree/main/agents).
 It uses core's public API and leaves application prompts, authorization and storage policy with you.
 
+The separate [`@providerkit/react` package](https://github.com/providerkit/providerkit/tree/main/react) is in development for chat hooks,
+streamed messages and agent activity. Its components and stylesheet are optional; Tailwind is not
+required.
+
 ## Use
 
 ```ts
@@ -262,6 +266,7 @@ vendor SDKs for this package (−5,033 more) and ships with the release that car
 ```
 core/     the npm package `@providerkit/core`
 agents/   the separate `@providerkit/agents` SDK
+react/    `@providerkit/react`, chat hooks and components (in development)
 site/     providerkit.dev (Astro + Starlight), also open source
 brand/    the mark, the OG card, and the generator for both
 ```

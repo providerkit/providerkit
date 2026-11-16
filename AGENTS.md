@@ -9,6 +9,11 @@ not agent orchestration, prompts, memory or graphs.
 for a shared agent loop and specialist execution. Application prompts, authorization and retention
 stay with the app; durable execution uses the host's existing run service, not a new scheduler.
 
+`react/` is the separate, experimental `@providerkit/react` package, still in development. It
+provides browser state, React hooks and optional chat components. The display protocol is
+React-free; the server projector exposes only allowlisted display data. Components receive plain
+data and callbacks, so an app can keep its existing state owner. Tailwind is not required.
+
 MIT · open source · `providerkit.dev`
 
 > **Before touching anything under `site/`, read [`site/DESIGN.md`](site/DESIGN.md).**
@@ -43,6 +48,7 @@ providerkit/            ← repo root (this folder), git root
 │   ├── src/
 │   └── test/
 ├── agents/             ← separate experimental `@providerkit/agents`, using core's public API
+├── react/              ← experimental chat hooks, display protocol and optional components
 ├── site/               ← providerkit.dev — Astro + Starlight, open source
 │   └── src/content/docs/  ← the docs, as plain markdown (guides/ is hand-written,
 │                             reference/ is TypeDoc output and gitignored)
@@ -110,6 +116,11 @@ TypeScript 7 does not ship. Move it when both do.
   split any provider capability. Its main entry stays portable. The optional durable-run binding
   stays on its own export and uses a host-supplied run service. Build and release the standalone
   SDK before any app migration; app-specific adoption is separate work.
+- **The React layer is separate.** Hook imports load no styles, Markdown parser or agent engine.
+  `/protocol` contains portable display data and reduction; `/agents` projects trusted server
+  state into that data. Do not send raw execution snapshots, reasoning or tool arguments to a
+  browser. The app still owns authorization, uploads, retention and approval decisions. UI CSS
+  is scoped and opt-in, with no global reset or required Tailwind setup.
 - **GitHub: org `providerkit`, repo `providerkit/providerkit`.** An org rather than a personal
   repo, so maintainers can be added later without a transfer.
 - Release scripts match the other packages in `dev/packages`:

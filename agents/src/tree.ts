@@ -1,6 +1,6 @@
 import { EMPTY_USAGE, addUsage, createGate, messageOf, type TokenUsage } from "@providerkit/core";
 import { immutableCopy } from "./snapshot.ts";
-import type { AgentHost, RunOptions, RunSnapshot, RunState } from "./types.ts";
+import type { AgentEvent, AgentHost, RunOptions, RunSnapshot, RunState } from "./types.ts";
 
 export type StopState = Exclude<RunState, { status: "running" | "completed" }>;
 
@@ -12,6 +12,16 @@ export class Halt extends Error {
 
 export function fail(code: string, message: string, operationId?: string): never {
   throw new Halt({ status: "failed", error: { code, message, operationId } });
+}
+
+/** Progress is not the durable journal, and an observer cannot stop execution. It gets a
+ * frozen copy, is never awaited, and whatever it throws or rejects with is dropped. */
+export function emitEvent(options: RunOptions, event: AgentEvent): void {
+  try {
+    void Promise.resolve(options.onEvent?.(immutableCopy(event))).catch(() => {});
+  } catch {
+    // Dropped on purpose: see above.
+  }
 }
 
 /** Cancellation stops SDK work, not external effects which ignore their signal. */
@@ -84,6 +94,12 @@ export class ExecutionTree {
       () => this.timeout.abort(new Error("The agent tree reached its time limit.")),
       Math.max(0, root.tree.startedAt + root.tree.limits.elapsedMs - Date.now()),
     );
+  }
+
+  /** A failed checkpoint fails every later one, so the host's saved journal stops at the last
+   * write that succeeded and the returned state was never stored. */
+  get checkpointFailed(): boolean {
+    return this.checkpointFailure !== undefined;
   }
 
   active(): void {
