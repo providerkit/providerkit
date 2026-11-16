@@ -176,6 +176,37 @@ h3 {
   color: var(--ink);
   background: transparent;
 }
+.history-controls {
+  padding: 12px 16px;
+  border-block-end: 1px solid var(--line);
+}
+.history-controls p {
+  margin-block: 8px 0;
+  min-block-size: 3em;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.sample-image {
+  margin: 12px 0;
+}
+.sample-image figcaption {
+  margin-block-end: 8px;
+}
+.sample-image img {
+  display: block;
+  inline-size: min(240px, 60%);
+  block-size: auto;
+}
+.sample-image[data-size="large"] img {
+  inline-size: 100%;
+}
+.demo-button[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: default;
+}
+.demo-button[aria-disabled="true"]:active {
+  transform: none;
+}
 .host-feedback {
   min-block-size: 2.5rem;
   padding-block: 8px;

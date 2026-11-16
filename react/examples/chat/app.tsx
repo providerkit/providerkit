@@ -6,6 +6,7 @@ import {
   useChat,
   useComposer,
   type DraftScope,
+  type DraftStorage,
 } from "@providerkit/react";
 import {
   Composer,
@@ -22,12 +23,15 @@ import type { SourcePart } from "@providerkit/react/protocol";
 import "@providerkit/react/styles.css";
 import "./host.css";
 import { browserDrafts, rememberDraft, remembersDraft } from "./drafts.ts";
+import { copyPasteSample, EarlierHistory, SampleImage, SampleTool } from "./fixtures.tsx";
+import { fixtureMessageId, pasteText, sampleImageId, sampleToolId } from "./samples.ts";
 import { attachmentOptions, command, demoFetch, portTransport, sseTransport } from "./transport.ts";
 import {
   apiPath,
   draftRetentionMs,
   fileTypes,
   isRecord,
+  type ApprovalMode,
   type SendMode,
   type TransportMode,
   type UploadMode,
@@ -81,7 +85,7 @@ function HostApproval({ disabled, onRespond, state }: ApprovalActions) {
   );
 }
 
-const renderSummary: MessageRenderers["renderPart"] = (part) => {
+const renderSummary: NonNullable<MessageRenderers["renderPart"]> = (part) => {
   if (part.type !== "data" || part.kind !== "sample-summary") return undefined;
   if (
     !isRecord(part.data) ||
@@ -98,7 +102,18 @@ const renderSummary: MessageRenderers["renderPart"] = (part) => {
 };
 const hostApproval: MessageRenderers["renderApproval"] = (actions) => <HostApproval {...actions} />;
 
-function useRenderers(hostStyled: boolean) {
+function useRenderers(scope: DraftScope, hostStyled: boolean) {
+  const renderPart = useCallback<NonNullable<MessageRenderers["renderPart"]>>(
+    (part, context) => {
+      if (context.message.id === fixtureMessageId) {
+        if (part.type === "tool" && part.id === sampleToolId) return <SampleTool tool={part} />;
+        if (part.type === "attachment" && part.id === sampleImageId)
+          return <SampleImage scope={scope} />;
+      }
+      return renderSummary(part, context);
+    },
+    [scope],
+  );
   const [source, setSource] = useState<SourcePart>();
   const sourceButton = useRef<HTMLElement | null>(null);
   const openSource = useCallback((next: SourcePart) => {
@@ -125,7 +140,7 @@ function useRenderers(hostStyled: boolean) {
     },
     renderers: {
       renderText,
-      renderPart: renderSummary,
+      renderPart,
       toolLabels,
       specialistLabels,
       onSource: openSource,
@@ -174,7 +189,7 @@ function Observer({
     transport,
     reconnect: { attempts: 0 },
   });
-  const { source, closeSource, renderers } = useRenderers(hostStyled);
+  const { source, closeSource, renderers } = useRenderers(scope, hostStyled);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus();
@@ -225,6 +240,20 @@ function App() {
   const [theme, setTheme] = useState(document.documentElement.dataset.theme ?? "light");
   const [sendMode, setSendMode] = useState<SendMode>("normal");
   const [uploadMode, setUploadMode] = useState<UploadMode>("normal");
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("pending");
+  const [draftFailure, setDraftFailure] = useState(false);
+  const failDraftSave = useRef(false);
+  // Keep the adapter identity stable so changing a fixture does not replace the open draft.
+  const draftStorage = useMemo<DraftStorage>(
+    () => ({
+      ...browserDrafts,
+      async save(scope, draft, options) {
+        if (failDraftSave.current) throw new Error("Synthetic draft write failure");
+        await browserDrafts.save(scope, draft, options);
+      },
+    }),
+    [],
+  );
   const transport = useMemo(() => {
     const http = sseTransport(scope, sendMode);
     return mode === "port" ? portTransport(http) : http;
@@ -237,7 +266,7 @@ function App() {
     send: chat.send,
     canSend: chat.canSend,
     attachments,
-    draft: remember ? { storage: browserDrafts, retentionMs: draftRetentionMs } : undefined,
+    draft: remember ? { storage: draftStorage, retentionMs: draftRetentionMs } : undefined,
   });
   const [observerOpen, setObserverOpen] = useState(false);
   const observerButton = useRef<HTMLButtonElement>(null);
@@ -247,7 +276,7 @@ function App() {
   const [stats, setStats] = useState<Record<string, number>>();
   const actionBusy = useRef(false);
   const leaving = useRef(false);
-  const { source, closeSource, renderers } = useRenderers(hostStyled);
+  const { source, closeSource, renderers } = useRenderers(scope, hostStyled);
   const hasDraft = Boolean(
     composer.text || composer.attachments.length || composer.draft.missingFiles,
   );
@@ -432,16 +461,58 @@ function App() {
                 value={uploadMode}
                 onChange={(event) => {
                   const value = event.target.value;
-                  if (value === "normal" || value === "slow" || value === "fail")
+                  if (
+                    value === "normal" ||
+                    value === "slow" ||
+                    value === "late" ||
+                    value === "fail"
+                  )
                     setUploadMode(value);
                 }}
               >
                 <option value="normal">Normal</option>
                 <option value="slow">Slow (3.5 seconds)</option>
+                <option value="late">Finish after cancellation (3.5 seconds)</option>
                 <option value="fail">Fail once per file, then allow Retry</option>
               </select>
             </label>
+            <label>
+              Approval response
+              <select
+                value={approvalMode}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (
+                    value === "pending" ||
+                    value === "expire" ||
+                    value === "unknown" ||
+                    value === "replace"
+                  )
+                    setApprovalMode(value);
+                }}
+              >
+                <option value="pending">Pending, then show the saved choice</option>
+                <option value="expire">Expire in 3 seconds</option>
+                <option value="unknown">Lose decision acknowledgement</option>
+                <option value="replace">Replace when answered</option>
+              </select>
+            </label>
           </div>
+          <label className="remember">
+            <input
+              type="checkbox"
+              checked={draftFailure}
+              onChange={(event) => {
+                failDraftSave.current = event.target.checked;
+                setDraftFailure(event.target.checked);
+              }}
+            />
+            Refuse draft saves
+          </label>
+          <p className="hint">
+            Turn on Save drafts below, then type to try a failed save. Turn this refusal off and
+            choose Retry saving before switching conversations or reloading.
+          </p>
           <div className="actions">
             <button
               className="demo-button"
@@ -472,7 +543,7 @@ function App() {
               onClick={() =>
                 void action(
                   "Opening approval",
-                  () => command(scope, "approval"),
+                  () => command(scope, "approval", { mode: approvalMode }),
                   "The sample request is ready in the conversation.",
                 )
               }
@@ -483,6 +554,63 @@ function App() {
           <p className="hint">
             Approvals here are host-only display requests, separate from the two-specialist SDK run.
             They do not prove SDK continuation.
+          </p>
+          <div className="actions">
+            <button
+              className="demo-button"
+              type="button"
+              disabled={
+                Boolean(pending) ||
+                chat.connection !== "open" ||
+                chat.messages.some((message) => message.id === fixtureMessageId)
+              }
+              onClick={() =>
+                void action(
+                  "Adding display samples",
+                  () => command(scope, "fixtures"),
+                  "Tool, image and link samples were added. Use Jump to latest to find them.",
+                )
+              }
+            >
+              Add tool, image and link samples
+            </button>
+            <button
+              className="demo-button"
+              type="button"
+              disabled={Boolean(pending) || composer.attachments.length >= 3}
+              onClick={() =>
+                void action(
+                  "Adding generated file",
+                  async () =>
+                    composer.addFiles([
+                      new File([pasteText], "generated-sample.txt", { type: "text/plain" }),
+                    ]),
+                  "Generated file selected. Check its upload status below.",
+                )
+              }
+            >
+              Add a generated text file
+            </button>
+            <button
+              className="demo-button"
+              type="button"
+              disabled={Boolean(pending)}
+              onClick={() =>
+                void action(
+                  "Copying paste sample",
+                  () => copyPasteSample(scope),
+                  "Text and a generated image were copied. Focus Your message and paste to add both.",
+                )
+              }
+            >
+              Copy text and generated image
+            </button>
+          </div>
+          <p className="hint">
+            Copy replaces your clipboard with sample text and a generated image; it never reads your
+            clipboard. Paste into Your message to try mixed text and file input. For upload
+            cancellation, choose Finish after cancellation, add a generated file, then remove it
+            before 3.5 seconds. A late result must not bring it back.
           </p>
         </div>
       </details>
@@ -505,6 +633,11 @@ function App() {
           </header>
           <Conversation chat={{ ...chat, reconnect }} labels={labels}>
             <ConnectionStatusDisplay />
+            <EarlierHistory
+              scope={scope}
+              messages={chat.messages}
+              connected={chat.connection === "open"}
+            />
             <MessageList
               {...renderers}
               loading={chat.connection === "connecting" && !chat.messages.length}

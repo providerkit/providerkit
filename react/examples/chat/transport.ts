@@ -38,9 +38,13 @@ export function sseTransport(scope: DraftScope, mode: SendMode): ChatTransport {
 
 export async function command(
   scope: DraftScope,
-  action: "connect" | "disconnect" | "approval",
+  action: "connect" | "disconnect" | "approval" | "history" | "fixtures",
+  query?: Record<string, string>,
 ): Promise<void> {
-  const response = await demoFetch(`${apiPath(scope)}/${action}`, { method: "POST" });
+  const response = await demoFetch(
+    `${apiPath(scope)}/${action}${query ? `?${new URLSearchParams(query)}` : ""}`,
+    { method: "POST" },
+  );
   if (!response.ok) throw new Error(await errorMessage(response));
 }
 
@@ -73,7 +77,9 @@ export function attachmentOptions(scope: DraftScope, mode: UploadMode): Attachme
         response = await demoFetch(`${apiPath(scope)}/upload`, {
           method: "POST",
           body: file,
-          signal,
+          // Explicit late-result fixture: the host finishes even after the UI cancels.
+          // The package must discard this result by upload identity, not only by AbortSignal.
+          signal: uploadMode === "late" ? undefined : signal,
           headers: { "Content-Type": file.type, "X-Demo-Upload": uploadMode },
         });
       } catch {
@@ -91,7 +97,7 @@ export function attachmentOptions(scope: DraftScope, mode: UploadMode): Attachme
         typeof value.size !== "number"
       )
         throw new Error("The upload reply was incomplete. Choose Retry.");
-      signal.throwIfAborted();
+      if (uploadMode !== "late") signal.throwIfAborted();
       onProgress(1);
       return { id: value.id, name: value.name, mediaType: value.mediaType, size: value.size };
     },

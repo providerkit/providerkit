@@ -4,7 +4,8 @@ export const maxFileBytes = 1024 * 1024;
 export const fileTypes = ["image/png", "image/jpeg", "text/plain"];
 export const draftRetentionMs = 24 * 60 * 60 * 1000;
 export type SendMode = "normal" | "delay" | "refuse" | "unknown";
-export type UploadMode = "normal" | "slow" | "fail";
+export type UploadMode = "normal" | "slow" | "late" | "fail";
+export type ApprovalMode = "pending" | "expire" | "unknown" | "replace";
 export type TransportMode = "sse" | "port";
 
 export interface DemoStats {

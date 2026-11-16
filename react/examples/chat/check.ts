@@ -12,6 +12,13 @@ import {
 } from "@providerkit/react/protocol";
 import { portTransport } from "./transport.ts";
 import { isRecord } from "./shared.ts";
+import {
+  earlierMessages,
+  fixtureMessageId,
+  hiddenSample,
+  sampleImageId,
+  sampleToolId,
+} from "./samples.ts";
 
 // A focused runtime check, invoked by hand. It owns and stops only this subprocess.
 assert.equal(Bun.version, "1.4.4", "Run the example check with the repo's Bun 1.4.4.");
@@ -30,7 +37,7 @@ const child = Bun.spawn(
     stderr: "inherit",
   },
 );
-const timeout = setTimeout(() => child.kill(), 25000);
+const timeout = setTimeout(() => child.kill(), 45000);
 let base = "";
 
 async function request(path: string, body?: unknown, headers?: HeadersInit): Promise<Response> {
@@ -47,6 +54,13 @@ async function state() {
   const event = parseChatEvent(await response.json());
   assert(event?.type === "snapshot");
   return event;
+}
+async function pendingApproval() {
+  const approval = (await state()).messages
+    .flatMap((message) => message.parts)
+    .find((part) => part.type === "approval" && part.state === "pending");
+  assert(approval?.type === "approval");
+  return approval;
 }
 async function counters() {
   const value: unknown = await (await request(`${path}/stats`)).json();
@@ -157,12 +171,88 @@ try {
   assert.equal(counts.toolCalls, 2);
   await until(async () => (await counters()).observers === 0);
 
+  // Earlier history is a real prepend through snapshots, never a second run or a reordered tail.
+  const beforeHistory = await state();
+  assert.equal((await request(`${path}/history?page=1&mode=fail`, {})).status, 503);
+  assert.deepEqual(await state(), beforeHistory);
+  const firstPage = await Promise.all([
+    request(`${path}/history?page=1`, {}),
+    request(`${path}/history?page=1`, {}),
+  ]);
+  assert(firstPage.every((reply) => reply.status === 204));
+  assert.deepEqual((await state()).messages, [
+    ...earlierMessages.slice(4),
+    ...beforeHistory.messages,
+  ]);
+  const afterFirst = await counters();
+  assert.equal((await request(`${path}/history?page=1`, {})).status, 204);
+  assert.deepEqual(
+    await counters(),
+    afterFirst,
+    "A repeated page must not publish another snapshot.",
+  );
+  assert.equal((await request(`${path}/history?page=2`, {})).status, 204);
+  assert.deepEqual((await state()).messages, [...earlierMessages, ...beforeHistory.messages]);
+  const allHistory = await counters();
+  assert.equal((await request(`${path}/history?page=3`, {})).status, 204);
+  assert.deepEqual(await counters(), allHistory, "An empty page must be a no-op.");
+  assert.equal((await request(`${path}/history?page=99`, {})).status, 400);
+  assert.equal((await state()).run.id, runId);
+  assert.equal((await counters()).modelCalls, 6);
+
+  assert.equal((await request(`${path}/fixtures`, {})).status, 204);
+  const fixtures = (await state()).messages.find((message) => message.id === fixtureMessageId);
+  assert(fixtures);
+  const tool = fixtures.parts.find((part) => part.id === sampleToolId);
+  assert(tool?.type === "tool" && tool.detail?.includes("Generated sample record"));
+  assert.equal(tool.data, undefined, "The hosted tool must not copy raw SDK arguments or results.");
+  const imagePart = fixtures.parts.find((part) => part.id === sampleImageId);
+  assert(imagePart?.type === "attachment" && imagePart.url === undefined);
+  assert(
+    fixtures.parts.some(
+      (part) =>
+        part.type === "data" &&
+        part.kind === "unhandled-sample" &&
+        JSON.stringify(part.data).includes(hiddenSample),
+    ),
+  );
+  const afterFixtures = await counters();
+  assert.equal((await request(`${path}/fixtures`, {})).status, 204);
+  assert.deepEqual(await counters(), afterFixtures);
+  assert.equal((await counters()).modelCalls, 6);
+  assert.equal((await counters()).toolCalls, 2);
+  await events(); // The original SDK sentinel privacy assertion includes every new fixture.
+
+  // Only the fixed, generated PNG can be served. Uploads, paths and remote URLs are not inputs.
+  assert.equal((await fetch(new URL(`${path}/sample-image`, base))).status, 403);
+  assert.equal(
+    (await request(`${path}/sample-image`, undefined, { Origin: "https://foreign.invalid" }))
+      .status,
+    403,
+  );
+  assert.equal((await request(`${path}/sample-image?file=other.png`)).status, 400);
+  assert.equal(
+    (await request(`${path}/sample-image?url=https://example.invalid/image.png`)).status,
+    400,
+  );
+  assert.equal((await request(`${path}/sample-image?mode=forever`)).status, 400);
+  const imageStarted = Date.now();
+  const image = await request(`${path}/sample-image?mode=slow`);
+  assert.equal(image.status, 200);
+  assert.equal(image.headers.get("Content-Type"), "image/png");
+  assert(Date.now() - imageStarted >= 2800, "The controlled image load must really wait.");
+  assert.deepEqual(
+    await image.arrayBuffer(),
+    await Bun.file(new URL("./sample-image.png", import.meta.url)).arrayBuffer(),
+  );
+  assert.equal(
+    (await fetch(new URL("/sample-link", base))).headers.get("Content-Type"),
+    "text/plain; charset=utf-8",
+  );
+
   // Host display approvals are deliberately separate from the SDK specialist run.
   assert.equal((await request(`${path}/approval`, {})).status, 204);
-  const approval = (await state()).messages
-    .flatMap((message) => message.parts)
-    .find((part) => part.type === "approval" && part.state === "pending");
-  assert(approval?.type === "approval");
+  const approval = await pendingApproval();
   const answers = { answers: [{ requestId: approval.id, response: { type: "approve" } }] };
   const decisions = await Promise.all([
     request(`${path}/respond`, answers),
@@ -180,6 +270,64 @@ try {
   );
   assert.equal((await counters()).decisions, 1);
   assert.equal((await counters()).modelCalls, 6);
+
+  assert.equal((await request(`${path}/approval?mode=expire`, {})).status, 204);
+  const expiring = await pendingApproval();
+  assert.equal(typeof expiring.expiresAt, "number");
+  await until(async () => (await state()).run.status === "completed");
+  assert.equal(
+    (
+      await request(`${path}/respond`, {
+        answers: [{ requestId: expiring.id, response: { type: "approve" } }],
+      })
+    ).status,
+    409,
+  );
+  assert.equal((await counters()).decisions, 1);
+
+  assert.equal((await request(`${path}/approval?mode=replace`, {})).status, 204);
+  const replaced = await pendingApproval();
+  const replaceAnswer = { answers: [{ requestId: replaced.id, response: { type: "approve" } }] };
+  const replacements = await Promise.all([
+    request(`${path}/respond`, replaceAnswer),
+    request(`${path}/respond`, replaceAnswer),
+  ]);
+  assert(replacements.every((reply) => reply.status === 204));
+  const replacement = await pendingApproval();
+  assert.notEqual(replacement.id, replaced.id);
+  assert(
+    (await state()).messages
+      .flatMap((message) => message.parts)
+      .some(
+        (part) => part.id === replaced.id && part.type === "approval" && part.state === "expired",
+      ),
+  );
+  assert.equal((await request(`${path}/respond`, replaceAnswer)).status, 409);
+  assert.equal((await counters()).decisions, 1, "Replacing a pending choice must not apply it.");
+  assert.equal((await request(`${path}/stop`, {})).status, 204);
+
+  assert.equal((await request(`${path}/approval?mode=unknown`, {})).status, 204);
+  const uncertain = await pendingApproval();
+  const uncertainAnswer = { answers: [{ requestId: uncertain.id, response: { type: "approve" } }] };
+  assert.equal((await request(`${path}/respond`, uncertainAnswer)).status, 503);
+  assert.equal((await request(`${path}/events?once=1`)).status, 503);
+  assert.equal((await counters()).decisions, 2);
+  assert.equal((await request(`${path}/respond`, uncertainAnswer)).status, 503);
+  assert.equal(
+    (await counters()).decisions,
+    2,
+    "A lost decision reply must not apply the choice twice.",
+  );
+  assert.equal((await request(`${path}/connect`, {})).status, 204);
+  const recovered = (await events()).reduce(reduceChat, emptyChatView());
+  assert(
+    recovered.messages
+      .flatMap((message) => message.parts)
+      .some(
+        (part) => part.id === uncertain.id && part.type === "approval" && part.state === "approved",
+      ),
+  );
+  assert.equal((await counters()).modelCalls, 6, "No approval fixture continues an SDK run.");
 
   assert.equal(
     (await request(`${path}/send`, { clientId: "stop-this-run", text: "Stop test" })).status,
@@ -237,6 +385,23 @@ try {
     detach();
   }
 
+  const lateUpload = await fetch(new URL(`${path}/upload`, base), {
+    method: "POST",
+    body: new Blob(["DISCARD_UPLOAD_BODY_SAMPLE"], { type: "text/plain" }),
+    headers: { "X-Demo-Request": "1", "X-Demo-Upload": "late" },
+  });
+  assert.equal(lateUpload.status, 200);
+  const lateReference: unknown = await lateUpload.json();
+  assert(isRecord(lateReference) && typeof lateReference.id === "string");
+  assert.deepEqual(Object.keys(lateReference).sort(), ["id", "mediaType", "name", "size"]);
+  assert(!JSON.stringify(lateReference).includes("DISCARD_UPLOAD_BODY_SAMPLE"));
+  assert.equal((await request(`${path}/upload/${lateReference.id}`)).status, 404);
+  assert.deepEqual(
+    await (await request(`${path}/sample-image`)).arrayBuffer(),
+    await Bun.file(new URL("./sample-image.png", import.meta.url)).arrayBuffer(),
+    "Uploads cannot replace the generated image.",
+  );
+
   const file = new Blob(["Synthetic upload"], { type: "text/plain" });
   const failedUpload = await fetch(new URL(`${path}/upload`, base), {
     method: "POST",
@@ -260,7 +425,7 @@ try {
   );
   assert.equal((await request(`${path}/stop`, {})).status, 204);
   console.log(
-    "PASS: HTTP replay, reload, two specialists, idempotent sends/decisions, observer close, Stop, projection privacy, unknown port delivery, preserved draft and attachment-only upload.",
+    "PASS: HTTP replay, two specialists, idempotent sends/decisions/history/fixtures, observer close, Stop, SDK projection privacy, bounded local image, discarded late upload contents, approval expiry/replacement/unknown delivery, unknown port send, preserved draft and attachment-only upload. Layout and focus still require a browser.",
   );
 } finally {
   clearTimeout(timeout);
