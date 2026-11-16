@@ -1,0 +1,267 @@
+/* Markdown, for the `@providerkit/react/markdown` entry. It inherits the app's font, size and text
+   color. Every tint is the text color mixed toward transparent, so light and dark themes both work
+   without this file knowing either. Sizes are in em, so they follow the app's text size. Every
+   selector sits in :where(), so any app rule wins over these. */
+@layer providerkit {
+  :where(.pk-md) {
+    /* A long address or identifier wraps instead of widening the message. */
+    overflow-wrap: anywhere;
+  }
+
+  /* Block spacing comes only from the gap between siblings, so the first and last block of a
+     message sit flush with whatever the app puts around it. */
+  :where(
+    .pk-md-p,
+    .pk-md-ul,
+    .pk-md-ol,
+    .pk-md-blockquote,
+    .pk-md-hr,
+    .pk-md-table,
+    .pk-md-pre,
+    .pk-md-section,
+    .pk-md-h1,
+    .pk-md-h2,
+    .pk-md-h3,
+    .pk-md-h4,
+    .pk-md-h5,
+    .pk-md-h6
+  ) {
+    margin: 0;
+  }
+
+  :where(.pk-md > * + *, .pk-md-li > * + *, .pk-md-blockquote > * + *, .pk-md-section > * + *) {
+    margin-block-start: 0.75em;
+  }
+
+  :where(.pk-md-li + .pk-md-li) {
+    margin-block-start: 0.25em;
+  }
+
+  :where(.pk-md-h1, .pk-md-h2, .pk-md-h3, .pk-md-h4, .pk-md-h5, .pk-md-h6) {
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  :where(.pk-md > * + :is(.pk-md-h1, .pk-md-h2, .pk-md-h3, .pk-md-h4, .pk-md-h5, .pk-md-h6)) {
+    margin-block-start: 1.25em;
+  }
+
+  :where(.pk-md-h1) {
+    font-size: 1.4em;
+  }
+
+  :where(.pk-md-h2) {
+    font-size: 1.25em;
+  }
+
+  :where(.pk-md-h3) {
+    font-size: 1.1em;
+  }
+
+  :where(.pk-md-h4, .pk-md-h5, .pk-md-h6) {
+    font-size: 1em;
+  }
+
+  :where(.pk-md-ul, .pk-md-ol) {
+    padding-inline-start: 1.5em;
+  }
+
+  :where(.pk-md-ul) {
+    list-style: disc;
+  }
+
+  :where(.pk-md-li .pk-md-ul) {
+    list-style: circle;
+  }
+
+  :where(.pk-md-ol) {
+    list-style: decimal;
+  }
+
+  :where(.pk-md-ul.contains-task-list) {
+    padding-inline-start: 0.25em;
+    list-style: none;
+  }
+
+  :where(.pk-md-input) {
+    margin: 0 0.4em 0 0;
+    vertical-align: middle;
+  }
+
+  :where(a.pk-md-a) {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+    text-underline-offset: 0.2em;
+  }
+
+  :where(a.pk-md-a:hover) {
+    text-decoration-color: currentColor;
+  }
+
+  :where(a.pk-md-a:focus-visible, .pk-md-cite:focus-visible, .pk-md-copy:focus-visible) {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+    border-radius: 0.2em;
+  }
+
+  :where(.pk-md-blockquote) {
+    padding-inline-start: 0.85em;
+    border-inline-start: 3px solid color-mix(in srgb, currentColor 22%, transparent);
+    color: color-mix(in srgb, currentColor 80%, transparent);
+  }
+
+  :where(.pk-md-hr) {
+    height: 0;
+    border: 0;
+    border-block-start: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  }
+
+  /* Inline code. A code block draws its own `code` element, which does not carry this class. */
+  :where(.pk-md-code) {
+    padding: 0.1em 0.35em;
+    border-radius: 0.35em;
+    background: color-mix(in srgb, currentColor 9%, transparent);
+    font-size: 0.875em;
+  }
+
+  :where(.pk-md-codeblock) {
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+    border-radius: 0.5em;
+    background: color-mix(in srgb, currentColor 4%, transparent);
+  }
+
+  :where(.pk-md-codeblock-bar) {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.3em 0.4em 0.3em 0.85em;
+    border-block-end: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+    font-size: 0.8em;
+  }
+
+  :where(.pk-md-codeblock-language) {
+    color: color-mix(in srgb, currentColor 70%, transparent);
+  }
+
+  :where(.pk-md-pre) {
+    padding: 0.75em 0.85em;
+    overflow-x: auto;
+    /* Code keeps every space and line as the model wrote it, and scrolls instead of wrapping. */
+    white-space: pre;
+    overflow-wrap: normal;
+    tab-size: 4;
+    font-size: 0.875em;
+    line-height: 1.5;
+  }
+
+  :where(.pk-md-copy) {
+    margin-inline-start: auto;
+    padding: 0.2em 0.65em;
+    border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+    border-radius: 0.35em;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+
+  :where(.pk-md-copy:hover) {
+    background: color-mix(in srgb, currentColor 8%, transparent);
+  }
+
+  /* Pressed: at once under the pointer or key, and while the clipboard write is pending. */
+  :where(.pk-md-copy:active, .pk-md-copy[data-state="copying"]) {
+    background: color-mix(in srgb, currentColor 16%, transparent);
+  }
+
+  :where(.pk-md-copy[aria-disabled="true"]) {
+    cursor: wait;
+  }
+
+  :where(.pk-md-copy[data-state="copied"]) {
+    border-color: currentColor;
+  }
+
+  :where(.pk-md-copy[data-state="failed"]) {
+    border-style: dashed;
+  }
+
+  /* A wide table scrolls in its own box. Its words do not break to fit, since it can scroll. */
+  :where(.pk-md-table-scroll) {
+    overflow-x: auto;
+    overflow-wrap: normal;
+  }
+
+  :where(.pk-md-table) {
+    border-collapse: collapse;
+  }
+
+  :where(.pk-md-th, .pk-md-td) {
+    padding: 0.35em 0.7em;
+    border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+    text-align: start;
+    vertical-align: top;
+  }
+
+  :where(.pk-md-th) {
+    background: color-mix(in srgb, currentColor 5%, transparent);
+    font-weight: 600;
+  }
+
+  :where(img.pk-md-img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: 0.35em;
+  }
+
+  /* An image the model wrote and the app did not allow: its alt text, marked as a picture. */
+  :where(.pk-md-img[data-state="blocked"]) {
+    padding: 0 0.4em;
+    border: 1px dashed color-mix(in srgb, currentColor 35%, transparent);
+    border-radius: 0.35em;
+    font-size: 0.9em;
+  }
+
+  :where(.pk-md-cite) {
+    padding: 0 0.3em;
+    border: 0;
+    border-radius: 0.35em;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    color: inherit;
+    font: inherit;
+    font-size: 0.75em;
+    line-height: 1;
+    text-decoration: none;
+    vertical-align: super;
+  }
+
+  :where(a.pk-md-cite, button.pk-md-cite) {
+    cursor: pointer;
+  }
+
+  :where(a.pk-md-cite:hover, button.pk-md-cite:hover) {
+    background: color-mix(in srgb, currentColor 18%, transparent);
+  }
+
+  :where(.pk-md-section[data-footnotes]) {
+    padding-block-start: 0.5em;
+    border-block-start: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+    font-size: 0.875em;
+  }
+
+  /* Read by screen readers, not shown. */
+  :where(.pk-md-sr) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+    white-space: nowrap;
+    clip-path: inset(50%);
+  }
+}
