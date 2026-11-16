@@ -93,7 +93,10 @@ A run can keep working while its connection is lost. `chat.run.status` describes
 - A lost observation can reconnect. The client never repeats a send or approval just to restore
   the screen.
 - A send with no confirmed reply can have reached the server. Keep it visible as unconfirmed and
-  check the saved conversation before offering a resend.
+  check the saved conversation before offering a resend. A successful `send` result includes
+  `outcome: "accepted" | "unknown"`; a custom composer clears its submitted draft only when
+  `result.ok && result.outcome === "accepted"`. `ok` alone means the message remains in the view,
+  not that the server confirmed it.
 
 For a read-only screen, use `useAgentRun({ id, transport })`. It observes the same display events
 without exposing a send action.

@@ -577,6 +577,7 @@ describe("sending", () => {
 
     const result = await client.send("Hello");
     if (!result.ok) throw new Error("An unknown outcome keeps the message.");
+    expect(result.outcome).toBe("unknown");
     const { messageId } = result;
     expect(find(client, messageId)?.state).toBe("failed");
     expect(client.getState().messageErrors[messageId]?.code).toBe("unconfirmed");
@@ -611,10 +612,34 @@ describe("sending", () => {
       error: { code: "not_unconfirmed" },
     });
 
-    expect(await client.retry(first.messageId)).toEqual({ ok: true, messageId: first.messageId });
+    expect(await client.retry(first.messageId)).toEqual({
+      ok: true,
+      outcome: "accepted",
+      messageId: first.messageId,
+    });
     expect(send).toHaveBeenCalledTimes(2);
     expect(send.mock.calls[1]?.[0]).toEqual(send.mock.calls[0]?.[0]);
     expect(find(client, first.messageId)?.state).toBe("settled");
+    expect(client.getState().messageErrors).toEqual({});
+  });
+
+  it("reports acceptance when the host's copy arrives before a transport failure", async () => {
+    const host = tail();
+    const call = deferred<void>();
+    const send = vi.fn<Send>(() => call.promise);
+    const client = createChatClient({ transport: { send, observe: host.observe } });
+    client.attach();
+    const pending = client.send("Hello");
+    const input = send.mock.calls[0]?.[0];
+    if (!input) throw new Error("The send did not start.");
+    host.latest().push(put(user("m1", input.text, input.clientId)));
+    await flush();
+    call.reject(new Error("Lost acknowledgement"));
+    expect(await pending).toEqual({
+      ok: true,
+      outcome: "accepted",
+      messageId: input.clientId,
+    });
     expect(client.getState().messageErrors).toEqual({});
   });
 
@@ -790,7 +815,7 @@ describe("sending", () => {
     const client = createChatClient({ transport: { send, observe: host.observe } });
     client.attach();
     await flush();
-    expect((await client.send("Hi")).ok).toBe(true);
+    expect(await client.send("Hi")).toMatchObject({ ok: true, outcome: "accepted" });
     await flush();
     expect(client.getState()).toMatchObject({ status: "ready", canSend: true });
     expect(host.opened).toHaveLength(1);
@@ -851,7 +876,7 @@ describe("stopping", () => {
     expect(client.getState()).toMatchObject({ status: "ready", run: { status: "stopped" } });
     // Some transports ignore abort while waiting for headers. Their reply cannot revive the run.
     call.resolve({ events: new Feed().push(...writingRun()).end() });
-    await pending;
+    expect(await pending).toMatchObject({ ok: true, outcome: "unknown" });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(client.getState()).toMatchObject({ status: "ready", run: { status: "stopped" } });
     expect(find(client, "a1")).toBeUndefined();

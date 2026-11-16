@@ -184,11 +184,11 @@ export interface ChatState {
 
 export type CommandResult = { ok: true } | { ok: false; error: DisplayError };
 
-/** `ok` means the message is in the conversation: taken by the host, or kept with an unknown
- * outcome (see `messageErrors`). Otherwise it is not, and `input` is what was taken back, so its
- * text can go back to the person. */
+/** `ok` means the message stays in the conversation, not that delivery is confirmed. Clear
+ * a submitted draft only when `outcome` is `accepted`. An `unknown` outcome stays visible while
+ * observation checks the host. Otherwise `input` is what was taken back, so the draft can keep it. */
 export type SendResult =
-  | { ok: true; messageId: string }
+  | { ok: true; messageId: string; outcome: "accepted" | "unknown" }
   | { ok: false; error: DisplayError; input?: SendInput };
 
 /** How the client reattaches when a stream ends or fails while a run is going. */
@@ -844,7 +844,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       commands.delete(controller);
       // The host's own copy arrived while the call was out: it has the message, whatever the call
       // says.
-      if (sends.get(id) !== entry) return { ok: true, messageId: id };
+      if (sends.get(id) !== entry) return { ok: true, messageId: id, outcome: "accepted" };
       if (error instanceof TransportError && error.outcome === "refused") {
         sends.delete(id);
         view = { ...view, messages: view.messages.filter((message) => message.id !== id) };
@@ -855,12 +855,13 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       entry.phase = "unconfirmed";
       now();
       if (latestCommand === controller && !controller.signal.aborted) watch();
-      return { ok: true, messageId: id };
+      return { ok: true, messageId: id, outcome: "unknown" };
     }
     if (sends.get(id) === entry && !controller.signal.aborted) entry.phase = "accepted";
     accepted(before, reply, controller);
     now();
-    return { ok: true, messageId: id };
+    const outcome = sends.get(id) === entry && entry.phase !== "accepted" ? "unknown" : "accepted";
+    return { ok: true, messageId: id, outcome };
   }
 
   async function retry(messageId: string): Promise<SendResult> {
