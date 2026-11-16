@@ -72,7 +72,7 @@ function clientPart(part: InputPart): InputPart {
 /** A user turn with each part rebuilt from the fields core reads. A blank text part is
  * dropped: providers refuse an empty text block, and a composer often sends one beside an
  * attachment. Nothing left is an error. */
-function readContent(value: unknown, what: string): UserContent {
+export function readContent(value: unknown, what: string): UserContent {
   const empty = `${what} needs some text, an image or a file.`;
   if (typeof value === "string") {
     if (!value.trim()) throw new TypeError(empty);
@@ -239,8 +239,17 @@ export function repairConversation(
  * keeps unfinished work, and a provider refuses a call without its result. */
 export function conversationOf(snapshot: RunSnapshot): AgentMessage[] {
   const messages: AgentMessage[] = [...snapshot.history, { role: "user", content: snapshot.input }];
-  for (const model of snapshot.models) {
-    if (model.status !== "completed" || model.tools.some((tool) => tool.status !== "completed"))
+  for (let position = 0; position <= snapshot.models.length; position++) {
+    // Steering joins only between whole rounds. Its saved position survives attempts and
+    // preserves the exact prefix even when the host later offers more input.
+    for (const input of snapshot.inputs)
+      if (input.beforeModel === position) messages.push({ role: "user", content: input.content });
+    const model = snapshot.models[position];
+    if (
+      !model ||
+      model.status !== "completed" ||
+      model.tools.some((tool) => tool.status !== "completed")
+    )
       break;
     messages.push(model.turn.message);
     for (const [index, tool] of model.tools.entries()) {

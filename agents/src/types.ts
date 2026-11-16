@@ -16,6 +16,8 @@ import type {
 } from "@providerkit/core";
 
 import type { ClientTool } from "./request.ts";
+import type { InputInbox, InputReceipt, RunInput } from "./steering.ts";
+import type { Handoff } from "./handoff.ts";
 import type {
   AGENT_RUNTIME,
   AgentRuntime,
@@ -186,8 +188,9 @@ export interface AgentConfig {
   modelSettings?: ModelSettings;
   /** Opt in before starting a run. Never retries a settled failure or an unknown write. */
   recovery?: RecoveryPolicy;
-  /** Core tools or delegation descriptors. A host terminal tool must be called alone. */
-  tools?: readonly (Tool | Delegation | ClientTool)[];
+  /** Core tools, client tools, delegations or text-only handoffs. Terminal tools and handoffs
+   * must be called alone. */
+  tools?: readonly (Tool | Delegation | ClientTool | Handoff)[];
   /** A host policy or allow-list. A run may narrow this list, never widen it. The reserved
    * submit_result tool stays available when there is an output contract. */
   enabledTools?: EnabledTools;
@@ -328,6 +331,9 @@ export interface ChildRequest extends ChildEnvelope {
  * Data passed to callbacks is a frozen copy, not the loop's live state. Without checkpoint,
  * execution is in-memory only. Checkpoints are not leases or exactly-once effect guarantees. */
 export interface AgentHost {
+  /** New user messages for the root's active conversation owner, never every specialist.
+   * A durable host must supply durable authenticated storage. Does not answer human requests. */
+  inbox?: InputInbox;
   /** Persist the whole snapshot before returning. Writes are serialized within this attempt. */
   checkpoint?: (snapshot: RunSnapshot) => void | Promise<void>;
   /** Load/compare authoritative state and check ownership and freshness, or throw.
@@ -476,11 +482,26 @@ export type ModelExecution = {
     }
 );
 
-export interface DelegationExecution {
-  operationId: string;
-  /** Admission order is the deterministic join/approval order. Receipts are never removed. */
-  children: (ChildEnvelope & { key: string })[];
+export interface AgentRef {
+  id: string;
+  version: string;
 }
+
+/** A server-side receipt. The note is model-written context, never authority. */
+export interface HandoffReceipt {
+  operationId: string;
+  runId: string;
+  childRunId: string;
+  from: AgentRef;
+  to: AgentRef;
+  note?: string;
+}
+
+export type DelegationExecution = {
+  operationId: string;
+  /** Admission order is the deterministic join/request order. Receipts are never removed. */
+  children: (ChildEnvelope & { key: string })[];
+} & ({ kind: "delegation" } | { kind: "handoff"; target: AgentRef; note?: string });
 
 /** JSON-serializable execution journal. Contains private prompts, arguments and results;
  * the host owns storage, access and retention. Never accept it as proof of permission, and
@@ -499,6 +520,8 @@ export interface RunSnapshot {
   history: AgentMessage[];
   /** The new user turn. */
   input: UserContent;
+  /** Accepted user messages, in order at safe model boundaries. Never replaces frozen input. */
+  inputs: RunInput[];
   /** The session the history came from, and the revision a settled run appends after. */
   session?: { id: string; revision: string | null };
   limits: RunLimits;
@@ -523,7 +546,7 @@ export type OperationReceipt =
       source?: Turn["source"];
     }
   | {
-      kind: "tool" | "delegation";
+      kind: "tool" | "delegation" | "handoff";
       id: string;
       callId: string;
       attemptId: string;
@@ -537,13 +560,19 @@ interface RunRecord {
   usage: TokenUsage;
   /** This run and all descendants, deduplicated by stable model receipt IDs. */
   treeUsage: TokenUsage;
-  /** The history, the new turn and whole settled rounds, without the system prompt. An
-   * unfinished tool round remains in snapshot.models. Server-side: pass it through
-   * toClientMessages before it reaches a browser. */
+  /** The last admitted agent on this run's handoff chain. Delegated specialists do not change
+   * their parent's conversation owner. Route the next turn by both id and version. */
+  activeAgent: AgentRef;
+  handoffs: HandoffReceipt[];
+  /** The active agent's settled conversation, without its system prompt. May contain an
+   * SDK-written transfer note, not a person's message. Server-only, not a display transcript. */
   history: AgentMessage[];
-  /** The new turn and this run's settled rounds: what a session appends. */
+  /** The original new turn and settled rounds along its handoff chain. Excludes transferred
+   * history and synthetic transfer inputs, so session append never duplicates earlier turns. */
   newMessages: AgentMessage[];
   receipts: OperationReceipt[];
+  /** Input delivery receipts. Queued messages still held by the host are not in the journal. */
+  inputs: InputReceipt[];
   snapshot: RunSnapshot;
   /** Present when the run has a session. An append that failed never changes the run's own
    * status. */
@@ -560,6 +589,11 @@ export type RunOutcome<T = string> = RunRecord &
   );
 
 export type AgentEvent =
+  /** Best-effort delivery update without the input's content. The snapshot is authoritative. */
+  | { type: "input"; receipt: InputReceipt }
+  /** Sent before the target's progress, also on resume. Upsert by operationId. Raw events
+   * remain server-only; project only the identities and labels your viewer may see. */
+  | ({ type: "handoff"; attemptId: string } & HandoffReceipt)
   /** Replace the interrupted attempt's partial display, do not append to it. Saved attempts
    * are authoritative if this best-effort event is missed. */
   | {

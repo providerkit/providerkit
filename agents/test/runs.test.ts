@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createRuns } from "@gusnips/server/runs";
 import { defineTool, type ChatMessage, type Provider, type ProviderChunk } from "@providerkit/core";
 import {
+  createMemoryInbox,
   createMemorySession,
   defineAgent,
   defineDelegation,
@@ -329,6 +330,96 @@ async function counts(task: string) {
 }
 
 describe("background binding on local Postgres", () => {
+  it("passes the authenticated host inbox through and saves inputs before acknowledgement", async () => {
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const histories: ChatMessage[][] = [];
+    const agent = defineAgent({
+      ...base,
+      tools: [
+        defineTool({
+          name: "read",
+          description: "Read",
+          inputSchema: { type: "object" },
+          run: async () => "read",
+        }),
+      ],
+      provider: {
+        id: "inbox",
+        model: "fake",
+        async *createStream(history) {
+          histories.push(structuredClone(history));
+          if (histories.length === 1) {
+            started.resolve();
+            await release.promise;
+            yield call("read");
+          } else yield answer("done");
+        },
+      },
+    });
+    const acknowledgements: string[] = [];
+    const enqueue = vi.fn(async (_id: string) => {});
+    const background = createBackgroundAgent({
+      agent,
+      kind: "inbox",
+      runs,
+      enqueue,
+      policy(context) {
+        expect(context.owner).toBe("alice");
+        return {
+          ...closedPolicy(context),
+          inbox: {
+            poll(request) {
+              return inbox.poll(request);
+            },
+            async acknowledge(receipts, options) {
+              const row = await runs.read(context.segmentId, context.owner);
+              const checkpoint = agent[AGENT_RUNTIME].restore(row?.checkpoint);
+              expect(checkpoint.inputs).toEqual([
+                { id: "steer", content: "Use short sentences", beforeModel: 1 },
+              ]);
+              expect(checkpoint.runId).toBe(receipts[0]?.rootRunId);
+              if (receipts[0]?.status === "consumed")
+                expect(checkpoint.models[1]?.status).toBe("completed");
+              acknowledgements.push(receipts[0]?.status ?? "missing");
+              inbox.acknowledge(receipts, options);
+            },
+          },
+        };
+      },
+    });
+    const { id } = await background.start("alice", "First");
+    const logical = (await background.read("alice", id)).snapshot.runId;
+    const inbox = createMemoryInbox(logical);
+    const driving = runs.drive(id, background.handlers);
+    try {
+      await Promise.race([
+        started.promise,
+        driving.then((status) => {
+          throw new Error(`Worker ended early: ${status}`);
+        }),
+      ]);
+      inbox.enqueue({ id: "steer", content: "Use short sentences" });
+      release.resolve();
+      expect(await driving).toBe("succeeded");
+      const result = await background.read("alice", id);
+      expect(result.outcome).toMatchObject({
+        status: "completed",
+        inputs: [{ id: "steer", status: "consumed", runId: logical }],
+      });
+      expect(acknowledgements).toEqual(["accepted", "consumed"]);
+      expect(histories[1]?.at(-1)).toEqual({ role: "user", content: "Use short sentences" });
+      inbox.enqueue({ id: "late", content: "Keep for the next run" });
+      expect(inbox.list()[1]?.status).toBe("queued");
+      expect(enqueue).toHaveBeenCalledExactlyOnceWith(id);
+      expect(await runs.drive(id, background.handlers)).toBe("skipped");
+      expect(histories).toHaveLength(2);
+    } finally {
+      release.resolve();
+      await driving;
+    }
+  });
+
   it("refuses remote database URLs and URL overrides", () => {
     expect(() => localDatabase("postgresql://postgres@example.com/providerkit_agents")).toThrow(
       /loopback/,

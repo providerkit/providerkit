@@ -1,5 +1,6 @@
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
 import { RequestJournal } from "./request.ts";
+import { handoffRef, type Handoff } from "./handoff.ts";
 import { conversationOf, inputOf, readInput } from "./input.ts";
 import {
   checkChildProgress,
@@ -40,6 +41,8 @@ export interface RunStart {
 
 /** @internal */
 export interface AgentRuntime<T> {
+  readonly outputKind: "text" | "checked";
+  readonly handoffs: readonly Handoff[];
   /** A new root run's snapshot: the input normalized, the session read once and the history
    * prepared, repaired and frozen, before anything is saved. */
   open(input: AgentInput, options: RunOptions, runId: string): Promise<RunSnapshot>;
@@ -337,6 +340,17 @@ export async function executeDelegation(
         await scope.tree.save();
         active();
         const step = { operationId: journal.operationId, key, runId: saved.snapshot.runId };
+        if (journal.kind === "handoff")
+          emitEvent(options, {
+            type: "handoff",
+            runId: parent.runId,
+            attemptId: parent.attemptId,
+            operationId: journal.operationId,
+            childRunId: saved.snapshot.runId,
+            from: handoffRef(parent),
+            to: journal.target,
+            ...(journal.note !== undefined ? { note: journal.note } : {}),
+          });
         let execution: Promise<ChildEnvelope> | undefined;
         let hookOpen = true;
         let executionSettled = false;

@@ -50,7 +50,7 @@ export interface BackgroundPolicy
     Required<
       Pick<AgentHost, "authorizeResume" | "prepareRequest" | "resolveRequest" | "beforeTool">
     >,
-    Pick<AgentHost, "canRunConcurrently" | "needsApproval" | "answerNow"> {
+    Pick<AgentHost, "canRunConcurrently" | "needsApproval" | "answerNow" | "inbox"> {
   /** Worker-only values for tools, such as the authenticated actor or a database handle.
    * Never serialized. The SDK supplies reserved operation IDs and cancellation signals. */
   context?: RunOptions["context"];
@@ -293,6 +293,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       ...(trusted.answerNow ? { answerNow: trusted.answerNow } : {}),
       canRunConcurrently: (request) => trusted.canRunConcurrently?.(request) === true,
       ...(trusted.loadMedia ? { loadMedia: trusted.loadMedia } : {}),
+      ...(trusted.inbox ? { inbox: trusted.inbox } : {}),
       async checkpoint(saved) {
         run.signal.throwIfAborted();
         await run.save(saved);

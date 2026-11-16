@@ -6,8 +6,20 @@ block has a short comment that names its source. Their copyright notices and lic
 ## TanStack AI
 
 - Source: [TanStack/ai](https://github.com/TanStack/ai/tree/1888233ddb501d14b17aa9a5f3497373a0e9242e),
-  `packages/ai-harness/src/inline-media.ts`, `packages/ai-harness/src/media.ts` and
+  `packages/ai-harness/src/inline-media.ts`, `packages/ai-harness/src/media.ts`,
+  `packages/ai-harness/src/handoff.ts`, `packages/ai-harness/src/log-records.ts`,
+  `packages/ai-harness/src/session/turn-parts.ts` (`steering` and `joinSteers`) and
   `packages/ai/src/interrupt-serialization.ts`.
+- Used in: `src/steering.ts`, joining queued user messages before a model call, in order,
+  committing them before removing them from pending delivery, and excluding delegated children.
+  Changed: a bounded host inbox supplies immutable ids; the existing execution journal records
+  positions before idempotent acknowledgement. A completed model receipt confirms consumption.
+  Unconsumed messages stay with the host, with no automatic follow-up run. `src/input.ts` folds
+  these positions between whole tool rounds; `test/steering.test.ts` checks admission and recovery.
+- Used in: `src/handoff.ts`, a transfer notice appended after existing history, fixed-target
+  guards and the active-agent fold. `test/handoff.test.ts` carries the transfer, self-target,
+  conflict and resume cases. Changed: every transfer is a journaled child with shared budgets;
+  only a root's own handoff chain changes its conversation owner, and notes use JSON quoting.
 - Used in: `src/request.ts`, canonical JSON ordering for request definition hashes. Our JSON
   validator checks values first; Web Crypto supplies SHA-256 instead of a copied hash function.
 - Used in: `src/snapshot.ts`, the base64 check and the byte count read from its length;
@@ -44,8 +56,14 @@ SOFTWARE.
 
 - Source: [openai/openai-agents-js](https://github.com/openai/openai-agents-js/tree/8aeac0eb255dbdff9adcdc65a0eae638cbcea74f),
   `packages/agents-core/src/memory/memorySession.ts`, `packages/agents-core/src/agent.ts`,
-  `packages/agents-core/src/tool.ts`, `packages/agents-core/src/runner/modelSettings.ts` and
-  `packages/agents-core/src/runner/toolExecution.ts`.
+  `packages/agents-core/src/tool.ts`, `packages/agents-core/src/runner/modelSettings.ts`,
+  `packages/agents-core/src/runner/toolExecution.ts`, `packages/agents-core/src/handoff.ts`,
+  `packages/agents-core/src/extensions/handoffFilters.ts` and `packages/agents-core/src/runState.ts`.
+- Used in: `src/handoff.ts`, the history-filter context, removal of tools and reasoning, and the
+  duplicate-agent identity check. Changed: assistant text survives without its private fields;
+  target identity is saved before approval; checked output is not supported across handoffs.
+  `test/handoff.test.ts` checks history filtering, next-turn routing, interrupted transfer reuse
+  and cancellation before admission.
 - Used in: `src/session.ts`, `createMemorySession`: a run id that already appended the same turn
   succeeds without writing it again, and the same run id with another turn fails.
 - Used in: `src/types.ts` and `src/run.ts`, dynamic instructions, enabled tools, resetting a

@@ -288,6 +288,113 @@ your own store, implement `Session` (`load` and `append`) and check it with
 `await checkSession(() => createTestSession())`. It writes to fresh sessions, so point it at a
 test database.
 
+### Send messages while a run works
+
+Add a correction or more context without interrupting the current call:
+
+```ts
+inbox.enqueue({ id: "correction-1", content: "Use short sentences." });
+```
+
+For a process-local run, create its inbox before starting:
+
+```ts
+import { createMemoryInbox } from "@providerkit/agents";
+
+const runId = crypto.randomUUID();
+const inbox = createMemoryInbox(runId);
+const work = writer.run("Explain database indexes.", { runId, host: { inbox } });
+
+inbox.enqueue({ id: "correction-1", content: "Use short sentences." });
+const result = await work;
+const deliveries = inbox.list();
+```
+
+The host must authenticate the person sending the message. `createMemoryInbox` does not check
+access and loses everything when the process ends. It is a reference helper, not a background
+queue. Keep it on the server; never put the agent or a provider key in the browser.
+
+New input joins before the next model call, after the previous model and all its tools finish.
+It cannot replace history, instructions, tools, permissions or the conversation owner. It uses
+the same text and media validation as a new user turn. Inline attachments count toward the
+agent's existing `inlineBytes` limit; media references still use `host.loadMedia`.
+
+The root receives these messages until a handoff admits its target. Then that target receives
+them. Delegated specialists, including their own handoff targets, never poll the root's inbox.
+The callback gets explicit root and owner identities; it does not parse ids to find an owner.
+
+An executing model or tool keeps working with its original input. The SDK does not cancel or
+replay it to insert a correction. A waiting approval, question or client tool still needs its
+explicit request-keyed answer. Writing "approve", "deny" or "stop" in a message does none of
+those things. Waiting does not extend the run's original time or call budgets.
+
+Delivery has three states:
+
+| State      | Meaning                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------ |
+| `queued`   | The host has it. The run has not saved it yet.                                                         |
+| `accepted` | The run saved the content and its position before a model call. Consumption is not confirmed.          |
+| `consumed` | A model call containing the message completed and was saved. This does not mean the model followed it. |
+
+A running or interrupted call may already have read an accepted message and incurred a charge.
+The SDK cannot prove that until it saves the completed call. `result.inputs` contains delivery
+receipts for recorded inputs, with their root run, receiving run, model position and completed
+attempt when known. Best-effort `input` events report the same receipts without content. Missed
+events do not change the journal. Without `host.checkpoint`, these states describe only the
+in-memory journal, not durable storage. `snapshot.inputs` holds the private content and its position
+on each receiving node. `history` and `newMessages` include it in order, without splitting tool
+calls from results. Session append keeps its original run id and revision, including on resume
+and through handoffs, so a message is not appended twice.
+
+A final answer can win the race with enqueue. Messages arriving after the last poll stay
+`queued`; accepted messages whose call never completed stay unconfirmed. Keep both kinds for
+explicit recall or a new run. Do not display them as read, discard them on completion or start
+another paid run automatically. After the run settles, `inbox.list()` lets the host offer their
+content back to the person. Reconcile any interrupted call before sending it again. An accepted
+message may already be in the session: use the saved history rather than appending that same
+message a second time.
+
+### Implement a durable inbox
+
+Supply `AgentHost.inbox`, an `InputInbox`, from trusted server code:
+
+- `poll({ rootRunId, runId, agent, limit, signal })` returns a non-destructive, oldest-first
+  prefix of `{ id, content }` records. Return promptly, without waiting for new messages. Respect
+  the requested count and UTF-8 JSON byte limit. Keep offered records available and immutable
+  until acknowledgement. Never silently truncate or rewrite a message to make it fit.
+- `acknowledge(receipts, { signal })` records delivery idempotently. Repeating a receipt succeeds
+  without another effect. An accepted receipt can become consumed, never the reverse. A known id
+  with a different receiving run or model position is a conflict. Keep unconsumed content.
+
+Persist an input before acknowledging enqueue to the app. The id is stable within its logical
+root run, at most 256 characters. Use opaque ids, not message text; progress events include them.
+Repeating the same normalized content returns its existing
+status; changed content under that id must fail. Use a new id for a new message. The memory
+helper throws `InputConflictError` for these conflicts.
+
+The SDK checkpoints accepted content and its model position **before** acknowledging delivery,
+then starts the model call. A crash before that save leaves it queued. A crash after save but
+before acknowledgement repeats the acknowledgement from the journal. Resume uses the saved
+content, not a new value from the inbox. Consumed acknowledgement follows the completed model
+checkpoint. Host poll or acknowledgement errors stop execution, without an automatic resend.
+Reconcile the inbox with authoritative saved state before recalling messages after such an error.
+
+`INPUT_LIMITS` bounds a logical run and its handoff chain: 32 pending messages per poll, 128
+accepted messages in total and 5,000,000 UTF-8 JSON bytes across normalized `{ id, content }`
+records. Hosts must also bound pending storage at enqueue. The memory helper enforces those
+ceilings and retains all entries, including consumed ones, for deduplication. When the run has
+no remaining input budget, further messages stay with the host. Large attachments belong behind
+media references. These bounds do not grant extra model turns.
+
+For `createBackgroundAgent`, supply the durable inbox through `policy(...).inbox`. Bind it to
+the authenticated owner and stored logical `snapshot.runId`, not the physical worker segment:
+an approval continuation has a new segment but the same logical input ids. Poll includes that
+logical id and the active receiving agent. Check access and fence writes under the host's run
+lease. The SDK does not supply an enqueue HTTP route, inbox tables or a queue service. The
+existing injected `runs.create` and commit-before-enqueue boundary are unchanged; enqueuing a
+message must not call `start` or `resume`. An app's delivery endpoint and UI must distinguish
+queued, accepted and consumed messages, and expose recall without automatic resend.
+
 ### Edit or regenerate a turn
 
 Send the conversation up to the user turn whose answer you want again:
@@ -381,7 +488,8 @@ const editor = defineAgent({
 ```
 
 The specialist gets only the input sent to it, not the parent's conversation. Its result returns
-to the orchestrator; this is not a conversation handoff. Each agent can use a different core provider.
+to the orchestrator; this is not a conversation handoff. Use `defineHandoff`, below, when the target
+should answer the person directly. Each agent can use a different core provider.
 `asTool` returns a failed tool result for a specialist's own turn, tool-call, time or output
 limit, or a known model/result failure. The parent can answer using its other results. Core
 `ProviderError` failures and the SDK's `model_failed`, `invalid_model_output`, `content_filtered`,
@@ -426,6 +534,121 @@ input, history or agent is refused. Every admitted child settles before the dele
 A child key becomes part of the child's run ID and of every operation ID under it. Progress events
 carry those IDs, and a screen that shows the run may send them to a browser. So key children by
 position or by a fixed name, such as `topic-1`, and never by their input.
+
+## Hand off a conversation
+
+A handoff lets another agent answer the person. The source makes no further model call after the
+target starts. For example, a help agent can transfer an invoice question to a billing agent:
+
+```ts
+const result = await help.run("Why was I charged twice?");
+```
+
+Register one fixed target per handoff tool:
+
+```ts
+import { defineAgent, defineHandoff } from "@providerkit/agents";
+
+const help = defineAgent({
+  id: "help",
+  version: "1",
+  instructions: "For billing questions, call transfer_to_billing alone and stop.",
+  provider,
+  tools: [
+    defineHandoff({
+      name: "transfer_to_billing",
+      description: "Let billing answer a question about an invoice or charge.",
+      to: billing,
+    }),
+  ],
+});
+```
+
+The model can pass `{ note: "Background for billing" }` or `{}`. It cannot choose an agent name,
+add tools or grant access. The note is quoted background in a user-role transfer message, never
+a system instruction or permission. `beforeTool` and the request journal still control actions.
+The target resolves its own instructions, provider settings and enabled tools once. It does not
+inherit source overrides. Both agents must use plain text output: an `output` contract on the
+source is refused at definition; one on the target is refused before admission, even when its
+validator returns a string. Checked-output agents can still use ordinary delegation. Handoff
+does not promise a union of unrelated output types.
+
+A handoff must be the only call in its model turn. Mixed calls, two transfers, a self target,
+a missing target or conflicting definitions for one target id produce tool feedback. Other
+calls in a mixed turn still settle or ask for approval. The model can then request a lone
+handoff. Each admitted target uses the existing child host hook, shared leases and limits. Each
+hop consumes one child and one depth level, so cycles stop at the configured tree limit. Waiting
+for replies does not reset any deadline or model budget.
+
+### Choose what the target reads
+
+`history` on `defineHandoff` controls transfer:
+
+- `"conversation"` (default) keeps user messages and non-empty assistant text. It removes tool
+  calls, results, private reasoning and provider-owned fields.
+- `"full"` keeps the settled conversation, including tool rounds and provider-private fields.
+  Use it only with trusted history and compatible providers.
+- A pure function receives `{ from, to, messages, note? }` and returns the messages to transfer.
+  Its input is frozen. It cannot insert a system message. The SDK validates its result like a
+  trusted child input, then saves it with that child.
+
+Every mode excludes the source system prompt and the current unfinished handoff round. The
+SDK appends its transfer message after the selected history. Media references remain references;
+`host.loadMedia` still checks access. The filter is not called again for a saved child. As with
+other creation callbacks, a crash before the first child checkpoint can call it again.
+
+`conversationOnly(messages)` exports the default filter for host-directed routing. It is a
+model-input filter, not a browser display policy.
+
+### Continue or resume
+
+Every outcome returns `activeAgent: { id, version }` and ordered `handoffs` receipts. The last
+admitted target owns the next turn, even when it failed or is waiting for replies. A handoff
+inside a delegated specialist changes that child's owner only, not the root's owner.
+
+For a **new turn**, the host picks the registered agent by both identity fields:
+
+```ts
+const nextAgent = agents.find(
+  (agent) => agent.id === result.activeAgent.id && agent.version === result.activeAgent.version,
+);
+if (!nextAgent) {
+  throw new Error("Restore the saved agent version before continuing this conversation.");
+}
+await nextAgent.run({
+  messages: [...result.history, { role: "user", content: "Which invoice was that?" }],
+});
+```
+
+`history` is the active agent's settled conversation, including the SDK's transfer message. It
+is server data, not a display transcript. `newMessages` retains the original new turn and settled
+rounds along the handoff chain, without copied history or synthetic transfer inputs. A session
+appends those messages under the original run id and revision, once. Sessions do not store the
+active agent: save that identity in your host. When routing a new session turn to another agent,
+choose a history policy explicitly, such as `prepareHistory: conversationOnly`.
+
+For a **waiting or interrupted run**, resume the agent that started it, using its original
+snapshot and the normal `answers` map. Requests from every target retain their exact call and
+child path. Partial replies preserve the remaining requests and completed work. An approved
+transfer does not approve any target tool. A host may allow edits to the note before the target
+starts. Changing it after admission fails with `handoff_input_changed`; reconcile the saved run
+before starting different work. Denying a renewed transfer approval after its target
+started stops that conversation; it cannot undo completed actions or return to a source model
+turn. A saved completed target is reused, never called again. Safe recovery remains opt-in;
+configured hosted tools still block interrupted model replay.
+
+For cycles, `to: () => billing` lets two definitions reference each other. Keep this function
+pure. It resolves once per handoff descriptor. After a restart, a different target id or version
+is refused, including while the transfer itself waits for approval. Bump the source version when
+its registered handoffs or history policy change.
+
+Each journal entry has `kind: "delegation" | "handoff"`; a handoff also records `target` and its
+optional note. Child snapshots stay at `delegations[].children[].snapshot`. Saved delegation
+entries without `kind` are refused. Operation receipts also distinguish `"handoff"`. A
+`handoff` event names `runId`, `operationId`, `childRunId`, `from` and `to` before target progress;
+it also carries `attemptId` and the optional note. It repeats on target resume, so upsert by
+operation id. Snapshots and receipts remain authoritative if an event is missed. Do not forward
+raw histories, notes or events to a browser. Project only approved identities, labels and content.
 
 ## Limits and usage
 
@@ -659,7 +882,7 @@ provide that guarantee across a restart.
 Snapshots and raw events hold private prompts, arguments and answers. Keep them on the server
 and build an allowlisted display view. Question text and choices may come from the model: treat
 them as untrusted display content. Snapshot format 3 includes resolved recovery policy and
-per-operation attempt histories.
+per-operation attempt histories, and an `inputs` journal on every node.
 Older formats, earlier format-3 shapes without those fields and the old single-approval state are
 refused, not converted.
 
@@ -775,17 +998,23 @@ bun run test test/recovery.test.ts
 bun run test test/lifecycle.test.ts
 bunx vitest run test/definition.test.ts
 bunx vitest run test/delegation.test.ts
+bunx vitest run test/handoff.test.ts
+bunx vitest run test/steering.test.ts
 bunx vitest run test/input.test.ts
 bunx vitest run test/session.test.ts
 bun examples/basic.ts
 bun examples/specialists.ts
 bun examples/conversation.ts
+bun examples/handoff.ts
+bun examples/steering.ts
 ```
 
 These checks and examples use fake providers and tools. They do not call a live model or any app.
 The basic example runs a model/tool round. The specialist example runs a manager with two children
 and returns their notes in order. The conversation example runs two turns on a session, one with
-a picture sent by reference. None needs an API key.
+a picture sent by reference. The handoff example transfers an invoice question, then routes the
+next turn to the returned active agent. The steering example adds a message while a tool works
+and retains a message sent too late for the model to read. None needs an API key.
 
 The background integration file needs a disposable local PostgreSQL database named
 `providerkit_agents`. It creates and drops its own schema and starts worker processes that it

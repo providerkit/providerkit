@@ -117,10 +117,12 @@ function observer() {
 /** The run that reported an event. A child event is its parent speaking. */
 function reporter(event: AgentEvent): string {
   if (event.type === "child") return event.parentRunId;
+  if (event.type === "input") return event.receipt.runId;
   if (event.type === "decision") return "decision";
   if (event.type === "request") return event.request.call.runId;
   return event.type === "model_chunk" ||
     event.type === "state" ||
+    event.type === "handoff" ||
     event.type === "operation_restart"
     ? event.runId
     : event.request.runId;

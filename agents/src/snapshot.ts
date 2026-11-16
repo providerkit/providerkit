@@ -11,6 +11,7 @@ import {
   type ToolCall,
   type Turn,
 } from "@providerkit/core";
+import { INPUT_LIMITS, inputBytes, readQueuedInput, type RunInput } from "./steering.ts";
 import { isRecoveryDefinition } from "./recovery.ts";
 import { checkDecision, isAsk } from "./request.ts";
 import type {
@@ -511,6 +512,13 @@ export function checkOptions(
     );
   if (value.host !== undefined) {
     if (!isRecord(value.host)) throw new TypeError("The run host must be an object.");
+    if (
+      value.host.inbox !== undefined &&
+      (!isRecord(value.host.inbox) ||
+        typeof value.host.inbox.poll !== "function" ||
+        typeof value.host.inbox.acknowledge !== "function")
+    )
+      throw new TypeError("host.inbox needs poll and acknowledge functions.");
     for (const key of [
       "checkpoint",
       "authorizeResume",
@@ -748,6 +756,13 @@ function isDelegationJournal(value: unknown): value is DelegationExecution {
   return (
     isRecord(value) &&
     isId(value.operationId) &&
+    (value.kind === "delegation"
+      ? value.target === undefined && value.note === undefined
+      : value.kind === "handoff" &&
+        isRecord(value.target) &&
+        isId(value.target.id) &&
+        isId(value.target.version) &&
+        optional(value.note, (note) => typeof note === "string")) &&
     Array.isArray(value.children) &&
     value.children.every(
       (child) =>
@@ -757,6 +772,19 @@ function isDelegationJournal(value: unknown): value is DelegationExecution {
         isSnapshot(child.snapshot),
     )
   );
+}
+
+function isRunInput(value: unknown): value is RunInput {
+  if (!isRecord(value) || !finite(value.beforeModel) || !Number.isSafeInteger(value.beforeModel))
+    return false;
+  try {
+    return equalData(
+      value.content,
+      readQueuedInput({ id: value.id, content: value.content }).content,
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Format 3 only. A format 2 snapshot from 0.1.0 has no reader: it is refused, not migrated. */
@@ -770,6 +798,8 @@ function isSnapshot(value: unknown): value is RunSnapshot {
     Array.isArray(value.history) &&
     value.history.every(isAgentMessage) &&
     isTurnContent(value.input) &&
+    Array.isArray(value.inputs) &&
+    value.inputs.every(isRunInput) &&
     optional(value.session, isSessionRef) &&
     isLimits(value.limits) &&
     Array.isArray(value.models) &&
@@ -800,7 +830,21 @@ export function childRunId(operationId: string, key: string): string {
 export function checkTree(root: RunSnapshot): void {
   let children = 0;
   let models = 0;
-  function visit(node: RunSnapshot, depth: number, path: ChildPathStep[]): void {
+  const inputIds = new Set<string>();
+  let inputSize = 0;
+  function visit(
+    node: RunSnapshot,
+    depth: number,
+    path: ChildPathStep[],
+    conversation: boolean,
+  ): void {
+    if (!conversation && node.inputs.length)
+      throw new TypeError("A delegated specialist cannot receive the root conversation's inbox.");
+    for (const input of node.inputs) {
+      if (inputIds.has(input.id)) throw new TypeError("Duplicate input id in the run tree.");
+      inputIds.add(input.id);
+      inputSize += inputBytes(input);
+    }
     if (!equalData(node.tree, root.tree) || node.startedAt < root.tree.startedAt)
       throw new TypeError("The child belongs to a different tree or deadline.");
     if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
@@ -816,6 +860,31 @@ export function checkTree(root: RunSnapshot): void {
         .find((tool) => tool.id === journal.operationId);
       if (!tool || (tool.status !== "delegating" && tool.status !== "completed"))
         throw new TypeError("The delegation journal does not match its tool call.");
+      if (journal.kind === "handoff") {
+        const child = journal.children[0];
+        const model = node.models.find(
+          (entry) =>
+            entry.status === "completed" && entry.tools.some((entry) => entry.id === tool.id),
+        );
+        if (
+          journal.target.id === node.agentId ||
+          journal.children.length > 1 ||
+          model?.status !== "completed" ||
+          model.tools.length !== 1 ||
+          (child &&
+            (child.key !== "handoff" ||
+              child.snapshot.session !== undefined ||
+              child.snapshot.agentId !== journal.target.id ||
+              child.snapshot.version !== journal.target.version)) ||
+          (child && model !== node.models.at(-1)) ||
+          (tool.status === "completed" &&
+            tool.result.ok &&
+            child?.snapshot.state.status !== "completed")
+        )
+          throw new TypeError(
+            "The handoff must have one fixed target, one call and no later source turn.",
+          );
+      }
       if (new Set(journal.children.map((child) => child.key)).size !== journal.children.length)
         throw new TypeError("Duplicate child key.");
       for (const child of journal.children) {
@@ -830,10 +899,15 @@ export function checkTree(root: RunSnapshot): void {
         )
           throw new TypeError("A completed delegation cannot contain unfinished children.");
         children++;
-        visit(child.snapshot, depth + 1, [
-          ...path,
-          { operationId: journal.operationId, key: child.key, runId: child.snapshot.runId },
-        ]);
+        visit(
+          child.snapshot,
+          depth + 1,
+          [
+            ...path,
+            { operationId: journal.operationId, key: child.key, runId: child.snapshot.runId },
+          ],
+          conversation && journal.kind === "handoff",
+        );
       }
     }
     for (const model of node.models) {
@@ -855,7 +929,9 @@ export function checkTree(root: RunSnapshot): void {
   }
   if (root.runId === root.tree.runId && root.startedAt !== root.tree.startedAt)
     throw new TypeError("The root start time does not match its tree.");
-  visit(root, 0, []);
+  visit(root, 0, [], true);
+  if (inputIds.size > INPUT_LIMITS.count || inputSize > INPUT_LIMITS.bytes)
+    throw new TypeError("The snapshot exceeds its input count or byte limit.");
   if (children > root.tree.limits.maxChildren || models > root.tree.limits.modelCalls)
     throw new TypeError("The snapshot exceeds its tree limits.");
 }
@@ -898,6 +974,13 @@ export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): vo
     !equalData(previous.tree, next.tree)
   )
     throw new TypeError("The child host returned a different child.");
+  if (
+    previous.inputs.some((input, index) => !equalData(input, next.inputs[index])) ||
+    next.inputs
+      .slice(previous.inputs.length)
+      .some((input) => input.beforeModel < previous.models.length)
+  )
+    throw new TypeError("The child host erased an input or changed an admitted model's input.");
   if (previous.models.length > next.models.length)
     throw new TypeError("The child host dropped saved model receipts.");
   if (
@@ -946,6 +1029,14 @@ export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): vo
     const saved = next.delegations.find((entry) => entry.operationId === journal.operationId);
     if (!saved || saved.children.length < journal.children.length)
       throw new TypeError("The child host dropped a delegation receipt.");
+    if (
+      saved.kind !== journal.kind ||
+      (journal.kind === "handoff" &&
+        (saved.kind !== "handoff" ||
+          !equalData(saved.target, journal.target) ||
+          (journal.children.length > 0 && saved.note !== journal.note)))
+    )
+      throw new TypeError("The child host changed a handoff identity or admitted note.");
     for (const [index, child] of journal.children.entries()) {
       const restored = saved.children[index];
       if (!restored || restored.key !== child.key)
@@ -971,6 +1062,19 @@ export function finalToolResult(
     if (stopAtTools.includes(call.name) && tool.result.final) return tool.result.final;
   }
   return undefined;
+}
+
+/** A successful handoff finishes with its text target's recorded candidate. No cast into the
+ * source contract and no model call to rewrite it. The child is validated by its own runtime. */
+export function finalHandoffResult(
+  snapshot: RunSnapshot,
+  model: Extract<ModelExecution, { status: "completed" }>,
+): { candidate: unknown } | undefined {
+  const tool = model.tools[0];
+  if (model.tools.length !== 1 || tool?.status !== "completed" || !tool.result.ok) return undefined;
+  const journal = snapshot.delegations.find((entry) => entry.operationId === tool.id);
+  const state = journal?.kind === "handoff" ? journal.children[0]?.snapshot.state : undefined;
+  return state?.status === "completed" ? { candidate: state.candidate } : undefined;
 }
 
 /** Validate the journal as well as its fields, so a cursor cannot skip unrecorded work. */
@@ -1110,10 +1214,38 @@ export function readSnapshot(
       throw new TypeError("A finished model turn cannot have later work.");
     }
   }
+  for (const [index, input] of raw.inputs.entries()) {
+    if (
+      input.beforeModel > raw.models.length ||
+      input.beforeModel < (raw.inputs[index - 1]?.beforeModel ?? 0) ||
+      raw.models
+        .slice(0, input.beforeModel)
+        .some(
+          (model) =>
+            model.status !== "completed" ||
+            model.tools.some((tool) => tool.status !== "completed") ||
+            !model.tools.length ||
+            model.turn.finishReason === null ||
+            model.turn.finishReason === "length" ||
+            model.turn.finishReason === "content_filter" ||
+            finalToolResult(model, raw.definition.stopAtTools, resultTool) ||
+            finalHandoffResult(raw, model),
+        )
+    )
+      throw new TypeError(
+        "An input must join before a new model call, after whole non-final rounds.",
+      );
+  }
   if (
     raw.models.length > limits.turns + (resultTool ? 0 : 1) ||
     calls > limits.toolCalls ||
-    inlineBytes(raw.history, raw.input) > limits.inlineBytes
+    inlineBytes(
+      [
+        ...raw.history,
+        ...raw.inputs.map((input) => ({ role: "user" as const, content: input.content })),
+      ],
+      raw.input,
+    ) > limits.inlineBytes
   )
     throw new TypeError("The snapshot exceeds this agent's limits.");
   const last = raw.models.at(-1);
@@ -1128,7 +1260,9 @@ export function readSnapshot(
       throw new TypeError("A completed run must have a completed final turn.");
     }
     const tools = last.turn.message.toolCalls ?? [];
-    const final = finalToolResult(last, raw.definition.stopAtTools, resultTool);
+    const final =
+      (!resultTool && finalHandoffResult(raw, last)) ||
+      finalToolResult(last, raw.definition.stopAtTools, resultTool);
     const candidate = final
       ? final.candidate
       : !resultTool && tools.length === 0 && last.turn.message.content.trim()

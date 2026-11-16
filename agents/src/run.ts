@@ -19,12 +19,21 @@ import {
   type RunStart,
 } from "./delegation.ts";
 import {
+  checkHandoffTargets,
+  handoffDelegation,
+  handoffNote,
+  handoffRecord,
+  handoffRef,
+  isHandoff,
+} from "./handoff.ts";
+import {
   RequestJournal,
   isClientTool,
   isInputRequired,
   requestHash,
   type ClientTool,
 } from "./request.ts";
+import { acknowledgeInputs, acceptInputs, inputReceipts } from "./steering.ts";
 import { modelsUsage, readRecoveryPolicy, recoveryToolHash, requireRecovery } from "./recovery.ts";
 import { conversationOf, readInput, readStored, repairConversation, requestOf } from "./input.ts";
 import {
@@ -47,6 +56,7 @@ import {
   copyData,
   equalData,
   finalToolResult,
+  finalHandoffResult,
   immutableCopy,
   inlineBytes,
   isBase64,
@@ -125,9 +135,7 @@ function recordOf(snapshot: RunSnapshot) {
         });
       if (tool.status === "pending") continue;
       receipts.push({
-        kind: saved.delegations.some((journal) => journal.operationId === tool.id)
-          ? "delegation"
-          : "tool",
+        kind: saved.delegations.find((journal) => journal.operationId === tool.id)?.kind ?? "tool",
         id: tool.id,
         callId: call.id,
         attemptId: tool.attemptId,
@@ -136,7 +144,6 @@ function recordOf(snapshot: RunSnapshot) {
       });
     }
   }
-  const history = conversationOf(saved);
   // A root run replaces this with what its append did. Read from a snapshot alone, whether the
   // session has the turn is not known.
   const session: SessionStatus | undefined = saved.session && {
@@ -149,8 +156,8 @@ function recordOf(snapshot: RunSnapshot) {
     usage,
     treeUsage: treeUsage(saved),
     receipts,
-    history,
-    newMessages: copyData(history.slice(saved.history.length)),
+    inputs: inputReceipts(saved),
+    ...handoffRecord(saved),
     snapshot: saved,
     ...(session ? { session } : {}),
   };
@@ -193,6 +200,12 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     throw new TypeError("An output contract needs an object schema and a runtime validator.");
   }
   const tools = [...(definition.tools ?? [])];
+  // ponytail: text-only transfer avoids claiming that an arbitrary target satisfies the
+  // source's checked output. Typed handoffs need an explicit typed adapter before support.
+  if (output && tools.some(isHandoff))
+    throw new TypeError(
+      "An agent with an output contract cannot offer handoffs. Use delegation instead.",
+    );
   if (
     new Set(tools.map((tool) => tool.name)).size !== tools.length ||
     tools.some((tool) => !isId(tool.name) || tool.name === RESULT_TOOL_NAME)
@@ -206,12 +219,13 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
   const stopAtTools = [...(definition.stopAtTools ?? [])];
   for (const name of stopAtTools) {
     const tool = tools.find((tool) => tool.name === name);
-    if (!tool || isDelegation(tool) || isClientTool(tool))
+    if (!tool || isDelegation(tool) || isHandoff(tool) || isClientTool(tool))
       throw new TypeError("stopAtTools must name ordinary tools registered on this agent.");
   }
   for (const tool of tools)
     if (
       !isDelegation(tool) &&
+      !isHandoff(tool) &&
       !isClientTool(tool) &&
       tool.isTerminal &&
       !stopAtTools.includes(tool.name)
@@ -233,7 +247,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     );
   }
   const registry = new ToolRegistry(
-    tools.filter((tool): tool is Tool => !isDelegation(tool) && !isClientTool(tool)),
+    tools.filter(
+      (tool): tool is Tool => !isDelegation(tool) && !isHandoff(tool) && !isClientTool(tool),
+    ),
   );
   for (const name of recovery?.readOnlyTools ?? [])
     if (!registry.get(name)?.isReadOnly || name === RESULT_TOOL_NAME)
@@ -241,6 +257,23 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         "Recovery readOnlyTools must name ordinary isReadOnly tools registered on this agent.",
       );
   const delegations = new Map(tools.filter(isDelegation).map((tool) => [tool.name, tool]));
+  const handoffs = new Map(tools.filter(isHandoff).map((tool) => [tool.name, tool]));
+
+  function descriptorFor(
+    name: string,
+    snapshot: RunSnapshot,
+    operationId: string,
+  ): Delegation | undefined {
+    const handoff = handoffs.get(name);
+    if (!handoff) return delegations.get(name);
+    const journal = snapshot.delegations.find((entry) => entry.operationId === operationId);
+    if (!journal || journal.kind !== "handoff") return undefined;
+    if (!equalData(journal.target, handoffRef(handoff.target())))
+      throw new TypeError(
+        "The saved handoff target or version changed. Restore the registered target.",
+      );
+    return handoffDelegation(handoff, snapshot, journal);
+  }
   const clients = new Map(tools.filter(isClientTool).map((tool) => [tool.name, tool]));
   const names = tools.map((tool) => tool.name);
   function checkNames(value: unknown): string[] {
@@ -404,11 +437,14 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           definition: tool?.definition() ?? null,
           needsApproval: await needsApproval(call, options, signal),
           kind:
-            tool && isDelegation(tool)
-              ? "delegation"
-              : tool && isClientTool(tool)
-                ? "client"
-                : "tool",
+            tool && isHandoff(tool)
+              ? "handoff"
+              : tool && isDelegation(tool)
+                ? "delegation"
+                : tool && isClientTool(tool)
+                  ? "client"
+                  : "tool",
+          ...(tool && isHandoff(tool) ? { target: handoffRef(tool.target()) } : {}),
           ...(tool && isClientTool(tool) ? { resultSchema: tool.resultSchema } : {}),
         }),
       (decision) => {
@@ -458,7 +494,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           : -1;
       const name =
         model?.status === "completed" ? model.turn.message.toolCalls?.[position]?.name : undefined;
-      const descriptor = name && delegations.get(name);
+      const descriptor = name && descriptorFor(name, snapshot, entry.operationId);
       if (!descriptor) continue;
       for (const child of entry.children) {
         if (
@@ -608,6 +644,10 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           (entry) => entry.operationId === request.operationId,
         );
         for (const child of delegation?.children ?? []) stopRequests(child.snapshot);
+        // Once a target was admitted, it owns this conversation. Denying a renewed transfer
+        // stops that conversation; it cannot buy a new source turn after target effects.
+        if (delegation?.kind === "handoff" && delegation.children.length > 0)
+          snapshot.state = { status: "cancelled" };
       }
       const edited = model.tools[index]?.asks?.some(
         (record) =>
@@ -763,8 +803,29 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     ): Promise<void> {
       let journal = snapshot.delegations.find((entry) => entry.operationId === request.operationId);
       if (!journal) {
-        journal = { operationId: request.operationId, children: [] };
+        journal = { kind: "delegation", operationId: request.operationId, children: [] };
         snapshot.delegations.push(journal);
+      }
+      if (journal.kind === "handoff") {
+        try {
+          const note = handoffNote(request.arguments);
+          if (journal.children.length > 0 && note !== journal.note)
+            throw new TypeError("The transfer note changed after the target started.");
+          journal.note = note;
+        } catch (error) {
+          if (journal.children.length > 0)
+            fail(
+              "handoff_input_changed",
+              "The target already started. Its transfer arguments cannot change. Reconcile the saved run before starting different work.",
+              request.operationId,
+            );
+          await finishTool(model, index, request, {
+            ok: false,
+            kind: "invalid_input",
+            content: messageOf(error),
+          });
+          return;
+        }
       }
       model.tools[index] = {
         interrupted: model.tools[index]?.interrupted ?? [],
@@ -825,7 +886,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           !snapshot.definition.enabledTools.includes(tool.name) ||
           snapshot.definition.modelSettings.toolChoice === "none" ||
           !completeArguments(request.call.arguments) ||
+          (isHandoff(tool) && model.tools.length !== 1) ||
           (!isDelegation(tool) &&
+            !isHandoff(tool) &&
             !isClientTool(tool) &&
             tool.isTerminal &&
             model.tools.length !== 1)
@@ -948,7 +1011,57 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           index++;
           continue;
         }
-        const descriptor = delegations.get(request.call.name);
+        const handoff = handoffs.get(request.call.name);
+        if (
+          handoff &&
+          !snapshot.delegations.some((entry) => entry.operationId === request.operationId)
+        ) {
+          let target;
+          let note;
+          try {
+            if (calls.length !== 1)
+              throw new TypeError(
+                `Call ${handoff.name} alone, after the other tool results arrive.`,
+              );
+            if (!completeArguments(request.call.arguments))
+              throw new TypeError(
+                "Tool arguments must be one complete JSON object. Send the full object again.",
+              );
+            note = handoffNote(request.arguments);
+            target = handoff.target();
+            if (target.id === id)
+              throw new TypeError(
+                "This agent already owns the conversation. Choose a different target.",
+              );
+            checkHandoffTargets(agent);
+          } catch (error) {
+            await finishTool(model, index, request, {
+              ok: false,
+              kind: "invalid_input",
+              content: messageOf(error),
+            });
+            index++;
+            continue;
+          }
+          // Pin identity before asking for permission. A resumed lazy reference cannot turn
+          // an approval for one target into a transfer to another.
+          snapshot.delegations.push({
+            kind: "handoff",
+            operationId: request.operationId,
+            target: handoffRef(target),
+            ...(note !== undefined ? { note } : {}),
+            children: [],
+          });
+          model.tools[index] = {
+            id: request.operationId,
+            status: "delegating",
+            attemptId: snapshot.attemptId,
+            interrupted: [],
+          };
+          await save();
+          active();
+        }
+        const descriptor = descriptorFor(request.call.name, snapshot, request.operationId);
         const tool = registry.get(request.call.name);
         const client = clients.get(request.call.name);
         const requests = journalFor(snapshot, model, index, options, scope, signal);
@@ -1081,11 +1194,13 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       }
       // Adapted from OpenAI Agents JS (MIT), runner/toolExecution.ts: settle this batch,
       // then select the first stopping tool in model order, not completion order.
-      const final = finalToolResult(
-        model,
-        snapshot.definition.stopAtTools,
-        output ? RESULT_TOOL_NAME : undefined,
-      );
+      const final =
+        finalHandoffResult(snapshot, model) ??
+        finalToolResult(
+          model,
+          snapshot.definition.stopAtTools,
+          output ? RESULT_TOOL_NAME : undefined,
+        );
       if (final) snapshot.state = { status: "completed", candidate: final.candidate };
     }
 
@@ -1162,6 +1277,11 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       const finalTurn = position === limits.turns;
       if (position > limits.turns || (finalTurn && output))
         throw new Halt({ status: "limited", limit: "turns" });
+      // A steer never changes the input of an already admitted call, including safe replay.
+      // Check capacity before polling so a spent budget leaves delivery queued in the host.
+      scope.tree.reserveModel();
+      if (!previous) await acceptInputs(snapshot, scope, options, signal);
+      active();
       // Media is read before the receipt below exists, so a missing loader or file fails the
       // run with no model operation left running and nothing to reconcile.
       const request = await requestOf(
@@ -1276,10 +1396,18 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       };
       snapshot.models[position] = done;
       await save();
+      for (const receipt of inputReceipts(snapshot).filter(
+        (receipt) => receipt.modelId === done.id,
+      ))
+        emit({ type: "input", receipt });
+      await acknowledgeInputs(snapshot, options, signal);
       return done;
     }
 
     try {
+      // Repair a lost acknowledgement from the saved journal without rereading its payload.
+      // Terminal snapshots synchronize too; this never starts a follow-up model call.
+      if (scope.depth === 0) await acknowledgeInputs(snapshot, options, signal);
       if (scope.depth === 0 && answers) {
         await answerRequests(snapshot, options, scope, answers, signal);
         if (
@@ -1390,6 +1518,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       definition: resolved,
       history: copyData(history),
       input: copyData(input),
+      inputs: [],
       ...(session ? { session: copyData(session) } : {}),
       limits: copyData(limits),
       models: [],
@@ -1400,6 +1529,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
   }
 
   const runtime: AgentRuntime<T | string> = {
+    outputKind: output ? "checked" : "text",
+    handoffs: [...handoffs.values()],
     execute,
     answerRequests,
     freeze,
@@ -1496,7 +1627,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             call &&
             snapshot.definition.enabledTools.includes(call.name) &&
             snapshot.definition.modelSettings.toolChoice !== "none" &&
-            delegations.get(call.name);
+            descriptorFor(call.name, snapshot, tool.id);
           const journal = snapshot.delegations.find((entry) => entry.operationId === tool.id);
           if (descriptor && tool.status !== "pending") {
             if (!journal || tool.status === "running")
@@ -1506,6 +1637,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           } else if (journal)
             throw new TypeError("The saved delegation is not in this agent definition.");
           if (!journal || !descriptor) continue;
+          if (journal.kind !== (call && handoffs.has(call.name) ? "handoff" : "delegation"))
+            throw new TypeError("The saved delegation kind does not match its registered tool.");
+          if (journal.kind === "handoff") checkHandoffTargets(agent);
           for (const entry of journal.children) {
             const agent = descriptor.specialists.find(
               (agent) =>
