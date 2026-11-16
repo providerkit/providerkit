@@ -98,7 +98,10 @@ export interface ToolPart {
 /** One row per specialist run. */
 export interface AgentPart {
   type: "agent";
+  /** The specialist run, also referenced by its child tool/text parts. */
   id: string;
+  /** The registered agent definition, for host-owned label maps. Not execution authority. */
+  agentId?: string;
   /** The id of the `agent` part for the specialist that started this one. Absent when the root
    * run started it. */
   parentId?: string;
@@ -354,7 +357,10 @@ function readTool(id: string, fields: Fields): ToolPart | null {
 function readAgent(id: string, fields: Fields): AgentPart | null {
   if (!isText(fields.label) || !isAgentState(fields.state)) return null;
   const part: AgentPart = { type: "agent", id, label: fields.label, state: fields.state };
-  return optional(part, "parentId", fields.parentId, isId) ? part : null;
+  return optional(part, "parentId", fields.parentId, isId) &&
+    optional(part, "agentId", fields.agentId, isId)
+    ? part
+    : null;
 }
 
 function readApproval(id: string, fields: Fields): ApprovalPart | null {

@@ -330,6 +330,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     const part: AgentPart = {
       type: "agent",
       id: runId,
+      agentId,
       label: lookup(options.labels?.agent, agentId),
       state,
     };

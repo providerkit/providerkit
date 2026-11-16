@@ -159,6 +159,84 @@ result supplied through that callback can become text or a host-rendered data ca
 The host's conversation store remains the source of the person's messages. A run input can hold
 private context and must not become a user message on screen.
 
+## Use the optional components
+
+Keep your own header and layout. The components accept the hook values or equivalent data from
+your app's store:
+
+```tsx
+import { draftScopeKey, useChat, useComposer } from "@providerkit/react";
+import type { ChatTransport, DraftScope } from "@providerkit/react";
+import {
+  Composer,
+  ConnectionStatusDisplay,
+  Conversation,
+  MessageList,
+  RunStatusDisplay,
+} from "@providerkit/react/ui";
+import { Markdown } from "@providerkit/react/markdown";
+import "@providerkit/react/styles.css";
+
+export function ChatPanel({ transport, scope }: { transport: ChatTransport; scope: DraftScope }) {
+  const id = draftScopeKey(scope);
+  const chat = useChat({ id, transport });
+  const composer = useComposer({ scope, send: chat.send, canSend: chat.canSend });
+
+  return (
+    <Conversation chat={chat}>
+      <ConnectionStatusDisplay />
+      <MessageList
+        renderText={(part, context) => (
+          <Markdown text={part.text} streaming={!part.settled} sources={context.sources} />
+        )}
+      />
+      <RunStatusDisplay />
+      <Composer
+        key={id}
+        text={composer.text}
+        onTextChange={composer.setText}
+        onSubmit={composer.submit}
+        submitting={composer.submitting}
+        canSubmit={composer.canSubmit}
+        error={composer.error}
+      />
+    </Conversation>
+  );
+}
+```
+
+`scope` names the current principal and conversation. It keeps delayed saves, uploads and send
+receipts from changing another person's draft. Use your authenticated app state to choose it;
+server authorization still checks every request.
+
+`Composer` is controlled: it does not send, clear or persist text itself. `useComposer` supplies
+that behavior. Add a host uploader through its `attachments` option and pass its attachment values
+and callbacks to the component. Draft persistence is opt-in through an injected storage adapter;
+there is no automatic localStorage capture. Before navigation that must wait for a save, await
+`composer.flushDraft()`. If it returns false, keep the draft open and offer `retryDraft()`.
+
+The transcript uses the published headless scroller with automatic turn anchoring disabled. It
+has an explicit jump-to-latest action instead of forcing someone back to the bottom when new
+output arrives. Real-browser scrolling and layout acceptance checks are still pending before
+release.
+
+Replace labels through component props, tool-label maps and specialist-label maps. Use
+`renderPart` for your own cards and `renderApproval` for an approval action that opens a host
+dialog. Unknown data parts are not displayed automatically. An approval slot cannot grant
+permission; its response still goes through the server.
+
+Every component accepts ordinary CSS customization. The optional stylesheet uses the
+`providerkit` layer, scoped `pk-*` classes and `data-part`/`data-state` attributes. It installs no
+font or global reset. With Tailwind 4, put it under the utilities layer:
+
+```css
+@import "tailwindcss";
+@import "@providerkit/react/styles.css" layer(components);
+```
+
+Omit the stylesheet when your app supplies the styles. Omit the Markdown renderer when you need
+only plain text; the UI entry does not import its parser.
+
 ## Imports
 
 | Import               | Responsibility                                             |
@@ -172,8 +250,8 @@ private context and must not become a user message on screen.
 | `/ag-ui`             | AG-UI event mapping                                        |
 | `/styles.css`        | Optional default styles                                    |
 
-The UI and AG-UI entries are still being built. Hook-only imports load no CSS, Markdown parser or
-server runtime. The `/agents` entry imports SDK types only; it does not execute an agent.
+The AG-UI mapping is still being built. Hook-only imports load no CSS, Markdown parser or server
+runtime. The `/agents` entry imports SDK types only; it does not execute an agent.
 
 ## Markdown and media
 

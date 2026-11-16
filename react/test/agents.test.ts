@@ -354,6 +354,11 @@ describe("createAgentProjector", () => {
       });
       const view = play(project(projector, seen.events));
       const saved = projector.snapshot(outcome.snapshot);
+      for (const message of [saved, view.messages[0]]) {
+        expect(
+          message?.parts.flatMap((part) => (part.type === "agent" ? [part.agentId] : [])),
+        ).toEqual(["researcher", "writer"]);
+      }
 
       expect(sketch(saved)).toEqual([
         'text "Let me check."',
