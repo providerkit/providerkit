@@ -1,6 +1,6 @@
 ---
 title: Tools
-description: A JSON-Schema-first tool kernel with timeouts, abort, structured outcomes, and optional zod ergonomics.
+description: A JSON-Schema-first tool kernel with timeouts, abort, structured outcomes, and optional zod ergonomics, plus the tools a vendor runs inside its own turn.
 ---
 
 The kernel takes plain JSON Schema, because that is what every provider's tool contract wants and
@@ -114,3 +114,103 @@ zod is an **optional peer dependency**. The kernel never imports it, so a projec
 
 `clampOverflow` is worth knowing about for terminal tools: when a model's output exceeds a
 schema's limits, clamping to the limit and submitting beats rejecting and losing the whole turn.
+
+## Hosted tools
+
+Some tools run on the vendor's side, inside the model's own turn: web search, web fetch, code
+execution, file search and image generation. You ask for them by type, and your loop runs none
+of them.
+
+```ts
+import { collectTurn } from "@providerkit/core";
+
+const turn = await collectTurn(
+  provider.createStream(history, [], { hostedTools: [{ type: "web_search" }] }),
+);
+
+turn.message.content; // the answer
+turn.message.citations; // the pages it cites, and where in the answer
+turn.message.hostedCalls; // what the vendor ran: the search, its query, the pages it found
+```
+
+A hosted call is never a tool call. It never lands in `toolCalls`, never makes the finish
+`tool_calls`, and never gets a `tool` message back. When one fails, the turn goes on: the call
+says `status: "failed"`, and `error` holds the vendor's code, such as `max_uses_exceeded`.
+
+### Which adapter sends what
+
+| Type               | Anthropic | Responses | Gemini | Chat Completions                                  |
+| ------------------ | --------- | --------- | ------ | ------------------------------------------------- |
+| `web_search`       | yes       | yes       | yes    | OpenRouter, and OpenAI's `-search-preview` models |
+| `web_fetch`        | yes       | no        | yes    | no                                                |
+| `code_execution`   | yes       | yes       | yes    | no                                                |
+| `file_search`      | no        | yes       | yes    | no                                                |
+| `image_generation` | no        | yes       | no     | no                                                |
+
+That is what each vendor's own API runs. Every other host runs none until you say it does: a
+gateway that doesn't know a hosted tool can ignore it and answer without searching, and nothing
+tells you. Once you have checked an endpoint, set `servesHostedTools` on its provider config.
+
+A fetched page can carry instructions written for the model, and the model picks which pages to
+fetch. Set `allowedDomains` to the sites you trust.
+
+### Refused before anything is sent
+
+Each setting on a hosted tool narrows what the vendor may do. An adapter that can't apply one
+refuses the request with an `invalid` error that names the setting, because sending the tool
+without it would let the vendor do more than you allowed.
+
+| Setting                                                | Anthropic        | Responses | Gemini | Chat Completions |
+| ------------------------------------------------------ | ---------------- | --------- | ------ | ---------------- |
+| `allowedDomains`, `blockedDomains`                     | one or the other | yes       | no     | OpenRouter only  |
+| `maxUses`                                              | yes              | no        | no     | OpenRouter only  |
+| `userLocation`                                         | yes              | yes       | no     | yes              |
+| `maxContentTokens`, on a fetch                         | yes              |           | no     |                  |
+| `fileIds`, on code execution                           | no               | yes       | no     |                  |
+| `storeIds` and `maxResults`, on a file search          |                  | yes       | yes    |                  |
+| `size`, `quality`, `format`, `background`, on an image |                  | yes       |        |                  |
+
+Mark a tool `optional: true` to drop it there instead of refusing. The whole tool goes, never
+one setting: a search without its domain filter does more than you asked, and no search at all
+only does less.
+
+These are refused too:
+
+- the same type listed twice;
+- a forced `toolChoice` (`"required"`, or a named tool) beside hosted tools, because each vendor
+  reads that pair differently. `toolChoice: "none"` sends no hosted tool at all;
+- on Anthropic, a function tool named `web_search`, `web_fetch`, `code_execution`,
+  `bash_code_execution` or `text_editor_code_execution`;
+- on Gemini 2, hosted tools beside function tools. Gemini 3 runs both;
+- any hosted tool on Antigravity.
+
+### Citations
+
+Each citation names its source and, when it can, the part of the answer it covers. `start` and
+`end` are indices into `content`, already moved from what the vendor counts in (UTF-8 bytes on
+Gemini, code points on OpenAI). `anchor: "claim"` means the span is text the source backs, as
+Anthropic and Gemini cite. `anchor: "marker"` means the span is a link the model wrote, as OpenAI
+cites. A span that doesn't match the text is left off, and the citation keeps its source.
+
+### Sending the turn back
+
+`hostedItems` is the vendor's own record of the turn: search results, fetched pages, code
+output. Anthropic and Gemini send it back with the turn, so the model keeps what it read.
+Responses and Chat Completions never send it. It goes back only to the provider that made it,
+and only while the answer is unchanged: edit the text, and the turn goes back as plain text.
+
+Keep `hostedItems` with your stored history, like `reasoningItems`, and never send it to a
+browser. `hostedCalls` and `citations` are as private as the answer: an excerpt can quote your
+own files.
+
+### Billing
+
+Vendors bill hosted calls one by one, beside the tokens. `usage.hostedCalls` counts them by
+type, and `costUsd` prices them at `rate.hosted`, the per-call prices from your vendor's price
+sheet. A cost the provider reports, as OpenRouter does, already includes them.
+
+A hosted call commits the stream, so a retry never runs it twice. A search loop can run several
+model passes in one turn and bill all of them, so `inputTokens` can read larger than the window
+ever was. Where Anthropic states the last pass, `usage.contextTokens` holds it. A long Anthropic
+search can pause its turn: the stream sends it back and carries on, up to ten times, and every
+pass is billed.

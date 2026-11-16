@@ -1013,7 +1013,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
                 // (Vercel convert-google-usage.ts:31-36).
                 inputTokens: (usage.promptTokenCount ?? 0) + (usage.toolUsePromptTokenCount ?? 0),
                 // Thoughts bill as OUTPUT, and Gemini reports them OUTSIDE
-                // candidatesTokenCount — leaving them out undercounts a thinking
+                // candidatesTokenCount, so leaving them out undercounts a thinking
                 // turn by most of what it cost.
                 outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
                 cachedInputTokens: usage.cachedContentTokenCount ?? 0,

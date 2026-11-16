@@ -1,4 +1,4 @@
-// Golden transcripts — one turn and five failures, on four vendors' wires, and
+// Golden transcripts: one turn and five failures on four vendors' wires, and
 // one turn that ran a hosted search, asked the same questions on all four.
 //
 // Every other suite here asks ONE adapter whether it reads its own vendor
