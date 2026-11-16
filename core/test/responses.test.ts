@@ -1577,6 +1577,62 @@ describe("responses hosted tools", () => {
     ]);
   });
 
+  it("reads a file the code wrote as a span citation of its container, and skips a bare file path", async () => {
+    const written = [
+      j({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({
+        type: "response.output_text.delta",
+        item_id: "msg_1",
+        content_index: 0,
+        delta: "See plot.png for it.",
+      }),
+      j({
+        type: "response.output_text.annotation.added",
+        item_id: "msg_1",
+        content_index: 0,
+        annotation: {
+          type: "container_file_citation",
+          container_id: "cntr_1",
+          file_id: "cfile_1",
+          filename: "plot.png",
+          start_index: 4,
+          end_index: 12,
+        },
+      }),
+      // A path to a file the code made names no source of the answer.
+      j({
+        type: "response.output_text.annotation.added",
+        item_id: "msg_1",
+        content_index: 0,
+        annotation: { type: "file_path", file_id: "cfile_1", index: 4 },
+      }),
+      j({
+        type: "response.output_item.done",
+        output_index: 1,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ];
+    const { message } = await collectTurn(
+      provider({ fetchImpl: recorder(written).fetchImpl }).createStream(hi, [], {
+        hostedTools: [{ type: "code_execution" }],
+      }),
+    );
+    expect(message.citations).toEqual([
+      {
+        source: { type: "file", fileId: "cfile_1", title: "plot.png", containerId: "cntr_1" },
+        start: 4,
+        end: 12,
+        anchor: "marker",
+      },
+    ]);
+    expect(message.content.slice(4, 12)).toBe("plot.png");
+  });
+
   it("reads a search with no action, and fails one that never finished", async () => {
     const bare = [
       j({

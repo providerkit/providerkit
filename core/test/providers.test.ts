@@ -1923,6 +1923,103 @@ describe("anthropic hosted tools", () => {
     }
   });
 
+  it("drops only the optional tool, and never excuses a required one beside it", async () => {
+    // PydanticAI's rule (tests/test_builtin_tools.py): `optional` speaks for
+    // its own tool, not for a sibling the endpoint can't run either.
+    const refused = recorder(ANTHROPIC_TEXT_TURN);
+    await expect(
+      collect(
+        claude(refused.fetchImpl).createStream(QUESTION, [], {
+          hostedTools: [
+            { type: "image_generation", optional: true },
+            { type: "file_search", storeIds: ["vs_1"] },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(refused.seen).toHaveLength(0);
+
+    const kept = recorder(ANTHROPIC_TEXT_TURN);
+    await collect(
+      claude(kept.fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [{ type: "image_generation", optional: true }, { type: "web_search" }],
+      }),
+    );
+    expect(anthropicHosted(kept.seen[0]!.body)).toEqual([
+      { type: "web_search_20250305", name: "web_search" },
+    ]);
+  });
+
+  it("reads a fetched page as its source, and a fetch error as data", async () => {
+    const fetchOf = (content: unknown) => [
+      j({ type: "message_start", message: { usage: { input_tokens: 10 } } }),
+      j({
+        type: "content_block_start",
+        content_block: {
+          type: "server_tool_use",
+          id: "srvtoolu_3",
+          name: "web_fetch",
+          input: { url: SOURCE_URL },
+        },
+      }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "content_block_start",
+        content_block: { type: "web_fetch_tool_result", tool_use_id: "srvtoolu_3", content },
+      }),
+      j({ type: "content_block_stop" }),
+      j({ type: "content_block_start", content_block: { type: "text", text: "" } }),
+      j({ type: "content_block_delta", delta: { type: "text_delta", text: "It is about cats." } }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 9, server_tool_use: { web_fetch_requests: 1 } },
+      }),
+      j({ type: "message_stop" }),
+    ];
+    const opts: StreamOptions = { hostedTools: [{ type: "web_fetch" }] };
+    const page = await collectTurn(
+      claude(
+        recorder(
+          fetchOf({
+            type: "web_fetch_result",
+            url: SOURCE_URL,
+            retrieved_at: "2026-11-01T10:00:00Z",
+            content: {
+              type: "document",
+              title: "Cat sleep",
+              source: { type: "text", media_type: "text/plain", data: "Cats sleep a lot." },
+            },
+          }),
+        ).fetchImpl,
+      ).createStream(QUESTION, [], opts),
+    );
+    expect(page.message.hostedCalls).toEqual([
+      {
+        id: "srvtoolu_3",
+        type: "web_fetch",
+        status: "completed",
+        input: { url: SOURCE_URL },
+        output: { sources: [{ type: "url", url: SOURCE_URL, title: "Cat sleep" }] },
+        at: 0,
+      },
+    ]);
+    expect(page.usage.hostedCalls).toEqual({ web_fetch: 1 });
+
+    const blocked = await collectTurn(
+      claude(
+        recorder(fetchOf({ type: "web_fetch_tool_result_error", error_code: "url_not_allowed" }))
+          .fetchImpl,
+      ).createStream(QUESTION, [], opts),
+    );
+    expect(blocked.message.hostedCalls?.[0]).toMatchObject({
+      status: "failed",
+      error: "url_not_allowed",
+    });
+    expect(blocked.finishReason).toBe("stop");
+  });
+
   it("runs none on another host until it is told that host does", async () => {
     const gateway = { baseUrl: "https://gateway.example" };
     const refused = recorder(ANTHROPIC_TEXT_TURN);
