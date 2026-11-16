@@ -21,6 +21,29 @@ export type {
 } from "./client.ts";
 export { useAgentRun, useChat } from "./hooks.ts";
 export type { AgentRunValue, ChatValue, UseAgentRunOptions, UseChatOptions } from "./hooks.ts";
+export { createComposer, useComposer } from "./composer.ts";
+export type {
+  ComposerOptions,
+  ComposerState,
+  ComposerController,
+  ComposerValue,
+} from "./composer.ts";
+export type {
+  AttachmentRules,
+  AttachmentUploader,
+  AttachmentOptions,
+  AttachmentItem,
+} from "./attachments.ts";
+export { draftScopeKey } from "./drafts.ts";
+export type {
+  DraftScope,
+  DraftContent,
+  StoredDraft,
+  DraftStorage,
+  DraftOptions,
+  DraftStatus,
+  DraftState,
+} from "./drafts.ts";
 // The display types a hook hands out, so code that reads `chat.messages` needs one import. The
 // parser and the reducer stay on `/protocol`.
 export type {
