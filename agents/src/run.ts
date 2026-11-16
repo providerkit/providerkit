@@ -23,6 +23,7 @@ import {
   ExecutionTree,
   Halt,
   authorizeTree,
+  emitEvent,
   fail,
   treeUsage,
   untilAbort,
@@ -228,11 +229,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     }
 
     function emit(event: AgentEvent): void {
-      try {
-        void Promise.resolve(options.onEvent?.(immutableCopy(event))).catch(() => {});
-      } catch {
-        // Progress is not the durable journal, and an observer cannot stop execution.
-      }
+      emitEvent(options, event);
     }
 
     const save = () => scope.tree.save();

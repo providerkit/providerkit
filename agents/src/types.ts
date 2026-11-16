@@ -282,4 +282,20 @@ export type AgentEvent =
     }
   | { type: "tool_start"; request: ToolRequest }
   | { type: "tool_result"; request: ToolRequest; result: ToolResult }
-  | { type: "state"; runId: string; attemptId: string; state: RunState };
+  | { type: "state"; runId: string; attemptId: string; state: RunState }
+  /** Names the specialist run a delegation is starting or resuming, before that run reports
+   * anything, so an observer can file the run's events under its parent without reading ID
+   * formats. Best-effort progress like every other event: it can be missed, and it carries no
+   * status (the child's own state event and the snapshot do). A child resumed after an approval
+   * or an interruption sends it again with the same identity, so upsert by runId. Only a child
+   * that runs here sends it: a settled child that is reused, or one the host serves from a
+   * saved copy, stays silent. */
+  | {
+      type: "child";
+      parentRunId: string;
+      operationId: string;
+      key: string;
+      runId: string;
+      agentId: string;
+      version: string;
+    };

@@ -9,7 +9,7 @@ import {
   isId,
   isRecord,
 } from "./snapshot.ts";
-import { fail, Halt, untilAbort, type ExecutionScope } from "./tree.ts";
+import { emitEvent, fail, Halt, untilAbort, type ExecutionScope } from "./tree.ts";
 import type {
   Agent,
   ChildEnvelope,
@@ -54,6 +54,9 @@ export type Joined<H extends readonly ChildHandle<unknown>[]> = {
 };
 
 export interface DelegationContext {
+  /** `key` becomes part of the child's run id and of every operation id under it, which
+   * progress events carry and a display layer may send to a browser. Key by position or a
+   * fixed name ("topic-1"), never by the input. */
   child<T>(key: string, agent: Agent<T>, input: string): ChildHandle<T>;
   /** Settles in caller order, not completion order. No child may outlive this barrier. */
   join<const H extends readonly ChildHandle<unknown>[]>(handles: H): Promise<Joined<H>>;
@@ -241,6 +244,18 @@ export async function executeDelegation(
             throw new Error("A host child may execute once, before its hook returns.");
           execution = (async () => {
             if (resume) saved.snapshot.attemptId = crypto.randomUUID();
+            // Sent here, not where the child is admitted, so it always comes with a run: the
+            // child's own state event follows it. A settled child that is reused, or one the host
+            // serves from a saved copy without running it, never gets this far, and a row for it
+            // would wait for a status that no event brings. Once per key: `started` and the
+            // execute-once check above both guard it.
+            emitEvent(options, {
+              type: "child",
+              parentRunId: parent.runId,
+              ...step,
+              agentId: agent.id,
+              version: agent.version,
+            });
             const result = await runtime.execute(
               saved.snapshot,
               { ...options, signal },

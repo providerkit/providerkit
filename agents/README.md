@@ -64,6 +64,15 @@ if (result.status === "completed") {
 The same reader collects the answer and reports progress. An observer failure does not stop the
 work. Tool results and provider metadata stay in the recorded history.
 
+When an agent hands work to a specialist (see below), a `child` event arrives before that
+specialist's own events. It holds the parent's run ID as `parentRunId`, the delegation's
+`operationId`, the child `key`, the specialist's `runId`, and its `agentId` and `version`. Use it
+to show a specialist's work under the agent that called it. It carries no status: read that from
+the specialist's `state` events or from the snapshot. Like any progress event, it can be missed.
+A specialist that resumes after an approval or an interruption sends it again with the same
+values, so update the entry you keep for that `runId` and do not add another. A specialist that
+already finished is reused and sends nothing.
+
 | Status      | Meaning                                                                    |
 | ----------- | -------------------------------------------------------------------------- |
 | `completed` | The answer passed the configured result validator.                         |
@@ -128,6 +137,10 @@ not their full snapshots. A suspended child pauses the parent instead of becomin
 Coordination callbacks must be pure: use `child` and `join` for work. The callback can run again
 after an interruption, but completed children are reused. Reusing a child key with different input
 or a different agent is refused. Every admitted child settles before the delegation ends.
+
+A child key becomes part of the child's run ID and of every operation ID under it. Progress events
+carry those IDs, and a screen that shows the run may send them to a browser. So key children by
+position or by a fixed name, such as `topic-1`, and never by their input.
 
 ## Limits and usage
 

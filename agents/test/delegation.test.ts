@@ -12,6 +12,7 @@ import {
   defineDelegation,
   RESULT_TOOL_NAME,
   type Agent,
+  type AgentEvent,
   type AgentHost,
   type ChildEnvelope,
   type DelegationContext,
@@ -98,6 +99,21 @@ function scope() {
     resource: { id: "record", version: "4" },
     expiresAt: Date.now() + 10_000,
   };
+}
+function observer() {
+  const events: AgentEvent[] = [];
+  return {
+    events,
+    onEvent(event: AgentEvent) {
+      events.push(event);
+    },
+    children: () => events.filter((event) => event.type === "child"),
+  };
+}
+/** The run that reported an event. A child event is its parent speaking. */
+function reporter(event: AgentEvent): string {
+  if (event.type === "child") return event.parentRunId;
+  return event.type === "model_chunk" || event.type === "state" ? event.runId : event.request.runId;
 }
 function approvalFixture(treeLimits = {}) {
   const effect = vi.fn(async (context: ToolContext) => {
@@ -1061,5 +1077,217 @@ describe("specialist delegation", () => {
     });
     expect(result.status).toBe("failed");
     expect(childWire.histories).toHaveLength(1);
+  });
+
+  it("names each child and its parent once, before that child reports anything", async () => {
+    const first = defineAgent({ ...base, id: "first", provider: wire([text("one")]).provider });
+    const second = defineAgent({
+      ...base,
+      id: "second",
+      version: "7",
+      provider: wire([text("two")]).provider,
+    });
+    const handles: Record<string, string> = {};
+    const root = defineAgent({
+      ...base,
+      id: "root",
+      provider: wire([calls(call("coordinate")), text("done")]).provider,
+      tools: [
+        coordinator([first, second], async (context) => {
+          const a = context.child("a", first, "first input");
+          // A second handle for one key is the same child, not another admission.
+          context.child("a", first, "first input");
+          const b = context.child("b", second, "second input");
+          handles.a = a.runId;
+          handles.b = b.runId;
+          return (await context.join([a, b])).map((result) => result.status);
+        }),
+      ],
+    });
+    const seen = observer();
+    const result = await root.run("work", { runId: "root-run", onEvent: seen.onEvent });
+    expect(result.status).toBe("completed");
+    const operationId = result.receipts.find((receipt) => receipt.kind === "delegation")?.id;
+    expect(operationId).toBeTruthy();
+    const children = seen.children();
+    expect(children).toEqual([
+      {
+        type: "child",
+        parentRunId: "root-run",
+        operationId,
+        key: "a",
+        runId: handles.a,
+        agentId: "first",
+        version: "1",
+      },
+      {
+        type: "child",
+        parentRunId: "root-run",
+        operationId,
+        key: "b",
+        runId: handles.b,
+        agentId: "second",
+        version: "7",
+      },
+    ]);
+    expect(children.every((child) => Object.isFrozen(child))).toBe(true);
+    for (const child of children) {
+      const own = seen.events.findIndex((event) => reporter(event) === child.runId);
+      expect(own).toBeGreaterThan(seen.events.indexOf(child));
+    }
+    // The parent announced its delegation first, so the child has a row to sit under.
+    expect(seen.events.findIndex((event) => event.type === "tool_start")).toBeLessThan(
+      seen.events.findIndex((event) => event.type === "child"),
+    );
+  });
+
+  it("names a resumed child again with the same identity and leaves a settled one silent", async () => {
+    const kept = defineAgent({ ...base, id: "kept", provider: wire([text("kept")]).provider });
+    const effect = vi.fn(async () => "written");
+    const held = defineAgent({
+      ...base,
+      id: "held",
+      provider: wire([calls(call("write")), text("held")]).provider,
+      tools: [ordinary("write", effect, true)],
+    });
+    const root = defineAgent({
+      ...base,
+      id: "root",
+      provider: wire([calls(call("coordinate")), text("done")]).provider,
+      tools: [
+        coordinator([kept, held], async (context) =>
+          (
+            await context.join([context.child("kept", kept, "a"), context.child("held", held, "b")])
+          ).map((result) => result.status),
+        ),
+      ],
+    });
+    const host = {
+      authorizeResume,
+      approvalContext: scope,
+      resolveApproval: () => "approved" as const,
+      beforeTool() {},
+    };
+    const before = observer();
+    const pending = await root.run("work", { host, onEvent: before.onEvent });
+    if (pending.status !== "suspended") throw new Error(pending.status);
+    expect(before.children().map((child) => child.key)).toEqual(["kept", "held"]);
+    const after = observer();
+    const done = await root.resume(checkpoint(pending.snapshot), {
+      host,
+      decision: "ticket",
+      approvalPath: pending.path,
+      onEvent: after.onEvent,
+    });
+    expect(done.status).toBe("completed");
+    expect(effect).toHaveBeenCalledTimes(1);
+    // Same run, same operation, same key: an observer updates its row and adds none.
+    expect(after.children()).toEqual([before.children()[1]]);
+    const again = after.children()[0];
+    if (!again) throw new Error("Missing child event");
+    expect(after.events.findIndex((event) => reporter(event) === again.runId)).toBeGreaterThan(
+      after.events.indexOf(again),
+    );
+    expect(after.events.some((event) => reporter(event) === before.children()[0]?.runId)).toBe(
+      false,
+    );
+  });
+
+  it("stays silent for a child the host serves from a saved copy without running it", async () => {
+    const child = defineAgent({
+      ...base,
+      id: "child",
+      provider: wire([calls(call("write")), text("child done")]).provider,
+      tools: [ordinary("write", async () => "written", true)],
+    });
+    const root = defineAgent({
+      ...base,
+      id: "root",
+      provider: wire([calls(call("child", "task")), text("done")]).provider,
+      tools: [child.asTool({ name: "child", description: "Ask the child." })],
+    });
+    let saved: ChildEnvelope | undefined;
+    const host = {
+      authorizeResume,
+      approvalContext: scope,
+      async child(
+        _request: Parameters<NonNullable<AgentHost["child"]>>[0],
+        execute: Parameters<NonNullable<AgentHost["child"]>>[1],
+      ) {
+        saved ??= await execute();
+        return saved;
+      },
+    };
+    const first = observer();
+    const pending = await root.run("work", { host, onEvent: first.onEvent });
+    expect(pending.status).toBe("suspended");
+    const [named] = first.children();
+    if (!named) throw new Error("Missing child event");
+    const second = observer();
+    const still = await root.resume(checkpoint(pending.snapshot), {
+      host,
+      onEvent: second.onEvent,
+    });
+    expect(still.status).toBe("suspended");
+    // No run, so no name: a row announced here would wait for a status that never comes.
+    expect(second.children()).toEqual([]);
+    expect(second.events.some((event) => reporter(event) === named.runId)).toBe(false);
+  });
+
+  it.each(["throws", "rejects"] as const)(
+    "finishes the delegation when the observer %s on a child event",
+    async (failure) => {
+      const childWire = wire([text("child result")]);
+      const child = defineAgent({ ...base, id: "child", provider: childWire.provider });
+      const root = defineAgent({
+        ...base,
+        id: "root",
+        provider: wire([calls(call("child", "task")), text("done")]).provider,
+        tools: [child.asTool({ name: "child", description: "Ask the child." })],
+      });
+      let announced = 0;
+      const result = await root.run("work", {
+        onEvent(event) {
+          if (event.type !== "child") return;
+          announced++;
+          if (failure === "throws") throw new Error("Observer bug");
+          return Promise.reject(new Error("Observer bug"));
+        },
+      });
+      expect(result).toMatchObject({ status: "completed", output: "done" });
+      expect(announced).toBe(1);
+      expect(childWire.histories).toHaveLength(1);
+      expect(firstChild(result.snapshot).state.status).toBe("completed");
+    },
+  );
+
+  it("reports each nested specialist under its real parent, matching the approval path", async () => {
+    const fixture = approvalFixture();
+    const host = {
+      authorizeResume,
+      approvalContext: scope,
+      resolveApproval: () => "approved" as const,
+      beforeTool() {},
+    };
+    const before = observer();
+    const pending = await fixture.root.run("work", { host, onEvent: before.onEvent });
+    if (pending.status !== "suspended") throw new Error(pending.status);
+    const [middle, leaf] = pending.path;
+    if (!middle || !leaf) throw new Error("Missing approval path");
+    const expected = [
+      { type: "child", parentRunId: pending.runId, ...middle, agentId: "middle", version: "1" },
+      { type: "child", parentRunId: middle.runId, ...leaf, agentId: "leaf", version: "1" },
+    ];
+    expect(before.children()).toEqual(expected);
+    // Resuming walks the same route, so both levels are named again, parent first.
+    const after = observer();
+    const done = await fixture.root.resume(checkpoint(pending.snapshot), {
+      host,
+      decision: "ticket",
+      approvalPath: pending.path,
+      onEvent: after.onEvent,
+    });
+    expect(done.status).toBe("completed");
+    expect(after.children()).toEqual(expected);
   });
 });
