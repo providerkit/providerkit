@@ -208,6 +208,12 @@ export async function* watchChunks<T>(
  * answers) and backup-eligible (a model that keeps doing it should be walked
  * away from). Until something streams, the empty frames are held back, so the
  * retry rule still holds: retry only while nothing was emitted.
+ *
+ * A hosted call streams the moment it appears, like reasoning, and is not an
+ * answer either: a search alone has said nothing. Forwarding it commits the
+ * stream, which is the point, because a retry past it would rerun and rebill
+ * the vendor's tool and show the reader the same search twice. The one hosted
+ * result that IS an answer is a generated image.
  */
 export async function* requireContent<T extends ProviderChunk>(
   provider: string,
@@ -223,9 +229,13 @@ export async function* requireContent<T extends ProviderChunk>(
   for await (const chunk of chunks) {
     if (chunk.type === "finish") finish = chunk.finishReason;
     if (chunk.usage) usage = chunk.usage;
-    answered ||= Boolean(chunk.content || chunk.toolCalls?.length);
+    answered ||= Boolean(
+      chunk.content ||
+      chunk.toolCalls?.length ||
+      chunk.hosted?.some((call) => call.status !== "failed" && call.output?.images?.length),
+    );
     if (!streaming) {
-      streaming = answered || Boolean(chunk.reasoning);
+      streaming = answered || Boolean(chunk.reasoning || chunk.hosted?.length);
       // Held rather than forwarded: once a chunk is out, the stream is
       // committed and the retry this guard exists to trigger can no longer
       // fire. Nothing has arrived worth showing yet, so there is nothing to

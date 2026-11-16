@@ -1,4 +1,10 @@
 // Anthropic-shape adapter — SSE from POST /v1/messages.
+//
+// Hosted tool shapes, betas and result blocks follow Vercel's AI SDK
+// (Apache-2.0, Copyright 2023 Vercel, Inc.: anthropic-prepare-tools.ts,
+// anthropic-language-model.ts, convert-to-anthropic-prompt.ts); the
+// continuation and the citation and container rules follow PydanticAI (MIT).
+// See THIRD_PARTY_NOTICES.
 import { repairHistory } from "../context.ts";
 import {
   fileRefused,
@@ -7,11 +13,13 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
+import type { HostedToolType } from "../hosted/types.ts";
+import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
-import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   JsonOutput,
   ChatMessage,
@@ -78,9 +86,19 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
    *  `CLAUDE_THINKING`), and several reject this marker outright. Claude 4.5
    *  and older accept it, and get it. */
   explicitNone?: boolean;
+  /**
+   * For providers imported from `@providerkit/core/hosted`.
+   * The hosted tools this endpoint runs. Defaults to web search, web fetch and
+   * code execution on api.anthropic.com and to none anywhere else: Bedrock,
+   * Vertex and the Anthropic-compatible gateways each run a different set, or
+   * none, and one that ignores a tool answers unsearched without saying so.
+   * Set it once you have checked the endpoint.
+   */
+  servesHostedTools?: readonly HostedToolType[];
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
+
 const DEFAULT_VERSION = "2023-06-01";
 /** Anthropic rejects a request without one, so a default is not optional. */
 const DEFAULT_MAX_TOKENS = 8_192;
@@ -209,9 +227,8 @@ function continuesToolLoop(messages: readonly ChatMessage[]): boolean {
  * A stated stop, or a throw for one this adapter does not know. An unknown
  * reason used to end the stream as a clean success with no finish at all.
  * Nothing says the answer ended on purpose, so it is `overload`: theirs, and
- * worth a retry (cc-proxy answers it the same way). `pause_turn` lands there
- * too: it is a server-tool turn waiting to be sent back, which this adapter
- * never asks for, and a half answer is not a finished one.
+ * worth a retry (cc-proxy answers it the same way). `pause_turn` never reaches
+ * here: the stream sends the paused turn back and carries on (see below).
  */
 function mapStopReason(provider: string, reason: string): FinishReason {
   switch (reason) {
@@ -325,12 +342,26 @@ function anthropicIds(): (id: string) => string {
   };
 }
 
+export interface AnthropicMessage {
+  role: string;
+  content: unknown[];
+}
+
 export function toAnthropicMessages(
   messages: readonly ChatMessage[],
   provider = "anthropic",
+): { system?: unknown[]; messages: AnthropicMessage[] } {
+  return anthropicMessages(messages, provider);
+}
+
+/** @internal Hosted replay stays outside the plain converter. */
+export function anthropicMessages(
+  messages: readonly ChatMessage[],
+  provider = "anthropic",
+  replay?: HostedCodecs["anthropic"]["replay"],
 ): {
   system?: unknown[];
-  messages: unknown[];
+  messages: AnthropicMessage[];
 } {
   const wireId = anthropicIds();
   const system = messages
@@ -338,7 +369,13 @@ export function toAnthropicMessages(
     .map((m) => m.content)
     .join("\n\n");
 
-  const out: { role: string; content: unknown[] }[] = [];
+  const toolUse = (call: { id: string; name: string; arguments: string }) => ({
+    type: "tool_use",
+    id: wireId(call.id),
+    name: call.name,
+    input: parseToolArgs(call.arguments),
+  });
+  const out: AnthropicMessage[] = [];
   const pushBlocks = (role: string, blocks: unknown[]) => {
     const last = out[out.length - 1];
     if (last?.role === role) last.content.push(...blocks);
@@ -370,16 +407,19 @@ export function toAnthropicMessages(
     // assistant. Reasoning is deliberately NOT replayed: Anthropic's thinking
     // blocks carry signatures we never captured, and a block without its
     // signature is rejected.
+    //
+    // A hosted turn this provider made goes back as the blocks it came in, so
+    // the model keeps the search results it read and the code it ran, and
+    // each text block keeps the citations it was given. Its text and calls
+    // come from the message, so an id `repairHistory` renamed still pairs.
+    const replayed = replay?.(message, provider, toolUse);
+    if (replayed) {
+      pushBlocks("assistant", replayed);
+      continue;
+    }
     const blocks: unknown[] = [];
     if (message.content) blocks.push({ type: "text", text: message.content });
-    for (const call of message.toolCalls ?? []) {
-      blocks.push({
-        type: "tool_use",
-        id: wireId(call.id),
-        name: call.name,
-        input: parseToolArgs(call.arguments),
-      });
-    }
+    for (const call of message.toolCalls ?? []) blocks.push(toolUse(call));
     if (blocks.length > 0) pushBlocks("assistant", blocks);
   }
 
@@ -387,25 +427,44 @@ export function toAnthropicMessages(
   return { ...(blocks ? { system: blocks } : {}), messages: out };
 }
 
-interface AnthropicUsage {
+export interface AnthropicUsage {
   input_tokens?: number;
   output_tokens?: number;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
+  /** The server tool calls this response billed. */
+  server_tool_use?: {
+    web_search_requests?: number;
+    web_fetch_requests?: number;
+    code_execution_requests?: number;
+  } | null;
+  /** Each model pass of the response, on the betas that report them. */
+  iterations?:
+    | {
+        type?: string;
+        input_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+      }[]
+    | null;
 }
 
-interface AnthropicEvent {
+export interface AnthropicEvent {
   type?: string;
   message?: {
     usage?: AnthropicUsage;
+    container?: { id?: string } | null;
   };
-  content_block?: { type?: string; id?: string; name?: string };
+  content_block?: { type?: string; id?: string; name?: string; [field: string]: unknown };
   delta?: {
     type?: string;
     text?: string;
     thinking?: string;
+    signature?: string;
     partial_json?: string;
+    citation?: unknown;
     stop_reason?: string;
+    container?: { id?: string } | null;
   };
   usage?: AnthropicUsage;
   index?: number;
@@ -413,6 +472,11 @@ interface AnthropicEvent {
 }
 
 export function createAnthropicProvider(config: AnthropicConfig): Provider {
+  return anthropicProvider(config);
+}
+
+/** @internal Shared by the plain and hosted entry points. */
+export function anthropicProvider(config: AnthropicConfig, codecs?: HostedCodecs): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "anthropic";
   const instanceSessionId = config.sessionHeader
@@ -429,13 +493,14 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
       validateMaxAttempts(opts.maxAttempts);
+      if (!codecs) refuseHostedTools(id, opts, messages);
       const model = opts.model ?? config.model;
       const maxTokens = opts.maxTokens ?? config.maxTokens ?? DEFAULT_MAX_TOKENS;
       const effort = opts.effort ?? config.effort;
       // Repaired first: a result with no call, a call with no result, or an id
       // used twice is a 400 that loses the turn. See repairHistory.
       const sent = repairHistory(messages).messages;
-      const { system, messages: body } = toAnthropicMessages(sent, id);
+      const { system, messages: body } = anthropicMessages(sent, id, codecs?.anthropic.replay);
 
       // Anthropic's own `service_tier` means auto or standard_only, not this.
       if (opts.serviceTier) {
@@ -468,12 +533,16 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       const named = typeof opts.toolChoice === "object" ? opts.toolChoice.name : undefined;
       const offered =
         unforced && named !== undefined ? tools.filter((tool) => tool.name === named) : tools;
-      if (offered.length > 0) {
-        request.tools = offered.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          input_schema: toAnthropicToolSchema(tool.inputSchema),
-        }));
+      const hosted = codecs?.anthropic.plan(config, baseUrl, id, offered, opts);
+      if (offered.length > 0 || (hosted?.tools.length ?? 0) > 0) {
+        request.tools = [
+          ...offered.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            input_schema: toAnthropicToolSchema(tool.inputSchema),
+          })),
+          ...(hosted?.tools ?? []),
+        ];
       }
       const choice =
         opts.toolChoice && opts.toolChoice !== "auto" && !unforced
@@ -534,145 +603,185 @@ export function createAnthropicProvider(config: AnthropicConfig): Provider {
       // EXCLUDED from `input_tokens` — where the OpenAI shapes report a cached
       // subset already inside the prompt count. Reconciling here is what keeps
       // one usage record meaningful across both, and a cost figure honest.
-      let freshInputTokens = 0;
-      let cachedInputTokens = 0;
-      let cacheWriteTokens = 0;
-      let outputTokens = 0;
+      //
+      // Summed over the passes of a paused turn: each pass is a response of its
+      // own, and each is billed.
+      const billed = { fresh: 0, cached: 0, written: 0, output: 0 };
       let toolCall: ToolCallIdentity | null = null;
       let sawToolCall = false;
       let blockIndex = -1;
-      // What proves the turn ended rather than the socket: a stated stop
-      // reason, or `message_stop`. See the check after the loop.
-      let stopped = false;
-      const usageChunk = (): ProviderChunk => ({
-        type: "usage",
-        usage: {
-          inputTokens: freshInputTokens + cachedInputTokens + cacheWriteTokens,
-          cachedInputTokens,
-          cacheWriteTokens,
-          outputTokens,
-        },
-      });
+      const hostedStream = codecs?.anthropic.stream(sent, id);
+      const usageChunk = (): ProviderChunk => {
+        return {
+          type: "usage",
+          usage: {
+            inputTokens: billed.fresh + billed.cached + billed.written,
+            cachedInputTokens: billed.cached,
+            cacheWriteTokens: billed.written,
+            outputTokens: billed.output,
+            ...hostedStream?.usage(),
+          },
+        };
+      };
+      const baseHeaders = {
+        "anthropic-version": config.version ?? DEFAULT_VERSION,
+        ...(config.bearer
+          ? { authorization: `Bearer ${config.apiKey}` }
+          : { "x-api-key": config.apiKey }),
+        ...attributionHeaders(config, config.headers),
+        ...(config.sessionHeader
+          ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
+          : {}),
+        ...config.headers,
+      };
+      const headers = codecs?.anthropic.headers(baseHeaders, hosted?.betas ?? []) ?? baseHeaders;
 
-      for await (const data of streamSse({
-        url: apiUrl(baseUrl, "/v1/messages"),
-        headers: {
-          "anthropic-version": config.version ?? DEFAULT_VERSION,
-          ...(config.bearer
-            ? { authorization: `Bearer ${config.apiKey}` }
-            : { "x-api-key": config.apiKey }),
-          ...attributionHeaders(config, config.headers),
-          ...(config.sessionHeader
-            ? { [config.sessionHeader]: opts.sessionId ?? instanceSessionId }
-            : {}),
-          ...config.headers,
-        },
-        body: request,
-        provider: id,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-        ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
-        ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
-        ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
-        // The stop reason rides in `message_delta` with the final usage, so a
-        // read that dies after it loses nothing but `message_stop`.
-        finished: () => stopped,
-      })) {
-        const event = parseFrame<AnthropicEvent>(data, id);
+      // One pass per response. A server tool loop that runs long ends its
+      // response on `pause_turn`, and the turn goes on only once the paused
+      // content is sent back as the last assistant message. The reader sees
+      // one turn: the next pass's blocks continue at the same offset.
+      // (PydanticAI's accumulate loop, MIT, models/_continuation.py:1-24.)
+      for (let pauses = 0; ; pauses++) {
+        // What proves the pass ended rather than the socket: a stated stop
+        // reason, or `message_stop`. See the check after the loop.
+        let stopped = false;
+        let ended = false;
+        let paused = false;
+        let fresh = 0;
+        let cached = 0;
+        let written = 0;
+        let output = 0;
+        const payload = hostedStream?.payload(request, body) ?? request;
 
-        switch (event.type) {
-          // A failure the backend reports after its headers went out. Classified
-          // rather than assumed transient: this shape carries `overloaded_error`
-          // most of the time, but a prompt found too long mid-stream arrives the
-          // same way, and retrying that one only fails it again more slowly.
-          case "error":
-            throw streamError(id, event);
+        read: for await (const data of streamSse({
+          url: apiUrl(baseUrl, "/v1/messages"),
+          headers,
+          body: payload,
+          provider: id,
+          ...(opts.signal ? { signal: opts.signal } : {}),
+          ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
+          ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
+          ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
+          // The stop reason rides in `message_delta` with the final usage, so a
+          // read that dies after it loses nothing but `message_stop`.
+          finished: () => stopped,
+        })) {
+          const event = parseFrame<AnthropicEvent>(data, id);
+          if (hostedStream) yield* hostedStream.event(event);
 
-          case "message_start": {
-            const usage = event.message?.usage;
-            cachedInputTokens = usage?.cache_read_input_tokens ?? 0;
-            cacheWriteTokens = usage?.cache_creation_input_tokens ?? 0;
-            freshInputTokens = usage?.input_tokens ?? 0;
-            break;
-          }
+          switch (event.type) {
+            // A failure the backend reports after its headers went out. Classified
+            // rather than assumed transient: this shape carries `overloaded_error`
+            // most of the time, but a prompt found too long mid-stream arrives the
+            // same way, and retrying that one only fails it again more slowly.
+            case "error":
+              throw streamError(id, event);
 
-          case "content_block_start": {
-            blockIndex += 1;
-            if (event.content_block?.type === "tool_use") {
-              toolCall = {
-                index: blockIndex,
-                id: event.content_block.id ?? "",
-                name: event.content_block.name ?? "",
-              };
-              // Checked here, because this block is the only place this shape
-              // states a call's id and name.
-              settleToolCalls(id, [toolCall]);
-              sawToolCall = true;
-              yield {
-                type: "delta",
-                toolCalls: [{ index: toolCall.index, id: toolCall.id, name: toolCall.name }],
-              };
+            case "message_start": {
+              const usage = event.message?.usage;
+              cached = usage?.cache_read_input_tokens ?? 0;
+              written = usage?.cache_creation_input_tokens ?? 0;
+              fresh = usage?.input_tokens ?? 0;
+              break;
             }
-            break;
-          }
 
-          case "content_block_delta": {
-            const delta = event.delta;
-            if (delta?.type === "text_delta" && delta.text) {
-              yield { type: "delta", content: delta.text };
-            } else if (delta?.type === "thinking_delta" && delta.thinking) {
-              yield { type: "delta", reasoning: delta.thinking };
-            } else if (delta?.type === "input_json_delta" && toolCall) {
-              yield {
-                type: "delta",
-                toolCalls: [{ index: toolCall.index, arguments: delta.partial_json ?? "" }],
-              };
+            case "content_block_start": {
+              blockIndex += 1;
+              const block: Record<string, unknown> = { ...event.content_block };
+              if (block.type === "tool_use") {
+                toolCall = {
+                  index: blockIndex,
+                  id: typeof block.id === "string" ? block.id : "",
+                  name: typeof block.name === "string" ? block.name : "",
+                };
+                // Checked here, because this block is the only place this shape
+                // states a call's id and name.
+                settleToolCalls(id, [toolCall]);
+                sawToolCall = true;
+                yield {
+                  type: "delta",
+                  toolCalls: [{ index: toolCall.index, id: toolCall.id, name: toolCall.name }],
+                };
+              }
+              break;
             }
-            break;
-          }
 
-          case "content_block_stop":
-            toolCall = null;
-            break;
+            case "content_block_delta": {
+              const delta = event.delta;
+              if (delta?.type === "text_delta" && delta.text) {
+                yield { type: "delta", content: delta.text };
+              } else if (delta?.type === "thinking_delta" && delta.thinking) {
+                yield { type: "delta", reasoning: delta.thinking };
+              } else if (delta?.type === "input_json_delta") {
+                // Buffered per block. A server tool's input is the vendor's to
+                // run, and fed into a function call's arguments it corrupts
+                // them (TanStack ai-anthropic text.ts:1706-1710).
+                if (toolCall) {
+                  yield {
+                    type: "delta",
+                    toolCalls: [{ index: toolCall.index, arguments: delta.partial_json ?? "" }],
+                  };
+                }
+              }
+              break;
+            }
 
-          case "message_delta": {
-            // Z.ai starts with zero input usage and reports the real totals here.
-            // These are cumulative counters, not increments. Native Anthropic
-            // usually sends only output_tokens here, so absent fields retain theirs.
-            freshInputTokens = event.usage?.input_tokens ?? freshInputTokens;
-            cachedInputTokens = event.usage?.cache_read_input_tokens ?? cachedInputTokens;
-            cacheWriteTokens = event.usage?.cache_creation_input_tokens ?? cacheWriteTokens;
-            outputTokens = event.usage?.output_tokens ?? outputTokens;
-            if (event.delta?.stop_reason) {
-              const stated = mapStopReason(id, event.delta.stop_reason);
+            case "content_block_stop": {
+              toolCall = null;
+              break;
+            }
+
+            case "message_delta": {
+              // Z.ai starts with zero input usage and reports the real totals here.
+              // These are cumulative counters, not increments. Native Anthropic
+              // usually sends only output_tokens here, so absent fields retain theirs.
+              fresh = event.usage?.input_tokens ?? fresh;
+              cached = event.usage?.cache_read_input_tokens ?? cached;
+              written = event.usage?.cache_creation_input_tokens ?? written;
+              output = event.usage?.output_tokens ?? output;
+              const reason = event.delta?.stop_reason;
+              if (!reason) break;
               stopped = true;
+              if (reason === "pause_turn" && hostedStream) {
+                paused = true;
+                break;
+              }
+              const stated = mapStopReason(id, reason);
+              if (hostedStream) yield* hostedStream.close();
               // Anthropic-compatible gateways can end a tool turn on
               // `end_turn`, and a caller reading that as done never runs the
               // tool. Only `stop` is promoted: a length cut may be what broke
-              // the call.
+              // the call. Hosted calls never count: the loop runs none of them.
               const finishReason = stated === "stop" && sawToolCall ? "tool_calls" : stated;
               yield { type: "finish", finishReason };
+              break;
             }
-            break;
-          }
 
-          // The turn's last event, so the reader stops here. Some gateways
-          // append a `[DONE]` or other bytes after it, and a read that died on
-          // those failed an answer that was already whole (Kimi, GLM and
-          // OpenCode Go, measured by cc-proxy).
-          case "message_stop":
-            yield usageChunk();
-            return;
+            // The pass's last event, so the reader stops here. Some gateways
+            // append a `[DONE]` or other bytes after it, and a read that died on
+            // those failed an answer that was already whole (Kimi, GLM and
+            // OpenCode Go, measured by cc-proxy).
+            case "message_stop":
+              ended = true;
+              break read;
+          }
+        }
+
+        billed.fresh += fresh;
+        billed.cached += cached;
+        billed.written += written;
+        billed.output += output;
+        // A gateway that states its stop reason and then skips `message_stop`,
+        // or whose socket dies after the reason, still finished the turn, and
+        // still billed it.
+        if (!stopped && !ended) throw streamCut(id);
+        hostedStream?.endPass(paused, pauses);
+        if (!paused) {
+          yield usageChunk();
+          return;
         }
       }
-      // A gateway that states its stop reason and then skips `message_stop`, or
-      // whose socket dies after the reason, still finished the turn, and still
-      // billed it.
-      if (stopped) {
-        yield usageChunk();
-        return;
-      }
-      throw streamCut(id);
     },
   };
-  return withConfiguredFallbacks(provider, config);
+  return configuredFallbacks(provider, config, codecs);
 }

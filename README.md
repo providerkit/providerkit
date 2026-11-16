@@ -141,6 +141,29 @@ each family uses. You can also sign in with `createAuthFlow("opencode-zen", host
 `claude-sonnet-5-5`). Sign in with `createAuthFlow("antigravity", host)` to discover the
 Cloud Code Assist project and hand the token source to `withToken` or `createRegistry`.
 
+### Hosted tools
+
+Let the vendor search the web, fetch a page or run code inside its own turn.
+Import the provider from `/hosted`, so plain chat apps load none of its encoders or parsers:
+
+```ts
+import { collectTurn } from "@providerkit/core";
+import { createPresetProvider } from "@providerkit/core/hosted";
+
+const provider = createPresetProvider("google", { apiKey });
+const turn = await collectTurn(
+  provider.createStream(history, [], { hostedTools: [{ type: "web_search" }] }),
+);
+```
+
+`turn.message.citations` holds the pages the answer cites and where each one sits in the text,
+and `turn.message.hostedCalls` holds what the vendor ran. None of it is a tool call your loop
+has to run. Constructors from the base import refuse `hostedTools` with an `invalid` error
+before sending a request. With `/hosted`, an adapter that can't run a tool or apply one of its
+settings, such as a domain filter, refuses unless you mark that tool `optional`.
+The [tools guide](https://providerkit.dev/guides/tools/#hosted-tools) says which adapter runs
+what, and how each call is billed.
+
 ### Speech
 
 Text to one audio file, from its own entry point, so a chat-only app loads none of the speech code:
@@ -200,7 +223,7 @@ drift.
 | [Errors](https://providerkit.dev/guides/errors/)                        | The thirteen kinds, and why status is not enough |
 | [Retries and fallback](https://providerkit.dev/guides/retries/)         | Backoff, the commitment rule, backup models      |
 | [Streaming and the watchdog](https://providerkit.dev/guides/streaming/) | The stream that stops sending; TTFT              |
-| [Tools](https://providerkit.dev/guides/tools/)                          | Tool kernel, truncated-argument salvage, zod     |
+| [Tools](https://providerkit.dev/guides/tools/)                          | Tool kernel, argument salvage, zod, hosted tools |
 | [Context and compaction](https://providerkit.dev/guides/context/)       | When to compact, and where to cut                |
 | [Resume after a crash](https://providerkit.dev/guides/resume/)          | Pick a conversation up after the process stops   |
 | [Usage and cost](https://providerkit.dev/guides/usage/)                 | Reconciling cache tokens, cost, savings          |

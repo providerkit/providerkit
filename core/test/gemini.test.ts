@@ -1,13 +1,19 @@
+import * as hosted from "../src/hosted.ts";
 // Golden transcripts for the Gemini adapter: real `?alt=sse` frame sequences
 // replayed through it, asserting the normalized chunks and the request it
 // builds. Same shape as providers.test.ts, plus the signal the fetch must see.
 import { describe, expect, it } from "vitest";
 import { ProviderError } from "../src/errors.ts";
+import type { HostedTool } from "../src/hosted.ts";
 import {
   antigravityUserAgent,
   createGeminiProvider,
   toGeminiContents,
 } from "../src/providers/gemini.ts";
+import { collectTurn } from "../src/turn.ts";
+import { withStreamRetry } from "../src/retry.ts";
+import { costUsd } from "../src/usage.ts";
+import { withWatchdog } from "../src/watchdog.ts";
 import type {
   ChatMessage,
   Effort,
@@ -775,5 +781,663 @@ describe("antigravityUserAgent", () => {
     expect(antigravityUserAgent("antigravity/gemini-4-argon")).toContain("antigravity/cli/");
     expect(antigravityUserAgent("gemini-3.8-flash")).toContain("antigravity/ide/");
     expect(antigravityUserAgent("claude-opus-5-5")).toContain("antigravity/ide/");
+  });
+});
+
+// ── hosted tools ──────────────────────────────────────────────────────────
+
+const SOURCE_URL = "https://cats.example/sleep";
+/** The claim holds an emoji, so its UTF-8 byte offsets and its JS indices
+ *  part. It is said twice, so only offsets converted right find the second:
+ *  matching the text alone can't tell the two apart. */
+const CLAIM = "Cats 🐈 sleep 12 to 16 hours.";
+const ANSWER = `${CLAIM} Again: ${CLAIM}`;
+const SECOND = ANSWER.lastIndexOf(CLAIM);
+const bytes = (text: string) => new TextEncoder().encode(text).length;
+const secondClaim = {
+  startIndex: bytes(ANSWER.slice(0, SECOND)),
+  endIndex: bytes(ANSWER),
+  text: CLAIM,
+};
+
+/** A grounded answer: the text, then the metadata saying what it read and
+ *  which sentence each page backs, in bytes. */
+const groundedTurn = (segment: { startIndex?: number; endIndex: number; text: string }) => [
+  candidate([{ text: ANSWER.slice(0, 7) }]),
+  candidate([{ text: ANSWER.slice(7) }]),
+  j({
+    candidates: [
+      {
+        content: { parts: [] },
+        finishReason: "STOP",
+        groundingMetadata: {
+          webSearchQueries: ["how long do cats sleep"],
+          searchEntryPoint: { renderedContent: "<div>suggestions</div>" },
+          groundingChunks: [
+            { web: { uri: SOURCE_URL, title: "cats.example" } },
+            { web: { uri: SOURCE_URL, title: "cats.example" } },
+          ],
+          groundingSupports: [{ segment, groundingChunkIndices: [0] }],
+        },
+      },
+    ],
+    usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 20, toolUsePromptTokenCount: 400 },
+  }),
+];
+
+describe("gemini hosted tools", () => {
+  const provider = (fetchImpl: typeof fetch, config: Record<string, unknown> = {}) =>
+    hosted.createGeminiProvider({ apiKey: "k", model: "gemini-3-pro", fetchImpl, ...config });
+  const search = { hostedTools: [{ type: "web_search" as const }] };
+  const fn: ToolDefinition = { name: "save", description: "save", inputSchema: { type: "object" } };
+
+  it("sends each built-in, and none of them when the tool choice is none", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    const tools: HostedTool[] = [
+      { type: "web_search" },
+      { type: "web_fetch" },
+      { type: "code_execution" },
+      { type: "file_search", storeIds: ["fileSearchStores/cats"], maxResults: 3 },
+    ];
+    for (const tool of tools) {
+      await collect(provider(fetchImpl).createStream(HI, [], { hostedTools: [tool] }));
+    }
+    expect(seen.map(({ body }) => body.tools)).toEqual([
+      [{ googleSearch: {} }],
+      [{ urlContext: {} }],
+      [{ codeExecution: {} }],
+      [{ fileSearch: { fileSearchStoreNames: ["fileSearchStores/cats"], topK: 3 } }],
+    ]);
+    // `NONE` stops only function calls here, so `none` leaves the built-ins out.
+    const none = recorder(TEXT_TURN);
+    await collect(
+      provider(none.fetchImpl).createStream(HI, [fn], { ...search, toolChoice: "none" }),
+    );
+    expect(none.seen[0]!.body.tools).toEqual([
+      { functionDeclarations: [expect.objectContaining({ name: "save" })] },
+    ]);
+  });
+
+  it.each([
+    ["web_search", { googleSearch: {} }],
+    ["web_fetch", { urlContext: {} }],
+    ["code_execution", { codeExecution: {} }],
+  ] as const)(
+    "refuses File Search beside %s and drops only an optional conflicting tool",
+    async (type, expectedTool) => {
+      const file: HostedTool = { type: "file_search", storeIds: ["fileSearchStores/cats"] };
+      const other: HostedTool = { type };
+      const refused = recorder(TEXT_TURN);
+      await expect(
+        collect(provider(refused.fetchImpl).createStream(HI, [], { hostedTools: [file, other] })),
+      ).rejects.toMatchObject({ kind: "invalid", message: expect.stringContaining("file_search") });
+      expect(refused.seen).toHaveLength(0);
+
+      const keepFile = recorder(TEXT_TURN);
+      await collect(
+        provider(keepFile.fetchImpl).createStream(HI, [], {
+          hostedTools: [file, { ...other, optional: true }],
+        }),
+      );
+      expect(keepFile.seen[0]!.body.tools).toEqual([
+        { fileSearch: { fileSearchStoreNames: ["fileSearchStores/cats"] } },
+      ]);
+
+      const keepOther = recorder(TEXT_TURN);
+      await collect(
+        provider(keepOther.fetchImpl).createStream(HI, [], {
+          hostedTools: [{ ...file, optional: true }, other],
+        }),
+      );
+      expect(keepOther.seen[0]!.body.tools).toEqual([expectedTool]);
+    },
+  );
+
+  it("never drops a required restriction to resolve an optional File Search conflict", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await expect(
+      collect(
+        provider(fetchImpl).createStream(HI, [], {
+          hostedTools: [
+            { type: "file_search", storeIds: ["fileSearchStores/cats"], optional: true },
+            { type: "web_search", maxUses: 1 },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("asks Gemini 3 to run built-ins beside functions, and refuses the mix on Gemini 2", async () => {
+    const mixed = recorder(TEXT_TURN);
+    await collect(provider(mixed.fetchImpl).createStream(HI, [fn], search));
+    expect(mixed.seen[0]!.body.tools).toEqual([
+      { functionDeclarations: [expect.objectContaining({ name: "save" })] },
+      { googleSearch: {} },
+    ]);
+    expect(mixed.seen[0]!.body.toolConfig).toEqual({
+      functionCallingConfig: { mode: "VALIDATED" },
+      includeServerSideToolInvocations: true,
+    });
+
+    const old = recorder(TEXT_TURN);
+    await expect(
+      collect(
+        provider(old.fetchImpl, { model: "gemini-2.5-flash" }).createStream(HI, [fn], search),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(old.seen).toHaveLength(0);
+    // Without functions, Gemini 2 searches.
+    const alone = recorder(TEXT_TURN);
+    await collect(
+      provider(alone.fetchImpl, { model: "gemini-2.5-flash" }).createStream(HI, [], search),
+    );
+    expect(alone.seen[0]!.body.tools).toEqual([{ googleSearch: {} }]);
+  });
+
+  it("refuses every field Gemini can't apply, and every tool on Antigravity", async () => {
+    const refusals: [HostedTool, Record<string, unknown>?][] = [
+      [{ type: "web_search", allowedDomains: ["cats.example"] }],
+      [{ type: "web_fetch", maxUses: 1 }],
+      [{ type: "web_search", userLocation: { country: "US" } }],
+      [{ type: "code_execution", fileIds: ["file_1"] }],
+      [{ type: "image_generation" }],
+      [
+        { type: "web_search" },
+        { id: "antigravity", baseUrl: "https://cloudcode-pa.googleapis.com" },
+      ],
+    ];
+    for (const [tool, config] of refusals) {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await expect(
+        collect(provider(fetchImpl, config).createStream(HI, [], { hostedTools: [tool] })),
+      ).rejects.toMatchObject({ kind: "invalid" });
+      expect(seen).toHaveLength(0);
+    }
+  });
+
+  it("reads grounding as one search, its pages as sources, and each supported sentence as a claim", async () => {
+    const turn = await collectTurn(
+      provider(recorder(groundedTurn(secondClaim)).fetchImpl).createStream(HI, [], search),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "web_search",
+        status: "completed",
+        input: { query: "how long do cats sleep" },
+        // One page, cited twice by the chunks, is one source of the search.
+        output: {
+          sources: [{ type: "url", url: SOURCE_URL, title: "cats.example" }],
+          searchSuggestions: "<div>suggestions</div>",
+        },
+        at: 0,
+      },
+    ]);
+    const [citation] = turn.message.citations ?? [];
+    // Bytes became JS indices: the span lands on the second claim, not the first.
+    expect(citation).toMatchObject({ anchor: "claim", start: SECOND, end: ANSWER.length });
+    expect(turn.message.content.slice(citation?.start, citation?.end)).toBe(CLAIM);
+    // The prompt the search results added bills as input too.
+    expect(turn.usage).toMatchObject({ inputTokens: 450, hostedCalls: { web_search: 1 } });
+    // Nothing to send back: grounding is not a part of the model's turn.
+    expect(turn.message.hostedItems).toBeUndefined();
+    expect(turn.message.toolCalls).toBeUndefined();
+  });
+
+  it("places a segment Google reported a byte off by its text, and drops a span that checks out nowhere", async () => {
+    // A text said once places the citation even when its bytes are a byte off
+    // (PydanticAI google.py:2379-2384).
+    const unique = `Again: ${CLAIM}`;
+    const start = bytes(ANSWER.slice(0, ANSWER.indexOf(unique)));
+    const off = groundedTurn({ startIndex: start + 1, endIndex: bytes(ANSWER) + 1, text: unique });
+    const placed = await collectTurn(
+      provider(recorder(off).fetchImpl).createStream(HI, [], search),
+    );
+    const [citation] = placed.message.citations ?? [];
+    expect(placed.message.content.slice(citation?.start, citation?.end)).toBe(unique);
+
+    // The claim is said twice, so a byte off can't be placed: the span goes.
+    const twice = groundedTurn({ ...secondClaim, startIndex: secondClaim.startIndex + 1 });
+    const unplaced = await collectTurn(
+      provider(recorder(twice).fetchImpl).createStream(HI, [], search),
+    );
+    expect(unplaced.message.citations).toEqual([
+      { source: { type: "url", url: SOURCE_URL, title: "cats.example" } },
+    ]);
+
+    const nowhere = groundedTurn({ endIndex: 4, text: "words the answer never said" });
+    const kept = await collectTurn(
+      provider(recorder(nowhere).fetchImpl).createStream(HI, [], search),
+    );
+    expect(kept.message.citations).toEqual([
+      { source: { type: "url", url: SOURCE_URL, title: "cats.example" } },
+    ]);
+  });
+
+  it.each([false, true])("honors citation partIndex with streamed parts: %s", async (streamed) => {
+    const claim = "Same 🐈 claim.";
+    const call = { toolCall: { id: "s", toolType: "GOOGLE_SEARCH_WEB", args: { query: "cats" } } };
+    const result = { toolResponse: { id: "s", toolType: "GOOGLE_SEARCH_WEB", response: {} } };
+    const frames = streamed
+      ? [
+          candidate([{ text: claim.slice(0, 5) }]),
+          candidate([{ text: claim.slice(5) }]),
+          candidate([call, result, { text: claim.slice(0, 5) }]),
+          candidate([{ text: claim.slice(5) }]),
+        ]
+      : [candidate([{ text: claim }, call, result, { text: claim }])];
+    frames.push(
+      j({
+        candidates: [
+          {
+            finishReason: "STOP",
+            groundingMetadata: {
+              webSearchQueries: ["cats"],
+              groundingChunks: [{ web: { uri: SOURCE_URL } }],
+              groundingSupports: [
+                {
+                  segment: { partIndex: 3, startIndex: 0, endIndex: bytes(claim), text: claim },
+                  groundingChunkIndices: [0],
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    const turn = await collectTurn(
+      provider(recorder(frames).fetchImpl).createStream(HI, [fn], search),
+    );
+    expect(turn.message.content).toBe(claim + claim);
+    expect(turn.message.citations).toEqual([
+      {
+        source: { type: "url", url: SOURCE_URL },
+        start: claim.length,
+        end: claim.length * 2,
+        anchor: "claim",
+      },
+    ]);
+  });
+
+  it.each([
+    ["gemini-3-flash-preview", true, ["cats", "dogs", "cats", "", "  "], 2],
+    ["gemini-4-pro", true, ["cats", "dogs", "cats"], 2],
+    ["gemini-2.5-pro", true, ["cats", "dogs"], 1],
+    ["gemini-2.5-pro", false, ["cats", "dogs"], 0],
+    ["gemini-3-flash-preview", true, ["", "  "], 0],
+  ] as const)(
+    "counts billable searches on %s, web sources: %s, queries: %j",
+    async (model, web, queries, count) => {
+      const frames = [
+        j({
+          candidates: [
+            {
+              content: { parts: [{ text: "An answer." }] },
+              finishReason: "STOP",
+              groundingMetadata: {
+                webSearchQueries: queries,
+                groundingChunks: web ? [{ web: { uri: SOURCE_URL } }] : [],
+              },
+            },
+          ],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+        }),
+      ];
+      const turn = await collectTurn(
+        provider(recorder(frames).fetchImpl, { model }).createStream(HI, [], search),
+      );
+      // The one summary record is display data, not the number of billed queries.
+      expect(turn.message.hostedCalls).toHaveLength(1);
+      expect(turn.usage.hostedCalls?.web_search ?? 0).toBe(count);
+      expect(
+        costUsd(turn.usage, { input: 0, output: 0, cacheRead: 0, hosted: { web_search: 0.25 } }),
+      ).toBe(count * 0.25);
+    },
+  );
+
+  it.each([1, 2])(
+    "fills %s explicit File Search calls without counting grounding again",
+    async (count) => {
+      // PydanticAI's Gemini 3 fixture returns empty FILE_SEARCH responses and
+      // supplies the retrieved passages later, in grounding metadata.
+      const frames = [
+        candidate(
+          Array.from({ length: count }, (_, index) => [
+            {
+              toolCall: {
+                id: `file_${index}`,
+                toolType: "FILE_SEARCH",
+                args: { query: "Capital of France" },
+              },
+            },
+            { toolResponse: { id: `file_${index}`, toolType: "FILE_SEARCH", response: {} } },
+          ]).flat(),
+        ),
+        j({
+          candidates: [
+            {
+              content: { parts: [{ text: "Paris." }] },
+              finishReason: "STOP",
+              groundingMetadata: {
+                groundingChunks: [
+                  { retrievedContext: { text: "Paris is the capital of France." } },
+                ],
+              },
+            },
+          ],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+        }),
+      ];
+      const turn = await collectTurn(
+        provider(recorder(frames).fetchImpl).createStream(HI, [], {
+          hostedTools: [{ type: "file_search", storeIds: ["fileSearchStores/geography"] }],
+        }),
+      );
+      expect(turn.message.hostedCalls).toEqual(
+        Array.from({ length: count }, (_, index) => ({
+          id: `file_${index}`,
+          type: "file_search",
+          status: "completed",
+          input: { query: "Capital of France" },
+          output: { sources: [{ type: "file", excerpt: "Paris is the capital of France." }] },
+          at: 0,
+        })),
+      );
+      expect(turn.usage.hostedCalls).toEqual({ file_search: count });
+      expect(
+        costUsd(turn.usage, { input: 0, output: 0, cacheRead: 0, hosted: { file_search: 0.25 } }),
+      ).toBe(count * 0.25);
+    },
+  );
+
+  it.each([
+    ['print(file_search.query(query="Capital of France"))\n', "Capital of France"],
+    ["print(file_search.query(query='France\\'s capital'))\n", "France's capital"],
+  ])("recognizes a Gemini 2.5 code-shaped File Search: %s", async (code, query) => {
+    // Ported from PydanticAI's test_google_model_file_search_tool_stream.yaml
+    // (MIT): there is no codeExecutionResult, only retrievedContext grounding.
+    const frames = [
+      candidate([{ executableCode: { language: "PYTHON", code } }]),
+      j({
+        candidates: [
+          {
+            content: { parts: [{ text: "Paris." }] },
+            finishReason: "STOP",
+            groundingMetadata: {
+              groundingChunks: [{ retrievedContext: { text: "Paris is the capital of France." } }],
+            },
+          },
+        ],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+      }),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(frames).fetchImpl, { model: "gemini-2.5-pro" }).createStream(HI, [], {
+        hostedTools: [{ type: "file_search", storeIds: ["fileSearchStores/geography"] }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "file_search",
+        status: "completed",
+        input: { query },
+        output: { sources: [{ type: "file", excerpt: "Paris is the capital of France." }] },
+        at: 0,
+      },
+    ]);
+    expect(turn.usage.hostedCalls).toEqual({ file_search: 1 });
+    expect(turn.message.hostedItems?.items[0]).toEqual({
+      executableCode: { language: "PYTHON", code },
+    });
+    expect(turn.finishReason).toBe("stop");
+  });
+
+  it("commits paid hosted work before validating a later function call in the same frame", async () => {
+    const { seen, fetchImpl } = recorder([
+      candidate([
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\\n" } },
+        { functionCall: { id: "broken", args: {} } },
+      ]),
+    ]);
+    const chunks: ProviderChunk[] = [];
+    await expect(
+      (async () => {
+        for await (const chunk of withStreamRetry(
+          (signal) =>
+            withWatchdog(provider(fetchImpl)).createStream(HI, [fn], {
+              hostedTools: [{ type: "code_execution" }],
+              signal,
+            }),
+          { maxAttempts: 2, sleep: async () => {} },
+        ))
+          chunks.push(chunk);
+      })(),
+    ).rejects.toMatchObject({ kind: "overload" });
+    expect(seen).toHaveLength(1);
+    expect(chunks.flatMap((chunk) => chunk.hosted ?? [])).toMatchObject([
+      { type: "code_execution", status: "running" },
+      { status: "completed", output: { stdout: "34\\n" } },
+    ]);
+  });
+
+  it("pairs each code run with its result, keeping a timed-out run as data", async () => {
+    const code = [
+      candidate([{ text: "Running it. " }]),
+      candidate([
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\n" } },
+        { executableCode: { language: "PYTHON", code: "while True: pass" } },
+        { codeExecutionResult: { outcome: "OUTCOME_DEADLINE_EXCEEDED" } },
+      ]),
+      candidate([{ text: "Done." }], "STOP"),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(code).fetchImpl).createStream(HI, [], {
+        hostedTools: [{ type: "code_execution" }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "code_execution",
+        status: "completed",
+        input: { code: "print(34)", language: "python" },
+        output: { stdout: "34\n" },
+        at: 12,
+      },
+      {
+        id: "hosted_1",
+        type: "code_execution",
+        status: "failed",
+        input: { code: "while True: pass", language: "python" },
+        error: "OUTCOME_DEADLINE_EXCEEDED",
+        at: 12,
+      },
+    ]);
+    expect(turn.finishReason).toBe("stop");
+    // The parts go back as they came, with the text as lengths.
+    expect(turn.message.hostedItems).toEqual({
+      provider: "gemini",
+      items: [
+        { length: 12 },
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\n" } },
+        { executableCode: { language: "PYTHON", code: "while True: pass" } },
+        { codeExecutionResult: { outcome: "OUTCOME_DEADLINE_EXCEEDED" } },
+        { length: 5 },
+      ],
+    });
+    // …and only to the provider that made them.
+    const history: ChatMessage[] = [...HI, turn.message, { role: "user", content: "thanks" }];
+    expect(hosted.toGeminiContents(history, "gemini").contents[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "Running it. " },
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\n" } },
+        { executableCode: { language: "PYTHON", code: "while True: pass" } },
+        { codeExecutionResult: { outcome: "OUTCOME_DEADLINE_EXCEEDED" } },
+        { text: "Done." },
+      ],
+    });
+    expect(hosted.toGeminiContents(history, "zen").contents[1]).toEqual({
+      role: "model",
+      parts: [{ text: "Running it. Done." }],
+    });
+  });
+
+  it("reads a server-side search beside a function call, and sends both back in order with their signatures", async () => {
+    const mixed = [
+      candidate([
+        {
+          toolCall: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", args: { query: "cats" } },
+          thoughtSignature: "sig_a",
+        },
+        {
+          toolResponse: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", response: { ok: true } },
+          thoughtSignature: "sig_b",
+        },
+        { functionCall: { id: "call_1", name: "save", args: { n: 1 } }, thoughtSignature: "sig_c" },
+      ]),
+      candidate([], "STOP"),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(mixed).fetchImpl).createStream(HI, [fn], search),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      { id: "srv_1", type: "web_search", status: "completed", input: { query: "cats" }, at: 0 },
+    ]);
+    expect(turn.message.toolCalls).toEqual([
+      { id: "call_1", name: "save", arguments: '{"n":1}', thoughtSignature: "sig_c" },
+    ]);
+    // The function call makes it a tool round; the search does not.
+    expect(turn.finishReason).toBe("tool_calls");
+    const result: ChatMessage = { role: "tool", toolCallId: "call_1", name: "save", content: "ok" };
+    const next = recorder(TEXT_TURN);
+    await collect(
+      provider(next.fetchImpl).createStream([...HI, turn.message, result], [fn], search),
+    );
+    expect((next.seen[0]!.body.contents as unknown[])[1]).toEqual({
+      role: "model",
+      parts: [
+        {
+          toolCall: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", args: { query: "cats" } },
+          thoughtSignature: "sig_a",
+        },
+        {
+          toolResponse: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", response: { ok: true } },
+          thoughtSignature: "sig_b",
+        },
+        { functionCall: { id: "call_1", name: "save", args: { n: 1 } }, thoughtSignature: "sig_c" },
+      ],
+    });
+  });
+
+  it("reconciles URL-context results onto server calls without hiding failed pages", async () => {
+    const blockedUrl = "https://paywall.example";
+    const extraUrl = "https://other.example";
+    const frames = [
+      candidate([
+        {
+          toolCall: {
+            id: "fetch",
+            toolType: "URL_CONTEXT",
+            args: { urls: [SOURCE_URL, blockedUrl] },
+          },
+        },
+        { toolResponse: { id: "fetch", toolType: "URL_CONTEXT", response: {} } },
+      ]),
+      j({
+        candidates: [
+          {
+            content: { parts: [{ text: "One page could not be read." }] },
+            finishReason: "STOP",
+            urlContextMetadata: {
+              urlMetadata: [
+                { retrievedUrl: SOURCE_URL, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS" },
+                { retrievedUrl: blockedUrl, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_PAYWALL" },
+                { retrievedUrl: extraUrl, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS" },
+              ],
+            },
+          },
+        ],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+      }),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(frames).fetchImpl).createStream(HI, [fn], {
+        hostedTools: [{ type: "web_fetch" }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "fetch",
+        type: "web_fetch",
+        status: "failed",
+        at: 0,
+        input: { url: SOURCE_URL },
+        output: { sources: [{ type: "url", url: SOURCE_URL }] },
+        error: "URL_RETRIEVAL_STATUS_PAYWALL",
+      },
+      {
+        id: "hosted_1",
+        type: "web_fetch",
+        status: "completed",
+        at: 0,
+        input: { url: extraUrl },
+        output: { sources: [{ type: "url", url: extraUrl }] },
+      },
+    ]);
+    expect(turn.usage.hostedCalls).toEqual({ web_fetch: 2 });
+    expect(turn.finishReason).toBe("stop");
+  });
+
+  it("reads URL context as one fetch per page, a failed one as data", async () => {
+    const fetched = [
+      candidate([{ text: "It is about cats." }]),
+      j({
+        candidates: [
+          {
+            content: { parts: [] },
+            finishReason: "STOP",
+            urlContextMetadata: {
+              urlMetadata: [
+                { retrievedUrl: SOURCE_URL, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS" },
+                {
+                  retrievedUrl: "https://paywall.example",
+                  urlRetrievalStatus: "URL_RETRIEVAL_STATUS_PAYWALL",
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(fetched).fetchImpl).createStream(HI, [], {
+        hostedTools: [{ type: "web_fetch" }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "web_fetch",
+        status: "completed",
+        input: { url: SOURCE_URL },
+        output: { sources: [{ type: "url", url: SOURCE_URL }] },
+        at: 0,
+      },
+      {
+        id: "hosted_1",
+        type: "web_fetch",
+        status: "failed",
+        input: { url: "https://paywall.example" },
+        error: "URL_RETRIEVAL_STATUS_PAYWALL",
+        at: 0,
+      },
+    ]);
   });
 });

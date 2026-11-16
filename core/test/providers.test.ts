@@ -1,3 +1,4 @@
+import * as hosted from "../src/hosted.ts";
 // Golden transcripts: real SSE frame sequences replayed through each adapter,
 // asserting the normalized chunks they must produce.
 import { describe, expect, it } from "vitest";
@@ -5,6 +6,8 @@ import { createAnthropicProvider, toAnthropicMessages } from "../src/providers/a
 import { createOpenAIProvider, effortParams, toOpenAIMessages } from "../src/providers/openai.ts";
 import { createPresetProvider } from "../src/providers/factory.ts";
 import { ProviderError } from "../src/errors.ts";
+import type { HostedTool } from "../src/hosted.ts";
+import { collectTurn } from "../src/turn.ts";
 import {
   EFFORTS,
   stripReasoning,
@@ -13,6 +16,7 @@ import {
   type ImagePart,
   type Provider,
   type ProviderChunk,
+  type StreamOptions,
   type ToolChoice,
   type ToolDefinition,
 } from "../src/types.ts";
@@ -1737,5 +1741,846 @@ describe("the session id a call without one sends", () => {
     expect(first).toMatch(/^[0-9a-f-]{36}$/);
     expect(second).toMatch(/^[0-9a-f-]{36}$/);
     expect(second).not.toBe(first);
+  });
+});
+
+// ── hosted tools ──────────────────────────────────────────────────────────
+
+/** Serves the i-th transcript to the i-th request, the last one after that:
+ *  a paused turn takes a request per pass. */
+function sequence(...turns: string[][]) {
+  const seen: { body: Record<string, unknown>; headers: Headers }[] = [];
+  // The test double stands in for fetch, which takes more than this reads.
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    seen.push({ body: JSON.parse(init.body as string), headers: new Headers(init.headers) });
+    const frames = turns[Math.min(seen.length, turns.length) - 1]!;
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(`data: ${frame}\n\n`));
+          controller.close();
+        },
+      }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  return { seen, fetchImpl };
+}
+
+/** The hosted tools a request carried: on Anthropic the ones with a `type`,
+ *  which a function tool never has. */
+const anthropicHosted = (body: Record<string, unknown>) =>
+  ((body.tools ?? []) as { type?: string }[]).filter((tool) => tool.type);
+
+const SOURCE_URL = "https://cats.example/sleep";
+const QUESTION: ChatMessage[] = [{ role: "user", content: "how long do cats sleep" }];
+const RESULT = {
+  type: "web_search_result",
+  url: SOURCE_URL,
+  title: "Cat sleep",
+  encrypted_content: "EqgfCioIARgB",
+  page_age: null,
+};
+const LOCATION = {
+  type: "web_search_result_location",
+  url: SOURCE_URL,
+  title: "Cat sleep",
+  cited_text: "Cats sleep 12 to 16 hours.",
+  encrypted_index: "Eo8BCioIAhgB",
+};
+
+/** One search, its result, and one cited text block, as Anthropic streams
+ *  them: the citation arrives before the text it cites. */
+const ANTHROPIC_SEARCH_TURN = [
+  j({ type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } }),
+  j({
+    type: "content_block_start",
+    index: 0,
+    content_block: { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: {} },
+  }),
+  j({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: "" },
+  }),
+  j({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: '{"query": "how long' },
+  }),
+  j({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: ' do cats sleep"}' },
+  }),
+  j({ type: "content_block_stop", index: 0 }),
+  j({
+    type: "content_block_start",
+    index: 1,
+    content_block: { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [RESULT] },
+  }),
+  j({ type: "content_block_stop", index: 1 }),
+  j({
+    type: "content_block_start",
+    index: 2,
+    content_block: { type: "text", text: "", citations: [] },
+  }),
+  j({
+    type: "content_block_delta",
+    index: 2,
+    delta: { type: "citations_delta", citation: LOCATION },
+  }),
+  j({
+    type: "content_block_delta",
+    index: 2,
+    delta: { type: "text_delta", text: "Cats sleep 12 to 16 hours." },
+  }),
+  j({ type: "content_block_stop", index: 2 }),
+  j({
+    type: "message_delta",
+    delta: { stop_reason: "end_turn" },
+    usage: {
+      output_tokens: 20,
+      server_tool_use: { web_search_requests: 1, web_fetch_requests: 0 },
+    },
+  }),
+  j({ type: "message_stop" }),
+];
+
+describe("anthropic hosted tools", () => {
+  const claude = (fetchImpl: typeof fetch, config: Record<string, unknown> = {}) =>
+    hosted.createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", fetchImpl, ...config });
+  const search: StreamOptions = { hostedTools: [{ type: "web_search" }] };
+
+  it("sends each tool in its pinned version, with the beta it needs beside the caller's own", async () => {
+    const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+    const provider = claude(fetchImpl, { headers: { "anthropic-beta": "oauth-2025-04-20" } });
+    await collect(
+      provider.createStream(QUESTION, [], {
+        hostedTools: [
+          {
+            type: "web_search",
+            maxUses: 3,
+            allowedDomains: ["cats.example"],
+            userLocation: { country: "US", timezone: "America/New_York" },
+          },
+          { type: "web_fetch", blockedDomains: ["dogs.example"], maxContentTokens: 4_000 },
+          { type: "code_execution" },
+        ],
+      }),
+    );
+    expect(seen[0]!.body.tools).toEqual([
+      {
+        type: "web_search_20250305",
+        name: "web_search",
+        max_uses: 3,
+        allowed_domains: ["cats.example"],
+        user_location: { type: "approximate", country: "US", timezone: "America/New_York" },
+      },
+      {
+        type: "web_fetch_20250910",
+        name: "web_fetch",
+        blocked_domains: ["dogs.example"],
+        max_content_tokens: 4_000,
+      },
+      { type: "code_execution_20250825", name: "code_execution" },
+    ]);
+    expect(seen[0]!.headers.get("anthropic-beta")).toBe(
+      "oauth-2025-04-20,web-fetch-2025-09-10,code-execution-2025-08-25",
+    );
+  });
+
+  it("refuses what it can't send before any request, and drops an optional tool whole", async () => {
+    const named = [
+      { name: "web_search", description: "mine", inputSchema: { type: "object" as const } },
+    ];
+    const cases: [HostedTool, ToolDefinition[]][] = [
+      // Anthropic takes one domain list or the other (TanStack's rule).
+      [{ type: "web_search", allowedDomains: ["a.example"], blockedDomains: ["b.example"] }, []],
+      // A function tool under a server tool's name is a 400.
+      [{ type: "web_search" }, named],
+      [{ type: "file_search", storeIds: ["vs_1"] }, []],
+      [{ type: "image_generation" }, []],
+      // Container uploads are not built, so file ids would be dropped.
+      [{ type: "code_execution", fileIds: ["file_1"] }, []],
+    ];
+    for (const [tool, tools] of cases) {
+      const refused = recorder(ANTHROPIC_TEXT_TURN);
+      const error = await collect(
+        claude(refused.fetchImpl).createStream(QUESTION, tools, { hostedTools: [tool] }),
+      ).catch((err: unknown) => err);
+      expect(error).toMatchObject({ kind: "invalid" });
+      expect(String(error)).toContain(tool.type);
+      expect(refused.seen).toHaveLength(0);
+
+      const optional = recorder(ANTHROPIC_TEXT_TURN);
+      await collect(
+        claude(optional.fetchImpl).createStream(QUESTION, tools, {
+          hostedTools: [{ ...tool, optional: true }],
+        }),
+      );
+      expect(anthropicHosted(optional.seen[0]!.body)).toEqual([]);
+    }
+  });
+
+  it("drops only the optional tool, and never excuses a required one beside it", async () => {
+    // PydanticAI's rule (tests/test_builtin_tools.py): `optional` speaks for
+    // its own tool, not for a sibling the endpoint can't run either.
+    const refused = recorder(ANTHROPIC_TEXT_TURN);
+    await expect(
+      collect(
+        claude(refused.fetchImpl).createStream(QUESTION, [], {
+          hostedTools: [
+            { type: "image_generation", optional: true },
+            { type: "file_search", storeIds: ["vs_1"] },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(refused.seen).toHaveLength(0);
+
+    const kept = recorder(ANTHROPIC_TEXT_TURN);
+    await collect(
+      claude(kept.fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [{ type: "image_generation", optional: true }, { type: "web_search" }],
+      }),
+    );
+    expect(anthropicHosted(kept.seen[0]!.body)).toEqual([
+      { type: "web_search_20250305", name: "web_search" },
+    ]);
+  });
+
+  it("reads a fetched page as its source, and a fetch error as data", async () => {
+    const fetchOf = (content: unknown) => [
+      j({ type: "message_start", message: { usage: { input_tokens: 10 } } }),
+      j({
+        type: "content_block_start",
+        content_block: {
+          type: "server_tool_use",
+          id: "srvtoolu_3",
+          name: "web_fetch",
+          input: { url: SOURCE_URL },
+        },
+      }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "content_block_start",
+        content_block: { type: "web_fetch_tool_result", tool_use_id: "srvtoolu_3", content },
+      }),
+      j({ type: "content_block_stop" }),
+      j({ type: "content_block_start", content_block: { type: "text", text: "" } }),
+      j({ type: "content_block_delta", delta: { type: "text_delta", text: "It is about cats." } }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 9, server_tool_use: { web_fetch_requests: 1 } },
+      }),
+      j({ type: "message_stop" }),
+    ];
+    const opts: StreamOptions = { hostedTools: [{ type: "web_fetch" }] };
+    const page = await collectTurn(
+      claude(
+        recorder(
+          fetchOf({
+            type: "web_fetch_result",
+            url: SOURCE_URL,
+            retrieved_at: "2026-11-01T10:00:00Z",
+            content: {
+              type: "document",
+              title: "Cat sleep",
+              source: { type: "text", media_type: "text/plain", data: "Cats sleep a lot." },
+            },
+          }),
+        ).fetchImpl,
+      ).createStream(QUESTION, [], opts),
+    );
+    expect(page.message.hostedCalls).toEqual([
+      {
+        id: "srvtoolu_3",
+        type: "web_fetch",
+        status: "completed",
+        input: { url: SOURCE_URL },
+        output: { sources: [{ type: "url", url: SOURCE_URL, title: "Cat sleep" }] },
+        at: 0,
+      },
+    ]);
+    expect(page.usage.hostedCalls).toEqual({ web_fetch: 1 });
+
+    const blocked = await collectTurn(
+      claude(
+        recorder(fetchOf({ type: "web_fetch_tool_result_error", error_code: "url_not_allowed" }))
+          .fetchImpl,
+      ).createStream(QUESTION, [], opts),
+    );
+    expect(blocked.message.hostedCalls?.[0]).toMatchObject({
+      status: "failed",
+      error: "url_not_allowed",
+    });
+    expect(blocked.finishReason).toBe("stop");
+  });
+
+  it("runs none on another host until it is told that host does", async () => {
+    const gateway = { baseUrl: "https://gateway.example" };
+    const refused = recorder(ANTHROPIC_TEXT_TURN);
+    await expect(
+      collect(claude(refused.fetchImpl, gateway).createStream(QUESTION, [], search)),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(refused.seen).toHaveLength(0);
+
+    const told = recorder(ANTHROPIC_TEXT_TURN);
+    await collect(
+      claude(told.fetchImpl, { ...gateway, servesHostedTools: ["web_search"] }).createStream(
+        QUESTION,
+        [],
+        search,
+      ),
+    );
+    expect(anthropicHosted(told.seen[0]!.body)).toEqual([
+      { type: "web_search_20250305", name: "web_search" },
+    ]);
+  });
+
+  it("reads a search as a hosted call, its result as sources, and its citation as a claim over the block", async () => {
+    const turn = await collectTurn(
+      claude(recorder(ANTHROPIC_SEARCH_TURN).fetchImpl).createStream(QUESTION, [], search),
+    );
+    expect(turn.message.toolCalls).toBeUndefined();
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "srvtoolu_1",
+        type: "web_search",
+        status: "completed",
+        input: { query: "how long do cats sleep" },
+        output: { sources: [{ type: "url", url: SOURCE_URL, title: "Cat sleep" }] },
+        at: 0,
+      },
+    ]);
+    expect(turn.message.citations).toEqual([
+      {
+        source: {
+          type: "url",
+          url: SOURCE_URL,
+          title: "Cat sleep",
+          excerpt: "Cats sleep 12 to 16 hours.",
+        },
+        start: 0,
+        end: 26,
+        anchor: "claim",
+      },
+    ]);
+    // The blocks as they came, the text as its length, the citation kept for replay.
+    expect(turn.message.hostedItems).toEqual({
+      provider: "anthropic",
+      items: [
+        {
+          type: "server_tool_use",
+          id: "srvtoolu_1",
+          name: "web_search",
+          input: { query: "how long do cats sleep" },
+        },
+        { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [RESULT] },
+        { length: 26, citations: [LOCATION] },
+      ],
+    });
+    expect(turn.usage.hostedCalls).toEqual({ web_search: 1 });
+    expect(turn.finishReason).toBe("stop");
+  });
+
+  it("keeps a server tool's input out of a function call's arguments", async () => {
+    // One shared input buffer once corrupted the client call (TanStack
+    // ai-anthropic text.ts:1706-1710).
+    const turn = await collectTurn(
+      claude(
+        recorder([
+          j({ type: "message_start", message: { usage: { input_tokens: 10 } } }),
+          j({
+            type: "content_block_start",
+            content_block: { type: "server_tool_use", id: "srvtoolu_1", name: "web_search" },
+          }),
+          j({
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: '{"query":"cats"}' },
+          }),
+          j({ type: "content_block_stop" }),
+          j({
+            type: "content_block_start",
+            content_block: {
+              type: "web_search_tool_result",
+              tool_use_id: "srvtoolu_1",
+              content: [],
+            },
+          }),
+          j({ type: "content_block_stop" }),
+          j({
+            type: "content_block_start",
+            content_block: { type: "tool_use", id: "toolu_1", name: "lookup", input: {} },
+          }),
+          j({
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: '{"id":7}' },
+          }),
+          j({ type: "content_block_stop" }),
+          j({
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 9 },
+          }),
+          j({ type: "message_stop" }),
+        ]).fetchImpl,
+      ).createStream(
+        QUESTION,
+        [{ name: "lookup", description: "lookup", inputSchema: { type: "object" } }],
+        search,
+      ),
+    );
+    expect(turn.message.toolCalls).toEqual([
+      { id: "toolu_1", name: "lookup", arguments: '{"id":7}' },
+    ]);
+    expect(turn.message.hostedCalls?.[0]?.input).toEqual({ query: "cats" });
+    // The function call, not the search, makes the turn a tool round.
+    expect(turn.finishReason).toBe("tool_calls");
+  });
+
+  it("keeps a failed search as data, and the turn goes on", async () => {
+    const failed = ANTHROPIC_SEARCH_TURN.map((frame) =>
+      frame.includes('"web_search_tool_result"')
+        ? j({
+            type: "content_block_start",
+            index: 1,
+            content_block: {
+              type: "web_search_tool_result",
+              tool_use_id: "srvtoolu_1",
+              content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+            },
+          })
+        : frame,
+    );
+    const turn = await collectTurn(
+      claude(recorder(failed).fetchImpl).createStream(QUESTION, [], search),
+    );
+    expect(turn.message.hostedCalls?.[0]).toMatchObject({
+      status: "failed",
+      error: "max_uses_exceeded",
+    });
+    expect(turn.message.content).toBe("Cats sleep 12 to 16 hours.");
+    expect(turn.finishReason).toBe("stop");
+  });
+
+  it("fails a call that never got its result, and leaves it out of what goes back", async () => {
+    // Anthropic pairs every server block with its result: a lone one sent
+    // back is a 400 on the next request.
+    const unanswered = ANTHROPIC_SEARCH_TURN.filter((frame) => !frame.includes('"index":1'));
+    const turn = await collectTurn(
+      claude(recorder(unanswered).fetchImpl).createStream(QUESTION, [], search),
+    );
+    expect(turn.message.hostedCalls?.[0]).toMatchObject({ status: "failed", error: "no_result" });
+    expect(turn.message.hostedItems).toBeUndefined();
+  });
+
+  it("runs code, and the next request in the same turn names its container", async () => {
+    const code = [
+      j({ type: "message_start", message: { usage: { input_tokens: 10 } } }),
+      j({
+        type: "content_block_start",
+        content_block: {
+          type: "server_tool_use",
+          id: "srvtoolu_2",
+          name: "bash_code_execution",
+          input: { command: "python fib.py" },
+        },
+      }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "content_block_start",
+        content_block: {
+          type: "bash_code_execution_tool_result",
+          tool_use_id: "srvtoolu_2",
+          content: {
+            type: "bash_code_execution_result",
+            stdout: "34\n",
+            stderr: "",
+            return_code: 0,
+            content: [{ type: "bash_code_execution_output", file_id: "file_1" }],
+          },
+        },
+      }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "content_block_start",
+        content_block: { type: "tool_use", id: "toolu_1", name: "save", input: { n: 34 } },
+      }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", container: { id: "container_1" } },
+        usage: { output_tokens: 30 },
+      }),
+      j({ type: "message_stop" }),
+    ];
+    const save = [{ name: "save", description: "save", inputSchema: { type: "object" as const } }];
+    const opts: StreamOptions = { hostedTools: [{ type: "code_execution" }] };
+    const { message } = await collectTurn(
+      claude(recorder(code).fetchImpl).createStream(QUESTION, save, opts),
+    );
+    expect(message.hostedCalls).toEqual([
+      {
+        id: "srvtoolu_2",
+        type: "code_execution",
+        status: "completed",
+        input: { code: "python fib.py", language: "bash" },
+        output: { stdout: "34\n", exitCode: 0, files: [{ id: "file_1" }] },
+        at: 0,
+      },
+    ]);
+    expect(message.hostedItems?.container).toBe("container_1");
+    // The stream showed one run, and Anthropic stated no count for it.
+    const result: ChatMessage = {
+      role: "tool",
+      toolCallId: "toolu_1",
+      name: "save",
+      content: "ok",
+    };
+    const next = recorder(ANTHROPIC_TEXT_TURN);
+    await collect(claude(next.fetchImpl).createStream([...QUESTION, message, result], save, opts));
+    expect(next.seen[0]!.body.container).toBe("container_1");
+    // A new question opens a new turn, which starts without it.
+    const fresh = recorder(ANTHROPIC_TEXT_TURN);
+    await collect(
+      claude(fresh.fetchImpl).createStream(
+        [...QUESTION, message, result, { role: "user", content: "thanks" }],
+        save,
+        opts,
+      ),
+    );
+    expect(fresh.seen[0]!.body).not.toHaveProperty("container");
+  });
+
+  /** A pass that searched and then paused, its thinking signed. */
+  const PAUSED = [
+    j({ type: "message_start", message: { usage: { input_tokens: 10, output_tokens: 1 } } }),
+    j({ type: "content_block_start", content_block: { type: "thinking", thinking: "" } }),
+    j({ type: "content_block_delta", delta: { type: "thinking_delta", thinking: "Search it." } }),
+    j({ type: "content_block_delta", delta: { type: "signature_delta", signature: "sig_1" } }),
+    j({ type: "content_block_stop" }),
+    j({
+      type: "content_block_start",
+      content_block: {
+        type: "server_tool_use",
+        id: "srvtoolu_1",
+        name: "web_search",
+        input: { query: "cats" },
+      },
+    }),
+    j({ type: "content_block_stop" }),
+    j({
+      type: "content_block_start",
+      content_block: {
+        type: "web_search_tool_result",
+        tool_use_id: "srvtoolu_1",
+        content: [RESULT],
+      },
+    }),
+    j({ type: "content_block_stop" }),
+    j({
+      type: "message_delta",
+      delta: { stop_reason: "pause_turn", container: { id: "container_9" } },
+      usage: { output_tokens: 5, server_tool_use: { web_search_requests: 1 } },
+    }),
+    j({ type: "message_stop" }),
+  ];
+
+  it("carries on after pause_turn, sending the paused content back as it came", async () => {
+    const resumed = [
+      j({ type: "message_start", message: { usage: { input_tokens: 30, output_tokens: 1 } } }),
+      j({ type: "content_block_start", content_block: { type: "text", text: "" } }),
+      j({ type: "content_block_delta", delta: { type: "text_delta", text: "Cats sleep." } }),
+      j({ type: "content_block_stop" }),
+      j({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 7, server_tool_use: { web_search_requests: 0 } },
+      }),
+      j({ type: "message_stop" }),
+    ];
+    const { seen, fetchImpl } = sequence(PAUSED, resumed);
+    const turn = await collectTurn(claude(fetchImpl).createStream(QUESTION, [], search));
+    expect(seen).toHaveLength(2);
+    // The paused blocks as the last assistant message, signature included,
+    // and the container the paused pass ran in.
+    expect(seen[1]!.body.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "how long do cats sleep" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Search it.", signature: "sig_1" },
+          {
+            type: "server_tool_use",
+            id: "srvtoolu_1",
+            name: "web_search",
+            input: { query: "cats" },
+          },
+          { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [RESULT] },
+        ],
+      },
+    ]);
+    expect(seen[1]!.body.container).toBe("container_9");
+    // One turn to the reader, billed for both passes.
+    expect(turn.message.content).toBe("Cats sleep.");
+    expect(turn.message.reasoning).toBe("Search it.");
+    expect(turn.message.hostedCalls).toHaveLength(1);
+    expect(turn.usage).toMatchObject({
+      inputTokens: 40,
+      outputTokens: 12,
+      hostedCalls: { web_search: 1 },
+    });
+    expect(turn.finishReason).toBe("stop");
+  });
+
+  it("gives up after ten pauses in a row, as overload", async () => {
+    const { seen, fetchImpl } = sequence(PAUSED);
+    await expect(
+      collect(claude(fetchImpl).createStream(QUESTION, [], search)),
+    ).rejects.toMatchObject({ kind: "overload" });
+    expect(seen).toHaveLength(11);
+  });
+
+  it("reads the last pass's prompt as the context size, where Anthropic lists its passes", async () => {
+    const listed = ANTHROPIC_SEARCH_TURN.map((frame) =>
+      frame.includes('"message_delta"')
+        ? j({
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: {
+              output_tokens: 20,
+              iterations: [
+                { type: "message", input_tokens: 100, cache_read_input_tokens: 900 },
+                {
+                  type: "message",
+                  input_tokens: 150,
+                  cache_read_input_tokens: 1_000,
+                  cache_creation_input_tokens: 50,
+                },
+              ],
+            },
+          })
+        : frame,
+    );
+    const turn = await collectTurn(
+      claude(recorder(listed).fetchImpl).createStream(QUESTION, [], search),
+    );
+    expect(turn.usage.contextTokens).toBe(1_200);
+  });
+
+  it("sends a hosted turn back as its own blocks, and as text to any other provider", async () => {
+    const { message } = await collectTurn(
+      claude(recorder(ANTHROPIC_SEARCH_TURN).fetchImpl).createStream(QUESTION, [], search),
+    );
+    const history: ChatMessage[] = [...QUESTION, message, { role: "user", content: "thanks" }];
+    expect(hosted.toAnthropicMessages(history, "anthropic").messages[1]).toEqual({
+      role: "assistant",
+      content: [
+        {
+          type: "server_tool_use",
+          id: "srvtoolu_1",
+          name: "web_search",
+          input: { query: "how long do cats sleep" },
+        },
+        { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [RESULT] },
+        { type: "text", text: "Cats sleep 12 to 16 hours.", citations: [LOCATION] },
+      ],
+    });
+    expect(hosted.toAnthropicMessages(history, "zai").messages[1]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "Cats sleep 12 to 16 hours." }],
+    });
+  });
+});
+
+/** An answer whose link sits after an emoji, so the annotation's code point
+ *  offsets and the text's JS indices differ by one. */
+const LINK = `([cats.example](${SOURCE_URL}))`;
+const SEARCHED = `Cats 🐈 sleep 12 to 16 hours ${LINK}.`;
+const OPENROUTER_SEARCH_TURN = [
+  j({ choices: [{ index: 0, delta: { role: "assistant", content: SEARCHED.slice(0, 20) } }] }),
+  j({
+    choices: [
+      {
+        index: 0,
+        delta: {
+          content: SEARCHED.slice(20),
+          annotations: [
+            {
+              type: "url_citation",
+              url_citation: {
+                url: SOURCE_URL,
+                title: "Cat sleep",
+                start_index: [...SEARCHED].indexOf("("),
+                end_index: [...SEARCHED].indexOf("(") + [...LINK].length,
+                content: "Cats sleep 12 to 16 hours.",
+              },
+            },
+          ],
+        },
+        finish_reason: "stop",
+      },
+    ],
+  }),
+  j({
+    choices: [],
+    usage: {
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      cost: 0.02,
+      server_tool_use_details: { web_search_requests: 1 },
+    },
+  }),
+];
+
+describe("openai-shape hosted web search", () => {
+  const openRouter = (fetchImpl: typeof fetch) =>
+    hosted.createOpenAIProvider({
+      apiKey: "k",
+      model: "openai/gpt-5",
+      baseUrl: "https://openrouter.ai/api",
+      id: "openrouter",
+      fetchImpl,
+    });
+
+  it("sends OpenRouter's own search tool, with every field", async () => {
+    const { seen, fetchImpl } = recorder(OPENROUTER_SEARCH_TURN);
+    await collect(
+      openRouter(fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [
+          {
+            type: "web_search",
+            maxUses: 2,
+            allowedDomains: ["cats.example"],
+            blockedDomains: ["dogs.example"],
+            userLocation: { country: "US" },
+          },
+        ],
+      }),
+    );
+    expect(seen[0]!.body.tools).toEqual([
+      {
+        type: "openrouter:web_search",
+        parameters: {
+          user_location: { type: "approximate", country: "US" },
+          allowed_domains: ["cats.example"],
+          excluded_domains: ["dogs.example"],
+          max_uses: 2,
+        },
+      },
+    ]);
+  });
+
+  it.each(["config", "call"] as const)(
+    "honors prompt-only JSON beside hosted-only tools from the %s setting",
+    async (setting) => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      const provider = hosted.createOpenAIProvider({
+        apiKey: "k",
+        model: "openai/gpt-5",
+        baseUrl: "https://openrouter.ai/api",
+        id: "openrouter",
+        fetchImpl,
+        ...(setting === "config" ? { jsonWithTools: "prompt" } : {}),
+      });
+      await collect(
+        provider.createStream(QUESTION, [], {
+          hostedTools: [{ type: "web_search" }],
+          json: { name: "answer", schema: { type: "object", properties: { claim: {} } } },
+          ...(setting === "call" ? { jsonWithTools: "prompt" } : {}),
+        }),
+      );
+      expect(seen[0]!.body.tools).toEqual([{ type: "openrouter:web_search", parameters: {} }]);
+      expect(seen[0]!.body).not.toHaveProperty("response_format");
+      expect(seen[0]!.body.messages).toEqual([
+        ...QUESTION,
+        { role: "system", content: expect.stringContaining('"claim"') },
+      ]);
+    },
+  );
+
+  it("reads OpenRouter's citations as markers on the link, and its stated search count", async () => {
+    const { message, usage, finishReason } = await collectTurn(
+      openRouter(recorder(OPENROUTER_SEARCH_TURN).fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [{ type: "web_search" }],
+      }),
+    );
+    const [citation] = message.citations ?? [];
+    expect(citation).toMatchObject({
+      source: { type: "url", url: SOURCE_URL, title: "Cat sleep" },
+      anchor: "marker",
+    });
+    expect(message.content.slice(citation?.start, citation?.end)).toBe(LINK);
+    // This wire states no record of the search, only its citations and count.
+    expect(message.hostedCalls).toBeUndefined();
+    expect(usage).toMatchObject({ hostedCalls: { web_search: 1 }, reportedCostUsd: 0.02 });
+    expect(finishReason).toBe("stop");
+  });
+
+  it("asks OpenAI's search models through web_search_options, which take no restriction", async () => {
+    const searcher = (fetchImpl: typeof fetch) =>
+      hosted.createOpenAIProvider({ apiKey: "k", model: "gpt-5-search-preview", fetchImpl });
+    const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+    await collect(
+      searcher(fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [{ type: "web_search", userLocation: { city: "Lisbon" } }],
+      }),
+    );
+    expect(seen[0]!.body.web_search_options).toEqual({
+      user_location: { type: "approximate", approximate: { city: "Lisbon" } },
+    });
+    expect(seen[0]!.body).not.toHaveProperty("tools");
+
+    const filtered = recorder(OPENAI_TEXT_TURN);
+    await expect(
+      collect(
+        searcher(filtered.fetchImpl).createStream(QUESTION, [], {
+          hostedTools: [{ type: "web_search", allowedDomains: ["cats.example"] }],
+        }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(filtered.seen).toHaveLength(0);
+  });
+
+  it("refuses a search anywhere else, and every other hosted type everywhere", async () => {
+    const elsewhere: [Record<string, unknown>, HostedTool][] = [
+      [{ model: "gpt-5" }, { type: "web_search" }],
+      [
+        { model: "deepseek-chat", baseUrl: "https://api.deepseek.com", id: "deepseek" },
+        { type: "web_search" },
+      ],
+      [{ model: "openai/gpt-5", baseUrl: "https://openrouter.ai/api" }, { type: "code_execution" }],
+    ];
+    for (const [config, tool] of elsewhere) {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await expect(
+        collect(
+          hosted
+            .createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl, ...config })
+            .createStream(QUESTION, [], { hostedTools: [tool] }),
+        ),
+      ).rejects.toMatchObject({ kind: "invalid" });
+      expect(seen).toHaveLength(0);
+    }
+  });
+
+  it("lets a preset say what its endpoint runs", async () => {
+    const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+    await collect(
+      hosted
+        .createPresetProvider("groq", {
+          apiKey: "k",
+          model: "compound",
+          servesHostedTools: ["web_search"],
+          fetchImpl,
+        })
+        .createStream(QUESTION, [], { hostedTools: [{ type: "web_search" }] }),
+    );
+    expect(seen[0]!.body.web_search_options).toEqual({});
   });
 });

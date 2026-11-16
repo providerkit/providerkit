@@ -5,6 +5,11 @@
 // its own chain of thought on the next turn. Written straight against the REST
 // wire rather than @google/genai, because this package ships zero dependencies
 // and the SDK is a Node-shaped one.
+//
+// Built-in tool shapes, parts and grounding fields follow Vercel's AI SDK
+// (Apache-2.0, Copyright 2023 Vercel, Inc.: google-prepare-tools.ts,
+// google-language-model.ts, convert-to-google-messages.ts); the byte offsets
+// and segment checks follow PydanticAI (MIT). See THIRD_PARTY_NOTICES.
 import { repairHistory } from "../context.ts";
 import {
   ProviderError,
@@ -13,10 +18,12 @@ import {
   validateMaxAttempts,
   type ErrorKind,
 } from "../errors.ts";
+import type { HostedToolType } from "../hosted/types.ts";
+import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAntigravityToolSchema, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
 import { streamSse, apiUrl, type FetchLike } from "../transport.ts";
-import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   ChatMessage,
   Effort,
@@ -25,6 +32,8 @@ import type {
   Provider,
   ProviderChunk,
   StreamOptions,
+  TokenUsage,
+  ToolCall,
   ToolCallDelta,
   ToolChoice,
   ToolDefinition,
@@ -64,6 +73,15 @@ export interface GeminiConfig extends ProviderFallbackConfig {
   maxTokens?: number;
   fetchImpl?: FetchLike;
   headers?: Record<string, string>;
+  /**
+   * For providers imported from `@providerkit/core/hosted`.
+   * The hosted tools this endpoint runs. Defaults to web search, web fetch,
+   * code execution and file search on the Gemini API
+   * (generativelanguage.googleapis.com), and to none anywhere else. Vertex
+   * and the gateways differ, and one that ignores a tool answers unsearched
+   * without saying so. Antigravity runs none.
+   */
+  servesHostedTools?: readonly HostedToolType[];
 }
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -193,6 +211,16 @@ function parseArgs(json: string): Record<string, unknown> {
   return parseToolArgs(json);
 }
 
+function functionCallPart(call: ToolCall): unknown {
+  return {
+    functionCall: { id: call.id, name: call.name, args: parseArgs(call.arguments) },
+    // Replayed verbatim: this is the model's own reasoning token, and without
+    // it the next turn starts from a chain of thought that no longer includes
+    // the call it just made.
+    ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
+  };
+}
+
 /** Same rule for a tool RESULT, which `functionResponse.response` also requires
  *  as an object. Plain text (the common case) rides under `output`. */
 function toResponseObject(content: string): Record<string, unknown> {
@@ -219,8 +247,25 @@ function toResponseObject(content: string): Record<string, unknown> {
  * that the response count does not match the call count. The responses go
  * first, in call order, and the run's images follow them all, the way the
  * OpenAI dialect places them.
+ *
+ * A model turn that ran built-in tools goes back to `provider`, the one that
+ * made it, as the parts it came in: the code and its result, the server
+ * tool's call and response with their thought signatures, which Gemini needs
+ * returned unchanged when built-ins and functions share a turn.
  */
-export function toGeminiContents(messages: readonly ChatMessage[]): {
+export function toGeminiContents(
+  messages: readonly ChatMessage[],
+  provider?: string,
+): { system?: string; contents: GeminiContent[] } {
+  return geminiContents(messages, provider);
+}
+
+/** @internal Hosted replay stays outside the plain converter. */
+export function geminiContents(
+  messages: readonly ChatMessage[],
+  provider?: string,
+  replay?: HostedCodecs["gemini"]["replay"],
+): {
   system?: string;
   contents: GeminiContent[];
 } {
@@ -253,17 +298,15 @@ export function toGeminiContents(messages: readonly ChatMessage[]): {
         break;
 
       case "assistant": {
+        const replayed =
+          provider === undefined ? undefined : replay?.(message, provider, functionCallPart);
+        if (replayed) {
+          contents.push({ role: "model", parts: replayed });
+          break;
+        }
         const parts: unknown[] = [];
         if (message.content) parts.push({ text: message.content });
-        for (const call of message.toolCalls ?? []) {
-          parts.push({
-            functionCall: { id: call.id, name: call.name, args: parseArgs(call.arguments) },
-            // Replayed verbatim: this is the model's own reasoning token, and
-            // without it the next turn starts from a chain of thought that
-            // no longer includes the call it just made.
-            ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
-          });
-        }
+        for (const call of message.toolCalls ?? []) parts.push(functionCallPart(call));
         // An assistant turn with neither text nor calls has no representation
         // here, and an empty `parts` is a 400.
         if (parts.length > 0) contents.push({ role: "model", parts });
@@ -369,12 +412,39 @@ function mapFinishReason(provider: string, reason: string): FinishReason {
   }
 }
 
-interface GeminiPart {
+export interface GeminiPart {
   text?: string;
   /** Marks the parts that are the model's reasoning. Absent on the answer. */
   thought?: boolean;
   thoughtSignature?: string;
   functionCall?: { id?: string; name?: string; args?: Record<string, unknown> };
+  /** Code the code execution tool ran, and what came of it, paired by order. */
+  executableCode?: { language?: string; code?: string };
+  codeExecutionResult?: { outcome?: string; output?: string };
+  /** A built-in tool's call and response, on Gemini 3 with function tools. */
+  toolCall?: { id?: string; toolType?: string; args?: Record<string, unknown> };
+  toolResponse?: { id?: string; toolType?: string; response?: unknown };
+}
+
+export interface GroundingSegment {
+  /** Offsets count UTF-8 bytes in the named Part, or the answer when absent. */
+  partIndex?: number;
+  startIndex?: number;
+  endIndex?: number;
+  text?: string;
+}
+
+export interface GroundingChunk {
+  web?: { uri?: string; title?: string };
+  retrievedContext?: { uri?: string; title?: string; text?: string };
+}
+
+/** What a grounded answer read, and which of its sentences each source backs. */
+export interface GroundingMetadata {
+  webSearchQueries?: string[];
+  groundingChunks?: GroundingChunk[];
+  groundingSupports?: { segment?: GroundingSegment; groundingChunkIndices?: number[] }[];
+  searchEntryPoint?: { renderedContent?: string };
 }
 
 /** Google's `google.rpc.Status`: an HTTP `code`, the canonical `status` name,
@@ -386,16 +456,20 @@ interface GeminiStatus {
   details?: unknown;
 }
 
-interface GeminiResponse {
+export interface GeminiResponse {
   candidates?: {
     content?: { parts?: GeminiPart[] };
     finishReason?: string;
+    groundingMetadata?: GroundingMetadata;
+    urlContextMetadata?: { urlMetadata?: { retrievedUrl?: string; urlRetrievalStatus?: string }[] };
   }[];
   usageMetadata?: {
     promptTokenCount?: number;
     candidatesTokenCount?: number;
     thoughtsTokenCount?: number;
     cachedContentTokenCount?: number;
+    /** The prompt the built-in tools' results added, billed as input. */
+    toolUsePromptTokenCount?: number;
   };
   /** Present only on the in-band failure below. Never on a real candidate. */
   error?: GeminiStatus;
@@ -404,6 +478,11 @@ interface GeminiResponse {
 }
 
 export function createGeminiProvider(config: GeminiConfig): Provider {
+  return geminiProvider(config);
+}
+
+/** @internal Shared by the plain and hosted entry points. */
+export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "gemini";
   const isAntigravity = id === "antigravity";
@@ -421,11 +500,16 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
     ): AsyncIterable<ProviderChunk> {
       const { maxAttempts } = opts;
       validateMaxAttempts(maxAttempts);
+      if (!codecs) refuseHostedTools(id, opts, messages);
       const effort = opts.effort ?? config.effort;
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       // Repaired first: a result with no call, or a call with no result, is a
       // 400 that loses the turn. See repairHistory.
-      const { system, contents } = toGeminiContents(repairHistory(messages).messages);
+      const { system, contents } = geminiContents(
+        repairHistory(messages).messages,
+        id,
+        codecs?.gemini.replay,
+      );
 
       // A model id copied out of Gemini's docs is often already `models/…`, and
       // the doubled segment 404s as "model not found" — a confusing way to
@@ -436,6 +520,15 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // Not `!isGemini3`: `gemini-flash-latest` and models newer than 3 are not
       // Gemini 3 either, and they must get a level.
       const isGemini2 = /gemini-2/i.test(model);
+      const hosted = codecs?.gemini.plan(
+        config,
+        baseUrl,
+        id,
+        isAntigravity,
+        isGemini2,
+        tools,
+        opts,
+      );
 
       const generationConfig: Record<string, unknown> = {};
       if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
@@ -460,9 +553,10 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       // outright with `400 "Function calling with a response mime type:
       // 'application/json' is unsupported"`, so the prompt is the only way a
       // schema travels beside tools there. Gemini 3 serves both, and there the
-      // setting is the caller's measured preference.
+      // setting is the caller's measured preference. A built-in tool is a tool
+      // here too: the prompt is the one route that works beside it everywhere.
       const promptCarried =
-        tools.length > 0 &&
+        (tools.length > 0 || (hosted?.tools.length ?? 0) > 0) &&
         ((opts.jsonWithTools ?? config.jsonWithTools) === "prompt" || !isGemini3);
       if (opts.json && !promptCarried) {
         generationConfig.responseMimeType = "application/json";
@@ -490,34 +584,51 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
         ...(opts.json && promptCarried ? [{ text: schemaPrompt(opts.json.schema) }] : []),
       ];
       if (systemParts.length > 0) request.systemInstruction = { parts: systemParts };
-      if (tools.length > 0) {
-        // Gemini has no switch for one call per turn. Sending the request
-        // anyway would hand back the parallel calls the caller ruled out.
-        if (opts.parallelToolCalls === false) {
-          throw new ProviderError(
-            id,
-            "invalid",
-            `${id}: Gemini can't limit a turn to one tool call. Leave parallelToolCalls unset ` +
-              "for Gemini models, or run the calls it returns one at a time.",
-          );
-        }
+      // Gemini has no switch for one call per turn. Sending the request anyway
+      // would hand back the parallel calls the caller ruled out.
+      if (tools.length > 0 && opts.parallelToolCalls === false) {
+        throw new ProviderError(
+          id,
+          "invalid",
+          `${id}: Gemini can't limit a turn to one tool call. Leave parallelToolCalls unset ` +
+            "for Gemini models, or run the calls it returns one at a time.",
+        );
+      }
+      const builtIns = hosted?.tools ?? [];
+      if (tools.length > 0 || builtIns.length > 0) {
         request.tools = [
-          {
-            functionDeclarations: tools.map((tool) => ({
-              name: tool.name,
-              description: tool.description,
-              // Antigravity (Cloud Code Assist) still expects the OpenAPI-subset
-              // `parameters` field; the Gemini API and OpenCode Zen take standard
-              // JSON Schema in `parametersJsonSchema` (cc-proxy 0.2.8).
-              ...(isAntigravity
-                ? { parameters: toAntigravityToolSchema(tool.inputSchema) }
-                : { parametersJsonSchema: toGeminiToolSchema(tool.inputSchema) }),
-            })),
-          },
+          ...(tools.length > 0
+            ? [
+                {
+                  functionDeclarations: tools.map((tool) => ({
+                    name: tool.name,
+                    description: tool.description,
+                    // Antigravity (Cloud Code Assist) still expects the OpenAPI-subset
+                    // `parameters` field; the Gemini API and OpenCode Zen take standard
+                    // JSON Schema in `parametersJsonSchema` (cc-proxy 0.2.8).
+                    ...(isAntigravity
+                      ? { parameters: toAntigravityToolSchema(tool.inputSchema) }
+                      : { parametersJsonSchema: toGeminiToolSchema(tool.inputSchema) }),
+                  })),
+                },
+              ]
+            : []),
+          ...builtIns,
         ];
+      }
+      if (tools.length > 0) {
         // Pointless without declarations, and Gemini 400s on a tool config that
-        // names a function it was never given.
-        const toolConfig = toToolConfig(opts.toolChoice);
+        // names a function it was never given. Built-ins beside functions need
+        // the mode that lets both run and the server's own calls streamed back,
+        // which then go back with the turn (google-prepare-tools.ts:187-231).
+        // A forced choice never gets here with built-ins: it is refused.
+        const toolConfig =
+          builtIns.length > 0
+            ? {
+                functionCallingConfig: { mode: "VALIDATED" },
+                includeServerSideToolInvocations: true,
+              }
+            : toToolConfig(opts.toolChoice);
         if (toolConfig) request.toolConfig = toolConfig;
       }
 
@@ -571,6 +682,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
       let callIndex = 0;
       let finished = false;
       let emitted = false;
+      const hostedStream = codecs?.gemini.stream(id, hosted?.hosted ?? [], isGemini2);
 
       for (let baseIdx = 0; baseIdx < bases.length; baseIdx++) {
         const currentBase = bases[baseIdx]!;
@@ -615,33 +727,43 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
             if (chunk.usageMetadata) {
               const usage = chunk.usageMetadata;
               emitted = true;
-              yield {
-                type: "usage",
-                usage: {
-                  inputTokens: usage.promptTokenCount ?? 0,
-                  // Thoughts bill as OUTPUT, and Gemini reports them OUTSIDE
-                  // candidatesTokenCount — leaving them out undercounts a thinking
-                  // turn by most of what it cost.
-                  outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
-                  cachedInputTokens: usage.cachedContentTokenCount ?? 0,
-                  ...(usage.thoughtsTokenCount !== undefined
-                    ? { reasoningTokens: usage.thoughtsTokenCount }
-                    : {}),
-                },
+              const tokenUsage: TokenUsage = {
+                // What the built-in tools' results added to the prompt bills as
+                // input too, and Gemini reports it apart
+                // (Vercel convert-google-usage.ts:31-36).
+                inputTokens: (usage.promptTokenCount ?? 0) + (usage.toolUsePromptTokenCount ?? 0),
+                // Thoughts bill as OUTPUT, and Gemini reports them OUTSIDE
+                // candidatesTokenCount, so leaving them out undercounts a thinking
+                // turn by most of what it cost.
+                outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
+                cachedInputTokens: usage.cachedContentTokenCount ?? 0,
+                ...(usage.thoughtsTokenCount !== undefined
+                  ? { reasoningTokens: usage.thoughtsTokenCount }
+                  : {}),
               };
+              yield { type: "usage", usage: hostedStream?.usage(tokenUsage) ?? tokenUsage };
             }
 
             const candidate = chunk.candidates?.[0];
             if (!candidate) continue;
+            hostedStream?.candidate(candidate);
 
-            // One chunk can carry several parts of each kind. They are coalesced
-            // per kind so the seam sees one reasoning delta and one content delta
-            // per chunk, in that order, rather than interleaved fragments.
+            // Coalesce text per frame, but emit hosted work at once: validating
+            // a later function call can throw, and must never hide a paid run
+            // from retry and fallback (invariant 19).
             let reasoning = "";
             let content = "";
             const toolCalls: ToolCallDelta[] = [];
-            for (const part of candidate.content?.parts ?? []) {
-              if (part.text) {
+            for (const [partIndex, part] of (candidate.content?.parts ?? []).entries()) {
+              const ran = hostedStream?.part(part, partIndex, content.length);
+              if (ran) {
+                if (ran.delta) {
+                  emitted = true;
+                  yield { type: "delta", hosted: [ran.delta] };
+                }
+                continue;
+              }
+              if (part.text !== undefined) {
                 if (part.thought) reasoning += part.text;
                 else content += part.text;
                 continue;
@@ -670,6 +792,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
             }
             if (content) {
               emitted = true;
+              hostedStream?.text(content);
               yield { type: "delta", content };
             }
             if (toolCalls.length > 0) {
@@ -683,6 +806,7 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
               const finishReason = mapFinishReason(id, candidate.finishReason);
               finished = true;
               emitted = true;
+              if (hostedStream) yield* hostedStream.close();
               yield {
                 type: "finish",
                 // Gemini routinely reports STOP on a turn that called tools, and a
@@ -718,5 +842,5 @@ export function createGeminiProvider(config: GeminiConfig): Provider {
     },
   };
 
-  return withConfiguredFallbacks(provider, config);
+  return configuredFallbacks(provider, config, codecs);
 }

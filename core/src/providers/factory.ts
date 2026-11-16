@@ -11,10 +11,11 @@
 // thinking dialects (Z.ai's explicit disabled marker, OpenRouter's floors)
 // are the adapters' knowledge, and this factory must not re-derive them.
 import { ProviderError, validateMaxAttempts } from "../errors.ts";
-import { createAnthropicProvider } from "./anthropic.ts";
-import { createGeminiProvider } from "./gemini.ts";
-import { createOpenAIProvider } from "./openai.ts";
-import { createResponsesProvider } from "./responses.ts";
+import { anthropicProvider } from "./anthropic.ts";
+import { geminiProvider } from "./gemini.ts";
+import { openaiProvider } from "./openai.ts";
+import { responsesProvider } from "./responses.ts";
+import type { HostedCodecs } from "./hosted-codecs.ts";
 import {
   PRESET_IDS,
   PROVIDER_PRESETS,
@@ -32,7 +33,8 @@ import type {
   StreamOptions,
   ToolDefinition,
 } from "../types.ts";
-import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import type { HostedToolType } from "../hosted/types.ts";
 import type { FetchLike } from "../transport.ts";
 
 export interface PresetProviderConfig extends ProviderFallbackConfig {
@@ -93,6 +95,10 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** Default `service_tier` for every call on the OpenAI and Responses shapes;
    *  `StreamOptions.serviceTier` wins. Anthropic and Gemini presets refuse it. */
   serviceTier?: ServiceTier;
+  /** For providers imported from `@providerkit/core/hosted`.
+   *  The hosted tools this endpoint runs, once you have checked it. Absent,
+   *  each adapter decides by host. See `StreamOptions.hostedTools`. */
+  servesHostedTools?: readonly HostedToolType[];
   fetchImpl?: FetchLike;
 }
 
@@ -104,23 +110,37 @@ export type PresetAdapterConfig = Omit<
 >;
 
 export function createPresetProvider(id: ProviderPresetId, config: PresetProviderConfig): Provider {
+  return presetProvider(id, config);
+}
+
+/** @internal Shared by the plain and hosted entry points. */
+export function presetProvider(
+  id: ProviderPresetId,
+  config: PresetProviderConfig,
+  codecs?: HostedCodecs,
+): Provider {
   const preset = presetFor(id);
   const chain = config.models?.length ? config.models : config.model ? undefined : preset.rotation;
   if (chain && chain.length > 1) {
     const { models: _models, fallbacks = [], ...single } = config;
-    return createPresetProvider(id, {
-      ...single,
-      model: chain[0],
-      fallbacks: [
-        ...chain.slice(1).map((model) => ({ ...single, preset: id, model })),
-        ...fallbacks,
-      ],
-    });
+    return presetProvider(
+      id,
+      {
+        ...single,
+        model: chain[0],
+        fallbacks: [
+          ...chain.slice(1).map((model) => ({ ...single, preset: id, model })),
+          ...fallbacks,
+        ],
+      },
+      codecs,
+    );
   }
   const { models: _models, ...single } = config;
-  return withConfiguredFallbacks(
-    presetAdapter(id, { ...single, model: chain?.[0] ?? config.model }),
+  return configuredFallbacks(
+    buildPresetAdapter(id, { ...single, model: chain?.[0] ?? config.model }, codecs),
     config,
+    codecs,
   );
 }
 
@@ -136,6 +156,15 @@ export function createPresetProvider(id: ProviderPresetId, config: PresetProvide
  * effort dialect from it (`opencode-go`, `openrouter`, `deepseek`).
  */
 export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig): Provider {
+  return buildPresetAdapter(id, config);
+}
+
+/** @internal Preset routing is shared; only the hosted codecs differ. */
+export function buildPresetAdapter(
+  id: ProviderPresetId,
+  config: PresetAdapterConfig,
+  codecs?: HostedCodecs,
+): Provider {
   const preset = presetFor(id);
   const model = config.model ?? preset.defaultModel;
   if (!model) {
@@ -148,9 +177,9 @@ export function presetAdapter(id: ProviderPresetId, config: PresetAdapterConfig)
         "Remove serviceTier.",
     );
   }
-  let provider = buildWireAdapter(id, preset, wire, model, config, config.fetchImpl);
+  let provider = buildWireAdapter(id, preset, wire, model, config, config.fetchImpl, codecs);
   if (id === "opencode-zen") {
-    provider = wrapOpenCodeZen(provider, preset, wire, config, model);
+    provider = wrapOpenCodeZen(provider, preset, wire, config, model, codecs);
   }
 
   // Here rather than in `createPresetProvider`: the wire is resolved here, and
@@ -167,6 +196,7 @@ function buildWireAdapter(
   model: string,
   config: PresetAdapterConfig,
   fetchImpl: FetchLike | undefined,
+  codecs?: HostedCodecs,
 ): Provider {
   const headers = { ...preset.headers, ...config.headers };
   const baseUrl = config.baseUrl ?? wire.baseUrl;
@@ -186,72 +216,84 @@ function buildWireAdapter(
     case "anthropic":
       // `key` rides Anthropic's native x-api-key; coding plans and OAuth
       // tokens read Bearer (measured across the family's coding endpoints).
-      return createAnthropicProvider({
-        ...baseConfig,
-        apiKey: config.apiKey,
-        model,
-        effort: config.effort,
-        maxTokens,
-        baseUrl,
-        id,
-        headers,
-        bearer: wire.auth !== "key",
-        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
-        // The endpoint's thinking dialect rides the table (zai: silence means
-        // the model default, which is ON — "none" must be said out loud).
-        ...(preset.explicitNone ? { explicitNone: true } : {}),
-        fetchImpl,
-      });
+      return anthropicProvider(
+        {
+          ...baseConfig,
+          apiKey: config.apiKey,
+          model,
+          effort: config.effort,
+          maxTokens,
+          baseUrl,
+          id,
+          headers,
+          bearer: wire.auth !== "key",
+          ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
+          // The endpoint's thinking dialect rides the table (zai: silence means
+          // the model default, which is ON — "none" must be said out loud).
+          ...(preset.explicitNone ? { explicitNone: true } : {}),
+          fetchImpl,
+        },
+        codecs,
+      );
     case "openai":
-      return createOpenAIProvider({
-        ...baseConfig,
-        id,
-        apiKey: config.apiKey,
-        model,
-        effort: config.effort,
-        maxTokens,
-        baseUrl,
-        ...(wire.path ? { path: wire.path } : {}),
-        headers,
-        ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
-        ...(config.dataCollection ? { dataCollection: config.dataCollection } : {}),
-        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
-        ...(preset.initiatorHeader ? { initiatorHeader: true } : {}),
-        ...(preset.noSampling ? { noSampling: true } : {}),
-        fetchImpl,
-      });
+      return openaiProvider(
+        {
+          ...baseConfig,
+          id,
+          apiKey: config.apiKey,
+          model,
+          effort: config.effort,
+          maxTokens,
+          baseUrl,
+          ...(wire.path ? { path: wire.path } : {}),
+          headers,
+          ...(config.providerOrder ? { providerOrder: config.providerOrder } : {}),
+          ...(config.dataCollection ? { dataCollection: config.dataCollection } : {}),
+          ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
+          ...(preset.initiatorHeader ? { initiatorHeader: true } : {}),
+          ...(preset.noSampling ? { noSampling: true } : {}),
+          fetchImpl,
+        },
+        codecs,
+      );
     case "responses":
-      return createResponsesProvider({
-        ...baseConfig,
-        apiKey: config.apiKey,
-        model,
-        effort: config.effort,
-        maxTokens,
-        baseUrl,
-        ...(wire.path ? { path: wire.path } : {}),
-        id,
-        headers,
-        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
-        ...(preset.imageLimits ? { imageLimits: preset.imageLimits } : {}),
-        ...(preset.replayReasoning ? { replayReasoning: true } : {}),
-        fetchImpl,
-      });
+      return responsesProvider(
+        {
+          ...baseConfig,
+          apiKey: config.apiKey,
+          model,
+          effort: config.effort,
+          maxTokens,
+          baseUrl,
+          ...(wire.path ? { path: wire.path } : {}),
+          id,
+          headers,
+          ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
+          ...(preset.imageLimits ? { imageLimits: preset.imageLimits } : {}),
+          ...(preset.replayReasoning ? { replayReasoning: true } : {}),
+          fetchImpl,
+        },
+        codecs,
+      );
     case "gemini":
-      return createGeminiProvider({
-        ...baseConfig,
-        apiKey: config.apiKey,
-        model,
-        effort: config.effort,
-        maxTokens,
-        baseUrl,
-        ...(wire.path ? { path: wire.path } : {}),
-        bearer: wire.auth !== "key",
-        ...(config.projectId ? { projectId: config.projectId } : {}),
-        ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
-        id,
-        headers,
-        fetchImpl,
-      });
+      return geminiProvider(
+        {
+          ...baseConfig,
+          apiKey: config.apiKey,
+          model,
+          effort: config.effort,
+          maxTokens,
+          baseUrl,
+          ...(wire.path ? { path: wire.path } : {}),
+          bearer: wire.auth !== "key",
+          ...(config.projectId ? { projectId: config.projectId } : {}),
+          ...(preset.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
+          id,
+          headers,
+          fetchImpl,
+        },
+        codecs,
+      );
   }
 }
 
@@ -298,7 +340,7 @@ export async function forgeOpenCodeSessionId(sessionId?: string): Promise<string
  * OpenCode's own `read` (`cc-proxy/src/providers/opencode/mod.rs`). A call with
  * `Read` sends it as `read` and gets `Read` back; a call with neither gets a
  * decoy `read` the model is told not to call (and `toolChoice: "none"` when the
- * caller passed no tools).
+ * caller passed no tools, and no hosted tools either, which `none` would drop).
  */
 function offerOpenCodeRead(
   messages: ChatMessage[],
@@ -323,7 +365,8 @@ function offerOpenCodeRead(
     return {
       messages,
       tools: [...tools, decoy],
-      opts: tools.length === 0 ? { ...opts, toolChoice: "none" } : opts,
+      opts:
+        tools.length === 0 && !opts.hostedTools?.length ? { ...opts, toolChoice: "none" } : opts,
       renamedRead: false,
     };
   }
@@ -353,6 +396,7 @@ function wrapOpenCodeZen(
   wire: Wire,
   config: PresetAdapterConfig,
   defaultModel: string,
+  codecs?: HostedCodecs,
 ): Provider {
   const instanceSessionId = config.instanceSessionId ?? crypto.randomUUID();
   const baseFetch = config.fetchImpl ?? fetch;
@@ -399,6 +443,7 @@ function wrapOpenCodeZen(
           defaultModel,
           config,
           fetchImpl,
+          codecs,
         );
         for await (const chunk of bound.createStream(prepared.messages, prepared.tools, {
           ...prepared.opts,

@@ -10,6 +10,11 @@
 // The event names arrive on the SSE `event:` line and are repeated inside each
 // payload's own `type`. The transport yields only `data:` payloads, so this
 // adapter reads `type` — which is what survives, and what gateways agree on.
+//
+// Hosted tool shapes, include values and item fields follow Vercel's AI SDK
+// (Apache-2.0, Copyright 2023 Vercel, Inc.: openai-responses-prepare-tools.ts,
+// openai-responses-language-model.ts, map-openai-responses-annotation.ts); the
+// marker-span check follows PydanticAI (MIT). See THIRD_PARTY_NOTICES.
 import { repairHistory } from "../context.ts";
 import {
   fileRefused,
@@ -18,6 +23,8 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
+import type { HostedToolType } from "../hosted/types.ts";
+import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
 import { settleToolCalls } from "../tool-args.ts";
@@ -35,7 +42,7 @@ import type {
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
 import { isStrictSchema, withoutPatterns } from "../schema.ts";
-import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import { gateImages, type ImageLimits } from "../image.ts";
 
 export interface ResponsesConfig extends ProviderFallbackConfig {
@@ -83,6 +90,14 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   replayReasoning?: boolean;
   /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
   serviceTier?: ServiceTier;
+  /**
+   * For providers imported from `@providerkit/core/hosted`.
+   * The hosted tools this endpoint runs. Defaults to web search, code
+   * execution, file search and image generation on api.openai.com, and to
+   * none anywhere else, the ChatGPT backend included, until someone checks
+   * that endpoint. One that ignores a tool answers unsearched without saying so.
+   */
+  servesHostedTools?: readonly HostedToolType[];
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -275,7 +290,7 @@ interface ResponsesUsage {
   output_tokens_details?: { reasoning_tokens?: number };
 }
 
-interface ResponsesItem {
+export interface ResponsesItem {
   type?: string;
   /** The output item's own id (`fc_…`), which the argument deltas reference. */
   id?: string;
@@ -284,12 +299,36 @@ interface ResponsesItem {
   name?: string;
   arguments?: string;
   encrypted_content?: string;
+  /** A hosted item's state: `in_progress`, `searching`, `completed`, `failed`… */
+  status?: string;
+  error?: { code?: string; message?: string } | null;
+  /** `web_search_call`: what the search did, sources included when asked for. */
+  action?: {
+    type?: string;
+    query?: string | null;
+    queries?: string[] | null;
+    url?: string | null;
+    sources?: { type?: string; url?: string }[] | null;
+  } | null;
+  /** `code_interpreter_call` */
+  code?: string | null;
+  container_id?: string;
+  outputs?: { type?: string; logs?: string; url?: string }[] | null;
+  /** `file_search_call` */
+  queries?: string[] | null;
+  results?: { file_id?: string; filename?: string; text?: string }[] | null;
+  /** `image_generation_call`: the image, as base64. */
+  result?: string | null;
+  revised_prompt?: string | null;
 }
 
-interface ResponsesEvent {
+export interface ResponsesEvent {
   type?: string;
   delta?: string;
   item_id?: string;
+  /** Which part of a message item a text delta or annotation belongs to. */
+  content_index?: number;
+  annotation?: import("../hosted/responses.ts").ResponsesAnnotation;
   /** xAI keys argument events by the CALL id instead of the item id. */
   call_id?: string;
   /** The whole argument string, on `function_call_arguments.done`. */
@@ -373,7 +412,12 @@ function codexHeaders(limits: CodexRateLimits): Headers {
   return headers;
 }
 
-function usageChunk(usage: ResponsesUsage): ProviderChunk {
+/** The usage record, with the hosted calls the stream showed: this shape bills
+ *  them per call and states no count of its own. */
+function usageChunk(
+  usage: ResponsesUsage,
+  hostedCalls?: Partial<Record<HostedToolType, number>>,
+): ProviderChunk {
   return {
     type: "usage",
     usage: {
@@ -386,6 +430,7 @@ function usageChunk(usage: ResponsesUsage): ProviderChunk {
       ...(usage.output_tokens_details?.reasoning_tokens !== undefined
         ? { reasoningTokens: usage.output_tokens_details.reasoning_tokens }
         : {}),
+      ...(hostedCalls ? { hostedCalls } : {}),
     },
   };
 }
@@ -410,6 +455,11 @@ function unsentTail(snapshot: string, streamed: string): string {
 }
 
 export function createResponsesProvider(config: ResponsesConfig): Provider {
+  return responsesProvider(config);
+}
+
+/** @internal Shared by the plain and hosted entry points. */
+export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "openai-responses";
   const instanceSessionId = config.sessionHeader
@@ -426,6 +476,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
       validateMaxAttempts(opts.maxAttempts);
+      if (!codecs) refuseHostedTools(id, opts, messages);
       const effort = opts.effort ?? config.effort;
       const model = opts.model ?? config.model;
       const museContributor = isMuseSparkContributor(model);
@@ -448,7 +499,16 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         store: false,
       };
       if (instructions) request.instructions = instructions;
-      if (config.replayReasoning) request.include = ["reasoning.encrypted_content"];
+      // Hosted items are never sent back: `store` is off, so the backend has
+      // no copy to reference, and their results ride in the answer instead.
+      const hosted = codecs?.responses.plan(config, baseUrl, id, opts);
+      // Merged, not overwritten: the reasoning items and each hosted tool's
+      // results are asked for in the same list.
+      const include = [
+        ...(config.replayReasoning ? ["reasoning.encrypted_content"] : []),
+        ...(hosted?.include ?? []),
+      ];
+      if (include.length > 0) request.include = include;
       const maxTokens = opts.maxTokens ?? config.maxTokens;
       if (maxTokens !== undefined) request.max_output_tokens = maxTokens;
       if (opts.temperature !== undefined) request.temperature = opts.temperature;
@@ -465,22 +525,27 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         request.reasoning =
           level === "none" ? { effort: "none" } : { effort: level, summary: "auto" };
       }
-      if (requestTools.length > 0) {
+      if (requestTools.length > 0 || (hosted?.tools.length ?? 0) > 0) {
         // Flat here — no nested `function` envelope, unlike chat/completions.
-        request.tools = requestTools.map((tool) => ({
-          type: "function",
-          name: tool.name,
-          description: tool.description,
-          parameters: withoutPatterns(tool.inputSchema),
-          // Said either way, never left to the default. Strict demands every
-          // property required and every object closed; on a schema that is not
-          // already shaped that way the backend makes optional arguments
-          // mandatory, and the model starts filling in parameters nobody asked
-          // for (cc-proxy, 0.1.15). Where the schema already qualifies, the
-          // enforcement is free.
-          strict: isStrictSchema(tool.inputSchema),
-        }));
-        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
+        request.tools = [
+          ...requestTools.map((tool) => ({
+            type: "function",
+            name: tool.name,
+            description: tool.description,
+            parameters: withoutPatterns(tool.inputSchema),
+            // Said either way, never left to the default. Strict demands every
+            // property required and every object closed; on a schema that is not
+            // already shaped that way the backend makes optional arguments
+            // mandatory, and the model starts filling in parameters nobody asked
+            // for (cc-proxy, 0.1.15). Where the schema already qualifies, the
+            // enforcement is free.
+            strict: isStrictSchema(tool.inputSchema),
+          })),
+          ...(hosted?.tools ?? []),
+        ];
+        if (requestTools.length > 0 && opts.parallelToolCalls === false) {
+          request.parallel_tool_calls = false;
+        }
       }
       // The cache affinity key. Without one the backend spreads a
       // conversation's turns across cache shards, and a re-sent prefix misses.
@@ -528,7 +593,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         reasoningItems.length
           ? [{ type: "delta", reasoningItems: { provider: id, items: reasoningItems } }]
           : [];
-
+      const hostedStream = codecs?.responses.stream(hosted?.hosted ?? []);
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
         headers: {
@@ -549,6 +614,8 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
         if (event.type?.endsWith(".delta") || event.type === "response.output_item.added") {
           produced = true;
         }
+
+        if (hostedStream) yield* hostedStream.event(event);
 
         switch (event.type) {
           case "response.output_text.delta":
@@ -716,8 +783,9 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
               const minted = settleToolCalls(id, calls);
               if (minted.length > 0) yield { type: "delta", toolCalls: minted };
             }
+            if (hostedStream) yield* hostedStream.close();
             yield* reasoningChunk();
-            if (response?.usage) yield usageChunk(response.usage);
+            if (response?.usage) yield usageChunk(response.usage, hostedStream?.counts());
             yield { type: "finish", finishReason };
             return;
           }
@@ -730,9 +798,10 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
             // A turn that ran out of output tokens still billed for its input,
             // and this event carries usage in the same shape as `completed`.
             const finishReason = incompleteFinish(id, event.response?.incomplete_details?.reason);
+            if (hostedStream) yield* hostedStream.close();
             yield* reasoningChunk();
             const usage = event.response?.usage;
-            if (usage) yield usageChunk(usage);
+            if (usage) yield usageChunk(usage, hostedStream?.counts());
             yield { type: "finish", finishReason };
             return;
           }
@@ -764,5 +833,5 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
     },
   };
 
-  return withConfiguredFallbacks(provider, config);
+  return configuredFallbacks(provider, config, codecs);
 }

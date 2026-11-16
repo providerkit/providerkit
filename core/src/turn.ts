@@ -9,6 +9,7 @@
 // turn that said nothing is not judged here: that is `requireContent`'s call
 // (invariant 13), made where the retry that can fix it still can.
 import { ProviderError } from "./errors.ts";
+import type { Citation, HostedCall, HostedItems, HostedToolType } from "./hosted/types.ts";
 import {
   EMPTY_USAGE,
   type ChatMessage,
@@ -18,6 +19,9 @@ import {
   type TokenUsage,
   type ToolCall,
 } from "./types.ts";
+
+/** A hosted call while it assembles: its type may not be stated yet. */
+type AssemblingCall = Omit<HostedCall, "type"> & { type?: HostedToolType };
 
 /** One drained turn: the message a loop appends, whose `toolCalls` are the
  *  calls it runs, and what the turn cost. */
@@ -43,8 +47,12 @@ export interface Turn {
  * for (const call of turn.message.toolCalls ?? []) history.push(await run(call));
  * ```
  *
+ * Hosted calls (a vendor's search, fetch or code run) land in `hostedCalls`,
+ * never in `toolCalls`: there is nothing for the loop to run.
+ *
  * @throws {ProviderError} `overload` when a tool call ends the stream with no
- * name. Whatever the stream itself throws passes through unchanged.
+ * name, or a hosted call with no type. Whatever the stream itself throws
+ * passes through unchanged.
  */
 export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise<Turn> {
   let content = "";
@@ -56,6 +64,9 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
   let reasoningDetails: unknown[] | undefined;
   let reasoningItems: ReasoningItems | undefined;
   const calls = new Map<number, ToolCall>();
+  const hosted = new Map<number, AssemblingCall>();
+  const citations: Citation[] = [];
+  let hostedItems: HostedItems | undefined;
   // Cumulative on some providers and final-only on others: the LAST one wins.
   let usage: TokenUsage = EMPTY_USAGE;
   let finishReason: FinishReason | null = null;
@@ -85,6 +96,27 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
       call.arguments += delta.arguments ?? "";
       calls.set(delta.index, call);
     }
+    for (const delta of chunk.hosted ?? []) {
+      // The same rule as a tool call's identity: the last value stated wins,
+      // so a skeleton's blanks never erase what the closing event says. A
+      // call's place in the answer is where the text was when it first
+      // appeared, unless the adapter said otherwise (Gemini's grounding record
+      // arrives after the answer and covers it from 0).
+      const call = hosted.get(delta.index) ?? { id: "", status: "running", at: content.length };
+      if (delta.id) call.id = delta.id;
+      if (delta.type) call.type = delta.type;
+      if (delta.status) call.status = delta.status;
+      if (delta.input) call.input = { ...call.input, ...delta.input };
+      if (delta.codeDelta) {
+        call.input = { ...call.input, code: (call.input?.code ?? "") + delta.codeDelta };
+      }
+      if (delta.output) call.output = delta.output;
+      if (delta.error) call.error = delta.error;
+      if (delta.at !== undefined) call.at = delta.at;
+      hosted.set(delta.index, call);
+    }
+    if (chunk.citations?.length) citations.push(...chunk.citations);
+    if (chunk.hostedItems) hostedItems = chunk.hostedItems;
     if (chunk.usage) usage = chunk.usage;
     if (chunk.finishReason) finishReason = chunk.finishReason;
   }
@@ -110,6 +142,19 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
     );
   }
   const toolCalls = indexed.map(([, call]) => call);
+  const hostedCalls = [...hosted]
+    .sort(([a], [b]) => a - b)
+    .map(([index, { type, ...call }]): HostedCall => {
+      // A record that never says what ran can't be shown or counted: the
+      // vendor's frame was broken, as with a nameless tool call above.
+      if (type) return { ...call, type };
+      const provider = source?.provider ?? "turn";
+      throw new ProviderError(
+        provider,
+        "overload",
+        `${provider}: hosted call ${call.id || `at index ${index}`} never said which tool ran`,
+      );
+    });
 
   return {
     message: {
@@ -119,6 +164,9 @@ export async function collectTurn(stream: AsyncIterable<ProviderChunk>): Promise
       ...(reasoningDetails ? { reasoningDetails } : {}),
       ...(reasoningItems ? { reasoningItems } : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(hostedCalls.length > 0 ? { hostedCalls } : {}),
+      ...(citations.length > 0 ? { citations } : {}),
+      ...(hostedItems ? { hostedItems } : {}),
     },
     usage,
     finishReason,
@@ -139,6 +187,10 @@ export interface Completion {
    *  for none. Before this field a drained turn that called a tool read as a
    *  turn that said nothing. */
   toolCalls: ToolCall[];
+  /** Present only when the vendor ran its own tools. See ChatMessage.hostedCalls. */
+  hostedCalls?: HostedCall[];
+  /** Present only when the answer cites sources. See ChatMessage.citations. */
+  citations?: Citation[];
   usage: TokenUsage;
   finishReason: FinishReason | null;
   model: string;
@@ -158,6 +210,8 @@ export async function drainStream(
     ...(message.reasoningDetails ? { reasoningDetails: message.reasoningDetails } : {}),
     ...(message.reasoningItems ? { reasoningItems: message.reasoningItems } : {}),
     toolCalls: message.toolCalls ?? [],
+    ...(message.hostedCalls ? { hostedCalls: message.hostedCalls } : {}),
+    ...(message.citations ? { citations: message.citations } : {}),
     usage,
     finishReason,
     model: source?.model ?? model,

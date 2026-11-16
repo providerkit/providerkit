@@ -10,7 +10,8 @@ import type { ProviderPresetId } from "./presets.ts";
 import { sleep } from "./retry.ts";
 import type { Provider, ProviderChunk, StreamOptions } from "./types.ts";
 import { STREAM_PROGRESS_MS, withWatchdog, type WatchdogOptions } from "./watchdog.ts";
-import { createPresetProvider, type PresetProviderConfig } from "./providers/factory.ts";
+import { presetProvider, type PresetProviderConfig } from "./providers/factory.ts";
+import type { HostedCodecs } from "./providers/hosted-codecs.ts";
 
 /** Retry intervals when the server supplies no deadline, not estimates of when
  *  it will recover. A server deadline always wins over these defaults. */
@@ -70,15 +71,20 @@ export type FallbackCandidate = Provider | FallbackSpec;
 function resolveFallback(
   candidate: FallbackCandidate,
   inheritedWatchdog?: WatchdogOptions,
+  codecs?: HostedCodecs,
 ): Provider {
   if (typeof candidate === "object" && candidate !== null && "createStream" in candidate) {
     return inheritedWatchdog ? withWatchdog(candidate, inheritedWatchdog) : candidate;
   }
   const { preset, watchdog = inheritedWatchdog, ...config } = candidate;
-  return createPresetProvider(preset, {
-    ...config,
-    ...(watchdog ? { watchdog } : {}),
-  });
+  return presetProvider(
+    preset,
+    {
+      ...config,
+      ...(watchdog ? { watchdog } : {}),
+    },
+    codecs,
+  );
 }
 
 /** Standard options that any provider config can accept to configure fallbacks inline. */
@@ -103,12 +109,21 @@ export function withConfiguredFallbacks(
   primary: Provider,
   config?: ProviderFallbackConfig,
 ): Provider {
+  return configuredFallbacks(primary, config);
+}
+
+/** @internal Keeps opt-in codecs on nested preset fallbacks. */
+export function configuredFallbacks(
+  primary: Provider,
+  config?: ProviderFallbackConfig,
+  codecs?: HostedCodecs,
+): Provider {
   const watchedPrimary = config?.watchdog ? withWatchdog(primary, config.watchdog) : primary;
   if (!config?.fallbacks || config.fallbacks.length === 0) return watchedPrimary;
   return withFallbackProviders(
     [
       watchedPrimary,
-      ...config.fallbacks.map((candidate) => resolveFallback(candidate, config.watchdog)),
+      ...config.fallbacks.map((candidate) => resolveFallback(candidate, config.watchdog, codecs)),
     ],
     config.fallbackOptions,
   );

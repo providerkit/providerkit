@@ -6,6 +6,14 @@
 // the lingua franca forces the other adapters to round-trip through a dialect
 // that isn't theirs, and every quirk of that dialect then leaks into callers
 // who never asked for it.
+import type {
+  Citation,
+  HostedCall,
+  HostedCallDelta,
+  HostedItems,
+  HostedTool,
+  HostedToolType,
+} from "./hosted/types.ts";
 import type { RateLimitReading } from "./rate-limit.ts";
 
 /**
@@ -122,6 +130,19 @@ export type ChatMessage =
        */
       reasoningItems?: ReasoningItems;
       toolCalls?: ToolCall[];
+      /**
+       * What the vendor's own tools did in this turn (a search, a fetch, a code
+       * run), in the order they ran. Never function calls: nothing here is
+       * run by the loop or answered with a `tool` message. Display data, with
+       * the sensitivity of `content`.
+       */
+      hostedCalls?: HostedCall[];
+      /** The sources the answer cites, with spans into `content`. */
+      citations?: Citation[];
+      /** The vendor's own record of its hosted tools, replayed only to the
+       *  provider that made it. Provider-owned like `reasoningItems`: never
+       *  echo it to a browser. See {@link HostedItems}. */
+      hostedItems?: HostedItems;
     }
   | {
       role: "tool";
@@ -192,6 +213,20 @@ export interface TokenUsage {
    * `costUsd` and `UsageTracker` bill it over any rate.
    */
   reportedCostUsd?: number;
+  /**
+   * The hosted tool calls this turn ran, by type: as the vendor states them
+   * (Anthropic, OpenRouter), or as the stream showed them. Absent when none
+   * ran. Vendors bill these per call, beside the tokens; `ModelRate.hosted`
+   * prices them.
+   */
+  hostedCalls?: Partial<Record<HostedToolType, number>>;
+  /**
+   * The prompt of the turn's LAST model pass, cache included, where the
+   * vendor states it (Anthropic's `usage.iterations`). A hosted tool loop runs
+   * several passes inside one turn and bills their sum, so `inputTokens` can
+   * read far larger than the window ever held. Compaction reads this first.
+   */
+  contextTokens?: number;
 }
 
 export const EMPTY_USAGE: TokenUsage = {
@@ -214,6 +249,13 @@ export interface ProviderChunk {
   /** Once per turn, where a provider replays its reasoning. See ChatMessage.reasoningItems. */
   reasoningItems?: ReasoningItems;
   toolCalls?: ToolCallDelta[];
+  /** Hosted call fragments, assembled by `index`. One commits the stream:
+   *  past it, a retry would rerun and rebill the vendor's tool. */
+  hosted?: HostedCallDelta[];
+  /** Citations, appended in order. Their spans index the turn's content. */
+  citations?: Citation[];
+  /** Once per turn, where a provider replays its hosted tools. See ChatMessage.hostedItems. */
+  hostedItems?: HostedItems;
   usage?: TokenUsage;
   finishReason?: FinishReason;
 }
@@ -440,6 +482,22 @@ export interface StreamOptions {
    * Gemini has no such switch. Overrides the provider's own setting.
    */
   serviceTier?: ServiceTier;
+  /**
+   * Tools the model vendor runs inside its own turn: web search, web fetch,
+   * code execution, file search, image generation. Each adapter sends them in
+   * its dialect, or refuses one it can't send with an `invalid` error before
+   * any request, unless the tool is `optional`. `toolChoice: "none"` sends
+   * none; a forced choice with any is refused.
+   *
+   * Import the provider constructor from `@providerkit/core/hosted` first.
+   * Plain constructors refuse this option before any request, even with
+   * `optional` or `toolChoice: "none"`; they include no hosted codecs.
+   *
+   * A custom Provider that can't run them must refuse them the same way
+   * (`planHostedTools` from `@providerkit/core/hosted` does it): ignored, they
+   * become an answer that never searched, with nothing to say so.
+   */
+  hostedTools?: readonly HostedTool[];
 }
 
 // ponytail: Codex's `ultrafast` tier (gpt-6-astra only) is the next value to add.
