@@ -172,6 +172,109 @@ Reasoning without an answer is not success. A provider's length-limited answer i
 a complete result. Increase the provider's output allowance when appropriate rather than blindly
 repeating a paid request.
 
+## Lifecycle hooks and guards
+
+Use a guard to refuse work or output. Use a hook to observe it. A hook is not permission.
+
+```ts
+const reader = defineAgent({
+  id: "reader",
+  version: "1",
+  instructions: "Read the records and answer.",
+  provider,
+  tools: [lookup],
+  guardrails: {
+    identity: "reader-policy-1",
+    modelInput: ({ messages }) => ({ allow: messages.length <= 100 }),
+    modelOutput: (turn) => ({ allow: !turn.message.content.includes("private") }),
+    toolOutput: ({ result }) => ({ allow: result.ok }),
+  },
+});
+```
+
+These checks are examples, not a privacy policy. Supply your own checks for your data. Each
+callback returns `{ allow: true }` or `{ allow: false }`. Guards never rewrite arguments, replace
+results or approve requests. A rejection ends the run with `guard_rejected`; a thrown exception
+or malformed verdict ends it with `guard_failed`. The SDK saves no exception text from a guard
+and does not ask the model to retry that operation.
+
+| Guard         | Checked value                                                       | Boundary                                                                                                             |
+| ------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `modelInput`  | `{ messages, tools, settings }`                                     | Every model attempt, after new inbox input and media loading, before the provider call.                              |
+| `modelOutput` | Core `Turn`, including reasoning, tool arguments and hosted results | After collection, before progress, recorded model history or local tool dispatch.                                    |
+| `toolInput`   | `ToolRequest` with the effective, approved `arguments`              | Before ordinary tools, delegation, handoff or a client request. Core validation and host authorization still follow. |
+| `toolOutput`  | `{ request, result }` with the SDK `ToolResult`                     | Before a settled result enters history, progress or terminal state. Includes failed and denied results.              |
+
+`modelOutput` checks every turn, not just the final answer. It also checks the arguments of
+`submit_result`. `toolOutput` checks tool-produced content and a stopping tool's recorded
+`final.candidate`. It does not recall the model's earlier words or arguments. Use both when
+both model and tool output need checks. Result validators still run; a validator's transformed
+application object remains the host's responsibility, not a new model response.
+
+With `modelOutput`, no model chunk is published until the verdict passes and its completed
+receipt is saved. It then publishes one `model_chunk` containing that checked turn, not the raw
+chunks: earlier metadata replaced during collection was not part of the verdict. The SDK collects
+at most 4,096 chunks and 1,000,000 UTF-8 JSON bytes per model
+attempt. Reasoning, tool arguments and provider metadata count too. Set `maxOutputBytes` to a
+positive whole number to change the byte bound. With `toolOutput`, the same byte bound applies
+to one normalized result. Exceeding either bound ends with `guard_output_limit`, without a
+retry or partial disclosure. Usage reports still checkpoint while output is withheld. This
+bounds retained SDK output, not allocations inside a provider or callback.
+
+`toolOutput` also withholds raw `decision` progress events, which can contain an unchecked
+client result or answer. The private request journal still records decisions before work.
+Read that journal for decision status; use the later checked `tool_result` for output. Requests
+and question prompts are a separate host-controlled surface: `prepareRequest` and your display
+projector must check what they expose. No guard makes raw snapshots safe for a browser.
+
+Guards are local to one agent. Set them on every specialist and handoff target whose output
+needs protection. A parent's tool guard does not intercept a child's own progress. Hosted
+provider tools may already have acted before a model output guard runs; use the input guard
+and provider configuration to prevent their dispatch. Tools with guards run serially within
+that agent, so a rejected result cannot start the next tool in its batch. Other already-running
+children and external effects cannot be recalled.
+
+Guard identity, configured stages and bounds live in `snapshot.definition.guardrails`.
+`snapshot.guards` records operation/attempt ids, input hashes and verdicts. Change `identity`
+when policy code changes. Resume refuses a changed policy or missing verdicts. A completed
+receipt reuses its verdict. A guard interrupted before saving a verdict fails closed, even if
+the callback would be safe to rerun. If a call returned but its guarded receipt was not saved,
+resume refuses to repeat it with `guarded_output_unsettled`. Reconcile it on the host. An
+interrupted inference-only stream can still use the existing recovery policy if no output
+check started; the replacement attempt gets its own guards.
+
+### Observe execution
+
+Set `onLifecycle(event, context)` on the agent or in `RunOptions`. At each boundary, the agent
+hook runs first, then the run hook. Run hooks reach descendants too; completed cached children
+and completed resumed runs do not re-emit lifecycle hooks.
+
+The event types are `run_start`, `run_end`, `model_start`, `model_end`, `model_error`,
+`tool_start`, `tool_end` and `tool_error`. For each live model call the order is input guard,
+start hook, dispatch, end hook, output guard, checkpoint, then progress. A tool follows the
+same order, with the host's `beforeTool` and request freshness checks after its start hook.
+A tool end hook also sees settled refusals that never dispatched. `model_error` reports a stream
+failure; `tool_error` reports an error escaping the tool phase, including guard failure. An output
+guard can fail after an end hook. `run_end`
+receives the attempt's final state, including suspension or failure. A tool that pauses with
+`InputRequired` has no settled result yet, so its start hook has no matching end hook on that
+attempt. Use `run_end` to close any unfinished observation; resuming starts a new attempt.
+
+Hooks are awaited to preserve order, but their return values and exceptions are ignored.
+They cannot change frozen callback data or waive host checks. End hooks see **unchecked raw
+output** for privileged server inspection. Do not forward them to a browser or log their
+payloads without a policy. `onEvent` remains the non-awaited progress observer, not a hook.
+
+All new callbacks receive a frozen `LifecycleContext`: `agentId`, `version`, `runId`,
+`attemptId`, host `context` and `signal`. Cancellation stops waiting and prevents later SDK
+work. Hooks are skipped when that signal is already aborted, including end hooks. It cannot
+stop callback code that ignores the signal, undo an external effect or count hidden calls
+inside a callback against tree budgets. Keep guards free of effects; hooks are not exactly-once
+notifications and can repeat after a crash. For background runs, configure hooks on the agent;
+`policy.context` supplies worker-only host services. No callbacks are serialized.
+
+See [the offline guard example](examples/guardrails.ts). It makes no network calls.
+
 ## Conversations
 
 Pass the thread's messages. The last one is the new user turn:
@@ -287,6 +390,53 @@ session.
 your own store, implement `Session` (`load` and `append`) and check it with
 `await checkSession(() => createTestSession())`. It writes to fresh sessions, so point it at a
 test database.
+
+### Trim context while a run works
+
+Configure `compaction` to shorten only what the next model call reads:
+
+```ts
+const reader = defineAgent({
+  id: "reader",
+  version: "1",
+  instructions: "Read the records and answer.",
+  provider,
+  compaction: { identity: "reader-context-1", contextWindow: 128_000 },
+});
+```
+
+Supply the actual context window for this provider and model. The SDK does not guess it from a
+model name. Core's `needsCompaction` decides when to trim, using the last reported input usage
+plus an estimate of new messages. Before any usage report, it estimates text. Images and files
+have provider-specific costs that this estimate cannot count. Core's `pickCut` keeps recent
+messages without splitting tool calls from results. `keepTokens` overrides core's default tail
+budget, `historyBudgetTokens(contextWindow)`. The newest message and unread inbox messages stay
+verbatim even when they exceed that budget. Trimming cannot guarantee that a request fits.
+
+Without `summarize`, trimming costs no extra call. It inserts a note saying that earlier messages
+were omitted. The system prompt stays unchanged. `snapshot.history`, model/tool journals,
+`result.history`, `newMessages` and the session append keep the full conversation. Input positions
+and accepted/consumed receipts do not move. A delegated child or handoff still receives its normal
+history policy, not the shortened model view.
+
+For a paid summary, explicitly add `compaction.summarize` with `provider`, `instructions` and a
+positive `maxTokens`. That provider must perform inference only. The SDK sends the removed
+messages with those instructions, no tools, `hostedTools: []`, `toolChoice: "none"` and
+`maxAttempts: 1`. Configure wrappers to honor that limit; hidden provider retries remain outside
+the SDK's control. The same model guards, lifecycle hooks, usage checkpoints, shared model-call
+budget and deadlines apply. Summary text never streams as the agent's answer. Its model receipt
+has `purpose: "compaction"`; its usage counts in `usage` and `treeUsage`.
+
+`snapshot.compactions` saves the cut and summary before the next model call. Resume reuses them,
+including when recovering that model call. A summary left running fails with
+`interrupted_compaction`, even under inference recovery: it may already have been billed. There
+is no automatic second summary or fallback to untrimmed history. Reconcile the saved operation
+on the host. A rejected or incomplete summary stops the run without dispatching tools. As with
+other journals, persistence requires `host.checkpoint`; without it the record lives in memory.
+
+Change `compaction.identity` when the prompt or hidden provider configuration changes. Resume
+refuses a different recorded policy or summary provider identity. Unlike `prepareHistory`, this
+feature runs inside the journal and never rewrites the session's stored transcript.
 
 ### Send messages while a run works
 
@@ -439,6 +589,32 @@ to submit; the validator checks the actual value. Return the desired TypeScript 
 message explaining what to correct. The SDK reserves the `submit_result` tool name for this path.
 A validator should be pure: it can run again when a completed result is restored.
 
+### Text, JSON and image results
+
+Return a JSON value from an ordinary core tool. Its existing `summarize` function controls the
+text the next model reads; core defaults to JSON text. The successful SDK receipt also keeps
+that JSON value in `result.output`. It is private host data, not automatic browser content.
+A non-JSON typed value with a text summary still works, but only the summary is saved.
+
+To return text with an image, return core content parts from the same tool's `run` function:
+
+```ts
+return [
+  { type: "text", text: "The front of the package." },
+  { type: "image", mimeType: "image/png", data: pictureBase64 },
+];
+```
+
+The SDK recognizes nonempty arrays of content parts. It joins text with newlines and puts
+images in core's tool-message `images` field. No second tool wrapper is needed. Empty arrays
+stay JSON. JPEG, PNG, WebP and GIF use the same padded-base64 checks as user attachments.
+Files and media references are not supported in tool results: return text and inline images.
+Tool images count toward the run's total `limits.inlineBytes`, including earlier tool results
+and user attachments. Too many bytes stops the run with `tool_media_limit`, without repeating
+the tool. Results retain images across checkpoints, sessions and resume. Client tools and
+pure delegations use the same normalization. Display projectors must still opt in to tool
+content and replace inline bytes with authorized references.
+
 ### End on a tool result
 
 When a tool already has the answer, avoid paying the model to rewrite it:
@@ -568,10 +744,37 @@ The model can pass `{ note: "Background for billing" }` or `{}`. It cannot choos
 add tools or grant access. The note is quoted background in a user-role transfer message, never
 a system instruction or permission. `beforeTool` and the request journal still control actions.
 The target resolves its own instructions, provider settings and enabled tools once. It does not
-inherit source overrides. Both agents must use plain text output: an `output` contract on the
-source is refused at definition; one on the target is refused before admission, even when its
-validator returns a string. Checked-output agents can still use ordinary delegation. Handoff
-does not promise a union of unrelated output types.
+inherit source overrides. Either agent may use text or a checked `output` contract. The target
+validates its own result, including after resume. The source never checks that result against
+its own schema or asks a model to rewrite it.
+
+`defineAgent` infers the union of its own output and every registered handoff target's output,
+including further handoffs. A text agent that can transfer to an `Agent<{ count: number }>` returns
+`RunOutcome<string | { count: number }>`. Two checked agents with different schemas return the
+union of those two types, without adding `string`. An agent without handoffs keeps its original
+output type. Ordinary delegations do not widen their parent's output.
+
+Check `status`, then narrow the output by its value or by a tag your validators return:
+
+```ts
+const result = await help.run("Count open invoices.");
+if (result.status === "completed") {
+  if (typeof result.output === "string") console.log(result.output);
+  else console.log(result.output.count);
+}
+```
+
+This example assumes `help` has text output and a counter target. `activeAgent` names the owner;
+its id does not narrow the output's TypeScript type. Keep a tag such as `kind` in distinct object
+outputs when you need that distinction. See [the offline typed example](examples/structured-handoff.ts)
+for two different checked schemas and resume, with no casts.
+
+`Handoff<T>` and `HandoffSpec<T>` retain their target's output type. Keep that generic in helpers
+instead of annotating a descriptor as bare `Handoff`, which forgets the output type. Let
+`defineAgent` infer its tools. For a cyclic graph, annotate one agent with the full output union,
+for example `Agent<InvoiceCount | Summary>`. If you annotate a definition, `AgentDefinition<T, H>`
+separates its own output `T` from the handoff output union `H` (default `never`). A definition whose
+`output` is optional also allows text results.
 
 A handoff must be the only call in its model turn. Mixed calls, two transfers, a self target,
 a missing target or conflicting definitions for one target id produce tool feedback. Other
@@ -634,8 +837,11 @@ transfer does not approve any target tool. A host may allow edits to the note be
 starts. Changing it after admission fails with `handoff_input_changed`; reconcile the saved run
 before starting different work. Denying a renewed transfer approval after its target
 started stops that conversation; it cannot undo completed actions or return to a source model
-turn. A saved completed target is reused, never called again. Safe recovery remains opt-in;
-configured hosted tools still block interrupted model replay.
+turn. A saved completed target is reused, never called again. Its raw candidate stays in its child
+snapshot and in the source's completed state; only the owning target's pure validator rebuilds
+the returned value. A failed target validation returns tool feedback to that target's loop. It
+cannot become source-schema success; if the target cannot finish, the source returns its failure
+or limit. Safe recovery remains opt-in; configured hosted tools still block interrupted model replay.
 
 For cycles, `to: () => billing` lets two definitions reference each other. Keep this function
 pure. It resolves once per handoff descriptor. After a restart, a different target id or version
@@ -882,9 +1088,64 @@ provide that guarantee across a restart.
 Snapshots and raw events hold private prompts, arguments and answers. Keep them on the server
 and build an allowlisted display view. Question text and choices may come from the model: treat
 them as untrusted display content. Snapshot format 3 includes resolved recovery policy and
-per-operation attempt histories, and an `inputs` journal on every node.
+per-operation attempt histories, an `inputs` journal, a `guards` journal and a `compactions` journal
+on every node. Each tool entry requires `retries`, including an empty list when unused.
+Its definition includes `guardrails`, `compaction` and `toolRetries` (null when unused). Checked `submit_result` receipts keep
+`final.candidate`, just as stopping tools do, rather than reconstructing it from model arguments.
 Older formats, earlier format-3 shapes without those fields and the old single-approval state are
 refused, not converted.
+
+### Retry a failed tool call
+
+Ordinary tool failures still return to the model as data. There is no automatic retry by default.
+To allow bounded retries of one registered read-only tool:
+
+```ts
+const reader = defineAgent({
+  id: "reader",
+  version: "1",
+  instructions: "Read the records and answer.",
+  provider,
+  tools: [lookup],
+  toolRetries: {
+    identity: "lookup-retries-1",
+    tools: { lookup: { maxAttempts: 2, replay: "read-only" } },
+  },
+});
+```
+
+`lookup` must have `isReadOnly: true`, and the run must supply `host.beforeTool`. A retry checks
+current access again, after its input guard and start hook. Read-only is not free: each attempt
+may incur another charge or return newer data. Attempts consume `limits.toolCalls`, share the
+tree's tool serialization and keep the original deadlines. They do not buy another model turn.
+
+`maxAttempts` includes the first attempt and crash recovery attempts for that operation. Only
+`failed` and `timeout` tool outcomes qualify. Invalid arguments or output need correction, not
+another identical call. When the budget ends, the last failure returns to the model. A new model
+call to the same tool is a new operation, still bounded by the run's tool and model limits.
+
+For a write, use `replay: "reconcile"` and supply `host.reconcileToolRetry(attempt, context)`.
+The callback receives the exact failed `request` and `result`. It must query authoritative host
+or service state, not dispatch work. Return `{ outcome: "not_run", receipt }` only after confirming
+that this attempt did not run **and cannot still complete**. Return `{ outcome: "unknown" }`
+otherwise. Missing or uncertain reconciliation stops the run with `tool_retry_unsafe`. A timeout,
+an error string saying "nothing happened" or an idempotency key does not prove safety.
+For background runs, supply the same callback as `policy.reconcileToolRetry`;
+it runs under the existing worker signal and checkpoint barriers.
+
+Retries keep the same operation and arguments but get a distinct `attemptId`. Every failed attempt
+stays in `tools[].retries`, with its arguments, result and any reconciliation receipt. Outcome
+`receipts` retains each attempt. The failed result is saved before reconciliation, and its receipt
+is saved before another attempt is admitted. Resume checks current authorization again without
+repeating a saved reconciliation. A running retry still has an unknown outcome after a crash:
+only the existing read-only recovery policy can replay it. Interrupted writes remain refused.
+
+Client tools, delegations, handoffs, stopping tools and tools requiring approval cannot be named
+in this policy. A call with any approval or question history never uses it, including a call with
+edited arguments. A new approval requirement, Stop, guard rejection, lease loss or failed progress
+write cannot become a retry. Calls configured for retry run serially within their agent. Change
+`toolRetries.identity` when the implementation or hidden effect policy changes; definitions and
+policy are checked against the saved run.
 
 ## Background runs
 
@@ -1056,6 +1317,70 @@ operation and attempt IDs in your own billing system. Configure `recovery` on ea
 may replay interrupted work; `runs.sweep` and the same leased worker handler resume it without
 starting another logical run.
 
+## Check your agent
+
+Run a set of checks and get a report:
+
+```ts
+const report = await runEvals(checks);
+```
+
+Import evaluation helpers from `@providerkit/agents/evals`. They run the same agent loop and
+score its saved journal; they do not replay stored effects.
+
+This setup uses an offline provider. It sends no network requests:
+
+```ts
+import { defineAgent } from "@providerkit/agents";
+import { assertReport, exact, runEvals, scriptedProvider } from "@providerkit/agents/evals";
+
+const checks = {
+  agent: () =>
+    defineAgent({
+      id: "greeting",
+      version: "1",
+      instructions: "Say hello.",
+      provider: scriptedProvider(["Hello"]),
+    }),
+  cases: [{ id: "hello", input: "Hi", expected: "Hello" }],
+  scorers: [exact()],
+};
+
+const report = await runEvals(checks);
+assertReport(report); // Throws if the checks did not pass.
+```
+
+Use `contains`, `schema`, `similarity`, `trajectory`, `toolArguments`, `answeredBy` and the
+`max*` budget scorers, or supply a custom scorer. `formatReport` returns text;
+`reportJson` returns JSON, and `compareReports` compares matching cases. Repeats are grouped by
+source case so a case with more measured repeats does not outweigh another. Failed, skipped,
+unscored and cancelled work remains counted; missing scores do not become passes.
+
+A case supplies exactly one of `input`, `turns` or `user`. Multiple turns share a fresh SDK
+memory session. Supply `resolveAgent` when a handoff changes which registered agent owns the
+next turn. The [offline example](examples/evals.ts) shows multiple turns, tool mocks and scripted
+approval answers. From this repository, run it with `bun run agents/examples/evals.ts`.
+
+Keep scripted answers and tool mocks in `drivers`, separate from stored case data. Answers
+match the request actually issued, including its agent, tool, question and child path. They do
+not turn model-written text into permission. `stub` replaces both tool execution paths and
+backend validation; it does not prove that the replaced backend checks work.
+
+Simulated users need an explicit provider and `allowSimulation: true`. Model judges, including
+`grounded`, need an explicit provider/rubric and `allowJudge: true`. These make extra provider
+calls and may cost money. A judge's score is an assessment, not proof that an answer is true.
+Pass current model and hosted-tool rates yourself. Spending thresholds stop more work from
+starting; they are not hard financial caps on calls already in flight or on external work that
+ignores cancellation. Configure SDK limits and use test data for tools that can change records.
+
+Reports omit inputs, outputs, snapshots, reasons and exception messages by default. Use
+non-sensitive case IDs: those remain in reports. `includePrivateData` opts the omitted fields
+in; store and share the result accordingly. Unknown charges stay unknown. `caseFromRun` extracts
+supported completed runs without executing them, and refuses input timing it cannot reproduce.
+The resulting golden case contains private run data and needs review before sharing. `createLiveScorer` scores only runs
+the host explicitly submits; it adds no queue or telemetry. The host owns sampling deduplication,
+storage and retention.
+
 ## Development
 
 From the repository root, run `bun install` and `bun run build`. Then, from `agents/`:
@@ -1069,13 +1394,19 @@ bun run test test/lifecycle.test.ts
 bunx vitest run test/definition.test.ts
 bunx vitest run test/delegation.test.ts
 bunx vitest run test/handoff.test.ts
+bunx vitest run test/structured-handoff.test.ts
 bunx vitest run test/steering.test.ts
 bunx vitest run test/input.test.ts
 bunx vitest run test/session.test.ts
+bunx vitest run test/extensions.test.ts
+bunx vitest run test/compaction.test.ts
+bunx vitest run test/tool-retry.test.ts
+bun examples/guardrails.ts
 bun examples/basic.ts
 bun examples/specialists.ts
 bun examples/conversation.ts
 bun examples/handoff.ts
+bun examples/structured-handoff.ts
 bun examples/steering.ts
 ```
 
@@ -1083,7 +1414,8 @@ These checks and examples use fake providers and tools. They do not call a live 
 The basic example runs a model/tool round. The specialist example runs a manager with two children
 and returns their notes in order. The conversation example runs two turns on a session, one with
 a picture sent by reference. The handoff example transfers an invoice question, then routes the
-next turn to the returned active agent. The steering example adds a message while a tool works
+next turn to the returned active agent. The structured-handoff example transfers between two
+checked schemas and restores the target's typed result. The steering example adds a message while a tool works
 and retains a message sent too late for the model to read. None needs an API key.
 
 The background integration file needs a disposable local PostgreSQL database named

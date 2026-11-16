@@ -6,9 +6,30 @@ import {
   defineTool,
   messageOf,
   parseToolArgs,
+  type Provider,
   type ProviderChunk,
   type Tool,
 } from "@providerkit/core";
+import {
+  allModels,
+  compactionDefinition,
+  compactionId,
+  compactionPlan,
+  modelConversation,
+} from "./compaction.ts";
+import { checkRetryTool, readToolRetryPolicy, retryBudget, toolAttempts } from "./tool-retry.ts";
+import {
+  GuardChecks,
+  GUARDED_CHUNK_LIMIT,
+  guardDefinition,
+  guardedChunk,
+  jsonBytes,
+  observeLifecycle,
+  refuseGuardedReplay,
+  requireGuardVerdicts,
+  successfulToolResult,
+  toolResultOf,
+} from "./extensions.ts";
 import {
   AGENT_RUNTIME,
   executeDelegation,
@@ -25,6 +46,7 @@ import {
   handoffRecord,
   handoffRef,
   isHandoff,
+  type Handoff,
 } from "./handoff.ts";
 import {
   RequestJournal,
@@ -35,7 +57,7 @@ import {
 } from "./request.ts";
 import { acknowledgeInputs, acceptInputs, inputReceipts } from "./steering.ts";
 import { modelsUsage, readRecoveryPolicy, recoveryToolHash, requireRecovery } from "./recovery.ts";
-import { conversationOf, readInput, readStored, repairConversation, requestOf } from "./input.ts";
+import { readInput, readStored, repairConversation, requestOf } from "./input.ts";
 import {
   ExecutionTree,
   Halt,
@@ -72,6 +94,7 @@ import {
   readTreeLimits,
   readSnapshot,
   readTurn,
+  snapshotInlineBytes,
   toolId,
 } from "./snapshot.ts";
 import type {
@@ -79,7 +102,11 @@ import type {
   AgentConfig,
   AgentDefinition,
   AgentEvent,
+  CompactionExecution,
   EnabledTools,
+  LifecycleContext,
+  LifecycleEvent,
+  ModelInput,
   MediaRef,
   ModelExecution,
   OperationReceipt,
@@ -102,8 +129,8 @@ type CompletedModel = Extract<ModelExecution, { status: "completed" }>;
 function recordOf(snapshot: RunSnapshot) {
   const saved = copyData(snapshot);
   const receipts: OperationReceipt[] = [];
-  const usage = modelsUsage(saved.models);
-  for (const model of saved.models) {
+  const usage = modelsUsage(allModels(saved));
+  for (const model of allModels(saved)) {
     for (const attempt of model.interrupted)
       receipts.push({
         kind: "model",
@@ -114,6 +141,9 @@ function recordOf(snapshot: RunSnapshot) {
       });
     receipts.push({
       kind: "model",
+      ...(saved.compactions.some((entry) => entry.id === model.id)
+        ? { purpose: "compaction" as const }
+        : {}),
       id: model.id,
       attemptId: model.attemptId,
       status: model.status,
@@ -132,6 +162,15 @@ function recordOf(snapshot: RunSnapshot) {
           callId: call.id,
           ...attempt,
           status: "interrupted",
+        });
+      for (const attempt of tool.retries)
+        receipts.push({
+          kind: "tool",
+          id: tool.id,
+          callId: call.id,
+          attemptId: attempt.attemptId,
+          result: attempt.result,
+          status: "completed",
         });
       if (tool.status === "pending") continue;
       receipts.push({
@@ -163,9 +202,24 @@ function recordOf(snapshot: RunSnapshot) {
   };
 }
 
-export function defineAgent<T>(definition: AgentConfig & { output: ResultSchema<T> }): Agent<T>;
-export function defineAgent(definition: AgentDefinition): Agent<string>;
-export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string> {
+// Adapted from OpenAI Agents JS (MIT), agent.ts: infer every registered handoff's output.
+// Ordinary tools contribute nothing; each runtime still validates only its own contract.
+type RegisteredTools = NonNullable<AgentConfig["tools"]>;
+type HandoffOutput<Tool> = Tool extends Handoff<infer Output> ? Output : never;
+type ConfigWithTools<Tools extends RegisteredTools> = Omit<AgentConfig, "tools"> & {
+  tools?: Tools;
+};
+
+export function defineAgent<T, const Tools extends RegisteredTools = []>(
+  definition: ConfigWithTools<Tools> & { output: ResultSchema<T> },
+): Agent<T | HandoffOutput<Tools[number]>>;
+export function defineAgent<const Tools extends RegisteredTools = []>(
+  definition: ConfigWithTools<Tools> & { output?: undefined },
+): Agent<string | HandoffOutput<Tools[number]>>;
+export function defineAgent<T, const Tools extends RegisteredTools = []>(
+  definition: ConfigWithTools<Tools> & { output?: ResultSchema<T> },
+): Agent<T | string | HandoffOutput<Tools[number]>>;
+export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | string | H> {
   const { id, version, instructions, provider } = definition;
   if (
     !isId(id) ||
@@ -177,6 +231,14 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     throw new TypeError("An agent needs an id, version, instructions and provider.");
   }
   const settings = readModelSettings(definition.modelSettings);
+  const compaction = compactionDefinition(definition.compaction);
+  const summarizer = definition.compaction?.summarize?.provider;
+  const toolRetries = readToolRetryPolicy(definition.toolRetries);
+  const guardPolicy = guardDefinition(definition.guardrails);
+  const guardrails = definition.guardrails && Object.freeze({ ...definition.guardrails });
+  const onLifecycle = definition.onLifecycle;
+  if (onLifecycle !== undefined && typeof onLifecycle !== "function")
+    throw new TypeError("onLifecycle must be a function.");
   const recovery = readRecoveryPolicy(definition.recovery);
   if (recovery && (!isId(provider.id) || !isId(provider.model)))
     throw new TypeError("A recovery profile needs a stable provider id and model.");
@@ -200,12 +262,6 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     throw new TypeError("An output contract needs an object schema and a runtime validator.");
   }
   const tools = [...(definition.tools ?? [])];
-  // ponytail: text-only transfer avoids claiming that an arbitrary target satisfies the
-  // source's checked output. Typed handoffs need an explicit typed adapter before support.
-  if (output && tools.some(isHandoff))
-    throw new TypeError(
-      "An agent with an output contract cannot offer handoffs. Use delegation instead.",
-    );
   if (
     new Set(tools.map((tool) => tool.name)).size !== tools.length ||
     tools.some((tool) => !isId(tool.name) || tool.name === RESULT_TOOL_NAME)
@@ -256,8 +312,21 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       throw new TypeError(
         "Recovery readOnlyTools must name ordinary isReadOnly tools registered on this agent.",
       );
+  for (const [name, policy] of Object.entries(toolRetries?.tools ?? {})) {
+    const tool = registry.get(name);
+    if (
+      !tool ||
+      tool.isTerminal ||
+      tool.needsApproval ||
+      stopAtTools.includes(name) ||
+      (policy.replay === "read-only" && !tool.isReadOnly)
+    )
+      throw new TypeError(
+        "toolRetries must name ordinary non-stopping tools without required approval. Read-only retries need isReadOnly.",
+      );
+  }
   const delegations = new Map(tools.filter(isDelegation).map((tool) => [tool.name, tool]));
-  const handoffs = new Map(tools.filter(isHandoff).map((tool) => [tool.name, tool]));
+  const handoffs = new Map(tools.filter(isHandoff<H>).map((tool) => [tool.name, tool]));
 
   function descriptorFor(
     name: string,
@@ -353,11 +422,23 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         }),
       ),
     );
+    const retryHashes = Object.fromEntries(
+      await Promise.all(
+        Object.keys(toolRetries?.tools ?? {}).map(async (name) => {
+          const tool = registry.get(name);
+          if (!tool) throw new TypeError("Missing retry tool.");
+          return [name, await recoveryToolHash(tool)] as const;
+        }),
+      ),
+    );
     return {
       instructions: text,
       modelSettings,
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
+      guardrails: copyData(guardPolicy),
+      compaction: copyData(compaction),
+      toolRetries: toolRetries ? { policy: copyData(toolRetries), toolHashes: retryHashes } : null,
       recovery: recovery
         ? {
             policy: copyData(recovery),
@@ -381,6 +462,24 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     return candidate;
   }
 
+  // Adapted from OpenAI Agents JS (MIT), result.ts: the active agent processes its own
+  // final output. Follow our saved child instead of casting it to the source's output type.
+  function completedOutput(snapshot: RunSnapshot): T | string | H {
+    if (snapshot.state.status !== "completed")
+      throw new TypeError("The run has no completed result.");
+    const last = snapshot.models.at(-1);
+    const transfer = last?.status === "completed" && finalHandoffResult(snapshot, last);
+    if (!transfer) return validateResult(snapshot.state.candidate);
+    const name = last.turn.message.toolCalls?.[0]?.name;
+    const target = name && handoffs.get(name)?.target();
+    if (!target || !equalData(handoffRef(target), handoffRef(transfer.child)))
+      throw new TypeError("The completed handoff does not match its registered target.");
+    const result = target[AGENT_RUNTIME].hydrate(transfer.child);
+    if (result.status !== "completed")
+      throw new TypeError("The handoff target has no completed result.");
+    return result.output;
+  }
+
   function requestFor(snapshot: RunSnapshot, model: CompletedModel, index: number): ToolRequest {
     const call = model.turn.message.toolCalls?.[index];
     const tool = model.tools[index];
@@ -389,7 +488,12 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       agentId: id,
       version,
       runId: snapshot.runId,
-      attemptId: snapshot.attemptId,
+      attemptId:
+        tool.status === "running" || tool.status === "completed"
+          ? tool.attemptId
+          : tool.retries.length
+            ? `${snapshot.attemptId}/tool-attempt/${tool.retries.length + tool.interrupted.length + 1}`
+            : snapshot.attemptId,
       operationId: tool.id,
       call,
       arguments: parseToolArgs(call.arguments),
@@ -454,6 +558,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           client.result(decision.value);
         }
       },
+      !!guardrails?.toolOutput,
     );
   }
 
@@ -530,7 +635,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     options: RunOptions,
     scope: ExecutionScope,
     answers?: Readonly<Record<string, unknown>>,
-  ): Promise<RunOutcome<T | string>> {
+  ): Promise<RunOutcome<T | string | H>> {
     const host = options.host;
     const deadline = snapshot.startedAt + limits.elapsedMs;
     const timeout = new AbortController();
@@ -544,7 +649,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       Math.max(0, deadline - Date.now()),
     );
     let release = () => {};
-    let completed: { output: T | string } | undefined;
+    let completed: { output: T | string | H } | undefined;
+    let started = false;
 
     function active(): void {
       scope.tree.active();
@@ -558,8 +664,40 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     }
 
     const save = () => scope.tree.save();
+    const callbackContext: LifecycleContext = Object.freeze({
+      agentId: id,
+      version,
+      runId: snapshot.runId,
+      attemptId: snapshot.attemptId,
+      context: Object.freeze({ ...options.context }),
+      signal,
+    });
+    const observe = (event: LifecycleEvent) =>
+      observeLifecycle([onLifecycle, options.onLifecycle], event, callbackContext);
+    const guards = new GuardChecks(snapshot, guardrails, callbackContext, save, active);
 
-    function restart(kind: "model" | "tool", operationId: string, previousAttemptId: string): void {
+    async function beforeTool(request: ToolRequest): Promise<void> {
+      await guards.check("toolInput", request.operationId, request.attemptId, request);
+      active();
+      await observe({ type: "tool_start", request });
+      active();
+    }
+
+    async function withToolError(request: ToolRequest, work: () => Promise<void>): Promise<void> {
+      try {
+        await work();
+      } catch (error) {
+        await observe({ type: "tool_error", request });
+        throw error;
+      }
+    }
+
+    function restart(
+      kind: "model" | "tool",
+      operationId: string,
+      previousAttemptId: string,
+      attemptId = snapshot.attemptId,
+    ): void {
       // Adapted from Vercel AI SDK (Apache-2.0), workflow/do-stream-step.ts: reset the
       // current display before replacement output. Unlike reset-step, identity stays explicit.
       emit({
@@ -568,7 +706,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         runId: snapshot.runId,
         operationId,
         previousAttemptId,
-        attemptId: snapshot.attemptId,
+        attemptId,
       });
     }
 
@@ -582,6 +720,13 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       const request = requestFor(snapshot, model, index);
       const tool = registry.get(request.call.name);
       const recorded = snapshot.definition.recovery;
+      const budget = retryBudget(snapshot.definition.toolRetries, request.call.name);
+      if (budget && previous + 1 >= budget.maxAttempts)
+        fail(
+          "tool_retry_exhausted",
+          "This call reached its tool attempt limit. Reconcile the saved attempts with the host.",
+          execution.id,
+        );
       requireRecovery(
         !!tool?.isReadOnly &&
           recorded?.policy.readOnlyTools?.includes(request.call.name) === true &&
@@ -603,10 +748,17 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     async function recoverTools(model: CompletedModel): Promise<void> {
       for (const [index, execution] of model.tools.entries()) {
         if (execution.status !== "running") continue;
-        await checkToolRecovery(model, index, execution.interrupted.length);
+        refuseGuardedReplay(snapshot, execution.id, execution.attemptId);
+        await checkToolRecovery(
+          model,
+          index,
+          execution.interrupted.length + execution.retries.length,
+        );
         model.tools[index] = {
           id: execution.id,
           status: "pending",
+          previousAttemptId: execution.attemptId,
+          retries: execution.retries,
           interrupted: [...execution.interrupted, { attemptId: execution.attemptId }],
         };
       }
@@ -617,16 +769,95 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         (count, model) =>
           count +
           (model.status === "completed"
-            ? model.tools.reduce(
-                (total, tool) =>
-                  total +
-                  tool.interrupted.length +
-                  (tool.status !== "pending" || tool.asks?.length ? 1 : 0),
-                0,
-              )
+            ? model.tools.reduce((total, tool) => total + toolAttempts(tool), 0)
             : 0),
         0,
       );
+    }
+
+    async function checkToolRetry(model: CompletedModel, index: number): Promise<void> {
+      const execution = model.tools[index];
+      const recorded = snapshot.definition.toolRetries;
+      if (!execution || !recorded) fail("invalid_journal", "Missing tool retry policy.");
+      const request = requestFor(snapshot, model, index);
+      await checkRetryTool(registry.get(request.call.name), recorded, execution);
+      if (!host?.beforeTool || (await needsApproval(request, options, signal)))
+        fail(
+          "tool_retry_unsafe",
+          "A retry needs current host authorization and cannot reuse or open an approval.",
+          execution.id,
+        );
+      active();
+    }
+
+    async function retryTool(model: CompletedModel, index: number): Promise<boolean> {
+      const execution = model.tools[index];
+      if (
+        !execution ||
+        execution.status !== "completed" ||
+        execution.result.ok ||
+        execution.asks?.length ||
+        !["failed", "timeout"].includes(execution.result.kind)
+      )
+        return false;
+      const request = requestFor(snapshot, model, index);
+      const policy = retryBudget(snapshot.definition.toolRetries, request.call.name);
+      const recoveryCeiling = execution.interrupted.length
+        ? snapshot.definition.recovery?.policy.maxAttempts
+        : undefined;
+      if (
+        !policy ||
+        toolAttempts(execution) >=
+          Math.min(policy.maxAttempts, recoveryCeiling ?? policy.maxAttempts)
+      )
+        return false;
+      active();
+      if (usedTools() >= limits.toolCalls)
+        throw new Halt({ status: "limited", limit: "toolCalls" });
+      await checkToolRetry(model, index);
+      let reconciliation: string | undefined;
+      if (policy.replay === "reconcile") {
+        const reconcile = host?.reconcileToolRetry;
+        if (!reconcile)
+          fail(
+            "tool_retry_unsafe",
+            "This failed call needs host reconciliation before it can be repeated.",
+            execution.id,
+          );
+        const verdict = await untilAbort(
+          Promise.resolve(
+            reconcile(immutableCopy({ request, result: execution.result }), callbackContext),
+          ),
+          signal,
+        );
+        active();
+        if (verdict?.outcome !== "not_run" || !isId(verdict.receipt))
+          fail(
+            "tool_retry_unsafe",
+            "The host could not confirm that the failed call did not run. Reconcile its effect before continuing.",
+            execution.id,
+          );
+        reconciliation = verdict.receipt;
+      }
+      model.tools[index] = {
+        id: execution.id,
+        status: "pending",
+        previousAttemptId: execution.attemptId,
+        interrupted: execution.interrupted,
+        retries: [
+          ...execution.retries,
+          {
+            attemptId: execution.attemptId,
+            arguments: copyData(request.arguments),
+            result: execution.result,
+            ...(reconciliation ? { reconciliation } : {}),
+          },
+        ],
+      };
+      // Retain the failure and reconciliation before reserving another attempt. Resume must
+      // recheck authority, but it must not erase the result or repeat the host's query.
+      await save();
+      return true;
     }
 
     async function finishTool(
@@ -660,11 +891,48 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           ...result,
           content: `${result.content}\nThe reviewer replaced the tool arguments before this call.`,
         };
+      await observe({ type: "tool_end", request, result });
+      active();
+      if (
+        guardPolicy?.stages.includes("toolOutput") &&
+        jsonBytes(result) > guardPolicy.maxOutputBytes
+      )
+        await guards.overflow("toolOutput", request.operationId, request.attemptId);
+      await guards.check("toolOutput", request.operationId, request.attemptId, {
+        request,
+        result,
+      });
+      active();
+      // Check after callbacks: another concurrent result may have consumed the remaining bytes.
+      if (
+        result.ok &&
+        result.images &&
+        snapshotInlineBytes(snapshot) +
+          inlineBytes(
+            [
+              {
+                role: "tool",
+                name: request.call.name,
+                toolCallId: request.call.id,
+                content: result.content,
+                images: result.images,
+              },
+            ],
+            "",
+          ) >
+          limits.inlineBytes
+      )
+        fail(
+          "tool_media_limit",
+          "Tool images exceed this run's inline byte limit. Return fewer or smaller images before starting new work.",
+          request.operationId,
+        );
       model.tools[index] = {
         interrupted: model.tools[index]?.interrupted ?? [],
+        retries: model.tools[index]?.retries ?? [],
         asks: model.tools[index]?.asks,
         id: request.operationId,
-        attemptId: snapshot.attemptId,
+        attemptId: request.attemptId,
         status: "completed",
         result,
       };
@@ -704,6 +972,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           active();
           const journal = journalFor(snapshot, model, index, options, scope, signal);
           try {
+            await beforeTool(request);
+            if (model.tools[index]?.retries.length) await checkToolRetry(model, index);
+            // Guards and observation cannot waive the host's last access/decision check.
             await journal.recheck(request);
             active();
             emit({ type: "tool_start", request });
@@ -717,6 +988,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
                 id: request.operationId,
                 status: "pending",
                 interrupted: model.tools[index]?.interrupted ?? [],
+                retries: model.tools[index]?.retries ?? [],
                 asks: model.tools[index]?.asks,
               };
             throw error;
@@ -743,7 +1015,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             answers: immutableCopy(answers),
             decision: immutableCopy(decision),
             runId: snapshot.runId,
-            attemptId: snapshot.attemptId,
+            attemptId: request.attemptId,
             operationId: request.operationId,
             callId: request.call.id,
             signal,
@@ -752,6 +1024,12 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         // Core reports an aborted invocation as data. It must not buy another model turn.
         if (!outcome.ok) active();
         if (!outcome.ok && outcome.kind === "failed" && isInputRequired(outcome.cause)) {
+          if (model.tools[index]?.retries.length)
+            fail(
+              "tool_retry_unsafe",
+              "A retried call requested input. Reconcile it with the host; retries cannot create request replay paths.",
+              request.operationId,
+            );
           const asks = model.tools[index]?.asks;
           // The explicit InputRequired contract is the only ordinary-tool pre-effect boundary.
           // A worker death before this response keeps the running marker and cannot replay it.
@@ -759,6 +1037,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             id: request.operationId,
             status: "pending",
             asks,
+            retries: model.tools[index]?.retries ?? [],
             interrupted: model.tools[index]?.interrupted ?? [],
           };
           const journal = journalFor(snapshot, model, index, options, scope, signal);
@@ -772,16 +1051,27 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           );
           return;
         }
-        result = outcome.ok
-          ? { ok: true, content: outcome.summary }
-          : { ok: false, content: outcome.error, kind: outcome.kind };
+        try {
+          result =
+            tool.name === RESULT_TOOL_NAME && outcome.ok
+              ? { ok: true, content: outcome.summary }
+              : toolResultOf(outcome);
+        } catch {
+          fail(
+            "invalid_tool_output",
+            "The tool returned unsavable data or unsupported content. Return JSON or core text/image parts.",
+            request.operationId,
+          );
+        }
+        if (outcome.ok && tool.name === RESULT_TOOL_NAME && result.ok)
+          result.final = { candidate: copyData(request.arguments) };
         if (outcome.ok && snapshot.definition.stopAtTools.includes(tool.name)) {
           // Keep the raw candidate, not the validator's return. Restoring runs applies the
           // same pure validator without repeating the effect or asking the model to rewrite it.
           try {
             const candidate = output ? copyData(outcome.output) : outcome.summary;
             validateResult(candidate);
-            result = { ok: true, content: outcome.summary, final: { candidate } };
+            result = { ...result, ok: true, final: { candidate } };
           } catch (error) {
             result = {
               ok: false,
@@ -829,9 +1119,10 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       }
       model.tools[index] = {
         interrupted: model.tools[index]?.interrupted ?? [],
+        retries: model.tools[index]?.retries ?? [],
         asks: model.tools[index]?.asks,
         id: request.operationId,
-        attemptId: snapshot.attemptId,
+        attemptId: request.attemptId,
         status: "delegating",
       };
       await save();
@@ -845,6 +1136,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         return;
       }
       const requests = journalFor(snapshot, model, index, options, scope, signal);
+      refuseGuardedReplay(snapshot, request.operationId);
+      await beforeTool(request);
       await requests.recheck(request);
       active();
       emit({ type: "tool_start", request });
@@ -922,6 +1215,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       if (!host?.beforeTool)
         fail("request_host_missing", "Provide host.beforeTool before dispatching a client tool.");
       const requests = journalFor(snapshot, model, index, options, scope, signal, request);
+      refuseGuardedReplay(snapshot, request.operationId);
+      await beforeTool(request);
       await requests.recheck(request);
       const record = await requests.ensure({ type: "client", resultSchema: client.resultSchema });
       if (!record.decision) return;
@@ -943,7 +1238,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       await requests.recheck(request);
       active();
       const result = client.result(record.decision.value);
-      await finishTool(model, index, request, { ok: true, content: result.summary });
+      await finishTool(model, index, request, successfulToolResult(result));
     }
 
     async function handleTurn(model: CompletedModel): Promise<void> {
@@ -986,7 +1281,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         throw new Halt({ status: "limited", limit: "turns" });
 
       for (let index = 0; index < calls.length;) {
-        if (model.tools[index]?.status === "completed") {
+        if (model.tools[index]?.status === "completed" && !(await retryTool(model, index))) {
           index++;
           continue;
         }
@@ -999,6 +1294,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         )
           throw new Halt({ status: "limited", limit: "toolCalls" });
         let request = requestFor(snapshot, model, index);
+        if (model.tools[index]?.retries.length) await checkToolRetry(model, index);
         if (
           !snapshot.definition.enabledTools.includes(request.call.name) ||
           snapshot.definition.modelSettings.toolChoice === "none"
@@ -1057,6 +1353,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             status: "delegating",
             attemptId: snapshot.attemptId,
             interrupted: [],
+            retries: [],
           };
           await save();
           active();
@@ -1113,12 +1410,12 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         if (approval?.type === "approve" && approval.arguments !== undefined)
           request = { ...request, arguments: copyData(approval.arguments) };
         if (descriptor) {
-          await runDelegation(model, index, request, descriptor);
+          await withToolError(request, () => runDelegation(model, index, request, descriptor));
           index++;
           continue;
         }
         if (client) {
-          await runClient(model, index, request, client);
+          await withToolError(request, () => runClient(model, index, request, client));
           if (model.tools[index]?.status !== "completed") {
             await openApprovals(model, index + 1);
             snapshot.state = { status: "suspended" };
@@ -1128,8 +1425,21 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           continue;
         }
 
-        const batch = [{ index, request, tool }];
+        const execution = model.tools[index];
+        const batch = [
+          {
+            index,
+            request,
+            tool,
+            previousAttemptId:
+              execution?.status === "pending" ? execution.previousAttemptId : undefined,
+          },
+        ];
         const parallel = (request: ToolRequest, tool?: Tool) =>
+          // A rejected guard stops the next dispatch, rather than racing a sibling effect.
+          !guardrails?.toolInput &&
+          !guardrails?.toolOutput &&
+          !retryBudget(snapshot.definition.toolRetries, request.call.name) &&
           tool?.isConcurrencySafe === true &&
           snapshot.definition.enabledTools.includes(request.call.name) &&
           !tool.needsApproval &&
@@ -1144,11 +1454,17 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             next < calls.length && batch.length < Math.min(limits.parallelTools, capacity);
             next++
           ) {
-            if (model.tools[next]?.status !== "pending") break;
+            const execution = model.tools[next];
+            if (execution?.status !== "pending") break;
             const nextRequest = requestFor(snapshot, model, next);
             const nextTool = registry.get(nextRequest.call.name);
             if (!parallel(nextRequest, nextTool)) break;
-            batch.push({ index: next, request: nextRequest, tool: nextTool });
+            batch.push({
+              index: next,
+              request: nextRequest,
+              tool: nextTool,
+              previousAttemptId: execution.previousAttemptId,
+            });
           }
         }
         // A checkpoint can capture the pending retry while another child saves. Check its
@@ -1156,24 +1472,38 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         for (const job of batch) {
           const execution = model.tools[job.index];
           if (execution?.interrupted.length && !execution.asks?.length)
-            await checkToolRecovery(model, job.index, execution.interrupted.length - 1);
+            await checkToolRecovery(
+              model,
+              job.index,
+              execution.interrupted.length + execution.retries.length - 1,
+            );
         }
         active();
         // Reserve the whole admitted batch before any invocation, including its tool-call budget.
         for (const job of batch)
           model.tools[job.index] = {
             interrupted: model.tools[job.index]?.interrupted ?? [],
+            retries: model.tools[job.index]?.retries ?? [],
             asks: model.tools[job.index]?.asks,
             id: job.request.operationId,
-            attemptId: snapshot.attemptId,
+            attemptId: job.request.attemptId,
             status: "running",
           };
         await save();
         const settled = await Promise.allSettled(
           batch.map((job) => {
-            const previous = model.tools[job.index]?.interrupted.at(-1);
-            if (previous) restart("tool", job.request.operationId, previous.attemptId);
-            return runTool(model, job.index, job.request, job.tool, concurrent);
+            // Retry and recovery histories can interleave. Use the predecessor saved when
+            // this replacement was scheduled, not the tail of either history alone.
+            if (job.previousAttemptId)
+              restart(
+                "tool",
+                job.request.operationId,
+                job.previousAttemptId,
+                job.request.attemptId,
+              );
+            return withToolError(job.request, () =>
+              runTool(model, job.index, job.request, job.tool, concurrent),
+            );
           }),
         );
         const rejected = settled.find((result) => result.status === "rejected");
@@ -1190,7 +1520,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           }
           continue;
         }
-        index += batch.length;
+        // Retrying tools run serially. Revisit their settled failure through the same
+        // admission path; ordinary batches advance as before.
+        if (!retryBudget(snapshot.definition.toolRetries, request.call.name)) index += batch.length;
       }
       // Adapted from OpenAI Agents JS (MIT), runner/toolExecution.ts: settle this batch,
       // then select the first stopping tool in model order, not completion order.
@@ -1245,13 +1577,89 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       return data;
     }
 
+    async function compact(): Promise<void> {
+      const last = snapshot.compactions.at(-1);
+      if (last?.status === "running")
+        fail(
+          "interrupted_compaction",
+          "The summary has no saved result and may have been billed. Reconcile it with the host before continuing.",
+          last.id,
+        );
+      const plan = compactionPlan(snapshot);
+      if (!plan) return;
+      const { removed, ...position } = plan;
+      const index = snapshot.compactions.length;
+      const entry: CompactionExecution = {
+        id: compactionId(snapshot.runId, index),
+        beforeModel: snapshot.models.length,
+        ...position,
+        status: "running",
+      };
+      const summary = snapshot.definition.compaction?.summarize;
+      if (!summary) {
+        snapshot.compactions.push({
+          ...entry,
+          status: "completed",
+          summary: "Earlier messages were omitted. No summary was generated.",
+        });
+        await save();
+        return;
+      }
+      if (!summarizer) fail("invalid_journal", "The recorded summary provider is missing.");
+      // A separate receipt freezes this cut before any paid work. A crash, even before
+      // dispatch, fails closed instead of silently purchasing the same summary twice.
+      snapshot.compactions.push(entry);
+      await save();
+      active();
+      const messages = await requestOf(summary.instructions, removed, loadMedia);
+      await callModel(
+        entry.id,
+        {
+          messages,
+          tools: [],
+          settings: {
+            maxTokens: summary.maxTokens,
+            maxAttempts: 1,
+            toolChoice: "none",
+            hostedTools: [],
+          },
+        },
+        summarizer,
+        (model) => {
+          if (model.status === "completed") {
+            if (
+              model.turn.finishReason !== "stop" ||
+              !model.turn.message.content.trim() ||
+              model.tools.length ||
+              model.turn.message.hostedCalls?.length ||
+              model.turn.message.hostedItems
+            )
+              fail(
+                "invalid_compaction",
+                "The summary must be complete text without tool calls. Check the summary provider before starting new work.",
+                entry.id,
+              );
+            snapshot.compactions[index] = {
+              ...entry,
+              model,
+              status: "completed",
+              summary: model.turn.message.content,
+            };
+          } else entry.model = model;
+        },
+        undefined,
+        true,
+      );
+    }
+
     async function nextTurn(
       previous?: Extract<ModelExecution, { status: "running" }>,
     ): Promise<CompletedModel> {
       active();
       // Hosted actions may run before any local tool call appears. Their explicit presence
       // overrides a profile's inference-only claim when an interrupted call is recovered.
-      if (previous)
+      if (previous) {
+        refuseGuardedReplay(snapshot, previous.id);
         requireRecovery(
           snapshot.definition.recovery?.policy.inferenceOnly === true &&
             !snapshot.definition.modelSettings.hostedTools?.length,
@@ -1259,6 +1667,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           snapshot.definition.recovery,
           previous.id,
         );
+      }
       const position = previous ? snapshot.models.indexOf(previous) : snapshot.models.length;
       const selected = tools.filter((tool) => snapshot.definition.enabledTools.includes(tool.name));
       if (
@@ -1280,35 +1689,18 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       // A steer never changes the input of an already admitted call, including safe replay.
       // Check capacity before polling so a spent budget leaves delivery queued in the host.
       scope.tree.reserveModel();
-      if (!previous) await acceptInputs(snapshot, scope, options, signal);
+      if (!previous) {
+        await acceptInputs(snapshot, scope, options, signal);
+        await compact();
+      }
       active();
       // Media is read before the receipt below exists, so a missing loader or file fails the
       // run with no model operation left running and nothing to reconcile.
       const request = await requestOf(
         snapshot.definition.instructions,
-        conversationOf(snapshot),
+        modelConversation(snapshot),
         loadMedia,
       );
-      active();
-      // The tree check and the receipt stay together, with no await between them, so two
-      // children racing for the tree's last model call cannot both take it.
-      scope.tree.reserveModel();
-      const model: ModelExecution = {
-        id: modelId(snapshot.runId, position),
-        attemptId: snapshot.attemptId,
-        status: "running",
-        billing: "unknown",
-        usage: { ...EMPTY_USAGE },
-        interrupted: previous
-          ? [
-              ...previous.interrupted,
-              { attemptId: previous.attemptId, usage: copyData(previous.usage) },
-            ]
-          : [],
-      };
-      snapshot.models[position] = model;
-      await save();
-      if (previous) restart("model", model.id, previous.attemptId);
       active();
       const modelSettings = copyData(snapshot.definition.modelSettings);
       // Ported from OpenAI Agents JS (MIT), runner/modelSettings.ts, maybeResetToolChoice.
@@ -1320,25 +1712,86 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       )
         modelSettings.toolChoice = "auto";
       if (finalTurn) modelSettings.toolChoice = "none";
+      const operationId = modelId(snapshot.runId, position);
+      const modelInput: ModelInput = {
+        messages: request,
+        tools: finalTurn ? [] : copyData(selected.map((tool) => tool.definition())),
+        settings: modelSettings,
+      };
+      const done = await callModel(
+        operationId,
+        modelInput,
+        provider,
+        (model) => {
+          snapshot.models[position] = model;
+        },
+        previous,
+      );
+      for (const receipt of inputReceipts(snapshot).filter(
+        (receipt) => receipt.modelId === done.id,
+      ))
+        emit({ type: "input", receipt });
+      await acknowledgeInputs(snapshot, options, signal);
+      return done;
+    }
+
+    // Both ordinary turns and explicit summaries use the same admission, guards, usage
+    // checkpoints and collection path. Summaries stay private and never dispatch tools.
+    async function callModel(
+      operationId: string,
+      modelInput: ModelInput,
+      selectedProvider: Provider,
+      record: (model: ModelExecution) => void,
+      previous?: Extract<ModelExecution, { status: "running" }>,
+      summary = false,
+    ): Promise<CompletedModel> {
+      const { messages: request, settings: modelSettings } = modelInput;
+      await guards.check("modelInput", operationId, snapshot.attemptId, modelInput);
+      await observe({
+        type: "model_start",
+        operationId,
+        attemptId: snapshot.attemptId,
+        input: modelInput,
+      });
+      active();
+      // The tree check and the receipt stay together, with no await between them, so two
+      // children racing for the tree's last model call cannot both take it.
+      scope.tree.reserveModel();
+      const model: ModelExecution = {
+        id: operationId,
+        attemptId: snapshot.attemptId,
+        status: "running",
+        billing: "unknown",
+        usage: { ...EMPTY_USAGE },
+        interrupted: previous
+          ? [
+              ...previous.interrupted,
+              { attemptId: previous.attemptId, usage: copyData(previous.usage) },
+            ]
+          : [],
+      };
+      record(model);
+      await save();
+      if (previous) restart("model", model.id, previous.attemptId);
+      active();
       let reportedUsage = false;
+      let bufferedChunks = 0;
+      let bufferedBytes = 0;
+      const guarded = !!guardrails?.modelOutput;
       async function* observed(): AsyncIterable<ProviderChunk> {
-        const stream = provider.createStream(
-          request,
-          finalTurn ? [] : copyData(selected.map((tool) => tool.definition())),
-          {
-            ...modelSettings,
-            ...(settings.onActivity ? { onActivity: settings.onActivity } : {}),
-            ...(settings.onRateLimit ? { onRateLimit: settings.onRateLimit } : {}),
-            ...(options.modelSettings?.onActivity
-              ? { onActivity: options.modelSettings.onActivity }
-              : {}),
-            ...(options.modelSettings?.onRateLimit
-              ? { onRateLimit: options.modelSettings.onRateLimit }
-              : {}),
-            signal,
-            sessionId: snapshot.runId,
-          },
-        );
+        const stream = selectedProvider.createStream(request, modelInput.tools, {
+          ...modelSettings,
+          ...(settings.onActivity ? { onActivity: settings.onActivity } : {}),
+          ...(settings.onRateLimit ? { onRateLimit: settings.onRateLimit } : {}),
+          ...(options.modelSettings?.onActivity
+            ? { onActivity: options.modelSettings.onActivity }
+            : {}),
+          ...(options.modelSettings?.onRateLimit
+            ? { onRateLimit: options.modelSettings.onRateLimit }
+            : {}),
+          signal,
+          sessionId: summary ? operationId : snapshot.runId,
+        });
         for await (const chunk of stream) {
           active();
           if (chunk.usage) {
@@ -1351,13 +1804,25 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             await save();
             active();
           }
-          emit({
-            type: "model_chunk",
-            runId: snapshot.runId,
-            attemptId: snapshot.attemptId,
-            operationId: model.id,
-            chunk,
-          });
+          if (guarded) {
+            // Bound collection before yielding. Only the checked assembled turn is published.
+            // All fields count, including reasoning, signatures, tool args and hosted payloads.
+            bufferedBytes += jsonBytes(chunk);
+            bufferedChunks++;
+            if (
+              bufferedBytes > (guardPolicy?.maxOutputBytes ?? 0) ||
+              bufferedChunks > GUARDED_CHUNK_LIMIT
+            )
+              await guards.overflow("modelOutput", model.id);
+          } else if (!summary) {
+            emit({
+              type: "model_chunk",
+              runId: snapshot.runId,
+              attemptId: snapshot.attemptId,
+              operationId: model.id,
+              chunk,
+            });
+          }
           active();
           yield chunk;
         }
@@ -1366,22 +1831,47 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       try {
         collected = await untilAbort(collectTurn(observed()), signal);
       } catch (error) {
+        await observe({ type: "model_error", operationId: model.id, attemptId: model.attemptId });
         active();
         // Only core's classified provider failures are local model failures. Host/checkpoint
         // errors and unclassified programming errors must not become benign tool strings.
-        if (!(error instanceof ProviderError)) throw error;
+        if (!(error instanceof ProviderError)) {
+          if (guarded && !(error instanceof Halt))
+            fail(
+              "guarded_model_failed",
+              "The guarded model call failed before its output could be checked. Inspect the provider on the server before starting new work.",
+              model.id,
+            );
+          throw error;
+        }
         if (error.kind === "aborted") {
           scope.tree.stop();
           throw new Halt({ status: "cancelled" });
         }
-        fail("model_failed", `The model call failed (${error.kind}): ${error.message}`, model.id);
+        fail(
+          "model_failed",
+          guarded
+            ? `The model call failed (${error.kind}). Check the provider before starting new work.`
+            : `The model call failed (${error.kind}): ${error.message}`,
+          model.id,
+        );
       }
       let turn;
       try {
         turn = readTurn(collected);
       } catch (error) {
-        fail("invalid_model_output", messageOf(error), model.id);
+        fail(
+          "invalid_model_output",
+          guarded
+            ? "The provider returned an invalid guarded turn. Check the provider before starting new work."
+            : messageOf(error),
+          model.id,
+        );
       }
+      await observe({ type: "model_end", operationId: model.id, attemptId: model.attemptId, turn });
+      active();
+      await guards.check("modelOutput", model.id, model.attemptId, turn);
+      active();
       const done: CompletedModel = {
         ...model,
         status: "completed",
@@ -1392,15 +1882,21 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           id: toolId(model.id, index),
           status: "pending",
           interrupted: [],
+          retries: [],
         })),
       };
-      snapshot.models[position] = done;
+      record(done);
       await save();
-      for (const receipt of inputReceipts(snapshot).filter(
-        (receipt) => receipt.modelId === done.id,
-      ))
-        emit({ type: "input", receipt });
-      await acknowledgeInputs(snapshot, options, signal);
+      if (guarded && !summary) {
+        active();
+        emit({
+          type: "model_chunk",
+          runId: snapshot.runId,
+          attemptId: model.attemptId,
+          operationId: model.id,
+          chunk: guardedChunk(turn),
+        });
+      }
       return done;
     }
 
@@ -1421,6 +1917,10 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       if (snapshot.state.status === "running" || snapshot.state.status === "suspended") {
         release = await scope.tree.gate.acquire(signal);
         active();
+        requireGuardVerdicts(snapshot);
+        started = true;
+        await observe({ type: "run_start" });
+        active();
         const last = snapshot.models.at(-1);
         snapshot.state = { status: "running" };
         if (last?.status === "running") await handleTurn(await nextTurn(last));
@@ -1430,8 +1930,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         }
         while (snapshot.state.status === "running") await handleTurn(await nextTurn());
       }
-      if (snapshot.state.status === "completed")
-        completed = { output: validateResult(snapshot.state.candidate) };
+      if (snapshot.state.status === "completed") completed = { output: completedOutput(snapshot) };
       await save();
     } catch (error) {
       let failure = error;
@@ -1460,6 +1959,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       }
     } finally {
       release();
+      if (started) await observe({ type: "run_end", state: snapshot.state });
       clearTimeout(timer);
     }
     emit({
@@ -1521,6 +2021,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       history: copyData(history),
       input: copyData(input),
       inputs: [],
+      guards: [],
+      compactions: [],
       ...(session ? { session: copyData(session) } : {}),
       limits: copyData(limits),
       models: [],
@@ -1530,8 +2032,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     };
   }
 
-  const runtime: AgentRuntime<T | string> = {
-    outputKind: output ? "checked" : "text",
+  const runtime: AgentRuntime<T | string | H> = {
     handoffs: [...handoffs.values()],
     execute,
     answerRequests,
@@ -1593,6 +2094,17 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       );
       checkNames(snapshot.definition.enabledTools);
       if (
+        !equalData(snapshot.definition.compaction, compaction) ||
+        !equalData(snapshot.definition.toolRetries?.policy ?? null, toolRetries)
+      )
+        throw new TypeError(
+          "The recorded compaction or tool retry policy changed. Restore the same definition before resuming.",
+        );
+      if (!equalData(snapshot.definition.guardrails, guardPolicy))
+        throw new TypeError(
+          "The recorded guard policy changed. Restore the same guard identity, stages and limits.",
+        );
+      if (
         !equalData(snapshot.definition.recovery?.policy ?? null, recovery) ||
         (snapshot.definition.recovery &&
           !equalData(snapshot.definition.recovery.provider, {
@@ -1653,7 +2165,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           }
         }
       }
-      if (snapshot.state.status === "completed") validateResult(snapshot.state.candidate);
+      if (snapshot.state.status === "completed") completedOutput(snapshot);
       return snapshot;
     },
     hydrate(snapshot) {
@@ -1661,7 +2173,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       const state = record.snapshot.state;
       if (state.status === "running") throw new Error("A child has not settled yet.");
       return state.status === "completed"
-        ? { ...record, status: "completed", output: validateResult(state.candidate) }
+        ? { ...record, status: "completed", output: completedOutput(record.snapshot) }
         : state.status === "suspended"
           ? { ...record, ...state, requests: openRequests(snapshot) }
           : { ...record, ...state };
@@ -1670,7 +2182,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
 
   /** Once per root, after its final checkpoint. Never changes the run's own status. */
   async function appendTurn(
-    outcome: RunOutcome<T | string>,
+    outcome: RunOutcome<T | string | H>,
     options: RunOptions,
     tree: ExecutionTree,
   ): Promise<SessionStatus | undefined> {
@@ -1728,7 +2240,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     answers?: Readonly<Record<string, unknown>>,
   ) {
     const tree = new ExecutionTree(snapshot, options);
-    let outcome: RunOutcome<T | string>;
+    let outcome: RunOutcome<T | string | H>;
     try {
       outcome = await execute(snapshot, options, { tree, depth: 0, path: [] }, answers);
     } finally {
@@ -1738,7 +2250,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     return session ? { ...outcome, session } : outcome;
   }
 
-  const agent: Agent<T | string> = {
+  const agent: Agent<T | string | H> = {
     id,
     version,
     [AGENT_RUNTIME]: runtime,

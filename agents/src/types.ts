@@ -3,6 +3,7 @@ import type {
   ContentPart,
   FileMimeType,
   ImageMimeType,
+  ImagePart,
   JsonObjectSchema,
   Provider,
   ProviderChunk,
@@ -11,6 +12,7 @@ import type {
   Tool,
   ToolCall,
   ToolContext,
+  ToolDefinition,
   ToolFailure,
   Turn,
 } from "@providerkit/core";
@@ -166,6 +168,133 @@ export interface RecoveryDefinition {
   toolHashes: Record<string, string>;
 }
 
+/** Callback context is host-only. Hidden calls inside callbacks do not use SDK tree budgets. */
+export interface LifecycleContext {
+  readonly agentId: string;
+  readonly version: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly context: ToolContext;
+  readonly signal: AbortSignal;
+}
+
+export interface ModelInput {
+  messages: ChatMessage[];
+  tools: ToolDefinition[];
+  settings: RecordedModelSettings;
+}
+
+/** Blocking checks, adapted from OpenAI Agents JS (MIT), guardrail.ts. No parallel tripwire:
+ * an input must pass before dispatch, and an output before ordinary progress or history. */
+export interface GuardInputs {
+  modelInput: ModelInput;
+  modelOutput: Turn;
+  toolInput: ToolRequest;
+  toolOutput: { request: ToolRequest; result: ToolResult };
+}
+export type GuardStage = keyof GuardInputs;
+export type GuardVerdict = { allow: true } | { allow: false };
+export type Guardrail<K extends GuardStage> = (
+  input: GuardInputs[K],
+  context: LifecycleContext,
+) => GuardVerdict | Promise<GuardVerdict>;
+
+/** Model-only history trimming. The full journal and session turn are never shortened. */
+export interface CompactionPolicy {
+  /** Change when the summary prompt or hidden provider configuration changes. */
+  identity: string;
+  /** Supply the actual window for the configured model. No model-name guessing. */
+  contextWindow: number;
+  /** Recent tokens to keep. Core's historyBudgetTokens(contextWindow) is the default. */
+  keepTokens?: number;
+  /** Omit to trim without a paid call. This provider must do inference only. The SDK sends
+   * no tools, allows one attempt, counts usage and refuses interrupted summarization. */
+  summarize?: { provider: Provider; instructions: string; maxTokens: number };
+}
+export interface CompactionDefinition {
+  identity: string;
+  contextWindow: number;
+  keepTokens: number;
+  summarize: {
+    provider: { id: string; model: string };
+    instructions: string;
+    maxTokens: number;
+  } | null;
+}
+export type CompactionExecution = {
+  id: string;
+  beforeModel: number;
+  /** Count and cut in the full conversation, not in the shortened model view. */
+  sourceCount: number;
+  cut: number;
+  model?: ModelExecution;
+} & ({ status: "running" } | { status: "completed"; summary: string });
+
+/** Per-operation budgets adapted from PydanticAI's tool_manager.py (MIT). No retries by
+ * default. These retry settled failures only; crash recovery remains a separate policy. */
+export interface ToolRetryPolicy {
+  identity: string;
+  tools: Record<
+    string,
+    {
+      /** Includes the first attempt and any crash recovery attempts. */
+      maxAttempts: number;
+      /** read-only also requires isReadOnly; reconcile requires host.reconcileToolRetry. */
+      replay: "read-only" | "reconcile";
+    }
+  >;
+}
+export interface ToolRetryDefinition {
+  policy: ToolRetryPolicy;
+  toolHashes: Record<string, string>;
+}
+export interface RetriedToolAttempt {
+  attemptId: string;
+  arguments: Record<string, unknown>;
+  result: Extract<ToolResult, { ok: false }>;
+  /** Host receipt proving this attempt did not run, not an unenforced idempotency key. */
+  reconciliation?: string;
+}
+
+/** Node-local policy. Configure each specialist/target separately. Callbacks cannot edit data,
+ * grant tool access or replace request decisions. Change identity when policy code changes. */
+export type Guardrails = { [K in GuardStage]?: Guardrail<K> } & {
+  identity: string;
+  /** UTF-8 JSON bytes across model chunks, or in one tool result. Default 1,000,000.
+   * Guarded model streams also stop at 4,096 chunks. No protected delta is sent before allow. */
+  maxOutputBytes?: number;
+};
+export interface GuardDefinition {
+  identity: string;
+  stages: GuardStage[];
+  maxOutputBytes: number;
+}
+export interface GuardRecord {
+  stage: GuardStage;
+  operationId: string;
+  attemptId: string;
+  /** Hash of the checked value; no rejected content or callback exception is saved here. */
+  inputHash: string;
+  status: "running" | "allowed" | "rejected" | "failed";
+}
+
+/** Privileged host inspection, NOT safe display output. End hooks see raw output before its
+ * guard. Hooks are ordered and awaited, but exceptions/return values never authorize or block.
+ * They may repeat after a crash. Use guards for policy and onEvent for checked progress. */
+export type LifecycleEvent =
+  | { type: "run_start" }
+  | { type: "run_end"; state: RunState }
+  | { type: "model_start"; operationId: string; attemptId: string; input: ModelInput }
+  | { type: "model_end"; operationId: string; attemptId: string; turn: Turn }
+  | { type: "model_error"; operationId: string; attemptId: string }
+  | { type: "tool_start"; request: ToolRequest }
+  | { type: "tool_end"; request: ToolRequest; result: ToolResult }
+  | { type: "tool_error"; request: ToolRequest };
+export type LifecycleHook = (
+  event: LifecycleEvent,
+  context: LifecycleContext,
+) => void | Promise<void>;
+
 /** The resolved definition used for every turn, including after a restart. No host context
  * or callbacks: they can contain credentials and process-local services. */
 export interface RunDefinition {
@@ -175,9 +304,12 @@ export interface RunDefinition {
   stopAtTools: string[];
   /** Null refuses interrupted effects. Recorded policy and identities must match on recovery. */
   recovery: RecoveryDefinition | null;
+  guardrails: GuardDefinition | null;
+  compaction: CompactionDefinition | null;
+  toolRetries: ToolRetryDefinition | null;
 }
 
-export interface AgentConfig {
+export interface AgentConfig<H = unknown> {
   id: string;
   /** Change this when instructions, tools or output contracts change. */
   version: string;
@@ -188,9 +320,14 @@ export interface AgentConfig {
   modelSettings?: ModelSettings;
   /** Opt in before starting a run. Never retries a settled failure or an unknown write. */
   recovery?: RecoveryPolicy;
-  /** Core tools, client tools, delegations or text-only handoffs. Terminal tools and handoffs
-   * must be called alone. */
-  tools?: readonly (Tool | Delegation | ClientTool | Handoff)[];
+  guardrails?: Guardrails;
+  compaction?: CompactionPolicy;
+  toolRetries?: ToolRetryPolicy;
+  /** Host-only observer. Runs before RunOptions.onLifecycle at each boundary. */
+  onLifecycle?: LifecycleHook;
+  /** Core tools, client tools, delegations or handoffs. Terminal tools and handoffs
+   * must be called alone. H is the union of the registered targets' output types. */
+  tools?: readonly (Tool | Delegation | ClientTool | Handoff<H>)[];
   /** A host policy or allow-list. A run may narrow this list, never widen it. The reserved
    * submit_result tool stays available when there is an output contract. */
   enabledTools?: EnabledTools;
@@ -203,8 +340,10 @@ export interface AgentConfig {
   treeLimits?: Partial<TreeLimits>;
 }
 
-export type AgentDefinition<T = string> = AgentConfig & { output?: ResultSchema<T> };
+/** T is this agent's output. H is its handoff targets' output, never checked as T. */
+export type AgentDefinition<T = string, H = never> = AgentConfig<H> & { output?: ResultSchema<T> };
 
+/** T is every possible completed output, including registered handoff chains. */
 export interface Agent<T = string> {
   readonly id: string;
   readonly version: string;
@@ -366,6 +505,16 @@ export interface AgentHost {
     call: ToolRequest,
     decided?: { request: PendingRequest; decision: Decision },
   ) => void | Promise<void>;
+  /** Authoritatively query the external service for this exact failed attempt. Return not_run
+   * only when it cannot still complete. An error string or literal key is not proof. Never
+   * dispatch from this callback. Requests and control tools cannot use this retry path. */
+  reconcileToolRetry?: (
+    attempt: { request: ToolRequest; result: Extract<ToolResult, { ok: false }> },
+    context: LifecycleContext,
+  ) =>
+    | { outcome: "not_run"; receipt: string }
+    | { outcome: "unknown" }
+    | Promise<{ outcome: "not_run"; receipt: string } | { outcome: "unknown" }>;
   /** Both this callback and the tool's isConcurrencySafe flag must allow batching. */
   canRunConcurrently?: (request: ToolRequest) => boolean;
   /** Optional in-process child binding under this root's lease and cancellation.
@@ -393,6 +542,8 @@ export interface RunOptions {
   host?: AgentHost;
   /** Best-effort progress from the one stream reader. Observer errors do not stop work. */
   onEvent?: (event: AgentEvent) => void | Promise<void>;
+  /** Privileged observer, inherited by children. Return values and failures are ignored. */
+  onLifecycle?: LifecycleHook;
   /** Loads the history once, before the run is saved, and appends the turn once the run
    * settles. The input must then be the new turn only, not `{ messages }`. Never passed to
    * specialists. */
@@ -434,7 +585,8 @@ export type LimitReason =
 
 export type RunState =
   | { status: "running" }
-  /** Saves the original result input, not a validator's potentially non-JSON return value. */
+  /** Saves the original result input, not a validator's potentially non-JSON return value.
+   * After a handoff this is the active target's candidate, validated only by that target. */
   | { status: "completed"; candidate: unknown }
   | { status: "suspended" }
   | { status: "cancelled" }
@@ -444,7 +596,16 @@ export type RunState =
 export type ToolResult =
   /** final keeps the raw stopping-tool output (or summary for text agents), not the
    * validator's possibly non-JSON return value. Restoring can validate without replay. */
-  | { ok: true; content: string; final?: { candidate: unknown } }
+  | {
+      ok: true;
+      content: string;
+      /** Core image parts, forwarded with the text in the next tool message. */
+      images?: ImagePart[];
+      /** JSON output for trusted host inspection. Not a browser display policy. Rich part
+       * arrays use content/images instead so inline bytes are not stored twice. */
+      output?: unknown;
+      final?: { candidate: unknown };
+    }
   | {
       ok: false;
       content: string;
@@ -466,8 +627,17 @@ export interface InterruptedModelAttempt extends InterruptedAttempt {
   usage: TokenUsage;
 }
 
-export type ToolExecution = { asks?: AskRecord[]; interrupted: InterruptedAttempt[] } & (
-  | { id: string; status: "pending" }
+export type ToolExecution = {
+  asks?: AskRecord[];
+  interrupted: InterruptedAttempt[];
+  retries: RetriedToolAttempt[];
+} & (
+  | {
+      id: string;
+      status: "pending";
+      /** Failed or interrupted attempt being replaced. Saved before replacement admission. */
+      previousAttemptId?: string;
+    }
   | { id: string; status: "running"; attemptId: string }
   /** Pure coordination can replay. Its children keep their own effect journals. */
   | { id: string; status: "delegating"; attemptId: string }
@@ -529,6 +699,10 @@ export interface RunSnapshot {
   input: UserContent;
   /** Accepted user messages, in order at safe model boundaries. Never replaces frozen input. */
   inputs: RunInput[];
+  /** Guard checks are journaled before callbacks and before releasing their checked output. */
+  guards: GuardRecord[];
+  /** Completed model-view cuts and any in-flight paid summary. Never session edits. */
+  compactions: CompactionExecution[];
   /** The session the history came from, and the revision a settled run appends after. */
   session?: { id: string; revision: string | null };
   limits: RunLimits;
@@ -544,6 +718,7 @@ export interface RunSnapshot {
 export type OperationReceipt =
   | {
       kind: "model";
+      purpose?: "compaction";
       id: string;
       attemptId: string;
       status: "running" | "completed" | "interrupted";

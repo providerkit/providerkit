@@ -1,5 +1,6 @@
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
 import { RequestJournal } from "./request.ts";
+import { successfulToolResult } from "./extensions.ts";
 import { handoffRef, type Handoff } from "./handoff.ts";
 import { conversationOf, inputOf, readInput } from "./input.ts";
 import {
@@ -41,7 +42,6 @@ export interface RunStart {
 
 /** @internal */
 export interface AgentRuntime<T> {
-  readonly outputKind: "text" | "checked";
   readonly handoffs: readonly Handoff[];
   /** A new root run's snapshot: the input normalized, the session read once and the history
    * prepared, repaired and frozen, before anything is saved. */
@@ -180,7 +180,7 @@ export function defineDelegation<I, O>(spec: DelegationSpec<I, O>): Delegation {
       const output = await run(input, context);
       const content = summarize ? summarize(output) : JSON.stringify(output);
       if (typeof content !== "string") throw new TypeError("A delegation summary must be text.");
-      return { ok: true, content };
+      return successfulToolResult({ output, summary: content });
     },
   });
 }

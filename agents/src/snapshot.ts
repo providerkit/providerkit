@@ -11,6 +11,9 @@ import {
   type ToolCall,
   type Turn,
 } from "@providerkit/core";
+import { allModels, checkCompactions, isCompactionDefinition } from "./compaction.ts";
+import { isToolRetryDefinition, retryBudget, toolAttempts } from "./tool-retry.ts";
+import { GUARD_STAGES } from "./extensions.ts";
 import { INPUT_LIMITS, inputBytes, readQueuedInput, type RunInput } from "./steering.ts";
 import { isRecoveryDefinition } from "./recovery.ts";
 import { checkDecision, isAsk } from "./request.ts";
@@ -19,7 +22,12 @@ import type {
   RequestScope,
   AskRecord,
   ChildPathStep,
+  CompactionExecution,
+  RetriedToolAttempt,
   DelegationExecution,
+  GuardDefinition,
+  GuardRecord,
+  GuardStage,
   InputPart,
   ModelExecution,
   ModelSettings,
@@ -185,6 +193,34 @@ export function inlineBytes(history: readonly AgentMessage[], input: UserContent
   }
   if (typeof input !== "string") count(input);
   return total;
+}
+
+/** All retained inline media, including results of a partially settled tool batch. */
+export function snapshotInlineBytes(snapshot: RunSnapshot): number {
+  return inlineBytes(
+    [
+      ...snapshot.history,
+      ...snapshot.inputs.map((input) => ({ role: "user" as const, content: input.content })),
+      ...snapshot.models.flatMap((model) =>
+        model.status === "completed"
+          ? model.tools.flatMap((tool) =>
+              tool.status === "completed" && tool.result.ok && tool.result.images
+                ? [
+                    {
+                      role: "tool" as const,
+                      name: "",
+                      toolCallId: "",
+                      content: "",
+                      images: tool.result.images,
+                    },
+                  ]
+                : [],
+            )
+          : [],
+      ),
+    ],
+    snapshot.input,
+  );
 }
 
 function isImage(value: unknown): value is ImagePart {
@@ -463,6 +499,30 @@ export function readModelSettings(value: unknown = {}): ModelSettings {
   };
 }
 
+function isGuardDefinition(value: unknown): value is GuardDefinition | null {
+  return (
+    value === null ||
+    (isRecord(value) &&
+      isId(value.identity) &&
+      positive(value.maxOutputBytes) &&
+      isNames(value.stages) &&
+      value.stages.length > 0 &&
+      value.stages.every((stage) => GUARD_STAGES.some((name) => name === stage)))
+  );
+}
+
+function isGuardRecord(value: unknown): value is GuardRecord {
+  return (
+    isRecord(value) &&
+    GUARD_STAGES.some((stage) => stage === value.stage) &&
+    isId(value.operationId) &&
+    isId(value.attemptId) &&
+    typeof value.inputHash === "string" &&
+    /^sha256:[a-f0-9]{64}$/.test(value.inputHash) &&
+    ["running", "allowed", "rejected", "failed"].some((status) => status === value.status)
+  );
+}
+
 function isRunDefinition(value: unknown): value is RunDefinition {
   return (
     isRecord(value) &&
@@ -470,6 +530,9 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     isRecordedModelSettings(value.modelSettings) &&
     isNames(value.enabledTools) &&
     isNames(value.stopAtTools) &&
+    isGuardDefinition(value.guardrails) &&
+    isCompactionDefinition(value.compaction) &&
+    isToolRetryDefinition(value.toolRetries) &&
     isRecoveryDefinition(value.recovery)
   );
 }
@@ -484,6 +547,7 @@ export function checkOptions(
     !optional(value.signal, (signal) => signal instanceof AbortSignal) ||
     !optional(value.context, isRecord) ||
     !optional(value.onEvent, (fn) => typeof fn === "function") ||
+    !optional(value.onLifecycle, (fn) => typeof fn === "function") ||
     !optional(value.answers, isRecord)
   ) {
     throw new TypeError("Invalid run options.");
@@ -527,6 +591,7 @@ export function checkOptions(
       "needsApproval",
       "answerNow",
       "beforeTool",
+      "reconcileToolRetry",
       "canRunConcurrently",
       "child",
       "loadMedia",
@@ -657,8 +722,12 @@ function isToolResult(value: unknown): value is ToolResult {
     typeof value.content === "string" &&
     (value.ok === true
       ? value.kind === undefined &&
+        optional(value.images, (images) => Array.isArray(images) && images.every(isImage)) &&
+        optional(value.output, serializable) &&
         optional(value.final, (final) => isRecord(final) && serializable(final.candidate))
       : value.ok === false &&
+        value.images === undefined &&
+        value.output === undefined &&
         value.final === undefined &&
         [
           "invalid_input",
@@ -682,21 +751,46 @@ function isInterrupted(value: unknown): value is { attemptId: string }[] {
   );
 }
 
+function isRetriedAttempt(value: unknown): value is RetriedToolAttempt {
+  return (
+    isRecord(value) &&
+    isId(value.attemptId) &&
+    isRecord(value.arguments) &&
+    isToolResult(value.result) &&
+    !value.result.ok &&
+    ["failed", "timeout"].includes(value.result.kind) &&
+    optional(value.reconciliation, isId)
+  );
+}
+
 function isToolExecution(value: unknown): value is ToolExecution {
   if (
     !isRecord(value) ||
     !isId(value.id) ||
     !isInterrupted(value.interrupted) ||
-    value.interrupted.some((attempt) => attempt.attemptId === value.attemptId) ||
+    !Array.isArray(value.retries) ||
+    !value.retries.every(isRetriedAttempt) ||
+    !isInterrupted([...value.interrupted, ...value.retries]) ||
+    [...value.interrupted, ...value.retries].some(
+      (attempt) => attempt.attemptId === value.attemptId,
+    ) ||
     !optional(value.asks, (v) => Array.isArray(v) && v.every(isAskRecord))
   )
     return false;
+  if (value.status === "pending")
+    return value.previousAttemptId === undefined
+      ? (value.interrupted.length === 0 && value.retries.length === 0) ||
+          (Array.isArray(value.asks) && value.asks.length > 0)
+      : isId(value.previousAttemptId) &&
+          [value.interrupted.at(-1), value.retries.at(-1)].some(
+            (attempt) => attempt?.attemptId === value.previousAttemptId,
+          );
   return (
-    value.status === "pending" ||
-    (isId(value.attemptId) &&
-      (value.status === "running" ||
-        value.status === "delegating" ||
-        (value.status === "completed" && isToolResult(value.result))))
+    value.previousAttemptId === undefined &&
+    isId(value.attemptId) &&
+    (value.status === "running" ||
+      value.status === "delegating" ||
+      (value.status === "completed" && isToolResult(value.result)))
   );
 }
 
@@ -721,6 +815,19 @@ function isModel(value: unknown): value is ModelExecution {
       isTurn(value.turn) &&
       Array.isArray(value.tools) &&
       value.tools.every(isToolExecution))
+  );
+}
+
+function isCompaction(value: unknown): value is CompactionExecution {
+  return (
+    isRecord(value) &&
+    isId(value.id) &&
+    finite(value.beforeModel) &&
+    Number.isSafeInteger(value.beforeModel) &&
+    positive(value.sourceCount) &&
+    positive(value.cut) &&
+    optional(value.model, isModel) &&
+    (value.status === "running" || (value.status === "completed" && isId(value.summary)))
   );
 }
 
@@ -800,6 +907,10 @@ function isSnapshot(value: unknown): value is RunSnapshot {
     isTurnContent(value.input) &&
     Array.isArray(value.inputs) &&
     value.inputs.every(isRunInput) &&
+    Array.isArray(value.guards) &&
+    value.guards.every(isGuardRecord) &&
+    Array.isArray(value.compactions) &&
+    value.compactions.every(isCompaction) &&
     optional(value.session, isSessionRef) &&
     isLimits(value.limits) &&
     Array.isArray(value.models) &&
@@ -848,7 +959,7 @@ export function checkTree(root: RunSnapshot): void {
     if (!equalData(node.tree, root.tree) || node.startedAt < root.tree.startedAt)
       throw new TypeError("The child belongs to a different tree or deadline.");
     if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
-    models += node.models.reduce((total, model) => total + 1 + model.interrupted.length, 0);
+    models += allModels(node).reduce((total, model) => total + 1 + model.interrupted.length, 0);
     if (
       new Set(node.delegations.map((journal) => journal.operationId)).size !==
       node.delegations.length
@@ -981,6 +1092,36 @@ export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): vo
       .some((input) => input.beforeModel < previous.models.length)
   )
     throw new TypeError("The child host erased an input or changed an admitted model's input.");
+  for (const [index, guard] of previous.guards.entries()) {
+    const saved = next.guards[index];
+    if (
+      !saved ||
+      !equalData({ ...guard, status: saved.status }, saved) ||
+      (guard.status !== "running" && guard.status !== saved.status)
+    )
+      throw new TypeError("The child host erased or replaced a guard verdict.");
+  }
+  if (previous.compactions.length > next.compactions.length)
+    throw new TypeError("The child host dropped compaction receipts.");
+  for (const [index, entry] of previous.compactions.entries()) {
+    const saved = next.compactions[index];
+    if (
+      !saved ||
+      entry.id !== saved.id ||
+      entry.cut !== saved.cut ||
+      entry.sourceCount !== saved.sourceCount ||
+      entry.beforeModel !== saved.beforeModel ||
+      (entry.status === "completed" && !equalData(entry, saved)) ||
+      (entry.model && (!saved.model || entry.model.attemptId !== saved.model.attemptId))
+    )
+      throw new TypeError("The child host erased or replaced a compaction.");
+  }
+  if (
+    next.compactions
+      .slice(previous.compactions.length)
+      .some((entry) => entry.beforeModel < previous.models.length)
+  )
+    throw new TypeError("The child host changed an admitted model's context.");
   if (previous.models.length > next.models.length)
     throw new TypeError("The child host dropped saved model receipts.");
   if (
@@ -1016,13 +1157,29 @@ export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): vo
       }
       if (
         !restored ||
-        (tool.status === "completed" && !equalData(tool, restored)) ||
+        tool.id !== restored.id ||
+        tool.retries.some((attempt, index) => !equalData(attempt, restored.retries[index])) ||
+        tool.interrupted.some(
+          (attempt, index) => !equalData(attempt, restored.interrupted[index]),
+        ) ||
         (tool.status === "running" && restored.status === "delegating")
       )
         throw new TypeError("The child host replaced a tool receipt.");
-      // Pure coordination already replays across approval resumes. It has no external
-      // attempt to retain; its children carry the effect receipts checked below.
-      if (tool.status !== "delegating") checkAttemptProgress(tool, restored);
+      const retained =
+        tool.status === "pending"
+          ? undefined
+          : restored.retries
+              .slice(tool.retries.length)
+              .find((attempt) => attempt.attemptId === tool.attemptId);
+      if (
+        tool.status === "completed" &&
+        !equalData(tool, restored) &&
+        (!retained || tool.result.ok || !equalData(retained.result, tool.result))
+      )
+        throw new TypeError("The child host replaced a completed tool receipt.");
+      // A settled failed attempt can move to retries. An interrupted attempt stays in its
+      // existing history; pure coordinators still carry no external attempt of their own.
+      if (tool.status !== "delegating" && !retained) checkAttemptProgress(tool, restored);
     }
   }
   for (const journal of previous.delegations) {
@@ -1057,24 +1214,79 @@ export function finalToolResult(
   for (const [index, call] of calls.entries()) {
     const tool = model.tools[index];
     if (tool?.status !== "completed" || !tool.result.ok) continue;
-    if (calls.length === 1 && call.name === resultTool)
-      return { candidate: parseToolArgs(call.arguments) };
-    if (stopAtTools.includes(call.name) && tool.result.final) return tool.result.final;
+    if ((calls.length === 1 && call.name === resultTool) || stopAtTools.includes(call.name))
+      if (tool.result.final) return tool.result.final;
   }
   return undefined;
 }
 
-/** A successful handoff finishes with its text target's recorded candidate. No cast into the
- * source contract and no model call to rewrite it. The child is validated by its own runtime. */
+/** A successful handoff keeps the target's raw candidate, not its transformed output. The
+ * target runtime owns validation, even when the source has a different output contract. */
 export function finalHandoffResult(
   snapshot: RunSnapshot,
   model: Extract<ModelExecution, { status: "completed" }>,
-): { candidate: unknown } | undefined {
+): { candidate: unknown; child: RunSnapshot } | undefined {
   const tool = model.tools[0];
   if (model.tools.length !== 1 || tool?.status !== "completed" || !tool.result.ok) return undefined;
   const journal = snapshot.delegations.find((entry) => entry.operationId === tool.id);
-  const state = journal?.kind === "handoff" ? journal.children[0]?.snapshot.state : undefined;
-  return state?.status === "completed" ? { candidate: state.candidate } : undefined;
+  const child = journal?.kind === "handoff" ? journal.children[0]?.snapshot : undefined;
+  return child?.state.status === "completed"
+    ? { candidate: child.state.candidate, child }
+    : undefined;
+}
+
+/** Saved verdicts cannot be dropped to turn a withheld response into a completed one. This
+ * checks journal structure, not authenticity: the host still supplies authoritative state. */
+function checkGuards(snapshot: RunSnapshot): void {
+  const stages = snapshot.definition.guardrails?.stages ?? [];
+  for (const guard of snapshot.guards) {
+    if (!stages.includes(guard.stage))
+      throw new TypeError("A guard is not in the recorded policy.");
+    const model = allModels(snapshot).find(
+      (model) =>
+        model.id === guard.operationId ||
+        (model.status === "completed" && model.tools.some((tool) => tool.id === guard.operationId)),
+    );
+    if (
+      !model &&
+      !(
+        guard.stage === "modelInput" &&
+        (guard.operationId === modelId(snapshot.runId, snapshot.models.length) ||
+          snapshot.compactions.some((entry) => entry.id === guard.operationId))
+      )
+    )
+      throw new TypeError("A guard does not match a journaled operation.");
+    if (snapshot.state.status === "completed" && guard.status !== "allowed")
+      throw new TypeError("A completed run cannot have an unfinished or rejected guard.");
+  }
+  function require(stage: GuardStage, id: string, attemptId: string): void {
+    if (
+      stages.includes(stage) &&
+      !snapshot.guards.some(
+        (guard) =>
+          guard.stage === stage &&
+          guard.operationId === id &&
+          guard.attemptId === attemptId &&
+          guard.status === "allowed",
+      )
+    )
+      throw new TypeError("A completed operation is missing its allowed guard verdict.");
+  }
+  for (const model of allModels(snapshot)) {
+    // Input checks precede admission; even running work must have passed them.
+    require("modelInput", model.id, model.attemptId);
+    if (model.status !== "completed") continue;
+    require("modelOutput", model.id, model.attemptId);
+    for (const tool of model.tools) {
+      for (const attempt of tool.retries) {
+        require("toolInput", tool.id, attempt.attemptId);
+        require("toolOutput", tool.id, attempt.attemptId);
+      }
+      if (tool.status !== "completed") continue;
+      if (tool.result.ok) require("toolInput", tool.id, tool.attemptId);
+      require("toolOutput", tool.id, tool.attemptId);
+    }
+  }
 }
 
 /** Validate the journal as well as its fields, so a cursor cannot skip unrecorded work. */
@@ -1128,7 +1340,11 @@ export function readSnapshot(
       if (
         tool.id !== toolId(model.id, position) ||
         (!last && tool.status !== "completed") ||
-        (pending && tool.status !== "pending" && !tool.asks?.length && !tool.interrupted.length)
+        (pending &&
+          tool.status !== "pending" &&
+          !tool.asks?.length &&
+          !tool.interrupted.length &&
+          !tool.retries.length)
       ) {
         throw new TypeError("Invalid tool operation position.");
       }
@@ -1152,9 +1368,10 @@ export function readSnapshot(
           raw.definition.modelSettings.toolChoice === "none"
         )
           throw new TypeError("A disabled tool cannot have a successful result.");
-        if (tool.result.final && !raw.definition.stopAtTools.includes(call.name))
+        const stopping = raw.definition.stopAtTools.includes(call.name) || call.name === resultTool;
+        if (tool.result.final && !stopping)
           throw new TypeError("This tool is not configured to produce a final result.");
-        if (raw.definition.stopAtTools.includes(call.name) && !tool.result.final)
+        if (stopping && !tool.result.final)
           throw new TypeError("A successful stopping tool must record its final result.");
       }
       const keys = new Set<string>();
@@ -1192,16 +1409,46 @@ export function readSnapshot(
         }
       }
       if (
+        call.name === resultTool &&
+        tool.status === "completed" &&
+        tool.result.ok &&
+        (tools.length !== 1 || !equalData(tool.result.final?.candidate, clientArguments))
+      )
+        throw new TypeError("The submitted result does not match its effective arguments.");
+      if (
         tool.interrupted.length &&
         (!raw.definition.recovery?.policy.readOnlyTools?.includes(call.name) ||
-          tool.interrupted.length + (tool.status === "pending" ? 0 : 1) >
-            raw.definition.recovery.policy.maxAttempts ||
+          toolAttempts(tool) > raw.definition.recovery.policy.maxAttempts ||
           tool.status === "delegating")
       )
         throw new TypeError("Tool attempts exceed the recorded recovery policy.");
-      pending ||= tool.status === "pending" && !tool.asks?.length && !tool.interrupted.length;
-      calls += tool.interrupted.length;
-      if (tool.status !== "pending" || tool.asks?.length) calls++;
+      const retry = retryBudget(raw.definition.toolRetries, call.name);
+      if (
+        (retry && toolAttempts(tool) > retry.maxAttempts) ||
+        (tool.retries.length &&
+          (!retry ||
+            tool.asks?.length ||
+            tool.status === "delegating" ||
+            raw.definition.stopAtTools.includes(call.name) ||
+            call.name === resultTool ||
+            !raw.definition.enabledTools.includes(call.name) ||
+            raw.definition.modelSettings.toolChoice === "none" ||
+            !completeArguments(call.arguments) ||
+            tool.retries.some(
+              (attempt) =>
+                !equalData(attempt.arguments, originalArguments) ||
+                (retry.replay === "reconcile"
+                  ? !isId(attempt.reconciliation)
+                  : attempt.reconciliation !== undefined),
+            )))
+      )
+        throw new TypeError("Tool retries do not match the recorded policy or call.");
+      pending ||=
+        tool.status === "pending" &&
+        !tool.asks?.length &&
+        !tool.interrupted.length &&
+        !tool.retries.length;
+      calls += toolAttempts(tool);
     }
     if (
       !last &&
@@ -1239,13 +1486,7 @@ export function readSnapshot(
   if (
     raw.models.length > limits.turns + (resultTool ? 0 : 1) ||
     calls > limits.toolCalls ||
-    inlineBytes(
-      [
-        ...raw.history,
-        ...raw.inputs.map((input) => ({ role: "user" as const, content: input.content })),
-      ],
-      raw.input,
-    ) > limits.inlineBytes
+    snapshotInlineBytes(raw) > limits.inlineBytes
   )
     throw new TypeError("The snapshot exceeds this agent's limits.");
   const last = raw.models.at(-1);
@@ -1261,7 +1502,7 @@ export function readSnapshot(
     }
     const tools = last.turn.message.toolCalls ?? [];
     const final =
-      (!resultTool && finalHandoffResult(raw, last)) ||
+      finalHandoffResult(raw, last) ??
       finalToolResult(last, raw.definition.stopAtTools, resultTool);
     const candidate = final
       ? final.candidate
@@ -1272,6 +1513,29 @@ export function readSnapshot(
       throw new TypeError("The completed result does not match its recorded turn.");
     }
   }
+  checkCompactions(raw);
+  for (const entry of raw.compactions) {
+    if (
+      raw.models
+        .slice(0, entry.beforeModel)
+        .some(
+          (model) =>
+            model.status !== "completed" ||
+            !model.tools.length ||
+            model.tools.some((tool) => tool.status !== "completed") ||
+            !["stop", "tool_calls"].includes(model.turn.finishReason ?? "") ||
+            finalToolResult(model, raw.definition.stopAtTools, resultTool) ||
+            finalHandoffResult(raw, model),
+        )
+    )
+      throw new TypeError("Compaction must follow whole non-final rounds.");
+    if (entry.model?.status === "completed") {
+      readTurn(entry.model.turn);
+      if (!equalData(entry.model.usage, entry.model.turn.usage))
+        throw new TypeError("Summary usage does not match its completed turn.");
+    }
+  }
+  checkGuards(raw);
   checkTree(raw);
   if (
     raw.state.status === "suspended" &&

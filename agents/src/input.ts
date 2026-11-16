@@ -237,14 +237,17 @@ export function repairConversation(
 
 /** The history, the new turn and whole settled rounds. Never half a tool round: the journal
  * keeps unfinished work, and a provider refuses a call without its result. */
-export function conversationOf(snapshot: RunSnapshot): AgentMessage[] {
+export function conversationOf(
+  snapshot: RunSnapshot,
+  beforeModel = snapshot.models.length,
+): AgentMessage[] {
   const messages: AgentMessage[] = [...snapshot.history, { role: "user", content: snapshot.input }];
-  for (let position = 0; position <= snapshot.models.length; position++) {
+  for (let position = 0; position <= beforeModel; position++) {
     // Steering joins only between whole rounds. Its saved position survives attempts and
     // preserves the exact prefix even when the host later offers more input.
     for (const input of snapshot.inputs)
       if (input.beforeModel === position) messages.push({ role: "user", content: input.content });
-    const model = snapshot.models[position];
+    const model = position < beforeModel ? snapshot.models[position] : undefined;
     if (
       !model ||
       model.status !== "completed" ||
@@ -260,6 +263,7 @@ export function conversationOf(snapshot: RunSnapshot): AgentMessage[] {
           toolCallId: call.id,
           name: call.name,
           content: tool.result.content,
+          ...(tool.result.ok && tool.result.images ? { images: tool.result.images } : {}),
         });
       }
     }

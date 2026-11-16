@@ -23,29 +23,30 @@ export interface HandoffContext {
   note?: string;
 }
 
-export interface HandoffSpec {
+export interface HandoffSpec<T = unknown> {
   name: string;
   description: string;
   /** A lazy reference permits cycles. It resolves once per descriptor, not once per call.
    * After a restart, the resolved identity must match the saved handoff. */
-  to: Agent<string> | (() => Agent<string>);
+  to: Agent<T> | (() => Agent<T>);
   /** Full history is trusted server data and may contain provider-private fields. A custom
    * filter must be pure: it runs before the first child checkpoint, never for a saved child. */
   history?: "conversation" | "full" | ((context: HandoffContext) => readonly AgentMessage[]);
 }
 
-export interface Handoff {
+/** T includes the target's own output and any further handoff outputs. */
+export interface Handoff<T = unknown> {
   readonly kind: "handoff";
   readonly name: string;
   readonly needsApproval: false;
   definition(): ToolDefinition;
   /** @internal */
-  target(): Agent<string>;
+  target(): Agent<T>;
   /** @internal */
   history(context: HandoffContext): readonly AgentMessage[];
 }
 
-export function isHandoff(value: { readonly name: string }): value is Handoff {
+export function isHandoff<T>(value: { readonly name: string } | Handoff<T>): value is Handoff<T> {
   return "kind" in value && value.kind === "handoff";
 }
 
@@ -60,7 +61,7 @@ export function conversationOnly(messages: readonly AgentMessage[]): AgentMessag
   });
 }
 
-export function defineHandoff(spec: HandoffSpec): Handoff {
+export function defineHandoff<T>(spec: HandoffSpec<T>): Handoff<T> {
   const { name, description, to, history = "conversation" } = spec;
   if (
     !isId(name) ||
@@ -69,7 +70,7 @@ export function defineHandoff(spec: HandoffSpec): Handoff {
     (typeof history !== "function" && history !== "conversation" && history !== "full")
   )
     throw new TypeError("A handoff needs a name, description, target agent and history policy.");
-  let target: Agent<string> | undefined;
+  let target: Agent<T> | undefined;
   return Object.freeze({
     kind: "handoff",
     name,
@@ -89,8 +90,6 @@ export function defineHandoff(spec: HandoffSpec): Handoff {
         throw new TypeError(
           "The handoff target is missing. Register an agent before transferring.",
         );
-      if (resolved[AGENT_RUNTIME].outputKind !== "text")
-        throw new TypeError("A handoff target must use text output, not an output contract.");
       target = resolved;
       return target;
     },

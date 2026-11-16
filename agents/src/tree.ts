@@ -1,4 +1,5 @@
 import { EMPTY_USAGE, addUsage, createGate, messageOf, type TokenUsage } from "@providerkit/core";
+import { allModels } from "./compaction.ts";
 import { modelUsage } from "./recovery.ts";
 import { copyData, immutableCopy, isRecord } from "./snapshot.ts";
 import type {
@@ -131,7 +132,7 @@ export function treeUsage(root: RunSnapshot): TokenUsage {
   let usage = { ...EMPTY_USAGE };
   const seen = new Set<string>();
   for (const snapshot of snapshots(root)) {
-    for (const model of snapshot.models) {
+    for (const model of allModels(snapshot)) {
       if (seen.has(model.id)) continue;
       seen.add(model.id);
       usage = addUsage(usage, modelUsage(model));
@@ -198,7 +199,7 @@ export class ExecutionTree {
     // preserves every reservation across resume without a second mutable ledger.
     let models = 0;
     for (const snapshot of snapshots(this.root))
-      for (const model of snapshot.models) models += 1 + model.interrupted.length;
+      for (const model of allModels(snapshot)) models += 1 + model.interrupted.length;
     if (models >= this.root.tree.limits.modelCalls)
       throw new Halt({ status: "limited", limit: "modelCalls" });
   }

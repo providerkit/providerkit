@@ -308,6 +308,9 @@ export class RequestJournal {
     private readonly signal: AbortSignal,
     private readonly identity: () => Promise<string>,
     private readonly validate: (decision: Decision) => void = () => {},
+    // Decisions can contain a client result or answer before toolOutput checks it. Keep the
+    // authoritative decision in the private journal, never bypass the guard through progress.
+    private readonly withholdDecisions = false,
   ) {}
 
   latest(ask: Ask): AskRecord | undefined {
@@ -393,7 +396,7 @@ export class RequestJournal {
       record.problem = { code: "invalid_answer", message: messageOf(error) };
     }
     await this.scope.tree.save();
-    if (record.decision)
+    if (record.decision && !this.withholdDecisions)
       emitEvent(this.options, {
         type: "decision",
         requestId: record.request.id,

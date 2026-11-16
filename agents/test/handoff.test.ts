@@ -18,7 +18,7 @@ import {
   type HandoffSpec,
   type RunSnapshot,
 } from "../src/index.ts";
-import { checkChildProgress } from "../src/snapshot.ts";
+import { checkChildProgress, isRecord } from "../src/snapshot.ts";
 import { AGENT_RUNTIME } from "../src/delegation.ts";
 
 const usage = { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 };
@@ -54,7 +54,11 @@ function wire(turns: ProviderChunk[][]) {
   };
   return { provider, histories, definitions };
 }
-function transfer(to: HandoffSpec["to"], history?: HandoffSpec["history"], name = "transfer") {
+function transfer<T>(
+  to: HandoffSpec<T>["to"],
+  history?: HandoffSpec["history"],
+  name = "transfer",
+) {
   return defineHandoff({ name, description: "Transfer this question.", to, history });
 }
 function targetNode(snapshot: RunSnapshot): RunSnapshot {
@@ -807,11 +811,22 @@ describe("conversation handoff", () => {
   it.each([false, true])(
     "keeps interrupted target recovery guarded (hosted tools: %s)",
     async (hosted) => {
-      const targetWire = wire([text("Original answer"), text("Recovered answer")]);
+      const targetWire = wire([
+        calls(call("submit_result", { answer: "Original answer" })),
+        calls(call("submit_result", { answer: "Recovered answer" })),
+      ]);
       const target = defineAgent({
         ...base,
         id: "target",
         provider: targetWire.provider,
+        output: {
+          schema: { type: "object" },
+          validate(raw) {
+            if (!isRecord(raw) || typeof raw.answer !== "string")
+              throw new Error("Return an answer.");
+            return { answer: raw.answer };
+          },
+        },
         recovery: { identity: "read-profile", maxAttempts: 2, inferenceOnly: true },
         ...(hosted ? { modelSettings: { hostedTools: [{ type: "web_search" as const }] } } : {}),
       });
@@ -844,7 +859,10 @@ describe("conversation handoff", () => {
         });
         expect(targetWire.histories).toHaveLength(1);
       } else {
-        expect(result).toMatchObject({ status: "completed", output: "Recovered answer" });
+        expect(result).toMatchObject({
+          status: "completed",
+          output: { answer: "Recovered answer" },
+        });
         expect(targetWire.histories).toHaveLength(2);
         expect(targetWire.histories[0]).toEqual(targetWire.histories[1]);
         expect(result.treeUsage.inputTokens).toBe(21);
@@ -853,24 +871,15 @@ describe("conversation handoff", () => {
     },
   );
 
-  it("refuses checked output on either side, even a checked target whose validator returns text", async () => {
-    const targetWire = wire([text("Unused")]);
+  it("accepts a checked target whose validator returns text", async () => {
+    const targetWire = wire([calls(call("submit_result", { answer: "checked text" }))]);
     const target = defineAgent({
       ...base,
       id: "target",
       provider: targetWire.provider,
       output: { schema: { type: "object" }, validate: () => "checked text" },
     });
-    const sourceWire = wire([calls(call()), text("Fallback")]);
-    expect(() =>
-      defineAgent({
-        ...base,
-        id: "source",
-        provider: sourceWire.provider,
-        tools: [transfer(target)],
-        output: { schema: { type: "object" }, validate: () => 42 },
-      }),
-    ).toThrow(/output contract/);
+    const sourceWire = wire([calls(call())]);
     const source = defineAgent({
       ...base,
       id: "source",
@@ -878,8 +887,12 @@ describe("conversation handoff", () => {
       tools: [transfer(target)],
     });
     const result = await source.run("Help");
-    expect(result).toMatchObject({ status: "completed", output: "Fallback", handoffs: [] });
-    expect(targetWire.histories).toHaveLength(0);
-    expect(JSON.stringify(sourceWire.histories[1])).toContain("text output");
+    expect(result).toMatchObject({ status: "completed", output: "checked text" });
+    expect(result.handoffs).toHaveLength(1);
+    expect(targetWire.histories).toHaveLength(1);
+    expect(sourceWire.histories).toHaveLength(1);
+    const resumed = await source.resume(result.snapshot, { host: host() });
+    expect(resumed).toMatchObject({ status: "completed", output: "checked text" });
+    expect(targetWire.histories).toHaveLength(1);
   });
 });
