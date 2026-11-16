@@ -367,8 +367,11 @@ registered `target` and child snapshots. No ID is parsed. `labels.agent` uses re
 Only the root's handoff chain gains default text visibility. An ordinary specialist's transcript,
 including its own handoffs, stays hidden. Notes, history and reasoning never cross by default.
 The `text` callback can further restrict visibility; a child source includes `handoff: true` only
-when it belongs to the conversation chain. Current SDK handoffs accept text-output agents only.
-There is no structured-output handoff support.
+when it belongs to the conversation chain. A target can also return structured output. Use the
+SDK outcome's `activeAgent` identity to choose the target's output contract. The projector's
+`output` callback receives the raw saved candidate, not the validator's transformed return value;
+validate and select safe fields before rendering it. Do not treat a target's result as the source
+agent's output type.
 
 ## Send a message while the agent works
 
@@ -519,8 +522,59 @@ only plain text; the UI entry does not import its parser.
 | `/ag-ui`             | AG-UI event mapping                                        |
 | `/styles.css`        | Optional default styles                                    |
 
-The AG-UI mapping is still being built. Hook-only imports load no CSS, Markdown parser or server
+Hook-only imports load no CSS, Markdown parser or server
 runtime. The `/agents` entry imports SDK types only; it does not execute an agent.
+
+## Use AG-UI events
+
+Convert one event, then handle both the display events and any mapping issues:
+
+```ts
+const { events, issues } = reader.read(event);
+```
+
+The optional `@providerkit/react/ag-ui` entry uses portable types and no React, SDK or server
+runtime. Bind the conversation, logical run and execution segment explicitly:
+
+```ts
+import { createAgUiReader, createAgUiWriter } from "@providerkit/react/ag-ui";
+
+const binding = {
+  threadId: "conversation",
+  runId: "logical-run",
+  segment: "physical-segment",
+  agUiRunId: "native-execution",
+};
+const reader = createAgUiReader({ binding });
+const writer = createAgUiWriter({ binding });
+```
+
+Use a new mapper for each segment or connection, initialized from a snapshot. `writer.write`
+returns native events plus display extensions. Send them in order. `reader.read` returns events
+for `reduceChat`; external native events may also receive a host-owned sequence and segment as
+its second argument. Call `end()` to detect an unfinished stream, not to invent a completion.
+
+Native clients receive text, tool, step, run and snapshot events. The owned
+`providerkit.display.v1` custom events retain display fields that native events cannot express,
+including requests, input receipts, handoff ownership, attempts and missing-text markers. Keep
+those extensions when you need a full display round trip. Native-only snapshots lack settled
+and attempt flags, so imported saved text is sealed and an issue explains the loss. Unknown or
+unsupported events also return issues; do not treat them as successful conversion.
+
+Arguments, raw results, reasoning, private messages, vendor errors and opaque app state are
+hidden by default. Explicit projection callbacks choose what may be shown. Shared-state patches
+need a state projection; only safe `add`, `replace`, `remove` and `test` operations are supported.
+The default limits are 2,048 retained items and 1,048,576 characters. They are bounds, not silent
+truncation settings.
+
+Use `toResumeEntry` for native approval or cancellation data, including permitted edited
+arguments. It returns `null` rather than discard unsupported answer fields.
+`toProviderkitResumeEntry` encodes richer request answers with binding metadata.
+`readResumeEntry` validates either shape against the supplied saved request and binding.
+Native entries contain no binding metadata, so the host must resolve the request itself.
+These helpers return evidence only: they never authorize, execute a tool or resume a run.
+A native pending tool-call ID is not an answerable request ID. No `RunAgentInput` parser or
+automatic continuation is supplied.
 
 ## Markdown and media
 
