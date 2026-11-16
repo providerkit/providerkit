@@ -1,3 +1,5 @@
+import { evidenceFor, firstRequest } from "./fixtures/requests.ts";
+import { openRequests } from "../src/tree.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
@@ -12,6 +14,7 @@ import {
   type AgentMessage,
   type InputPart,
   type RunContext,
+  type RunSnapshot,
   type Session,
 } from "../src/index.ts";
 import { AGENT_RUNTIME } from "../src/delegation.ts";
@@ -80,7 +83,7 @@ beforeAll(async () => {
     CREATE TABLE ${schema}.invocations (task text NOT NULL, kind text NOT NULL);
     CREATE TABLE ${schema}.resources (id text PRIMARY KEY, owner text NOT NULL, version text NOT NULL);
     CREATE TABLE ${schema}.claims (
-      operation text PRIMARY KEY, continuation text UNIQUE NOT NULL, source text NOT NULL,
+      operation text PRIMARY KEY, continuation text NOT NULL, source text NOT NULL,
       owner text NOT NULL, decision json NOT NULL, segment text, consumed boolean NOT NULL DEFAULT false
     );`);
 });
@@ -136,44 +139,61 @@ async function approvalFixture(resource = crypto.randomUUID()) {
         WHERE continuation=$2 AND source=$3 AND owner=$4 AND segment=$1`,
         [context.segmentId, claim.id, claim.sourceId, context.owner],
       );
-      if (rowCount !== 1) throw new Error("The continuation belongs to another host segment.");
+      if (rowCount !== Object.keys(claim.answers).length)
+        throw new Error("The continuation belongs to another host segment.");
     },
-    async approvalContext() {
+    async prepareRequest() {
       await access(context, "1");
-      return { actorId: context.owner, resource: { id: resource, version: "1" }, expiresAt };
+      return {
+        scope: { actorId: context.owner, resource: { id: resource, version: "1" }, expiresAt },
+      };
     },
     async claimContinuation(snapshot, continuation) {
       if (snapshot.state.status !== "suspended") throw new Error("Not suspended.");
-      decision(continuation.decision);
-      const approval = snapshot.state.approval;
-      if (
-        approval.scope.actorId !== context.owner ||
-        approval.scope.resource.id !== resource ||
-        approval.scope.expiresAt <= Date.now()
-      )
-        throw new Error("Approval scope expired or changed.");
-      // Check the authoritative resource and claim in one statement, not read-then-write.
-      const { rowCount } = await pool.query(
-        `INSERT INTO ${schema}.claims AS claimed (operation, continuation, source, owner, decision, segment)
-        SELECT $1,$2,$3,$4,$5::json,$8 FROM ${schema}.resources WHERE id=$6 AND owner=$4 AND version=$7
-        ON CONFLICT (operation) DO UPDATE SET continuation=EXCLUDED.continuation
-        WHERE claimed.continuation=EXCLUDED.continuation AND claimed.source=EXCLUDED.source
-          AND claimed.owner=EXCLUDED.owner AND claimed.segment=EXCLUDED.segment
-          AND claimed.decision::text=EXCLUDED.decision::text`,
-        [
-          approval.request.operationId,
-          continuation.id,
-          continuation.sourceId,
-          context.owner,
-          JSON.stringify(continuation.decision),
-          resource,
-          approval.scope.resource.version,
-          context.segmentId,
-        ],
-      );
-      if (rowCount !== 1) throw new Error("The decision is stale or was already claimed.");
+      const requests = new Map(openRequests(snapshot).map((request) => [request.id, request]));
+      const connection = await pool.connect();
+      try {
+        await connection.query("BEGIN");
+        for (const [id, evidence] of Object.entries(continuation.answers)) {
+          decision(evidence);
+          const request = requests.get(id);
+          if (
+            !request ||
+            request.scope.actorId !== context.owner ||
+            request.scope.resource.id !== resource ||
+            request.scope.expiresAt <= Date.now()
+          )
+            throw new Error("Request scope expired or changed.");
+          // Claim the entire submitted batch atomically, including the resource version check.
+          const { rowCount } = await connection.query(
+            `INSERT INTO ${schema}.claims AS claimed (operation, continuation, source, owner, decision, segment)
+            SELECT $1,$2,$3,$4,$5::json,$8 FROM ${schema}.resources WHERE id=$6 AND owner=$4 AND version=$7
+            ON CONFLICT (operation) DO UPDATE SET continuation=EXCLUDED.continuation
+            WHERE claimed.continuation=EXCLUDED.continuation AND claimed.source=EXCLUDED.source
+              AND claimed.owner=EXCLUDED.owner AND claimed.segment=EXCLUDED.segment
+              AND claimed.decision::text=EXCLUDED.decision::text`,
+            [
+              id,
+              continuation.id,
+              continuation.sourceId,
+              context.owner,
+              JSON.stringify(evidence),
+              resource,
+              request.scope.resource.version,
+              context.segmentId,
+            ],
+          );
+          if (rowCount !== 1) throw new Error("The decision is stale or was already claimed.");
+        }
+        await connection.query("COMMIT");
+      } catch (error) {
+        await connection.query("ROLLBACK");
+        throw error;
+      } finally {
+        connection.release();
+      }
     },
-    async resolveApproval(approval, raw): Promise<"approved"> {
+    async resolveRequest(approval, raw) {
       decision(raw);
       await access(context, approval.scope.resource.version);
       if (approval.scope.expiresAt <= Date.now()) throw new Error("Approval expired.");
@@ -181,7 +201,7 @@ async function approvalFixture(resource = crypto.randomUUID()) {
         `UPDATE ${schema}.claims SET consumed=true
         WHERE operation=$1 AND continuation=$2 AND owner=$3 AND segment=$4 AND decision::text=$5`,
         [
-          approval.request.operationId,
+          approval.id,
           context.continuation?.id,
           context.owner,
           context.segmentId,
@@ -189,18 +209,27 @@ async function approvalFixture(resource = crypto.randomUUID()) {
         ],
       );
       if (rowCount !== 1) throw new Error("This segment has no matching decision claim.");
-      return "approved";
+      return { type: "approve" };
     },
     async beforeTool(_request, approval) {
-      await access(context, approval?.scope.resource.version);
+      await access(context, approval?.request.scope.resource.version);
       if (
         approval &&
-        (approval.scope.actorId !== context.owner || approval.scope.expiresAt <= Date.now())
+        (approval.request.scope.actorId !== context.owner ||
+          approval.request.scope.expiresAt <= Date.now())
       )
         throw new Error("Approval access expired.");
     },
   });
   return { policy, evidence, resource, expiresAt };
+}
+
+async function submittedAnswers(
+  background: { read(owner: string, id: string): Promise<{ snapshot: RunSnapshot }> },
+  id: string,
+  evidence: unknown,
+) {
+  return evidenceFor((await background.read("alice", id)).snapshot, evidence);
 }
 
 function approvalAgent() {
@@ -253,10 +282,22 @@ async function pauseUntilStopped(signal: AbortSignal): Promise<never> {
 }
 
 const workers = new Set<ChildProcess>();
-function worker(task: string, id: string, mode: "checkpoint" | "effect" | "recover") {
+function worker(
+  task: string,
+  id: string,
+  mode: "checkpoint" | "effect" | "model" | "recover",
+  profile: "off" | "inference" | "read" | "hosted" = "off",
+) {
   const child = spawn(
     "bun",
-    [fileURLToPath(new URL("./fixtures/runs-worker.ts", import.meta.url)), schema, task, id, mode],
+    [
+      fileURLToPath(new URL("./fixtures/runs-worker.ts", import.meta.url)),
+      schema,
+      task,
+      id,
+      mode,
+      profile,
+    ],
     {
       env: { ...process.env, AGENTS_TEST_DATABASE_URL: url },
       stdio: ["ignore", "pipe", "pipe"],
@@ -666,14 +707,22 @@ describe("background binding on local Postgres", () => {
         },
       },
     });
-    await expect(failing.resume("alice", original.id, authority.evidence)).rejects.toThrow(
-      "Create unavailable",
-    );
+    await expect(
+      failing.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(failing, original.id, authority.evidence),
+      ),
+    ).rejects.toThrow("Create unavailable");
     const claimed = await pool.query(`SELECT * FROM ${schema}.claims WHERE source=$1`, [
       original.id,
     ]);
     expect(claimed.rows).toEqual([]);
-    const next = await background.resume("alice", original.id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      original.id,
+      await submittedAnswers(background, original.id, authority.evidence),
+    );
     expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
     expect((await background.read("alice", next.id)).outcome?.status).toBe("completed");
     expect(synthetic.effects()).toBe(1);
@@ -705,7 +754,11 @@ describe("background binding on local Postgres", () => {
           throw new Error("Queue unavailable");
         },
       });
-      const submitted = failing.resume("alice", original.id, authority.evidence);
+      const submitted = failing.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(failing, original.id, authority.evidence),
+      );
       if (failure === "create-reply") await expect(submitted).rejects.toThrow("Create reply lost");
       else await expect(submitted).rejects.toBeInstanceOf(BackgroundEnqueueError);
       if (!savedId) throw new Error("Missing created row.");
@@ -1007,17 +1060,29 @@ describe("background binding on local Postgres", () => {
     const suspended = await background.read("alice", original.id);
     expect(suspended.outcome?.status).toBe("suspended");
     expect(synthetic.effects()).toBe(0);
-    const unauthorized = await background.resume("alice", original.id, {
-      ...authority.evidence,
-      actor: "bob",
-    });
+    const unauthorized = await background.resume(
+      "alice",
+      original.id,
+      evidenceFor(suspended.snapshot, {
+        ...authority.evidence,
+        actor: "bob",
+      }),
+    );
     expect(await runs.drive(unauthorized.id, background.handlers)).toBe("failed");
     expect((await background.read("alice", unauthorized.id)).error?.message).toMatch(
       /authentication/,
     );
     const attempts = await Promise.all([
-      background.resume("alice", original.id, authority.evidence),
-      background.resume("alice", original.id, authority.evidence),
+      background.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(background, original.id, authority.evidence),
+      ),
+      background.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(background, original.id, authority.evidence),
+      ),
     ]);
     expect(synthetic.calls()).toBe(1);
     expect(synthetic.effects()).toBe(0);
@@ -1038,7 +1103,11 @@ describe("background binding on local Postgres", () => {
     expect(completed.outcome?.treeUsage).toMatchObject({ inputTokens: 6, outputTokens: 4 });
     expect(synthetic.effects()).toBe(1);
     expect(synthetic.calls()).toBe(2);
-    const duplicateClaim = await background.resume("alice", original.id, authority.evidence);
+    const duplicateClaim = await background.resume(
+      "alice",
+      original.id,
+      await submittedAnswers(background, original.id, authority.evidence),
+    );
     expect(await runs.drive(duplicateClaim.id, background.handlers)).toBe("failed");
     expect((await background.read("alice", duplicateClaim.id)).error?.message).toMatch(
       /already claimed/,
@@ -1056,6 +1125,137 @@ describe("background binding on local Postgres", () => {
     expect(synthetic.calls()).toBe(2);
   });
 
+  it("recovers a partially consumed answer batch under the same lease claim", async () => {
+    const authority = await approvalFixture();
+    const effects: string[] = [];
+    const wire = fake((count) =>
+      count === 0
+        ? {
+            ...call("write"),
+            toolCalls: [0, 1, 2].map((index) => ({
+              index,
+              id: `call-${index}`,
+              name: "write",
+              arguments: "{}",
+            })),
+          }
+        : answer("done"),
+    );
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [
+        defineTool({
+          name: "write",
+          description: "Write one record.",
+          inputSchema: { type: "object" },
+          needsApproval: true,
+          async run(_input, context) {
+            effects.push(context.callId ?? "missing");
+            return "written";
+          },
+        }),
+      ],
+    });
+    const thread = createMemorySession();
+    const background = createBackgroundAgent({
+      agent,
+      kind: "batch",
+      runs,
+      enqueue,
+      policy: authority.policy,
+      session: () => thread,
+    });
+    const initial = await background.start("alice", "Write three records", {
+      sessionId: thread.id,
+    });
+    expect(await runs.drive(initial.id, background.handlers)).toBe("succeeded");
+    const waiting = await background.read("alice", initial.id);
+    const requests = openRequests(waiting.snapshot);
+    expect(requests).toHaveLength(3);
+    expect(waiting.outcome?.session?.status).toBe("pending");
+    const answers = Object.fromEntries(
+      requests.slice(0, 2).map((request) => [request.id, authority.evidence]),
+    );
+    const next = await background.resume("alice", initial.id, answers);
+    const store = service();
+    const parked = Promise.withResolvers<void>();
+    let signal: AbortSignal | undefined;
+    let consumed = 0;
+    const interrupted = createBackgroundAgent({
+      agent,
+      kind: "batch",
+      runs: store,
+      enqueue,
+      session: () => thread,
+      policy(context) {
+        const trusted = authority.policy(context);
+        return {
+          ...trusted,
+          async resolveRequest(request, evidence) {
+            const decision = await trusted.resolveRequest(request, evidence);
+            if (++consumed === 2) {
+              parked.resolve();
+              if (!signal) throw new Error("Missing worker signal");
+              await pauseUntilStopped(signal);
+            }
+            return decision;
+          },
+        };
+      },
+    });
+    const handler = interrupted.handlers.batch;
+    if (!handler) throw new Error("Missing batch handler");
+    const driving = store.drive(next.id, {
+      batch(run) {
+        signal = run.signal;
+        return handler(run);
+      },
+    });
+    try {
+      await Promise.race([
+        parked.promise,
+        driving.then((status) => {
+          throw new Error(`Worker ended before checkpoint: ${status}`);
+        }),
+      ]);
+      await store.drain(0);
+      expect(await driving).toBe("requeued");
+      expect(effects).toEqual([]);
+      expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
+      const partial = await background.read("alice", next.id);
+      expect(partial.outcome?.status).toBe("suspended");
+      expect(partial.outcome?.session?.status).toBe("pending");
+      expect(openRequests(partial.snapshot).map((request) => request.id)).toEqual([
+        requests[2]?.id,
+      ]);
+      expect(effects).toEqual(["call-0", "call-1"]);
+      expect(wire.calls()).toBe(1);
+      const claimed = await pool.query(
+        `SELECT * FROM ${schema}.claims WHERE continuation=(SELECT continuation FROM ${schema}.claims WHERE source=$1 LIMIT 1)`,
+        [initial.id],
+      );
+      expect(claimed.rows).toHaveLength(2);
+      const last = await background.resume(
+        "alice",
+        next.id,
+        evidenceFor(partial.snapshot, authority.evidence),
+      );
+      expect(await runs.drive(last.id, background.handlers)).toBe("succeeded");
+      const done = await background.read("alice", last.id);
+      expect(done.outcome).toMatchObject({
+        status: "completed",
+        session: { status: "saved" },
+        treeUsage: { inputTokens: 6, outputTokens: 4 },
+      });
+      expect(effects).toEqual(["call-0", "call-1", "call-2"]);
+      expect(wire.calls()).toBe(2);
+    } finally {
+      await store.drain(0);
+      await driving;
+    }
+  });
+
   it("rejects expired submissions and checks resource access again in the worker", async () => {
     const authority = await approvalFixture();
     const synthetic = approvalAgent();
@@ -1065,14 +1265,20 @@ describe("background binding on local Postgres", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       vi.setSystemTime(authority.expiresAt + 1);
-      await expect(background.resume("alice", id, authority.evidence)).rejects.toThrow(/expired/);
+      await expect(
+        background.resume("alice", id, await submittedAnswers(background, id, authority.evidence)),
+      ).rejects.toThrow(/expired/);
     } finally {
       vi.useRealTimers();
     }
     await pool.query(`UPDATE ${schema}.resources SET version='2' WHERE id=$1`, [
       authority.resource,
     ]);
-    const stale = await background.resume("alice", id, authority.evidence);
+    const stale = await background.resume(
+      "alice",
+      id,
+      await submittedAnswers(background, id, authority.evidence),
+    );
     expect(await runs.drive(stale.id, background.handlers)).toBe("failed");
     expect((await background.read("alice", stale.id)).error?.message).toMatch(/stale/);
     expect(synthetic.effects()).toBe(0);
@@ -1080,7 +1286,11 @@ describe("background binding on local Postgres", () => {
     await pool.query(`UPDATE ${schema}.resources SET version='1' WHERE id=$1`, [
       authority.resource,
     ]);
-    const next = await background.resume("alice", id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      id,
+      await submittedAnswers(background, id, authority.evidence),
+    );
     await pool.query(`UPDATE ${schema}.resources SET version='2' WHERE id=$1`, [
       authority.resource,
     ]);
@@ -1101,9 +1311,13 @@ describe("background binding on local Postgres", () => {
     const saved = await background.read("alice", initial.id);
     expect(saved.outcome).toMatchObject({
       status: "suspended",
-      path: [{ key: "result" }, { key: "result" }],
+      requests: [{ path: [{ key: "result" }, { key: "result" }] }],
     });
-    const next = await background.resume("alice", initial.id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      initial.id,
+      await submittedAnswers(background, initial.id, authority.evidence),
+    );
     expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
     const result = await background.read("alice", next.id);
     expect(result.outcome).toMatchObject({
@@ -1162,8 +1376,12 @@ describe("background binding on local Postgres", () => {
       const saved = await background.read("alice", initial.id);
       expect(saved).toMatchObject({ snapshot: { state: { status: "suspended" } } });
       if (saved.snapshot.state.status !== "suspended") throw new Error("Missing approval.");
-      const originalApproval = saved.snapshot.state.approval;
-      const next = await background.resume("alice", initial.id, authority.evidence);
+      const originalApproval = firstRequest(saved.snapshot);
+      const next = await background.resume(
+        "alice",
+        initial.id,
+        await submittedAnswers(background, initial.id, authority.evidence),
+      );
       const store = service();
       const parked = Promise.withResolvers<void>();
       let pause = true;
@@ -1186,8 +1404,8 @@ describe("background binding on local Postgres", () => {
                 await pauseUntilStopped(signal);
               }
             },
-            async resolveApproval(approval, decision) {
-              const result = await trusted.resolveApproval(approval, decision);
+            async resolveRequest(approval, decision) {
+              const result = await trusted.resolveRequest(approval, decision);
               if (point === "consumed" && pause) {
                 pause = false;
                 parked.resolve();
@@ -1225,8 +1443,9 @@ describe("background binding on local Postgres", () => {
                   child.models.at(-1)?.status === "completed") ||
                 (point === "later-approval" &&
                   child.state.status === "suspended" &&
-                  child.state.approval.request.operationId !==
-                    originalApproval.request.operationId);
+                  openRequests(child).some(
+                    (request) => request.call.operationId !== originalApproval.call.operationId,
+                  ));
               if (shouldPause) {
                 pause = false;
                 parked.resolve();
@@ -1247,7 +1466,7 @@ describe("background binding on local Postgres", () => {
         expect(await driving).toBe("requeued");
         const interruptedState = await background.read("alice", next.id);
         expect(interruptedState.snapshot.state.status).toBe(
-          point === "claim" ? "suspended" : "running",
+          point === "claim" || point === "consumed" ? "suspended" : "running",
         );
         const claimed = await pool.query<{ segment: string; consumed: boolean }>(
           `SELECT segment, consumed FROM ${schema}.claims WHERE source=$1`,
@@ -1256,7 +1475,7 @@ describe("background binding on local Postgres", () => {
         expect(claimed.rows).toEqual([
           {
             segment: next.id,
-            consumed: point !== "claim" && point !== "route",
+            consumed: point !== "claim",
           },
         ]);
         expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
@@ -1276,10 +1495,14 @@ describe("background binding on local Postgres", () => {
           expect(leafWire.calls()).toBe(2);
           if (result.snapshot.state.status !== "suspended")
             throw new Error("Missing new approval.");
-          expect(result.snapshot.state.approval.request.operationId).not.toBe(
-            originalApproval.request.operationId,
+          expect(firstRequest(result.snapshot).call.operationId).not.toBe(
+            originalApproval.call.operationId,
           );
-          const last = await background.resume("alice", next.id, authority.evidence);
+          const last = await background.resume(
+            "alice",
+            next.id,
+            await submittedAnswers(background, next.id, authority.evidence),
+          );
           expect(await runs.drive(last.id, background.handlers)).toBe("succeeded");
           result = await background.read("alice", last.id);
         }
@@ -1372,7 +1595,11 @@ describe("background binding on local Postgres", () => {
       [id],
     );
     expect(children.rows[0]?.count).toBe(2);
-    const next = await background.resume("alice", id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      id,
+      await submittedAnswers(background, id, authority.evidence),
+    );
     expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
     expect((await background.read("alice", next.id)).outcome).toMatchObject({
       status: "completed",
@@ -1423,6 +1650,115 @@ describe("background binding on local Postgres", () => {
         first.child.kill("SIGKILL");
     }
   });
+
+  it.each(["inference", "read", "hosted"] as const)(
+    "recovers only the configured %s profile after real worker loss",
+    async (profile) => {
+      const task = crypto.randomUUID();
+      const agent = recoveryAgent(pool, schema, task, undefined, profile);
+      const background = bind(agent, closedPolicy, "recovery");
+      const { id } = await background.start("alice", "Recover interrupted work");
+      const mode = profile === "read" ? "effect" : "model";
+      let kept: unknown;
+      const attempts: string[] = [];
+      for (let crash = 0; crash < (profile === "inference" ? 2 : 1); crash++) {
+        const running = worker(task, id, mode, profile);
+        try {
+          await vi.waitFor(() => expect(running.stdout(), running.stderr()).toContain(`${mode}\n`));
+          const before = await background.read("alice", id);
+          const children = before.snapshot.delegations[0]?.children;
+          const child = children?.find((entry) => entry.key === "one")?.snapshot;
+          if (!child) throw new Error("Missing running child");
+          const operation = child.models.at(-1);
+          if (!operation) throw new Error("Missing operation");
+          attempts.push(
+            profile === "read" &&
+              operation.status === "completed" &&
+              operation.tools[0]?.status === "running"
+              ? operation.tools[0].attemptId
+              : operation.attemptId,
+          );
+          if (profile === "inference") {
+            kept ??= children?.find((entry) => entry.key === "kept");
+            expect(children?.find((entry) => entry.key === "kept")).toEqual(kept);
+            expect(operation.usage.inputTokens).toBe(3);
+          }
+          // Attaching twice cannot buy another execution attempt or cancel the producer.
+          const observed = new AbortController();
+          const stream = background.observe("alice", id, 0, observed.signal);
+          expect((await stream.next()).done).toBe(false);
+          observed.abort();
+          expect((await stream.next()).done).toBe(true);
+          expect((await background.read("alice", id)).status).toBe("running");
+          expect(running.child.kill("SIGKILL")).toBe(true);
+          expect((await running.done).signal).toBe("SIGKILL");
+          const nudged: string[] = [];
+          await vi.waitFor(async () => {
+            await runs.sweep({ olderThanSecs: 0, nudge: (runId) => nudged.push(runId) });
+            expect(nudged).toContain(id);
+          });
+        } finally {
+          if (running.child.exitCode === null && running.child.signalCode === null)
+            running.child.kill("SIGKILL");
+        }
+      }
+      const replacement = worker(task, id, "recover", profile);
+      expect(await replacement.done, replacement.stderr()).toEqual({ code: 0, signal: null });
+      const result = await background.read("alice", id);
+      expect(result.outcome?.status).toBe(profile === "hosted" ? "failed" : "completed");
+      const child = result.snapshot.delegations[0]?.children.find(
+        (entry) => entry.key === "one",
+      )?.snapshot;
+      if (!child) throw new Error("Missing saved child");
+      if (profile === "hosted") {
+        expect(child.state).toMatchObject({
+          status: "failed",
+          error: { code: "interrupted_operation" },
+        });
+        expect(await counts(task)).toEqual({
+          root_model: 1,
+          child_model: 2,
+          tool: 1,
+          hosted_effect: 1,
+        });
+      } else if (profile === "inference") {
+        expect(await counts(task)).toEqual({
+          root_model: 2,
+          kept_model: 1,
+          child_model: 4,
+          tool: 1,
+        });
+        expect(
+          result.snapshot.delegations[0]?.children.find((entry) => entry.key === "kept"),
+        ).toEqual(kept);
+        expect(child.models[1]?.interrupted.map((attempt) => attempt.attemptId)).toEqual(attempts);
+        expect(result.outcome?.treeUsage).toMatchObject({ inputTokens: 21, outputTokens: 14 });
+      } else {
+        expect(await counts(task)).toEqual({ root_model: 2, child_model: 2, tool: 2 });
+        const model = child.models[0];
+        expect(
+          model?.status === "completed"
+            ? model.tools[0]?.interrupted.map((attempt) => attempt.attemptId)
+            : [],
+        ).toEqual(attempts);
+        expect(result.outcome?.treeUsage).toMatchObject({ inputTokens: 12, outputTokens: 8 });
+      }
+      const events = [];
+      for await (const event of background.observe("alice", id)) events.push(event);
+      const restarts = events.filter(
+        (event) =>
+          event.type === "agent" && isRecord(event.data) && event.data.type === "operation_restart",
+      );
+      // A killed process may lose best-effort events. The surviving attempt's marker must
+      // arrive, but this test does not promise durable progress from killed attempts.
+      expect(restarts.length).toBeLessThanOrEqual(attempts.length);
+      if (profile === "hosted") expect(restarts).toHaveLength(0);
+      else expect(restarts.at(-1)?.data).toMatchObject({ previousAttemptId: attempts.at(-1) });
+      const usageBeforeRead = result.outcome?.treeUsage;
+      expect((await background.read("alice", id)).outcome?.treeUsage).toEqual(usageBeforeRead);
+      expect(await runs.drive(id, background.handlers)).toBe("skipped");
+    },
+  );
 
   it("refuses an external effect interrupted by SIGKILL rather than invoking it again", async () => {
     const task = crypto.randomUUID();

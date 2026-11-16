@@ -1,7 +1,7 @@
 import {
   EMPTY_USAGE,
+  ProviderError,
   ToolRegistry,
-  addUsage,
   collectTurn,
   defineTool,
   messageOf,
@@ -15,10 +15,17 @@ import {
   isDelegation,
   specialistTool,
   type AgentRuntime,
-  type ApprovalEvidence,
   type Delegation,
   type RunStart,
 } from "./delegation.ts";
+import {
+  RequestJournal,
+  isClientTool,
+  isInputRequired,
+  requestHash,
+  type ClientTool,
+} from "./request.ts";
+import { modelsUsage, readRecoveryPolicy, recoveryToolHash, requireRecovery } from "./recovery.ts";
 import { conversationOf, readInput, readStored, repairConversation, requestOf } from "./input.ts";
 import {
   ExecutionTree,
@@ -27,6 +34,10 @@ import {
   emitEvent,
   fail,
   treeUsage,
+  openRequests,
+  readAnswers,
+  requestRecords,
+  stopRequests,
   untilAbort,
   type ExecutionScope,
 } from "./tree.ts";
@@ -44,7 +55,6 @@ import {
   isNames,
   isRecord,
   isRevision,
-  isScope,
   isUsage,
   modelId,
   readLimits,
@@ -63,7 +73,6 @@ import type {
   MediaRef,
   ModelExecution,
   OperationReceipt,
-  PendingApproval,
   ResultSchema,
   RunContext,
   RunDefinition,
@@ -83,21 +92,38 @@ type CompletedModel = Extract<ModelExecution, { status: "completed" }>;
 function recordOf(snapshot: RunSnapshot) {
   const saved = copyData(snapshot);
   const receipts: OperationReceipt[] = [];
-  let usage = { ...EMPTY_USAGE };
+  const usage = modelsUsage(saved.models);
   for (const model of saved.models) {
-    usage = addUsage(usage, model.usage);
+    for (const attempt of model.interrupted)
+      receipts.push({
+        kind: "model",
+        id: model.id,
+        ...attempt,
+        status: "interrupted",
+        billing: "unknown",
+      });
     receipts.push({
       kind: "model",
       id: model.id,
       attemptId: model.attemptId,
       status: model.status,
+      billing: model.billing,
       usage: model.usage,
       ...(model.status === "completed" && model.turn.source ? { source: model.turn.source } : {}),
     });
     if (model.status !== "completed") continue;
     for (const [index, tool] of model.tools.entries()) {
       const call = model.turn.message.toolCalls?.[index];
-      if (!call || tool.status === "pending") continue;
+      if (!call) continue;
+      for (const attempt of tool.interrupted)
+        receipts.push({
+          kind: "tool",
+          id: tool.id,
+          callId: call.id,
+          ...attempt,
+          status: "interrupted",
+        });
+      if (tool.status === "pending") continue;
       receipts.push({
         kind: saved.delegations.some((journal) => journal.operationId === tool.id)
           ? "delegation"
@@ -144,6 +170,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     throw new TypeError("An agent needs an id, version, instructions and provider.");
   }
   const settings = readModelSettings(definition.modelSettings);
+  const recovery = readRecoveryPolicy(definition.recovery);
+  if (recovery && (!isId(provider.id) || !isId(provider.model)))
+    throw new TypeError("A recovery profile needs a stable provider id and model.");
   if (definition.enabledTools !== undefined && !isEnabledTools(definition.enabledTools))
     throw new TypeError("enabledTools must be an allow-list or a function returning one.");
   const enabledTools = Array.isArray(definition.enabledTools)
@@ -177,11 +206,16 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
   const stopAtTools = [...(definition.stopAtTools ?? [])];
   for (const name of stopAtTools) {
     const tool = tools.find((tool) => tool.name === name);
-    if (!tool || isDelegation(tool))
+    if (!tool || isDelegation(tool) || isClientTool(tool))
       throw new TypeError("stopAtTools must name ordinary tools registered on this agent.");
   }
   for (const tool of tools)
-    if (!isDelegation(tool) && tool.isTerminal && !stopAtTools.includes(tool.name))
+    if (
+      !isDelegation(tool) &&
+      !isClientTool(tool) &&
+      tool.isTerminal &&
+      !stopAtTools.includes(tool.name)
+    )
       stopAtTools.push(tool.name);
   if (output) {
     tools.push(
@@ -198,8 +232,16 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       }),
     );
   }
-  const registry = new ToolRegistry(tools.filter((tool): tool is Tool => !isDelegation(tool)));
+  const registry = new ToolRegistry(
+    tools.filter((tool): tool is Tool => !isDelegation(tool) && !isClientTool(tool)),
+  );
+  for (const name of recovery?.readOnlyTools ?? [])
+    if (!registry.get(name)?.isReadOnly || name === RESULT_TOOL_NAME)
+      throw new TypeError(
+        "Recovery readOnlyTools must name ordinary isReadOnly tools registered on this agent.",
+      );
   const delegations = new Map(tools.filter(isDelegation).map((tool) => [tool.name, tool]));
+  const clients = new Map(tools.filter(isClientTool).map((tool) => [tool.name, tool]));
   const names = tools.map((tool) => tool.name);
   function checkNames(value: unknown): string[] {
     if (!isNames(value) || value.some((name) => !names.includes(name)))
@@ -269,11 +311,30 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       (typeof choice === "object" && !enabled.includes(choice.name))
     )
       throw new TypeError("toolChoice must name an enabled tool; required needs at least one.");
+    const toolHashes = Object.fromEntries(
+      await Promise.all(
+        (recovery?.readOnlyTools ?? []).map(async (name) => {
+          const tool = registry.get(name);
+          if (!tool) throw new TypeError("Missing recovery tool.");
+          return [name, await recoveryToolHash(tool)] as const;
+        }),
+      ),
+    );
     return {
       instructions: text,
       modelSettings,
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
+      recovery: recovery
+        ? {
+            policy: copyData(recovery),
+            provider: { id: provider.id, model: provider.model },
+            toolHashes,
+            modelToolsHash: await requestHash(
+              tools.filter((tool) => enabled.includes(tool.name)).map((tool) => tool.definition()),
+            ),
+          }
+        : null,
     };
   }
 
@@ -287,11 +348,152 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     return candidate;
   }
 
+  function requestFor(snapshot: RunSnapshot, model: CompletedModel, index: number): ToolRequest {
+    const call = model.turn.message.toolCalls?.[index];
+    const tool = model.tools[index];
+    if (!call || !tool) fail("invalid_journal", "The tool call is missing from its journal.");
+    return {
+      agentId: id,
+      version,
+      runId: snapshot.runId,
+      attemptId: snapshot.attemptId,
+      operationId: tool.id,
+      call,
+      arguments: parseToolArgs(call.arguments),
+    };
+  }
+
+  async function needsApproval(
+    call: ToolRequest,
+    options: RunOptions,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (call.call.name === RESULT_TOOL_NAME) return false;
+    const tool = tools.find((tool) => tool.name === call.call.name);
+    return (
+      tool?.needsApproval === true ||
+      (await untilAbort(
+        Promise.resolve(options.host?.needsApproval?.(immutableCopy(call))),
+        signal,
+      )) === true
+    );
+  }
+
+  function journalFor(
+    snapshot: RunSnapshot,
+    model: CompletedModel,
+    index: number,
+    options: RunOptions,
+    scope: ExecutionScope,
+    signal: AbortSignal,
+    effectiveCall?: ToolRequest,
+  ): RequestJournal {
+    const call = requestFor(snapshot, model, index);
+    const execution = model.tools[index];
+    if (!execution) throw new TypeError("Missing tool journal.");
+    const tool = tools.find((tool) => tool.name === call.call.name);
+    return new RequestJournal(
+      execution,
+      effectiveCall ?? call,
+      options,
+      scope,
+      signal,
+      // The policy hash follows the original model call even when dispatch arguments were edited.
+      async () =>
+        requestHash({
+          definition: tool?.definition() ?? null,
+          needsApproval: await needsApproval(call, options, signal),
+          kind:
+            tool && isDelegation(tool)
+              ? "delegation"
+              : tool && isClientTool(tool)
+                ? "client"
+                : "tool",
+          ...(tool && isClientTool(tool) ? { resultSchema: tool.resultSchema } : {}),
+        }),
+      (decision) => {
+        if (decision.type === "result") {
+          const client = clients.get(call.call.name);
+          if (!client) throw new TypeError("This call is not a registered client tool.");
+          client.result(decision.value);
+        }
+      },
+    );
+  }
+
+  // Intake is a tree-wide pre-effect barrier. A saved child receives its decisions in its
+  // snapshot before the host may reuse a segment. No browser-supplied route is consulted.
+  async function answerRequests(
+    snapshot: RunSnapshot,
+    options: RunOptions,
+    scope: ExecutionScope,
+    answers: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (snapshot.state.status !== "running" && snapshot.state.status !== "suspended") return;
+    signal.throwIfAborted();
+    for (const model of snapshot.models) {
+      if (model.status !== "completed") continue;
+      for (const [index, execution] of model.tools.entries()) {
+        if (execution.status === "completed") continue;
+        const journal = journalFor(snapshot, model, index, options, scope, signal);
+        for (const record of [...(execution.asks ?? [])]) {
+          if (record.closed) continue;
+          scope.tree.active();
+          signal.throwIfAborted();
+          if (!record.decision && Object.hasOwn(answers, record.request.id))
+            await journal.resolve(record, answers[record.request.id]);
+          else await journal.refresh(record);
+        }
+      }
+    }
+    for (const entry of snapshot.delegations) {
+      const model = snapshot.models.find(
+        (model) =>
+          model.status === "completed" && model.tools.some((tool) => tool.id === entry.operationId),
+      );
+      const position =
+        model?.status === "completed"
+          ? model.tools.findIndex((tool) => tool.id === entry.operationId)
+          : -1;
+      const name =
+        model?.status === "completed" ? model.turn.message.toolCalls?.[position]?.name : undefined;
+      const descriptor = name && delegations.get(name);
+      if (!descriptor) continue;
+      for (const child of entry.children) {
+        if (
+          child.snapshot.state.status !== "running" &&
+          child.snapshot.state.status !== "suspended"
+        )
+          continue;
+        const specialist = descriptor.specialists.find(
+          (agent) =>
+            agent.id === child.snapshot.agentId && agent.version === child.snapshot.version,
+        );
+        if (!specialist) throw new TypeError("Unregistered specialist.");
+        await specialist[AGENT_RUNTIME].answerRequests(
+          child.snapshot,
+          options,
+          {
+            tree: scope.tree,
+            depth: scope.depth + 1,
+            path: [
+              ...scope.path,
+              { operationId: entry.operationId, key: child.key, runId: child.snapshot.runId },
+            ],
+          },
+          answers,
+          signal,
+        );
+      }
+    }
+  }
+
   async function execute(
     snapshot: RunSnapshot,
     options: RunOptions,
     scope: ExecutionScope,
-    evidence?: ApprovalEvidence,
+    answers?: Readonly<Record<string, unknown>>,
   ): Promise<RunOutcome<T | string>> {
     const host = options.host;
     const deadline = snapshot.startedAt + limits.elapsedMs;
@@ -306,7 +508,6 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       Math.max(0, deadline - Date.now()),
     );
     let release = () => {};
-    let approved: PendingApproval | undefined;
     let completed: { output: T | string } | undefined;
 
     function active(): void {
@@ -322,30 +523,74 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
 
     const save = () => scope.tree.save();
 
+    function restart(kind: "model" | "tool", operationId: string, previousAttemptId: string): void {
+      // Adapted from Vercel AI SDK (Apache-2.0), workflow/do-stream-step.ts: reset the
+      // current display before replacement output. Unlike reset-step, identity stays explicit.
+      emit({
+        type: "operation_restart",
+        kind,
+        runId: snapshot.runId,
+        operationId,
+        previousAttemptId,
+        attemptId: snapshot.attemptId,
+      });
+    }
+
+    async function checkToolRecovery(
+      model: CompletedModel,
+      index: number,
+      previous: number,
+    ): Promise<void> {
+      const execution = model.tools[index];
+      if (!execution) fail("invalid_journal", "The tool call is missing from its journal.");
+      const request = requestFor(snapshot, model, index);
+      const tool = registry.get(request.call.name);
+      const recorded = snapshot.definition.recovery;
+      requireRecovery(
+        !!tool?.isReadOnly &&
+          recorded?.policy.readOnlyTools?.includes(request.call.name) === true &&
+          !execution.asks?.length &&
+          !!host?.beforeTool,
+        previous,
+        recorded,
+        execution.id,
+      );
+      if (!tool || (await recoveryToolHash(tool)) !== recorded?.toolHashes[tool.name])
+        fail(
+          "recovery_definition_changed",
+          "The interrupted tool's definition changed. Reconcile it with the host before continuing.",
+          execution.id,
+        );
+      active();
+    }
+
+    async function recoverTools(model: CompletedModel): Promise<void> {
+      for (const [index, execution] of model.tools.entries()) {
+        if (execution.status !== "running") continue;
+        await checkToolRecovery(model, index, execution.interrupted.length);
+        model.tools[index] = {
+          id: execution.id,
+          status: "pending",
+          interrupted: [...execution.interrupted, { attemptId: execution.attemptId }],
+        };
+      }
+    }
+
     function usedTools(): number {
       return snapshot.models.reduce(
         (count, model) =>
           count +
           (model.status === "completed"
-            ? model.tools.filter((tool) => tool.status !== "pending").length
+            ? model.tools.reduce(
+                (total, tool) =>
+                  total +
+                  tool.interrupted.length +
+                  (tool.status !== "pending" || tool.asks?.length ? 1 : 0),
+                0,
+              )
             : 0),
         0,
       );
-    }
-
-    function requestFor(model: CompletedModel, index: number): ToolRequest {
-      const call = model.turn.message.toolCalls?.[index];
-      const tool = model.tools[index];
-      if (!call || !tool) fail("invalid_journal", "The tool call is missing from its journal.");
-      return {
-        agentId: id,
-        version,
-        runId: snapshot.runId,
-        attemptId: snapshot.attemptId,
-        operationId: tool.id,
-        call,
-        arguments: parseToolArgs(call.arguments),
-      };
     }
 
     async function finishTool(
@@ -354,7 +599,30 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       request: ToolRequest,
       result: ToolResult,
     ): Promise<void> {
+      if (!result.ok && (result.kind === "cancelled" || result.kind === "denied")) {
+        for (const record of model.tools[index]?.asks ?? [])
+          if (!record.decision && !record.closed) record.closed = "stopped";
+        // A cancelled coordination call cannot leave suspended children under a completed
+        // tool receipt. Already settled children and their usage remain untouched.
+        const delegation = snapshot.delegations.find(
+          (entry) => entry.operationId === request.operationId,
+        );
+        for (const child of delegation?.children ?? []) stopRequests(child.snapshot);
+      }
+      const edited = model.tools[index]?.asks?.some(
+        (record) =>
+          !record.closed &&
+          record.decision?.type === "approve" &&
+          record.decision.arguments !== undefined,
+      );
+      if (edited)
+        result = {
+          ...result,
+          content: `${result.content}\nThe reviewer replaced the tool arguments before this call.`,
+        };
       model.tools[index] = {
+        interrupted: model.tools[index]?.interrupted ?? [],
+        asks: model.tools[index]?.asks,
         id: request.operationId,
         attemptId: snapshot.attemptId,
         status: "completed",
@@ -394,35 +662,46 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       } else {
         const outcome = await scope.tree.invokeTool(parallel, signal, async () => {
           active();
-          const approval =
-            approved?.request.operationId === request.operationId ? approved : undefined;
-          if (tool.needsApproval && !approval)
-            fail(
-              "approval_required",
-              "This tool needs a host-approved decision.",
-              request.operationId,
-            );
-          function checkExpiry(): void {
-            if (approval && approval.scope.expiresAt <= Date.now())
-              fail(
-                "approval_expired",
-                "The approval expired. Request a new decision before running this tool.",
-                request.operationId,
-              );
+          const journal = journalFor(snapshot, model, index, options, scope, signal);
+          try {
+            await journal.recheck(request);
+            active();
+            emit({ type: "tool_start", request });
+            active();
+            await journal.assertFresh();
+          } catch (error) {
+            // No invocation has started. Expiry reopens the request rather than leaving an
+            // unknown effect marker for work that was never sent.
+            if (error instanceof Halt && error.state.status === "suspended")
+              model.tools[index] = {
+                id: request.operationId,
+                status: "pending",
+                interrupted: model.tools[index]?.interrupted ?? [],
+                asks: model.tools[index]?.asks,
+              };
+            throw error;
           }
-          checkExpiry();
-          await untilAbort(
-            Promise.resolve(host?.beforeTool?.(immutableCopy(request), immutableCopy(approval))),
-            signal,
+          const records = model.tools[index]?.asks ?? [];
+          const answers = Object.fromEntries(
+            records
+              .filter(
+                (record) =>
+                  !record.closed &&
+                  record.request.ask.type === "question" &&
+                  record.decision?.type === "answer",
+              )
+              .map((record) => [
+                record.request.ask.type === "question" ? record.request.ask.key : "",
+                record.decision?.type === "answer" ? record.decision.answer : undefined,
+              ]),
           );
-          active();
-          checkExpiry();
-          emit({ type: "tool_start", request });
-          active();
-          // A synchronous observer can delay invocation past the approval's expiry.
-          checkExpiry();
+          const decision = [...records]
+            .reverse()
+            .find((record) => !record.closed && record.decision)?.decision;
           return tool.invoke(copyData(request.arguments), {
             ...options.context,
+            answers: immutableCopy(answers),
+            decision: immutableCopy(decision),
             runId: snapshot.runId,
             attemptId: snapshot.attemptId,
             operationId: request.operationId,
@@ -432,6 +711,27 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         });
         // Core reports an aborted invocation as data. It must not buy another model turn.
         if (!outcome.ok) active();
+        if (!outcome.ok && outcome.kind === "failed" && isInputRequired(outcome.cause)) {
+          const asks = model.tools[index]?.asks;
+          // The explicit InputRequired contract is the only ordinary-tool pre-effect boundary.
+          // A worker death before this response keeps the running marker and cannot replay it.
+          model.tools[index] = {
+            id: request.operationId,
+            status: "pending",
+            asks,
+            interrupted: model.tools[index]?.interrupted ?? [],
+          };
+          const journal = journalFor(snapshot, model, index, options, scope, signal);
+          const previous = journal.latest(outcome.cause.ask);
+          if (previous?.decision) previous.closed = "invalid";
+          await journal.open(
+            outcome.cause.ask,
+            outcome.cause.problem
+              ? { code: "invalid_answer", message: outcome.cause.problem }
+              : undefined,
+          );
+          return;
+        }
         result = outcome.ok
           ? { ok: true, content: outcome.summary }
           : { ok: false, content: outcome.error, kind: outcome.kind };
@@ -467,6 +767,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         snapshot.delegations.push(journal);
       }
       model.tools[index] = {
+        interrupted: model.tools[index]?.interrupted ?? [],
+        asks: model.tools[index]?.asks,
         id: request.operationId,
         attemptId: snapshot.attemptId,
         status: "delegating",
@@ -481,10 +783,12 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         });
         return;
       }
-      await untilAbort(Promise.resolve(host?.beforeTool?.(immutableCopy(request))), signal);
+      const requests = journalFor(snapshot, model, index, options, scope, signal);
+      await requests.recheck(request);
       active();
       emit({ type: "tool_start", request });
       active();
+      await requests.assertFresh();
       // Coordination is pure and is the only place children can start. Lend once
       // for this entire barrier, including ignored children and overlapping joins.
       release();
@@ -499,13 +803,84 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           scope,
           signal,
           active,
-          evidence,
+          requests,
         );
       } finally {
         release = await scope.tree.gate.acquire(signal);
       }
       active();
       await finishTool(model, index, request, result);
+    }
+
+    async function openApprovals(model: CompletedModel, from: number): Promise<void> {
+      for (let index = from; index < model.tools.length; index++) {
+        const execution = model.tools[index];
+        if (!execution || execution.status === "completed") continue;
+        if (usedTools() >= limits.toolCalls && !execution.asks?.length) break;
+        const request = requestFor(snapshot, model, index);
+        const tool = tools.find((tool) => tool.name === request.call.name);
+        if (
+          !tool ||
+          request.call.name === RESULT_TOOL_NAME ||
+          !snapshot.definition.enabledTools.includes(tool.name) ||
+          snapshot.definition.modelSettings.toolChoice === "none" ||
+          !completeArguments(request.call.arguments) ||
+          (!isDelegation(tool) &&
+            !isClientTool(tool) &&
+            tool.isTerminal &&
+            model.tools.length !== 1)
+        )
+          continue;
+        if (await needsApproval(request, options, signal))
+          await journalFor(snapshot, model, index, options, scope, signal).ensure({
+            type: "approval",
+          });
+      }
+    }
+
+    async function runClient(
+      model: CompletedModel,
+      index: number,
+      request: ToolRequest,
+      client: ClientTool,
+    ): Promise<void> {
+      try {
+        if (!completeArguments(request.call.arguments))
+          throw new TypeError("Send one complete JSON object.");
+        client.validateArguments(request.arguments);
+      } catch (error) {
+        await finishTool(model, index, request, {
+          ok: false,
+          kind: "invalid_input",
+          content: messageOf(error),
+        });
+        return;
+      }
+      if (!host?.beforeTool)
+        fail("request_host_missing", "Provide host.beforeTool before dispatching a client tool.");
+      const requests = journalFor(snapshot, model, index, options, scope, signal, request);
+      await requests.recheck(request);
+      const record = await requests.ensure({ type: "client", resultSchema: client.resultSchema });
+      if (!record.decision) return;
+      if (record.decision.type === "stop") {
+        scope.tree.stop();
+        throw new Halt({ status: "cancelled" });
+      }
+      if (record.decision.type === "cancel") {
+        await finishTool(model, index, request, {
+          ok: false,
+          kind: "cancelled",
+          content:
+            "The person cancelled this client request. This does not undo an action already taken.",
+        });
+        return;
+      }
+      if (record.decision.type !== "result")
+        throw new TypeError("A client request needs a result.");
+      await requests.recheck(request);
+      active();
+      const result = client.result(record.decision.value);
+      await finishTool(model, index, request, { ok: true, content: result.summary });
     }
 
     async function handleTurn(model: CompletedModel): Promise<void> {
@@ -554,9 +929,13 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
         }
         active();
         const capacity = limits.toolCalls - usedTools();
-        if (capacity <= 0 && model.tools[index]?.status === "pending")
+        if (
+          capacity <= 0 &&
+          model.tools[index]?.status === "pending" &&
+          !model.tools[index]?.asks?.length
+        )
           throw new Halt({ status: "limited", limit: "toolCalls" });
-        const request = requestFor(model, index);
+        let request = requestFor(snapshot, model, index);
         if (
           !snapshot.definition.enabledTools.includes(request.call.name) ||
           snapshot.definition.modelSettings.toolChoice === "none"
@@ -570,40 +949,70 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           continue;
         }
         const descriptor = delegations.get(request.call.name);
+        const tool = registry.get(request.call.name);
+        const client = clients.get(request.call.name);
+        const requests = journalFor(snapshot, model, index, options, scope, signal);
+        if (
+          (tool || descriptor || client) &&
+          completeArguments(request.call.arguments) &&
+          (!tool?.isTerminal || model.tools.length === 1) &&
+          (await needsApproval(request, options, signal))
+        )
+          await requests.ensure({ type: "approval" });
+        const records = model.tools[index]?.asks ?? [];
+        if (records.some((record) => !record.closed && record.decision?.type === "stop")) {
+          scope.tree.stop();
+          throw new Halt({ status: "cancelled" });
+        }
+        const decline = records.find(
+          (record) =>
+            !record.closed &&
+            (record.decision?.type === "deny" || record.decision?.type === "cancel"),
+        );
+        if (decline?.decision) {
+          await finishTool(
+            model,
+            index,
+            request,
+            decline.decision.type === "deny"
+              ? {
+                  ok: false,
+                  kind: "denied",
+                  content:
+                    decline.decision.message ??
+                    "The person denied this call. Continue without this action.",
+                }
+              : {
+                  ok: false,
+                  kind: "cancelled",
+                  content: "The person cancelled this request. Continue without this action.",
+                },
+          );
+          index++;
+          continue;
+        }
+        if (records.some((record) => !record.closed && !record.decision)) {
+          await openApprovals(model, index + 1);
+          snapshot.state = { status: "suspended" };
+          return;
+        }
+        const approval = requests.latest({ type: "approval" })?.decision;
+        if (approval?.type === "approve" && approval.arguments !== undefined)
+          request = { ...request, arguments: copyData(approval.arguments) };
         if (descriptor) {
           await runDelegation(model, index, request, descriptor);
           index++;
           continue;
         }
-        const tool = registry.get(request.call.name);
-        if (
-          tool?.needsApproval &&
-          (!tool.isTerminal || model.tools.length === 1) &&
-          completeArguments(request.call.arguments) &&
-          approved?.request.operationId !== request.operationId
-        ) {
-          if (!host?.approvalContext)
-            fail(
-              "approval_host_missing",
-              "Provide host.approvalContext to request approval for this tool.",
-              request.operationId,
-            );
-          const scope = copyData(
-            await untilAbort(Promise.resolve(host.approvalContext(immutableCopy(request))), signal),
-          );
-          active();
-          if (!isScope(scope) || scope.expiresAt <= Date.now())
-            fail(
-              "invalid_approval_scope",
-              "The host must supply an actor, resource version and future approval expiry.",
-              request.operationId,
-            );
-          snapshot.state = {
-            status: "suspended",
-            approval: { request: copyData(request), scope },
-            path: [],
-          };
-          return;
+        if (client) {
+          await runClient(model, index, request, client);
+          if (model.tools[index]?.status !== "completed") {
+            await openApprovals(model, index + 1);
+            snapshot.state = { status: "suspended" };
+            return;
+          }
+          index++;
+          continue;
         }
 
         const batch = [{ index, request, tool }];
@@ -611,6 +1020,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           tool?.isConcurrencySafe === true &&
           snapshot.definition.enabledTools.includes(request.call.name) &&
           !tool.needsApproval &&
+          !host?.needsApproval &&
+          !model.tools.find((entry) => entry.id === request.operationId)?.asks?.length &&
           !tool.isTerminal &&
           host?.canRunConcurrently?.(immutableCopy(request)) === true;
         const concurrent = parallel(request, tool);
@@ -621,27 +1032,51 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             next++
           ) {
             if (model.tools[next]?.status !== "pending") break;
-            const nextRequest = requestFor(model, next);
+            const nextRequest = requestFor(snapshot, model, next);
             const nextTool = registry.get(nextRequest.call.name);
             if (!parallel(nextRequest, nextTool)) break;
             batch.push({ index: next, request: nextRequest, tool: nextTool });
           }
         }
+        // A checkpoint can capture the pending retry while another child saves. Check its
+        // identity again before admission, even if this worker did not perform the reset.
+        for (const job of batch) {
+          const execution = model.tools[job.index];
+          if (execution?.interrupted.length && !execution.asks?.length)
+            await checkToolRecovery(model, job.index, execution.interrupted.length - 1);
+        }
         active();
         // Reserve the whole admitted batch before any invocation, including its tool-call budget.
         for (const job of batch)
           model.tools[job.index] = {
+            interrupted: model.tools[job.index]?.interrupted ?? [],
+            asks: model.tools[job.index]?.asks,
             id: job.request.operationId,
             attemptId: snapshot.attemptId,
             status: "running",
           };
         await save();
         const settled = await Promise.allSettled(
-          batch.map((job) => runTool(model, job.index, job.request, job.tool, concurrent)),
+          batch.map((job) => {
+            const previous = model.tools[job.index]?.interrupted.at(-1);
+            if (previous) restart("tool", job.request.operationId, previous.attemptId);
+            return runTool(model, job.index, job.request, job.tool, concurrent);
+          }),
         );
         const rejected = settled.find((result) => result.status === "rejected");
         if (rejected?.status === "rejected") throw rejected.reason;
-        approved = undefined;
+        if (batch.some((job) => model.tools[job.index]?.status === "pending")) {
+          if (
+            batch.some((job) =>
+              model.tools[job.index]?.asks?.some((record) => !record.closed && !record.decision),
+            )
+          ) {
+            await openApprovals(model, index + batch.length);
+            snapshot.state = { status: "suspended" };
+            return;
+          }
+          continue;
+        }
         index += batch.length;
       }
       // Adapted from OpenAI Agents JS (MIT), runner/toolExecution.ts: settle this batch,
@@ -695,13 +1130,34 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       return data;
     }
 
-    async function nextTurn(): Promise<CompletedModel> {
+    async function nextTurn(
+      previous?: Extract<ModelExecution, { status: "running" }>,
+    ): Promise<CompletedModel> {
       active();
+      if (previous)
+        requireRecovery(
+          snapshot.definition.recovery?.policy.inferenceOnly === true,
+          previous.interrupted.length,
+          snapshot.definition.recovery,
+          previous.id,
+        );
+      const position = previous ? snapshot.models.indexOf(previous) : snapshot.models.length;
+      const selected = tools.filter((tool) => snapshot.definition.enabledTools.includes(tool.name));
+      if (
+        previous &&
+        (await requestHash(selected.map((tool) => tool.definition()))) !==
+          snapshot.definition.recovery?.modelToolsHash
+      )
+        fail(
+          "recovery_definition_changed",
+          "The interrupted model call's tool definitions changed. Restore the same definitions or reconcile the run.",
+          previous.id,
+        );
       // Ported from Microsoft Agent Framework (MIT), _tools.py: after the iteration
       // allowance, ask once for a tool-free answer. Checked output needs submit_result,
       // so that mode retains the hard local turn cap instead of buying an unusable call.
-      const finalTurn = snapshot.models.length === limits.turns;
-      if (snapshot.models.length > limits.turns || (finalTurn && output))
+      const finalTurn = position === limits.turns;
+      if (position > limits.turns || (finalTurn && output))
         throw new Halt({ status: "limited", limit: "turns" });
       // Media is read before the receipt below exists, so a missing loader or file fails the
       // run with no model operation left running and nothing to reconcile.
@@ -715,15 +1171,22 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       // children racing for the tree's last model call cannot both take it.
       scope.tree.reserveModel();
       const model: ModelExecution = {
-        id: modelId(snapshot.runId, snapshot.models.length),
+        id: modelId(snapshot.runId, position),
         attemptId: snapshot.attemptId,
         status: "running",
+        billing: "unknown",
         usage: { ...EMPTY_USAGE },
+        interrupted: previous
+          ? [
+              ...previous.interrupted,
+              { attemptId: previous.attemptId, usage: copyData(previous.usage) },
+            ]
+          : [],
       };
-      snapshot.models.push(model);
+      snapshot.models[position] = model;
       await save();
+      if (previous) restart("model", model.id, previous.attemptId);
       active();
-      const selected = tools.filter((tool) => snapshot.definition.enabledTools.includes(tool.name));
       const modelSettings = copyData(snapshot.definition.modelSettings);
       // Ported from OpenAI Agents JS (MIT), runner/modelSettings.ts, maybeResetToolChoice.
       // Derive usage from the journal so resume cannot force the first tool a second time.
@@ -734,6 +1197,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       )
         modelSettings.toolChoice = "auto";
       if (finalTurn) modelSettings.toolChoice = "none";
+      let reportedUsage = false;
       async function* observed(): AsyncIterable<ProviderChunk> {
         const stream = provider.createStream(
           request,
@@ -758,6 +1222,11 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             if (!isUsage(chunk.usage))
               fail("invalid_usage", "The provider returned invalid token usage.", model.id);
             model.usage = copyData(chunk.usage);
+            reportedUsage = true;
+            // Preserve measurements before another pull can hang or the worker can disappear.
+            // This saves usage, not partial text, and does not claim final billing is known.
+            await save();
+            active();
           }
           emit({
             type: "model_chunk",
@@ -770,104 +1239,65 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
           yield chunk;
         }
       }
-      const turn = readTurn(await untilAbort(collectTurn(observed()), signal));
+      let collected;
+      try {
+        collected = await untilAbort(collectTurn(observed()), signal);
+      } catch (error) {
+        active();
+        // Only core's classified provider failures are local model failures. Host/checkpoint
+        // errors and unclassified programming errors must not become benign tool strings.
+        if (!(error instanceof ProviderError)) throw error;
+        if (error.kind === "aborted") {
+          scope.tree.stop();
+          throw new Halt({ status: "cancelled" });
+        }
+        fail("model_failed", `The model call failed (${error.kind}): ${error.message}`, model.id);
+      }
+      let turn;
+      try {
+        turn = readTurn(collected);
+      } catch (error) {
+        fail("invalid_model_output", messageOf(error), model.id);
+      }
       const done: CompletedModel = {
         ...model,
         status: "completed",
+        billing: reportedUsage ? "reported" : "unknown",
         usage: turn.usage,
         turn,
         tools: (turn.message.toolCalls ?? []).map((_call, index) => ({
           id: toolId(model.id, index),
           status: "pending",
+          interrupted: [],
         })),
       };
-      snapshot.models[snapshot.models.length - 1] = done;
+      snapshot.models[position] = done;
       await save();
       return done;
     }
 
     try {
+      if (scope.depth === 0 && answers) {
+        await answerRequests(snapshot, options, scope, answers, signal);
+        if (
+          [...requestRecords(snapshot)].some(
+            ({ record }) => !record.closed && record.decision?.type === "stop",
+          )
+        )
+          scope.tree.stop();
+        await save();
+      }
       if (snapshot.state.status === "running" || snapshot.state.status === "suspended") {
         release = await scope.tree.gate.acquire(signal);
         active();
-        for (const model of snapshot.models) {
-          const interrupted =
-            model.status === "running"
-              ? model
-              : model.tools.find((tool) => tool.status === "running");
-          if (interrupted)
-            fail(
-              "interrupted_operation",
-              "This operation started but has no saved result. Reconcile it with the host; it will not be replayed.",
-              interrupted.id,
-            );
+        const last = snapshot.models.at(-1);
+        snapshot.state = { status: "running" };
+        if (last?.status === "running") await handleTurn(await nextTurn(last));
+        else if (last?.status === "completed") {
+          await recoverTools(last);
+          await handleTurn(last);
         }
-        if (snapshot.state.status === "suspended" && snapshot.state.path.length > 0) {
-          // Replay only pure coordination. Evidence follows its exact path to one leaf.
-          snapshot.state = { status: "running" };
-        }
-        if (snapshot.state.status === "suspended" && evidence) {
-          active();
-          const approval = snapshot.state.approval;
-          if (approval.scope.expiresAt <= Date.now())
-            fail(
-              "approval_expired",
-              "The approval expired. Request a new decision before resuming.",
-              approval.request.operationId,
-            );
-          if (
-            !snapshot.definition.enabledTools.includes(approval.request.call.name) ||
-            snapshot.definition.modelSettings.toolChoice === "none" ||
-            !registry.get(approval.request.call.name)?.needsApproval
-          )
-            fail(
-              "invalid_approval",
-              "The pending approval does not belong to an approval-required tool.",
-            );
-          if (!host?.resolveApproval || !host.beforeTool)
-            fail(
-              "approval_host_missing",
-              "Provide host.resolveApproval and host.beforeTool to authenticate a decision and recheck access.",
-            );
-          await save();
-          active();
-          const answer = await untilAbort(
-            Promise.resolve(
-              host.resolveApproval(immutableCopy(approval), immutableCopy(evidence.decision)),
-            ),
-            signal,
-          );
-          active();
-          if (answer !== "pending") {
-            if (answer !== "approved" && answer !== "denied")
-              fail(
-                "invalid_approval_decision",
-                "The host must return approved, denied or pending.",
-              );
-            snapshot.state = { status: "running" };
-            if (answer === "approved") approved = approval;
-            else {
-              const model = snapshot.models.at(-1);
-              if (model?.status !== "completed")
-                fail("invalid_journal", "The pending tool turn is missing.");
-              const index = model.tools.findIndex(
-                (tool) => tool.id === approval.request.operationId,
-              );
-              if (usedTools() >= limits.toolCalls)
-                throw new Halt({ status: "limited", limit: "toolCalls" });
-              await finishTool(model, index, requestFor(model, index), {
-                ok: false,
-                kind: "denied",
-                content: "The host denied this tool call. Continue without this action.",
-              });
-            }
-          }
-        }
-        if (snapshot.state.status === "running") {
-          const last = snapshot.models.at(-1);
-          if (last?.status === "completed") await handleTurn(last);
-          while (snapshot.state.status === "running") await handleTurn(await nextTurn());
-        }
+        while (snapshot.state.status === "running") await handleTurn(await nextTurn());
       }
       if (snapshot.state.status === "completed")
         completed = { output: validateResult(snapshot.state.candidate) };
@@ -913,7 +1343,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       if (!completed) throw new Error("The agent completed without validating its result.");
       return { ...record, status: "completed", output: completed.output };
     }
-    return { ...record, ...state };
+    return state.status === "suspended"
+      ? { ...record, ...state, requests: openRequests(snapshot) }
+      : { ...record, ...state };
   }
 
   function checkInline(start: Pick<RunStart, "history" | "input">): void {
@@ -966,6 +1398,7 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
 
   const runtime: AgentRuntime<T | string> = {
     execute,
+    answerRequests,
     freeze,
     create,
     async open(input, options, runId) {
@@ -1024,6 +1457,17 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       );
       checkNames(snapshot.definition.enabledTools);
       if (
+        !equalData(snapshot.definition.recovery?.policy ?? null, recovery) ||
+        (snapshot.definition.recovery &&
+          !equalData(snapshot.definition.recovery.provider, {
+            id: provider.id,
+            model: provider.model,
+          }))
+      )
+        throw new TypeError(
+          "The recorded recovery policy or provider identity changed. Restore the same profile or reconcile the run.",
+        );
+      if (
         !equalData(snapshot.definition.stopAtTools, stopAtTools) ||
         (output && !snapshot.definition.enabledTools.includes(RESULT_TOOL_NAME))
       )
@@ -1079,7 +1523,9 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       if (state.status === "running") throw new Error("A child has not settled yet.");
       return state.status === "completed"
         ? { ...record, status: "completed", output: validateResult(state.candidate) }
-        : { ...record, ...state };
+        : state.status === "suspended"
+          ? { ...record, ...state, requests: openRequests(snapshot) }
+          : { ...record, ...state };
     },
   };
 
@@ -1137,11 +1583,15 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
     }
   }
 
-  async function root(snapshot: RunSnapshot, options: RunOptions, evidence?: ApprovalEvidence) {
+  async function root(
+    snapshot: RunSnapshot,
+    options: RunOptions,
+    answers?: Readonly<Record<string, unknown>>,
+  ) {
     const tree = new ExecutionTree(snapshot, options);
     let outcome: RunOutcome<T | string>;
     try {
-      outcome = await execute(snapshot, options, { tree, depth: 0 }, evidence);
+      outcome = await execute(snapshot, options, { tree, depth: 0, path: [] }, answers);
     } finally {
       tree.close();
     }
@@ -1172,19 +1622,10 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
             ? "This run belongs to another session."
             : "This run has no session. Resume it without one.",
         );
-      let evidence: ApprovalEvidence | undefined;
-      if (options.decision !== undefined || options.approvalPath !== undefined) {
-        if (
-          snapshot.state.status !== "suspended" ||
-          !equalData(options.approvalPath ?? [], snapshot.state.path)
-        )
-          throw new TypeError("The decision path must match the exposed pending approval.");
-        if (options.decision !== undefined)
-          evidence = copyData({ path: snapshot.state.path, decision: options.decision });
-      }
+      const answers = readAnswers(snapshot, options.answers ?? {});
       await authorizeTree(snapshot, options.host);
       snapshot.attemptId = crypto.randomUUID();
-      return root(snapshot, options, evidence);
+      return root(snapshot, options, answers);
     },
   };
   return Object.freeze(agent);

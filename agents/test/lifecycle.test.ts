@@ -1,3 +1,4 @@
+import { evidenceFor, firstRequest } from "./fixtures/requests.ts";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   defineTool,
@@ -477,25 +478,27 @@ describe("portable agent lifecycle", () => {
         if (JSON.stringify(snapshot) !== JSON.stringify(authoritative))
           throw new Error("Stale or unauthorized snapshot");
       },
-      approvalContext(request) {
-        expect(Object.isFrozen(request.arguments.nested)).toBe(true);
+      prepareRequest(request) {
+        expect(Object.isFrozen(request.call.arguments.nested)).toBe(true);
         return {
-          actorId: "actor",
-          resource: { id: "record", version: "4" },
-          expiresAt: Date.now() + 60_000,
+          scope: {
+            actorId: "actor",
+            resource: { id: "record", version: "4" },
+            expiresAt: Date.now() + 60_000,
+          },
         };
       },
-      resolveApproval(approval, decision) {
+      resolveRequest(approval, decision) {
         expect(Object.isFrozen(approval.scope.resource)).toBe(true);
-        expect(approval.request.call.id).toBe("wire-exact");
-        if (decision !== "signed-ticket") return "pending";
+        expect(approval.call.call.id).toBe("wire-exact");
+        if (decision !== "signed-ticket") return { type: "pending" };
         if (consumed) throw new Error("Decision already consumed");
         consumed = true;
-        return "approved";
+        return { type: "approve" };
       },
       beforeTool(request, approval) {
         recheck(request.operationId);
-        expect(approval?.scope.resource.version).toBe("4");
+        expect(approval?.request.scope.resource.version).toBe("4");
         expect(Object.isFrozen(request.call)).toBe(true);
       },
     };
@@ -509,26 +512,32 @@ describe("portable agent lifecycle", () => {
     if (!pendingCall || corrupted.state.status !== "suspended")
       throw new Error("Expected a pending approval");
     pendingCall.arguments = '{"nested":';
-    corrupted.state.approval.request.call.arguments = pendingCall.arguments;
-    corrupted.state.approval.request.arguments = {};
+    firstRequest(corrupted).call.call.arguments = pendingCall.arguments;
+    firstRequest(corrupted).call.arguments = {};
     const unauthorized = vi.fn();
     await expect(
       agent.resume(corrupted, { host: { authorizeResume: unauthorized } }),
-    ).rejects.toThrow("approval does not match");
+    ).rejects.toThrow("request does not match");
     expect(unauthorized).not.toHaveBeenCalled();
     const pending = await agent.resume(JSON.parse(JSON.stringify(suspended.snapshot)), {
       host,
-      decision: true,
+      answers: evidenceFor(suspended.snapshot, true),
     });
     expect(pending.status).toBe("suspended");
     expect(write).not.toHaveBeenCalled();
-    const result = await agent.resume(pending.snapshot, { host, decision: "signed-ticket" });
+    const result = await agent.resume(pending.snapshot, {
+      host,
+      answers: evidenceFor(pending.snapshot, "signed-ticket"),
+    });
     expect(result.status).toBe("completed");
     expect(consumed).toBe(true);
     expect(write).toHaveBeenCalledTimes(1);
     expect(recheck).toHaveBeenCalledWith(`${suspended.runId}/model/1/tool/1`);
     await expect(
-      agent.resume(pending.snapshot, { host, decision: "signed-ticket" }),
+      agent.resume(pending.snapshot, {
+        host,
+        answers: evidenceFor(pending.snapshot, "signed-ticket"),
+      }),
     ).rejects.toThrow("Stale");
     expect(write).toHaveBeenCalledTimes(1);
   });
@@ -536,8 +545,8 @@ describe("portable agent lifecycle", () => {
   it.each([
     ["denied", "completed"],
     ["revoked", "failed"],
-    ["expired", "failed"],
-    ["expired at tool start", "failed"],
+    ["expired", "suspended"],
+    ["expired at tool start", "suspended"],
     ["elapsed", "limited"],
   ] as const)("does not invoke a write when approval is %s", async (reason, expectedStatus) => {
     vi.useFakeTimers();
@@ -549,16 +558,18 @@ describe("portable agent lifecycle", () => {
       tools: [tool("write", write, { approval: true })],
       limits: { elapsedMs: 100 },
     });
-    const resolveApproval = vi.fn(() =>
-      reason === "denied" ? ("denied" as const) : ("approved" as const),
+    const resolveRequest = vi.fn(() =>
+      reason === "denied" ? { type: "deny" as const } : { type: "approve" as const },
     );
     const host = {
       authorizeResume,
-      resolveApproval,
-      approvalContext: () => ({
-        actorId: "actor",
-        resource: { id: "record", version: "1" },
-        expiresAt: Date.now() + 5,
+      resolveRequest,
+      prepareRequest: () => ({
+        scope: {
+          actorId: "actor",
+          resource: { id: "record", version: "1" },
+          expiresAt: Date.now() + 5,
+        },
       }),
       beforeTool() {
         if (reason === "revoked") throw new Error("Access revoked");
@@ -569,7 +580,7 @@ describe("portable agent lifecycle", () => {
       await vi.advanceTimersByTimeAsync(reason === "expired" ? 6 : 101);
     const result = await agent.resume(suspended.snapshot, {
       host,
-      decision: "ticket",
+      answers: evidenceFor(suspended.snapshot, "ticket"),
       onEvent(event) {
         if (reason === "expired at tool start" && event.type === "tool_start")
           vi.setSystemTime(Date.now() + 6);
@@ -577,8 +588,7 @@ describe("portable agent lifecycle", () => {
     });
     expect(result.status).toBe(expectedStatus);
     expect(write).not.toHaveBeenCalled();
-    if (reason === "expired" || reason === "elapsed")
-      expect(resolveApproval).not.toHaveBeenCalled();
+    if (reason === "expired" || reason === "elapsed") expect(resolveRequest).not.toHaveBeenCalled();
     if (reason === "denied")
       expect(result.history[2]).toMatchObject({
         role: "tool",

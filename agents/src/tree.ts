@@ -1,6 +1,16 @@
 import { EMPTY_USAGE, addUsage, createGate, messageOf, type TokenUsage } from "@providerkit/core";
-import { immutableCopy } from "./snapshot.ts";
-import type { AgentEvent, AgentHost, RunOptions, RunSnapshot, RunState } from "./types.ts";
+import { modelUsage } from "./recovery.ts";
+import { copyData, immutableCopy, isRecord } from "./snapshot.ts";
+import type {
+  AgentEvent,
+  AgentHost,
+  AskRecord,
+  ChildPathStep,
+  RunOptions,
+  RunSnapshot,
+  RunState,
+  ToolExecution,
+} from "./types.ts";
 
 export type StopState = Exclude<RunState, { status: "running" | "completed" }>;
 
@@ -8,6 +18,23 @@ export class Halt extends Error {
   constructor(readonly state: StopState) {
     super(state.status);
   }
+}
+
+/** Only known specialist-local outcomes can become tool data. Unknown codes fail closed. */
+export function isLocalStop(state: RunState): boolean {
+  return (
+    (state.status === "limited" &&
+      ["turns", "toolCalls", "elapsedMs", "outputTokens"].includes(state.limit)) ||
+    (state.status === "failed" &&
+      [
+        "model_failed",
+        "invalid_model_output",
+        "content_filtered",
+        "incomplete_turn",
+        "missing_result",
+        "empty_output",
+      ].includes(state.error.code))
+  );
 }
 
 export function fail(code: string, message: string, operationId?: string): never {
@@ -47,6 +74,56 @@ export function* snapshots(root: RunSnapshot): Generator<RunSnapshot> {
     for (const child of delegation.children) yield* snapshots(child.snapshot);
 }
 
+/** Requests come from the effect journal, in tool and child admission order. */
+export function* requestRecords(
+  root: RunSnapshot,
+): Generator<{ record: AskRecord; execution: ToolExecution; snapshot: RunSnapshot }> {
+  for (const model of root.models) {
+    if (model.status !== "completed") continue;
+    for (const execution of model.tools) {
+      for (const record of execution.asks ?? []) yield { record, execution, snapshot: root };
+      const delegation = root.delegations.find((journal) => journal.operationId === execution.id);
+      for (const child of delegation?.children ?? []) yield* requestRecords(child.snapshot);
+    }
+  }
+}
+
+export function openRequests(root: RunSnapshot) {
+  if (root.state.status !== "running" && root.state.status !== "suspended") return [];
+  return [...requestRecords(root)]
+    .filter(
+      ({ record, execution, snapshot }) =>
+        (snapshot.state.status === "running" || snapshot.state.status === "suspended") &&
+        execution.status !== "completed" &&
+        !record.decision &&
+        !record.closed,
+    )
+    .map(({ record }) => ({
+      ...copyData(record.request),
+      ...(record.problem ? { problem: copyData(record.problem) } : {}),
+    }));
+}
+
+/** Do this before authorization callbacks. A JSON object cannot contain duplicate keys after
+ * parsing; HTTP hosts must reject duplicate raw JSON members before constructing this map. */
+export function readAnswers(root: RunSnapshot, value: unknown): Record<string, unknown> {
+  if (!isRecord(value) || Object.values(value).some((evidence) => evidence === undefined))
+    throw new TypeError("Provide JSON evidence by request id.");
+  const pending = new Set(openRequests(root).map((request) => request.id));
+  for (const id of Object.keys(value))
+    if (!pending.has(id))
+      throw new TypeError("An answer names an unknown, closed or already-decided request.");
+  return copyData(value);
+}
+
+export function stopRequests(root: RunSnapshot): void {
+  for (const { record } of requestRecords(root))
+    if (!record.closed && !record.decision) record.closed = "stopped";
+  for (const snapshot of snapshots(root))
+    if (snapshot.state.status === "running" || snapshot.state.status === "suspended")
+      snapshot.state = { status: "cancelled" };
+}
+
 /** Count local receipts once. Never add a child's already aggregated total. */
 export function treeUsage(root: RunSnapshot): TokenUsage {
   let usage = { ...EMPTY_USAGE };
@@ -55,7 +132,7 @@ export function treeUsage(root: RunSnapshot): TokenUsage {
     for (const model of snapshot.models) {
       if (seen.has(model.id)) continue;
       seen.add(model.id);
-      usage = addUsage(usage, model.usage);
+      usage = addUsage(usage, modelUsage(model));
     }
   }
   return usage;
@@ -104,7 +181,8 @@ export class ExecutionTree {
 
   active(): void {
     if (this.checkpointFailure) throw new Halt(this.checkpointFailure);
-    if (this.options.signal?.aborted) throw new Halt({ status: "cancelled" });
+    if (this.options.signal?.aborted || this.root.state.status === "cancelled")
+      throw new Halt({ status: "cancelled" });
     if (
       this.timeout.signal.aborted ||
       Date.now() >= this.root.tree.startedAt + this.root.tree.limits.elapsedMs
@@ -117,7 +195,8 @@ export class ExecutionTree {
     // ponytail: a bounded tree is small. Deriving counters from the journal also
     // preserves every reservation across resume without a second mutable ledger.
     let models = 0;
-    for (const snapshot of snapshots(this.root)) models += snapshot.models.length;
+    for (const snapshot of snapshots(this.root))
+      for (const model of snapshot.models) models += 1 + model.interrupted.length;
     if (models >= this.root.tree.limits.modelCalls)
       throw new Halt({ status: "limited", limit: "modelCalls" });
   }
@@ -175,6 +254,11 @@ export class ExecutionTree {
     }
   }
 
+  stop(): void {
+    stopRequests(this.root);
+    this.broken.abort(new Halt({ status: "cancelled" }));
+  }
+
   close(): void {
     clearTimeout(this.timer);
   }
@@ -183,4 +267,5 @@ export class ExecutionTree {
 export interface ExecutionScope {
   tree: ExecutionTree;
   depth: number;
+  path: ChildPathStep[];
 }

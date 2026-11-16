@@ -1,3 +1,4 @@
+import { evidenceFor } from "./fixtures/requests.ts";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   defineTool,
@@ -21,13 +22,15 @@ const base = { id: "definition", version: "1", instructions: "Answer the questio
 const usage = { inputTokens: 5, cachedInputTokens: 1, outputTokens: 2 };
 const authorizeResume = () => {};
 const approval: AgentHost = {
-  approvalContext: () => ({
-    actorId: "actor",
-    resource: { id: "record", version: "1" },
-    expiresAt: Date.now() + 60_000,
+  prepareRequest: () => ({
+    scope: {
+      actorId: "actor",
+      resource: { id: "record", version: "1" },
+      expiresAt: Date.now() + 60_000,
+    },
   }),
   beforeTool: () => {},
-  resolveApproval: () => "approved",
+  resolveRequest: () => ({ type: "approve" }),
 };
 
 function text(content = "Done"): ProviderChunk[] {
@@ -228,7 +231,7 @@ describe("model settings", () => {
     await expect(
       rebuilt.resume(pending.snapshot, {
         host: { ...approval, authorizeResume },
-        decision: "ticket",
+        answers: evidenceFor(pending.snapshot, "ticket"),
       }),
     ).resolves.toMatchObject({ status: "completed" });
     expect(wire.requests[1]?.options.maxTokens).toBe(25);
@@ -275,7 +278,7 @@ describe("tool choice and turn limit", () => {
     const pending = await agent.run("Write", { host: approval });
     await agent.resume(pending.snapshot, {
       host: { ...approval, authorizeResume },
-      decision: "ticket",
+      answers: evidenceFor(pending.snapshot, "ticket"),
     });
     expect(wire.requests[1]?.options.toolChoice).toBe("auto");
     const run = vi.fn(async () => "must not run");
@@ -440,7 +443,7 @@ describe("definition resolved once", () => {
     const result = await rebuilt.resume(JSON.parse(JSON.stringify(pending.snapshot)), {
       context: { locale: "es" },
       host: { ...approval, authorizeResume },
-      decision: "ticket",
+      answers: evidenceFor(pending.snapshot, "ticket"),
     });
     expect(result.status).toBe("completed");
     expect(wire.requests[1]?.messages[0]).toEqual({ role: "system", content: "Reply in en." });
@@ -463,9 +466,9 @@ describe("definition resolved once", () => {
       ],
       enabledTools: ["read"],
     });
-    const approvalContext = vi.fn(approval.approvalContext);
+    const prepareRequest = vi.fn(approval.prepareRequest);
     const result = await agent.run("Read", {
-      host: { approvalContext, canRunConcurrently: () => true },
+      host: { prepareRequest, canRunConcurrently: () => true },
     });
     expect(result.status).toBe("completed");
     expect(wire.requests[0]?.tools.map((tool) => tool.name)).toEqual(["read"]);
@@ -475,7 +478,7 @@ describe("definition resolved once", () => {
       { result: { ok: true } },
     ]);
     expect(run).not.toHaveBeenCalled();
-    expect(approvalContext).not.toHaveBeenCalled();
+    expect(prepareRequest).not.toHaveBeenCalled();
     expect(childWire.requests).toHaveLength(0);
     await expect(
       agent.resume(result.snapshot, { host: { authorizeResume } }),
@@ -629,8 +632,7 @@ describe("definition resolved once", () => {
     const result = await parent.resume(pending.snapshot, {
       host: { ...approval, authorizeResume },
       context: { locale: "es" },
-      decision: "ticket",
-      approvalPath: pending.status === "suspended" ? pending.path : [],
+      answers: evidenceFor(pending.snapshot, "ticket"),
     });
     expect(result.status).toBe("completed");
     expect(instructions).toHaveBeenCalledOnce();

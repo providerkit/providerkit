@@ -15,6 +15,7 @@ import type {
   Turn,
 } from "@providerkit/core";
 
+import type { ClientTool } from "./request.ts";
 import type {
   AGENT_RUNTIME,
   AgentRuntime,
@@ -143,6 +144,26 @@ export type EnabledTools =
   | readonly string[]
   | ((run: RunContext) => readonly string[] | Promise<readonly string[]>);
 
+/** Trusted host assertions, never inferred from model output or an idempotency key. */
+export interface RecoveryPolicy {
+  /** Change when hidden provider defaults, hosted capabilities or tool implementations change. */
+  identity: string;
+  /** Total attempts per operation, including the first. Tree and local limits still apply. */
+  maxAttempts: number;
+  /** Assert that this provider profile performs inference only, with no hosted effects. */
+  inferenceOnly?: boolean;
+  /** Explicit allow-list of ordinary isReadOnly tools. Calls with human requests cannot replay. */
+  readOnlyTools?: readonly string[];
+}
+
+export interface RecoveryDefinition {
+  policy: RecoveryPolicy;
+  provider: { id: string; model: string };
+  /** Definitions advertised to the model, including the output schema. */
+  modelToolsHash: string;
+  toolHashes: Record<string, string>;
+}
+
 /** The resolved definition used for every turn, including after a restart. No host context
  * or callbacks: they can contain credentials and process-local services. */
 export interface RunDefinition {
@@ -150,6 +171,8 @@ export interface RunDefinition {
   modelSettings: RecordedModelSettings;
   enabledTools: string[];
   stopAtTools: string[];
+  /** Null refuses interrupted effects. Recorded policy and identities must match on recovery. */
+  recovery: RecoveryDefinition | null;
 }
 
 export interface AgentConfig {
@@ -161,8 +184,10 @@ export interface AgentConfig {
   /** Already composed with whatever routing, retries and watchdog the caller needs. */
   provider: Provider;
   modelSettings?: ModelSettings;
+  /** Opt in before starting a run. Never retries a settled failure or an unknown write. */
+  recovery?: RecoveryPolicy;
   /** Core tools or delegation descriptors. A host terminal tool must be called alone. */
-  tools?: readonly (Tool | Delegation)[];
+  tools?: readonly (Tool | Delegation | ClientTool)[];
   /** A host policy or allow-list. A run may narrow this list, never widen it. The reserved
    * submit_result tool stays available when there is an output contract. */
   enabledTools?: EnabledTools;
@@ -199,15 +224,84 @@ export interface ToolRequest {
   arguments: Record<string, unknown>;
 }
 
-export interface ApprovalScope {
+export interface RequestScope {
   actorId: string;
   resource: { id: string; version: string };
   expiresAt: number;
 }
 
-export interface PendingApproval {
-  request: ToolRequest;
-  scope: ApprovalScope;
+export interface Choice {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface ApprovalAsk {
+  type: "approval";
+  message?: string;
+  /** Full argument replacement, only when trusted host policy allows it. */
+  editable?: boolean;
+  approveSchema?: JsonObjectSchema;
+  denySchema?: JsonObjectSchema;
+}
+
+export interface QuestionAsk {
+  type: "question";
+  /** Stable within this call. Coordination replays match by key, not call position. */
+  key: string;
+  message: string;
+  choices?: readonly Choice[];
+  multiple?: boolean;
+  freeText?: boolean;
+  /** Describes form data. The host and asker must validate it at runtime. */
+  schema?: JsonObjectSchema;
+}
+
+export interface ClientAsk {
+  type: "client";
+  resultSchema: JsonObjectSchema;
+}
+
+export type Ask = ApprovalAsk | QuestionAsk | ClientAsk;
+
+export interface PendingRequest {
+  id: string;
+  /** Absolute path from the logical root, derived by the SDK, never supplied by the client. */
+  path: ChildPathStep[];
+  call: ToolRequest;
+  definitionHash: string;
+  ask: Ask;
+  scope: RequestScope;
+  createdAt: number;
+}
+
+export interface Answer {
+  choices?: string[];
+  text?: string;
+  data?: unknown;
+}
+
+export type Decision =
+  | { type: "approve"; arguments?: Record<string, unknown>; data?: unknown; receipt?: string }
+  | { type: "deny"; message?: string; data?: unknown; receipt?: string }
+  | { type: "answer"; answer: Answer; receipt?: string }
+  | { type: "result"; value: unknown; receipt?: string }
+  | { type: "cancel"; receipt?: string }
+  | { type: "stop"; receipt?: string };
+
+export type Resolution = Decision | { type: "pending"; problem?: string };
+
+export interface RequestProblem {
+  code: "expired" | "stale" | "invalid_answer" | "refused";
+  message: string;
+}
+
+export interface AskRecord {
+  request: PendingRequest;
+  /** Written once before any effect. A stored decision is data, not permission. */
+  decision?: Decision;
+  closed?: "expired" | "stale" | "invalid" | "stopped";
+  problem?: RequestProblem;
 }
 
 export interface ChildPathStep {
@@ -239,17 +333,26 @@ export interface AgentHost {
   /** Load/compare authoritative state and check ownership and freshness, or throw.
    * The host must also exclude concurrent attempts; this loop does not take a lease. */
   authorizeResume?: (snapshot: RunSnapshot) => void | Promise<void>;
-  /** Supplies the actor and resource version from trusted host state. */
-  approvalContext?: (request: ToolRequest) => ApprovalScope | Promise<ApprovalScope>;
-  /** Authenticate and consume a decision once. A supplied value is evidence, not permission.
-   * A crash after consumption but before the running marker may need host reconciliation. */
-  resolveApproval?: (
-    approval: PendingApproval,
-    decision: unknown,
-  ) => "approved" | "denied" | "pending" | Promise<"approved" | "denied" | "pending">;
-  /** Recheck permissions and resource versions immediately before each invocation.
-   * Required before executing an approved call. Throw to refuse the run. */
-  beforeTool?: (request: ToolRequest, approval?: PendingApproval) => void | Promise<void>;
+  /** May require approval for an unmarked tool, never waive a tool's needsApproval. */
+  needsApproval?: (call: ToolRequest) => boolean | Promise<boolean>;
+  /** Required to open a request. Supplies trusted actor, resource version and expiry.
+   * Only an approval's presentation/edit policy may be overridden. */
+  prepareRequest?: (
+    draft: Omit<PendingRequest, "scope">,
+  ) =>
+    | { scope: RequestScope; ask?: ApprovalAsk }
+    | Promise<{ scope: RequestScope; ask?: ApprovalAsk }>;
+  /** Optional standing host policy. undefined leaves the request pending. */
+  answerNow?: (request: PendingRequest) => Decision | undefined | Promise<Decision | undefined>;
+  /** Authenticate evidence, validate form data and consume it for this exact request. Recovery
+   * of the same host claim must return the same decision; another claim must be refused. */
+  resolveRequest?: (request: PendingRequest, evidence: unknown) => Resolution | Promise<Resolution>;
+  /** Recheck current access and resource version, with the arguments that will run. Required
+   * for every invocation carrying a decision, and before exposing a client-tool request. */
+  beforeTool?: (
+    call: ToolRequest,
+    decided?: { request: PendingRequest; decision: Decision },
+  ) => void | Promise<void>;
   /** Both this callback and the tool's isConcurrencySafe flag must allow batching. */
   canRunConcurrently?: (request: ToolRequest) => boolean;
   /** Optional in-process child binding under this root's lease and cancellation.
@@ -296,10 +399,8 @@ export interface ResumeOptions extends Omit<
   /** The run's own session, so the turn is appended once the run settles. Resume never loads
    * it again: the history stays the one the snapshot froze. Another session is refused. */
   session?: Session;
-  /** JSON evidence for resolveApproval, never a trusted approve flag. */
-  decision?: unknown;
-  /** Exact path from the suspended outcome. Required for descendant decision evidence. */
-  approvalPath?: readonly ChildPathStep[];
+  /** Untrusted JSON evidence by request id. Unknown, closed and already-decided ids are refused. */
+  answers?: Readonly<Record<string, unknown>>;
 }
 
 export interface RunFailure {
@@ -322,7 +423,7 @@ export type RunState =
   | { status: "running" }
   /** Saves the original result input, not a validator's potentially non-JSON return value. */
   | { status: "completed"; candidate: unknown }
-  | { status: "suspended"; approval: PendingApproval; path: ChildPathStep[] }
+  | { status: "suspended" }
   | { status: "cancelled" }
   | { status: "limited"; limit: LimitReason }
   | { status: "failed"; error: RunFailure };
@@ -334,17 +435,36 @@ export type ToolResult =
   | {
       ok: false;
       content: string;
-      kind: ToolFailure | "denied" | "unknown_tool" | "disabled_tool" | "invalid_output";
+      kind:
+        | ToolFailure
+        | "denied"
+        | "cancelled"
+        | "unknown_tool"
+        | "disabled_tool"
+        | "invalid_output";
     };
 
-export type ToolExecution =
+export interface InterruptedAttempt {
+  attemptId: string;
+}
+
+/** Last measured usage, not a final bill. An interrupted call may have cost more. */
+export interface InterruptedModelAttempt extends InterruptedAttempt {
+  usage: TokenUsage;
+}
+
+export type ToolExecution = { asks?: AskRecord[]; interrupted: InterruptedAttempt[] } & (
   | { id: string; status: "pending" }
   | { id: string; status: "running"; attemptId: string }
   /** Pure coordination can replay. Its children keep their own effect journals. */
   | { id: string; status: "delegating"; attemptId: string }
-  | { id: string; status: "completed"; attemptId: string; result: ToolResult };
+  | { id: string; status: "completed"; attemptId: string; result: ToolResult }
+);
 
-export type ModelExecution =
+export type ModelExecution = {
+  interrupted: InterruptedModelAttempt[];
+  billing: "unknown" | "reported";
+} & (
   | { id: string; attemptId: string; status: "running"; usage: TokenUsage }
   | {
       id: string;
@@ -353,7 +473,8 @@ export type ModelExecution =
       usage: TokenUsage;
       turn: Turn;
       tools: ToolExecution[];
-    };
+    }
+);
 
 export interface DelegationExecution {
   operationId: string;
@@ -395,7 +516,9 @@ export type OperationReceipt =
       kind: "model";
       id: string;
       attemptId: string;
-      status: "running" | "completed";
+      status: "running" | "completed" | "interrupted";
+      /** reported means a stream with usage ended, not that the SDK verified the vendor's bill. */
+      billing: "unknown" | "reported";
       usage: TokenUsage;
       source?: Turn["source"];
     }
@@ -404,7 +527,7 @@ export type OperationReceipt =
       id: string;
       callId: string;
       attemptId: string;
-      status: "running" | "completed";
+      status: "running" | "completed" | "interrupted";
       result?: ToolResult;
     };
 
@@ -430,13 +553,23 @@ interface RunRecord {
 export type RunOutcome<T = string> = RunRecord &
   (
     | { status: "completed"; output: T }
-    | { status: "suspended"; approval: PendingApproval; path: ChildPathStep[] }
+    | { status: "suspended"; requests: (PendingRequest & { problem?: RequestProblem })[] }
     | { status: "cancelled" }
     | { status: "limited"; limit: LimitReason }
     | { status: "failed"; error: RunFailure }
   );
 
 export type AgentEvent =
+  /** Replace the interrupted attempt's partial display, do not append to it. Saved attempts
+   * are authoritative if this best-effort event is missed. */
+  | {
+      type: "operation_restart";
+      kind: "model" | "tool";
+      runId: string;
+      operationId: string;
+      previousAttemptId: string;
+      attemptId: string;
+    }
   | {
       type: "model_chunk";
       runId: string;
@@ -444,6 +577,8 @@ export type AgentEvent =
       operationId: string;
       chunk: ProviderChunk;
     }
+  | { type: "request"; request: PendingRequest }
+  | { type: "decision"; requestId: string; decision: Decision }
   | { type: "tool_start"; request: ToolRequest }
   | { type: "tool_result"; request: ToolRequest; result: ToolResult }
   | { type: "state"; runId: string; attemptId: string; state: RunState }

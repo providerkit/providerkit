@@ -55,8 +55,8 @@ export function closedPolicy(context: BackgroundContext): BackgroundPolicy {
   return {
     authorizeResume: owned,
     beforeTool: owned,
-    approvalContext: noApproval,
-    resolveApproval: noApproval,
+    prepareRequest: noApproval,
+    resolveRequest: noApproval,
     claimContinuation: noApproval,
   };
 }
@@ -65,7 +65,8 @@ export function recoveryAgent(
   pool: Pool,
   schema: string,
   task: string,
-  pause?: "checkpoint" | "effect",
+  pause?: "checkpoint" | "effect" | "model",
+  profile: "off" | "inference" | "read" | "hosted" = "off",
 ) {
   checkSchema(schema);
   async function count(kind: string) {
@@ -83,6 +84,8 @@ export function recoveryAgent(
     name: "effect",
     description: "Record one synthetic effect.",
     inputSchema: { type: "object" },
+    // The insert measures invocations of a fake read; it is not an application effect.
+    isReadOnly: profile === "read",
     async run() {
       await count("tool");
       if (pause === "effect") await park("effect");
@@ -94,6 +97,14 @@ export function recoveryAgent(
     model: "fake",
     async *createStream(history) {
       await count("child_model");
+      if (history.at(-1)?.role === "tool") {
+        if (profile === "hosted") await count("hosted_effect");
+        if (pause === "model") {
+          yield { type: "delta", content: "interrupted text" };
+          yield { type: "usage", usage: testUsage };
+          await park("model");
+        }
+      }
       yield history.at(-1)?.role === "tool" ? answer("child result") : call("effect");
     },
   };
@@ -103,14 +114,38 @@ export function recoveryAgent(
     instructions: "Test child.",
     provider: childProvider,
     tools: [effect],
+    ...(profile === "off"
+      ? {}
+      : {
+          recovery: {
+            identity: `fake-${profile}-v1`,
+            maxAttempts: 3,
+            inferenceOnly: profile === "inference",
+            readOnlyTools: profile === "read" ? ["effect"] : [],
+          },
+        }),
+  });
+  const kept = defineAgent({
+    id: "kept",
+    version: "1",
+    instructions: "Test completed sibling.",
+    provider: {
+      id: "kept",
+      model: "fake",
+      async *createStream() {
+        await count("kept_model");
+        yield answer("kept result");
+      },
+    },
   });
   const coordinate = defineDelegation({
     name: "coordinate",
     description: "Run one child.",
     inputSchema: { type: "object" },
     validate: () => null,
-    specialists: [child],
+    specialists: [child, kept],
     async run(_input, context) {
+      if (profile === "inference") await context.child("kept", kept, "Keep this result").join();
       const result = await context.child("one", child, "Do the work").join();
       if (pause === "checkpoint") await park("checkpoint");
       if (result.status !== "completed") throw new Error(`The child stopped: ${result.status}.`);
@@ -136,8 +171,14 @@ export function recoveryAgent(
 }
 
 async function main() {
-  const [schema, task, id, mode] = process.argv.slice(2);
-  if (!schema || !task || !id || !["checkpoint", "effect", "recover"].includes(mode ?? ""))
+  const [schema, task, id, mode, profile = "off"] = process.argv.slice(2);
+  if (
+    !schema ||
+    !task ||
+    !id ||
+    !["checkpoint", "effect", "model", "recover"].includes(mode ?? "") ||
+    (profile !== "off" && profile !== "inference" && profile !== "read" && profile !== "hosted")
+  )
     throw new Error("Pass the test schema, task, run id and worker mode.");
   const pool = new Pool({ connectionString: localDatabase() });
   const runs = createRuns(pool, {
@@ -150,7 +191,8 @@ async function main() {
     pool,
     schema,
     task,
-    mode === "checkpoint" || mode === "effect" ? mode : undefined,
+    mode === "checkpoint" || mode === "effect" || mode === "model" ? mode : undefined,
+    profile,
   );
   const background = createBackgroundAgent({
     agent,

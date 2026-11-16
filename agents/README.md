@@ -8,7 +8,7 @@ const result = await writer.run("Explain why a database index speeds up a search
 ```
 
 A completed result has `status: "completed"` and an `output` value. Other results say whether the
-run failed, was cancelled, reached a limit or is waiting for approval. Check the status before
+run failed, was cancelled, reached a limit or is waiting for input. Check the status before
 using the output.
 
 The API may change before 1.0. This package uses `@providerkit/core` for model calls. Its main
@@ -39,7 +39,8 @@ export function createWriter(provider: Provider) {
 ```
 
 Set up routing, fallback models, provider deadlines and retry policy in core. The agent uses that
-provider as supplied; it does not add another retry loop.
+provider as supplied; it does not retry a failed live call. Opt-in crash recovery is separate,
+as described under checkpoints and recovery.
 
 Change the agent's version when its instructions, tools or result contract change. A saved run
 from another version is refused rather than resumed under different rules.
@@ -162,7 +163,7 @@ already finished is reused and sends nothing.
 | Status      | Meaning                                                                    |
 | ----------- | -------------------------------------------------------------------------- |
 | `completed` | The answer passed the configured result validator.                         |
-| `suspended` | A tool needs an approval decision from the host.                           |
+| `suspended` | An approval, question or client tool needs a reply.                        |
 | `cancelled` | The caller stopped the run. Cancellation does not undo an external action. |
 | `limited`   | A turn, tool-call, time or provider output limit stopped the run.          |
 | `failed`    | Execution could not continue. Read `error.code` and `error.message`.       |
@@ -381,8 +382,16 @@ const editor = defineAgent({
 
 The specialist gets only the input sent to it, not the parent's conversation. Its result returns
 to the orchestrator; this is not a conversation handoff. Each agent can use a different core provider.
-`asTool` propagates a specialist's stopped outcome. Use `defineDelegation` when your code needs to
-combine several explicit child outcomes, or to share the conversation.
+`asTool` returns a failed tool result for a specialist's own turn, tool-call, time or output
+limit, or a known model/result failure. The parent can answer using its other results. Core
+`ProviderError` failures and the SDK's `model_failed`, `invalid_model_output`, `content_filtered`,
+`incomplete_turn`, `missing_result` and `empty_output` codes are local failures. An unclassified
+exception is not: custom providers should throw core's `ProviderError` for provider failures.
+
+Suspension still reaches the host. Cancellation, shared tree limits and host or journal failures
+still stop the parent. Every admitted child settles, and its usage and completed receipts remain.
+Use `defineDelegation` when your code needs to combine explicit child outcomes or share the
+conversation. Its coordinator cannot waive cancellation, tree limits or integrity failures.
 
 A delegation declares its fixed `specialists` list, input schema and validator. Inside its `run`
 callback, start children before joining them:
@@ -410,7 +419,7 @@ const review = context.child("review", reviewer, {
 Your coordinator is trusted code, so provider-owned fields in the forwarded messages are kept.
 Media references stay references, and the child reads them through the same `host.loadMedia`.
 
-Coordination callbacks must be pure: use `child` and `join` for work. The callback can run again
+Coordination callbacks must be pure: use `child`, `join` and `ask` for work. The callback can run again
 after an interruption, but completed children are reused. Reusing a child key with a different
 input, history or agent is refused. Every admitted child settles before the delegation ends.
 
@@ -447,31 +456,211 @@ are not included. Prices and billing stay with the host, and these counters are 
 spending cap. Use SDK delegation rather than calling another model directly inside an ordinary
 tool when that work must share the tree's limits and usage.
 
-## Checkpoints and approval
+## Asking the person
 
-A host can save a run through `host.checkpoint`. The SDK records each model or tool operation before
-starting it and records its result afterward. Saved operation IDs remain stable across attempts.
+A suspended run returns `requests`, including requests from its specialists. Each has a stable
+`id`, the exact call and child `path`, the tool definition's hash, and a host-supplied actor,
+resource version and expiry. Approvals, questions and client tools use the same tool journal.
+The SDK saves a request before reporting it. It saves each accepted decision before any effect.
 
-`agent.resume(snapshot, options)` requires a trusted `host.authorizeResume` callback. The host must
-load authoritative state, check its owner and prevent concurrent attempts. Valid JSON is not
-permission to run a tool, and a snapshot sent by a browser is not authoritative state.
+Reply by request id, using the snapshot your server stored:
 
-For tools marked `needsApproval`, the host supplies the actor, resource version and expiry through
-`approvalContext`, authenticates and consumes the decision through `resolveApproval`, and checks
-current access through `beforeTool`. Missing approval policy refuses the action. A saved approval
-flag cannot bypass those checks.
+```ts
+await writer.resume(savedSnapshot, {
+  host,
+  answers: { [requestId]: authenticatedEvidence },
+});
+```
 
-A suspended result includes the `path` to the exact child call. Pass it as `approvalPath` when
-resuming a descendant decision. Approving the parent does not approve its children's actions.
+`answers` is evidence, not permission. Never accept a browser's snapshot as authority.
+`host.authorizeResume` must load authoritative state, check ownership and exclude concurrent
+attempts. It runs for every node, including specialists. Unknown, closed and already-decided
+request ids are refused before host callbacks. HTTP hosts must also reject duplicate keys in
+raw JSON before parsing an answer map.
 
-Completed results can be reused. An operation recorded as running has an unknown outcome after a
-crash, so resume refuses to repeat it automatically. An email, payment or paid model call may have
-finished before its result was saved. Reconcile that outcome or use a receiving service that
-honors an idempotency key; a checkpoint alone cannot make the action happen exactly once.
+The host supplies these callbacks:
 
-Snapshots include the conversation, prompts, tool arguments and results. The host owns access,
-storage and retention. Progress events are not a substitute for saved execution state. This
-version writes snapshot format 3. A format 2 snapshot from 0.1.0 is refused, not converted.
+- `prepareRequest(draft)` returns `{ scope }`: the actor id, resource id and version, and a future
+  `expiresAt` in milliseconds. For approvals it can also return `ask` to set the message,
+  `editable`, `approveSchema` or `denySchema`. Editing is off by default.
+- `resolveRequest(request, evidence)` authenticates and consumes evidence for that exact request.
+  It returns a `Decision`, or `{ type: "pending", problem? }` when the request is still open.
+  Validate any form data against the host's schema here, before accepting it.
+- `beforeTool(call, decided?)` checks current access and resource version immediately before
+  execution. `call.arguments` holds the arguments that will run. `decided` holds `{ request,
+  decision }`; a saved decision cannot bypass this check. The callback is required when using
+  an answer and before exposing a client-tool request.
+- Optional `needsApproval(call)` requires approval even for an unmarked tool. It cannot waive
+  a tool's own `needsApproval` flag. Optional `answerNow(request)` returns a standing policy
+  decision, or `undefined` to ask the person. This is trusted policy, not model output.
+
+A `Decision` is one of:
+
+| Type      | Value and result                                                                                                                                |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `approve` | Runs the approved call. Optional `arguments` replace all model arguments, only when `editable` is true. The tool's validator still checks them. |
+| `deny`    | Does not run the call. Its optional `message` becomes the tool result.                                                                          |
+| `answer`  | Supplies `{ answer: { choices?, text?, data? } }` to a question.                                                                                |
+| `result`  | Supplies `{ value }` for a registered client tool. Its result validator must accept it.                                                         |
+| `cancel`  | Dismisses the request and returns a cancelled tool result. Does not undo an action already taken.                                               |
+| `stop`    | Cancels the run tree and closes its open requests. Does not undo past effects.                                                                  |
+
+Each decision may carry an opaque `receipt`. An approval or denial may carry `data` only when
+its corresponding schema was declared. Form schemas describe what to show; the SDK does not
+ship a JSON Schema evaluator. Your host must validate their data. Wrong kinds, forbidden edits,
+unknown or repeated choices, disallowed text and blank answers stay pending with a `problem`.
+Invalid edited arguments become a failed tool result without executing the tool.
+
+You may answer a subset. All approval-required calls remaining in a turn open together, within
+the tool budget. A later call waits behind an earlier open request. Specialists can wait on
+several requests at once; answering one keeps the other requests and completed work intact.
+Usage and admissions do not reset. Cancelling a coordinator's question also stops its unfinished
+children; settled children remain. Progress includes `request` and `decision` events, but these
+can be missed: the journal is the durable record.
+
+An expired approval or question is replaced under a new id and fresh host scope. A changed tool
+definition does the same. Old evidence never answers the replacement. Replacements need a fresh
+answer through `resolveRequest`, not another automatic `answerNow` decision. Access and expiry are
+checked again before an effect, including after the tool-start observer.
+
+### Questions and forms
+
+Give the model `questionTool()` to ask for text or choices:
+
+```ts
+import { questionTool } from "@providerkit/agents";
+
+const questions = questionTool();
+```
+
+Put `questions` in the agent's `tools`. Its `ask_question` call takes `message`, optional
+`choices` (`id`, `label`, optional `description`), `multiple` and `freeText`. An answer chooses
+only offered ids, with no duplicates, and one at most unless `multiple` is true. The answer
+becomes the tool result, not an instruction with tool authority.
+
+Pure coordinators can call `context.ask(question, validate)`:
+
+```ts
+const count = await context.ask(
+  { key: "count", message: "How many copies?", schema: countSchema },
+  (answer) => validateCount(answer.data),
+);
+```
+
+`validateCount` is your pure runtime validator. It returns the typed value or throws. A rejected
+form opens a new request with the problem. Parallel asks use distinct keys. The coordinator runs
+again from its start and reads recorded answers by key; its JavaScript stack is not saved. Do not
+put external effects in it. Catching or ignoring an unanswered `ask` still suspends the run.
+
+An ordinary core tool may throw `new InputRequired({ key, message, ... })` only at a replay-safe
+boundary **before every external effect**. On resume the entire tool runs again; use
+`answerOf(context, key)` to read its saved answer. The SDK supplies frozen `context.answers` and
+`context.decision`, overriding values with those names in host context. A second question can
+use another key. Throwing again for an answered key rejects that answer and opens a new request.
+Never write, send, or make a paid call before throwing: the SDK cannot prove your code was safe.
+
+### Client tools
+
+Register a deferred tool with `defineClientTool({ name, description, inputSchema, validate,
+result: { schema, validate }, summarize? })` in trusted server code. Its arguments are validated
+before the request opens. The host exposes only the allowed client request; the client cannot
+choose a new tool definition or grant itself authority. Return a `result` decision through the
+same authenticated channel. The registered result validator runs before it is recorded.
+Validators and summaries must be pure: recovery can call them again. Dispatch with
+`request.call.arguments`, which includes approved edits. `request.call.call` keeps the original
+model call for identity checks, not the arguments to execute.
+
+There is no local `run` callback and no local duplicate execution. A pending client request keeps
+its id on reconnect, and a resolved one is never sent again. The host must deduplicate client
+dispatch by request id and recheck access before dispatch. A browser event is not permission.
+An expired or changed client request fails with `client_result_unknown`, rather than issuing
+another potentially repeated effect. Reconcile it with the host. An idempotency key alone does
+not prove that the receiver enforces it.
+
+### Checkpoints and recovery
+
+`host.checkpoint` persists the entire journal before returning. Completed results can be reused.
+An operation recorded as running has an unknown outcome after a crash. The default is refusal,
+with `interrupted_operation`, not replay. A model may have run provider-hosted tools even if no
+tool call appeared in its stream. A tool may have acted before it could report `InputRequired`.
+Neither an empty stream nor an idempotency key proves that repeating it is safe.
+
+#### Opt in to safe replay
+
+For a provider profile you know performs inference only, configure recovery before starting:
+
+```ts
+const reader = defineAgent({
+  id: "reader",
+  version: "1",
+  instructions: "Read the records you need, then answer.",
+  provider,
+  tools: [lookup],
+  recovery: {
+    identity: "inference-and-lookup-v1",
+    maxAttempts: 3,
+    inferenceOnly: true,
+    readOnlyTools: ["lookup"],
+  },
+});
+```
+
+`inferenceOnly: true` is your host's assertion about the configured provider, including its
+wrappers and defaults. Never set it for provider-hosted search, code execution or any other
+remote tool. Leave it out to refuse interrupted model calls. `readOnlyTools` is an explicit
+allow-list, not a tool hint: each named tool must also have `isReadOnly: true`. A replay requires
+`host.beforeTool`, which checks access again before invocation. Read-only does not mean free:
+a repeated request can incur another charge or return newer data.
+
+Calls with any approval, question or client-request history cannot replay under this policy.
+A decision for a previous attempt is never permission to repeat an unknown effect. Client tools,
+writes and hosted effects require authoritative host reconciliation. There is no force-replay
+switch. Do not restart the whole run as a substitute: that repeats completed work too.
+
+The policy is saved in `snapshot.definition.recovery`, together with the provider id/model and
+hashes of advertised tools and permitted read-only definitions. Resume checks the same policy
+and provider identity; replay checks the tool definitions. Resolved instructions, model settings
+and enabled tools stay frozen. Change `identity` when hidden provider defaults, hosted
+capabilities or tool implementations change. The SDK cannot inspect code inside a provider
+wrapper or prove that a receiver enforces an idempotency key.
+
+Recovery repeats only the interrupted operation. It keeps that operation's `id` and changes its
+`attemptId`. Completed siblings and tools are reused. `maxAttempts` includes the first attempt;
+when used up, the run fails with `recovery_exhausted`. A reserved attempt counts even if the
+worker died before sending it. Each new model attempt consumes a tree `modelCalls` admission.
+Each new tool attempt consumes a local `toolCalls` admission. Neither retries nor observation
+reset counters, local deadlines or the tree deadline. Retries replace the same logical turn;
+they do not grant another tool-capable turn. Settled failures and cancelled runs are not retried.
+
+Each model/tool journal entry has an `interrupted` array. Model entries retain the last measured
+usage for every interrupted attempt, and usage updates are checkpointed before reading more
+chunks. `usage` and `treeUsage` include every attempt once. Outcome `receipts` contains one entry
+per attempt: key billing by `(id, attemptId)`, not just `id`. Model receipts have
+`billing: "unknown"` while running or interrupted, and `"reported"` once a stream with a usage
+report completes. A completed stream without usage stays `"unknown"`. Reported is not an audited
+bill. A process can die before saving a new usage report, and an
+interrupted request may cost more than its saved usage. Ordinary tool charges remain unknown.
+
+Before replacement output, `operation_restart` reports `kind`, `runId`, `operationId`,
+`previousAttemptId` and `attemptId`. A display projector must clear the interrupted attempt's
+partial text before applying the replacement, not append to it. Keep the operation's row.
+`model_chunk.attemptId` and the snapshot's current attempt also identify the replacement if the
+best-effort restart event is missed. Reading or reconnecting an observer never starts a retry;
+only an authorized executor holding the host's lease may resume. Partial text is not durable in
+the execution journal. This policy does not add event batching or awaited event storage.
+
+The host's decision store must insert requests once, move pending requests to one decision,
+and reserve a submitted batch atomically. A crash can occur after evidence is consumed but before
+the decision checkpoint. Resolving the same authorized claim must return the same decision;
+another claim, segment, actor or resource version must be refused. No in-memory boolean can
+provide that guarantee across a restart.
+
+Snapshots and raw events hold private prompts, arguments and answers. Keep them on the server
+and build an allowlisted display view. Question text and choices may come from the model: treat
+them as untrusted display content. Snapshot format 3 includes resolved recovery policy and
+per-operation attempt histories.
+Older formats, earlier format-3 shapes without those fields and the old single-approval state are
+refused, not converted.
 
 ## Background runs
 
@@ -540,32 +729,38 @@ Pass an observer signal to `observe` or `wait` to stop listening. That does not 
 `cancel(owner, id)` cancels the whole run tree. Children execute in-process under their root's
 lease; they are not independently owned distributed jobs.
 
-### Background approval policy
+### Background request policy
 
 The required `policy` factory receives the authoritative owner and host run ID. It provides the
 same resume and tool checks described above, plus `claimContinuation`. Keep these rules in trusted
 server code:
 
 - `authorizeResume` checks stored state and ownership on every attempt.
-- `approvalContext` identifies the actor, resource version and decision expiry.
-- `claimContinuation` authenticates submitted evidence and atomically reserves the exact pending
-  decision for one continuation and one host run. Repeating that same claim during recovery must
-  succeed; a different claim or host run must fail.
-- `resolveApproval` returns the decision only for that claim. `beforeTool` checks current access
+- `prepareRequest` supplies the actor, resource version and request expiry.
+- `claimContinuation(snapshot, continuation)` authenticates `continuation.answers` and atomically
+  reserves every named request for `continuation.id` and this host segment. Repeating the exact
+  claim during recovery must succeed; a different claim, segment or resource version must fail.
+- `resolveRequest` returns each decision only for that claim. `beforeTool` checks current access
   and resource version again immediately before the action.
 
 Return database handles or other worker-only tool values through `policy.context`. They are not
 serialized. Do not put secrets or handles in a saved snapshot.
 
-`resume(owner, id, decisionEvidence)` saves a new host run with the same logical agent history.
-It queues evidence, not permission. The worker claims it under its lease after the row exists;
-read or wait on the returned ID to learn whether the decision was accepted. Completed child work
-is retained, and old evidence cannot approve a later tool call. The host must store approval claims
-durably; an in-memory boolean is not sufficient.
+`resume(owner, id, answers)` saves a new host run with the same logical agent history. Answer
+all or some requests by id. It queues evidence, not permission. The worker claims the batch under
+its lease after the row exists; read or wait on the returned ID to learn whether it was accepted.
+Recovery skips decisions already in the journal and resolves only still-open ids from that exact
+batch. It never applies old evidence to a new request. Completed children, usage and pending
+session state survive partial resolution. The host must store claims durably.
+
+Expired submissions are refused before queueing. Renew approvals or questions through a trusted
+portable resume after reconciling stored state; do not submit a new snapshot from the browser.
 
 This binding stores token-usage receipts, not money. It does not call the run service's additive
 `spend()` method or claim atomic billing with checkpoints. Account for recorded operations using
-stable IDs in your own billing system.
+operation and attempt IDs in your own billing system. Configure `recovery` on each agent that
+may replay interrupted work; `runs.sweep` and the same leased worker handler resume it without
+starting another logical run.
 
 ## Development
 
@@ -574,7 +769,9 @@ From the repository root, run `bun install` and `bun run build`. Then, from `age
 ```sh
 bun run lint
 bun run typecheck
-bunx vitest run test/lifecycle.test.ts
+bun run test test/request.test.ts
+bun run test test/recovery.test.ts
+bun run test test/lifecycle.test.ts
 bunx vitest run test/definition.test.ts
 bunx vitest run test/delegation.test.ts
 bunx vitest run test/input.test.ts

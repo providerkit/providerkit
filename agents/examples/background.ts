@@ -45,9 +45,9 @@ export function backgroundExample(
 // saved.snapshot holds the whole conversation. Keep it, and every raw event, on the server.
 // Aborting observerSignal stops waiting, not the worker. To stop the whole tree:
 // await jobs.cancel(authenticatedOwner, id);
-// For a suspended outcome, send authenticated decision evidence, never a client snapshot:
-// const next = await jobs.resume(authenticatedOwner, id, decisionEvidence);
-// The worker claims that decision under its lease. Check next.id for acceptance or failure.
+// For a suspended outcome, send authenticated answer evidence, never a client snapshot:
+// const next = await jobs.resume(authenticatedOwner, id, { [requestId]: evidence });
+// The worker claims those answers under its lease. Check next.id for acceptance or failure.
 // Observe next.id: continuation creates a new host row but keeps the logical agent run id.
 
 // The host's queue worker awaits runs.drive(job.runId, jobs.handlers).

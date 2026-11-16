@@ -2,6 +2,7 @@ import type { createRuns, Run, RunEvent, RunHandler, StoredRun } from "@gusnips/
 import { AGENT_RUNTIME } from "./delegation.ts";
 import {
   checkOptions,
+  checkChildProgress,
   copyData,
   equalData,
   immutableCopy,
@@ -11,7 +12,7 @@ import {
   isSessionStatus,
   readModelSettings,
 } from "./snapshot.ts";
-import { untilAbort } from "./tree.ts";
+import { openRequests, readAnswers, untilAbort } from "./tree.ts";
 import type {
   Agent,
   AgentHost,
@@ -34,7 +35,7 @@ export interface Continuation {
   /** Unique authorization claim, distinct from both the logical run and the host row. */
   id: string;
   sourceId: string;
-  decision: unknown;
+  answers: Readonly<Record<string, unknown>>;
 }
 
 export interface BackgroundContext {
@@ -47,19 +48,19 @@ export interface BackgroundContext {
 export interface BackgroundPolicy
   extends
     Required<
-      Pick<AgentHost, "authorizeResume" | "approvalContext" | "resolveApproval" | "beforeTool">
+      Pick<AgentHost, "authorizeResume" | "prepareRequest" | "resolveRequest" | "beforeTool">
     >,
-    Pick<AgentHost, "canRunConcurrently"> {
+    Pick<AgentHost, "canRunConcurrently" | "needsApproval" | "answerNow"> {
   /** Worker-only values for tools, such as the authenticated actor or a database handle.
    * Never serialized. The SDK supplies reserved operation IDs and cancellation signals. */
   context?: RunOptions["context"];
   /** Reads media references for this owner's run. Check that the owner may read each id. */
   loadMedia?: AgentHost["loadMedia"];
-  /** Called under the worker's lease, after its row exists. Authenticate the decision,
-   * recheck resource version/expiry and atomically reserve this approval for continuation.id
+  /** Called under the worker's lease, after its row exists. Authenticate every answer,
+   * recheck resource version/expiry and atomically reserve each exact request for continuation.id
    * AND context.segmentId. Repeating that exact claim must succeed; any other claim or segment
-   * must fail. authorizeResume checks ownership on every attempt. resolveApproval may reuse a
-   * consumed decision only for this same claim/segment. These guarantees need durable host state. */
+   * must fail. authorizeResume checks ownership on every attempt. resolveRequest may reuse a
+   * consumed answer only for this same claim/segment. These guarantees need durable host state. */
   claimContinuation: (snapshot: RunSnapshot, continuation: Continuation) => void | Promise<void>;
 }
 
@@ -131,40 +132,6 @@ function settled(raw: unknown): Settled {
   return { format: 1, snapshot: raw.snapshot, session };
 }
 
-/** Restore only the original pending route, using the latest receipts throughout.
- * Ancestors become running during coordination, before the leaf consumes its decision. */
-function restoreApprovalRoute(snapshot: RunSnapshot, initial: RunSnapshot): boolean {
-  const pending = initial.state;
-  if (pending.status !== "suspended") return false;
-  const route = [snapshot];
-  let node = snapshot;
-  for (const step of pending.path) {
-    const child = node.delegations
-      .find((journal) => journal.operationId === step.operationId)
-      ?.children.find((child) => child.key === step.key && child.snapshot.runId === step.runId);
-    if (!child) return false;
-    node = child.snapshot;
-    route.push(node);
-  }
-  if (node.state.status !== "suspended" || !equalData(node.state.approval, pending.approval))
-    return false;
-  for (const [index, ancestor] of route.entries()) {
-    const state = ancestor.state;
-    if (
-      state.status !== "running" &&
-      !(
-        state.status === "suspended" &&
-        equalData(state.approval, pending.approval) &&
-        equalData(state.path, pending.path.slice(index))
-      )
-    )
-      return false;
-  }
-  for (const [index, ancestor] of route.entries())
-    ancestor.state = { ...copyData(pending), path: pending.path.slice(index) };
-  return true;
-}
-
 /** Background work uses the host's lease, queue and cancellation. Children stay in-process.
  * Usage remains in stable SDK receipts; this binding never calls additive Run.spend. */
 export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
@@ -194,8 +161,8 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     const value = await options.policy(immutableCopy(context));
     for (const key of [
       "authorizeResume",
-      "approvalContext",
-      "resolveApproval",
+      "prepareRequest",
+      "resolveRequest",
       "beforeTool",
       "claimContinuation",
     ] as const)
@@ -214,7 +181,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       !isRecord(continuation) ||
       !isId(continuation.id) ||
       !isId(continuation.sourceId) ||
-      continuation.decision === undefined
+      !isRecord(continuation.answers)
     )
       throw new TypeError("The saved continuation is invalid.");
     return {
@@ -223,7 +190,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       continuation: {
         id: continuation.id,
         sourceId: continuation.sourceId,
-        decision: copyData(continuation.decision),
+        answers: readAnswers(snapshot, continuation.answers),
       },
     };
   }
@@ -239,6 +206,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       !equalData(saved.tree, initial.tree)
     )
       throw new TypeError("The saved journal belongs to another logical run.");
+    checkChildProgress(initial, saved);
     return saved;
   }
 
@@ -318,9 +286,11 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
         run.signal.throwIfAborted();
         return untilAbort(Promise.resolve(trusted.authorizeResume(saved)), run.signal);
       },
-      approvalContext: (request) => trusted.approvalContext(request),
-      resolveApproval: (approval, decision) => trusted.resolveApproval(approval, decision),
-      beforeTool: (request, approval) => trusted.beforeTool(request, approval),
+      prepareRequest: (request) => trusted.prepareRequest(request),
+      resolveRequest: (request, evidence) => trusted.resolveRequest(request, evidence),
+      beforeTool: (request, decided) => trusted.beforeTool(request, decided),
+      ...(trusted.needsApproval ? { needsApproval: trusted.needsApproval } : {}),
+      ...(trusted.answerNow ? { answerNow: trusted.answerNow } : {}),
       canRunConcurrently: (request) => trusted.canRunConcurrently?.(request) === true,
       ...(trusted.loadMedia ? { loadMedia: trusted.loadMedia } : {}),
       async checkpoint(saved) {
@@ -364,21 +334,18 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
         }
       },
     };
-    const continuation = initial.continuation;
-    // Never reapply old evidence to a later approval or roll back a running effect marker.
-    const pending = initial.snapshot.state;
-    const decision =
-      continuation && restoreApprovalRoute(snapshot, initial.snapshot)
-        ? continuation.decision
-        : undefined;
+    // A recovered segment may already have saved some decisions. Reuse only still-open
+    // ids from this exact claim; never apply the old evidence to a replacement request.
+    const pending = new Set(openRequests(snapshot).map((request) => request.id));
+    const answers = Object.fromEntries(
+      Object.entries(initial.continuation?.answers ?? {}).filter(([id]) => pending.has(id)),
+    );
     const result = await agent.resume(snapshot, {
       signal: run.signal,
       context: trusted.context,
       host,
       ...(session ? { session } : {}),
-      ...(decision !== undefined
-        ? { decision, approvalPath: pending.status === "suspended" ? pending.path : [] }
-        : {}),
+      answers,
       onEvent: (event) => run.emit("agent", event),
     });
     // The portable loop reports cancellation as data. The run service needs its control
@@ -458,15 +425,25 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     },
     /** Queues decision evidence, not permission. The leased worker claims it; read or wait
      * for that segment's outcome to learn whether the host accepted it. */
-    async resume(owner: string, id: string, decision: unknown): Promise<{ id: string }> {
+    async resume(
+      owner: string,
+      id: string,
+      answers: Readonly<Record<string, unknown>>,
+    ): Promise<{ id: string }> {
       const { row, snapshot } = await load(owner, id);
       if (row.status !== "succeeded" || snapshot.state.status !== "suspended")
         throw new Error("Only a settled, suspended agent segment can accept a decision.");
-      if (snapshot.state.approval.scope.expiresAt <= Date.now())
-        throw new Error("The approval expired. Request a new decision before continuing.");
-      if (decision === undefined)
-        throw new TypeError("Provide decision evidence from the authenticated caller.");
-      const continuation = copyData({ id: crypto.randomUUID(), sourceId: id, decision });
+      const submitted = readAnswers(snapshot, answers);
+      if (!Object.keys(submitted).length)
+        throw new TypeError("Provide at least one answer by request id.");
+      if (
+        openRequests(snapshot).some(
+          (request) =>
+            Object.hasOwn(submitted, request.id) && request.scope.expiresAt <= Date.now(),
+        )
+      )
+        throw new Error("A request expired. Ask the host to renew it before continuing.");
+      const continuation = copyData({ id: crypto.randomUUID(), sourceId: id, answers: submitted });
       return create(owner, { format: 1, snapshot, continuation });
     },
   });

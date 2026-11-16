@@ -1,3 +1,4 @@
+import { evidenceFor } from "./fixtures/requests.ts";
 import { describe, expect, it, vi } from "vitest";
 import {
   defineTool,
@@ -616,12 +617,14 @@ describe("sessions in a run", () => {
     const { session, load, append } = spied(inner);
     const host = {
       authorizeResume,
-      approvalContext: () => ({
-        actorId: "actor",
-        resource: { id: "note", version: "1" },
-        expiresAt: Date.now() + 60_000,
+      prepareRequest: () => ({
+        scope: {
+          actorId: "actor",
+          resource: { id: "note", version: "1" },
+          expiresAt: Date.now() + 60_000,
+        },
       }),
-      resolveApproval: () => "approved" as const,
+      resolveRequest: () => ({ type: "approve" as const }),
       beforeTool() {},
     };
     const waiting = await agent.run("Save a note.", { session, host });
@@ -630,7 +633,11 @@ describe("sessions in a run", () => {
       session: { id: "thread-4", status: "pending" },
     });
     expect(append).not.toHaveBeenCalled();
-    const done = await agent.resume(waiting.snapshot, { session, host, decision: "yes" });
+    const done = await agent.resume(waiting.snapshot, {
+      session,
+      host,
+      answers: evidenceFor(waiting.snapshot, "yes"),
+    });
     expect(done).toMatchObject({
       status: "completed",
       session: { id: "thread-4", status: "saved", revision: "2" },
@@ -713,12 +720,14 @@ describe("sessions in a run", () => {
     const agent = defineAgent({ ...base, provider: wire.provider, tools: [write] });
     const host = {
       authorizeResume,
-      approvalContext: () => ({
-        actorId: "actor",
-        resource: { id: "note", version: "1" },
-        expiresAt: Date.now() + 60_000,
+      prepareRequest: () => ({
+        scope: {
+          actorId: "actor",
+          resource: { id: "note", version: "1" },
+          expiresAt: Date.now() + 60_000,
+        },
       }),
-      resolveApproval: () => "approved" as const,
+      resolveRequest: () => ({ type: "approve" as const }),
       beforeTool() {},
     };
     const waiting = await agent.run("Save it.", {
@@ -728,7 +737,7 @@ describe("sessions in a run", () => {
     });
     expect(prepareHistory).toHaveBeenCalledTimes(1);
     expect(wire.requests[0]).toEqual([system, before[1], { role: "user", content: "Save it." }]);
-    await agent.resume(waiting.snapshot, { host, decision: "yes" });
+    await agent.resume(waiting.snapshot, { host, answers: evidenceFor(waiting.snapshot, "yes") });
     expect(prepareHistory).toHaveBeenCalledTimes(1);
     expect(wire.requests[1]?.slice(0, 3)).toEqual(wire.requests[0]);
     await expect(

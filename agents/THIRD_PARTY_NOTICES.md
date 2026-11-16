@@ -6,7 +6,10 @@ block has a short comment that names its source. Their copyright notices and lic
 ## TanStack AI
 
 - Source: [TanStack/ai](https://github.com/TanStack/ai/tree/1888233ddb501d14b17aa9a5f3497373a0e9242e),
-  `packages/ai-harness/src/inline-media.ts` and `packages/ai-harness/src/media.ts`.
+  `packages/ai-harness/src/inline-media.ts`, `packages/ai-harness/src/media.ts` and
+  `packages/ai/src/interrupt-serialization.ts`.
+- Used in: `src/request.ts`, canonical JSON ordering for request definition hashes. Our JSON
+  validator checks values first; Web Crypto supplies SHA-256 instead of a copied hash function.
 - Used in: `src/snapshot.ts`, the base64 check and the byte count read from its length;
   `src/input.ts` and `src/run.ts`, a media reference swapped for its bytes only in the provider
   request, loaded once per id per run.
@@ -80,7 +83,10 @@ SOFTWARE.
 
 - Source: [pydantic/pydantic-ai](https://github.com/pydantic/pydantic-ai/tree/f93bcff0c72caa0d5b0e2ead8b550d9674c8c9c4),
   `pydantic_ai_slim/pydantic_ai/conversation_store.py` and
-  `pydantic_ai_slim/pydantic_ai/settings.py`.
+  `pydantic_ai_slim/pydantic_ai/settings.py`, and
+  `src/pydantic_ai_harness/pydantic_ai_harness/ask_user/_types.py`.
+- Used in: `src/request.ts`, answer checks for offered choices, repeated selections, blank text
+  and cancellation. Changed to our keyed requests and host-authorized decisions.
 - Used in: `src/session.ts`, `createMemorySession`: the revision check on every append, and a
   copy on every read and write.
 - Used in: `src/run.ts`, merging model settings with the run's values preferred over the
@@ -145,10 +151,48 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE
 ```
 
+## LangGraph.js
+
+- Source: [langchain-ai/langgraphjs](https://github.com/langchain-ai/langgraphjs),
+  `libs/langgraph-core/src/interrupt.ts`.
+- Used in: `src/delegation.ts`, returning a saved answer when pure coordination replays and
+  validating it before returning to the coordinator.
+- Changed: stable question keys replace positional matching. Requests and decisions stay in
+  the existing effect journal, and host authorization is required before accepting an answer.
+
+```text
+The MIT License
+
+Copyright (c) 2024 LangChain
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## Vercel AI SDK
 
 - Source: [vercel/ai](https://github.com/vercel/ai/tree/8ba3940d3dd1f3cd3c4365bbaec505c6ef0eb1e3),
-  `packages/ai/src/prompt/convert-to-language-model-prompt.ts`.
+  `packages/ai/src/prompt/convert-to-language-model-prompt.ts` and
+  `packages/workflow/src/do-stream-step.ts`.
+- Used in: `src/run.ts`, the restart marker before replacement model output.
+- Changed: restart is opt-in for inference-only and trusted read-only work, retains every
+  attempt's measured usage, and names the stable operation plus old and new attempts. It does
+  not reset an entire workflow step or promise durable partial output.
 - Used in: `test/input.test.ts`, the check that a request never reaches a user turn, or its end,
   while a tool call is unanswered. This test is not in the published package.
 - Changed: it returns the unanswered ids instead of throwing, and it also reports a tool result

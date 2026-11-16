@@ -1,4 +1,5 @@
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
+import { RequestJournal } from "./request.ts";
 import { conversationOf, inputOf, readInput } from "./input.ts";
 import {
   checkChildProgress,
@@ -10,13 +11,14 @@ import {
   isId,
   isRecord,
 } from "./snapshot.ts";
-import { emitEvent, fail, Halt, untilAbort, type ExecutionScope } from "./tree.ts";
+import { emitEvent, fail, Halt, isLocalStop, untilAbort, type ExecutionScope } from "./tree.ts";
 import type {
   Agent,
   AgentInput,
   AgentMessage,
+  Answer,
+  QuestionAsk,
   ChildEnvelope,
-  ChildPathStep,
   DelegationExecution,
   RunOptions,
   RunOutcome,
@@ -27,11 +29,6 @@ import type {
 
 /** Internal symbol holds no execution state. Every invocation receives its own scope. */
 export const AGENT_RUNTIME = Symbol("agent-runtime");
-
-export interface ApprovalEvidence {
-  path: readonly ChildPathStep[];
-  decision: unknown;
-}
 
 /** @internal What a new run starts from, checked: the history before the new turn, the turn,
  * and the session the history came from. */
@@ -58,11 +55,18 @@ export interface AgentRuntime<T> {
   ): Promise<RunSnapshot>;
   restore(raw: unknown, tree?: RunSnapshot["tree"]): RunSnapshot;
   hydrate(snapshot: RunSnapshot): RunOutcome<T>;
+  answerRequests(
+    snapshot: RunSnapshot,
+    options: RunOptions,
+    scope: ExecutionScope,
+    answers: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<void>;
   execute(
     snapshot: RunSnapshot,
     options: RunOptions,
     scope: ExecutionScope,
-    evidence?: ApprovalEvidence,
+    answers?: Readonly<Record<string, unknown>>,
   ): Promise<RunOutcome<T>>;
 }
 
@@ -78,6 +82,9 @@ export type Joined<H extends readonly ChildHandle<unknown>[]> = {
 };
 
 export interface DelegationContext {
+  /** Pure coordination replays from its start. The saved answer is matched by key and checked
+   * by this pure validator, not by a saved JavaScript stack. A rejected form is asked again. */
+  ask<T>(question: Omit<QuestionAsk, "type">, validate: (answer: Answer) => T): Promise<T>;
   /** `key` becomes part of the child's run id and of every operation id under it, which
    * progress events carry and a display layer may send to a browser. Key by position or a
    * fixed name ("topic-1"), never by the input. The input is checked like `run`'s, except
@@ -96,6 +103,7 @@ export interface DelegationSpec<I, O> {
   name: string;
   description: string;
   inputSchema: JsonObjectSchema;
+  needsApproval?: boolean;
   validate: (raw: unknown) => I;
   /** Fixed allow-list. Agents cannot add tools or specialists at runtime. */
   specialists: readonly Agent<unknown>[];
@@ -109,6 +117,7 @@ export interface DelegationSpec<I, O> {
 export interface Delegation {
   readonly kind: "delegation";
   readonly name: string;
+  readonly needsApproval: boolean;
   readonly specialists: readonly Agent<unknown>[];
   definition(): ToolDefinition;
   /** @internal Errors and suspensions must not go through Tool.invoke's error conversion. */
@@ -116,6 +125,7 @@ export interface Delegation {
 }
 
 export interface SpecialistToolOptions<T> {
+  needsApproval?: boolean;
   name: string;
   description: string;
   /** Pure; may run again when replaying coordination. */
@@ -154,6 +164,7 @@ export function defineDelegation<I, O>(spec: DelegationSpec<I, O>): Delegation {
   return Object.freeze({
     kind: "delegation",
     name: spec.name,
+    needsApproval: spec.needsApproval ?? false,
     specialists,
     definition: () => copyData(definition),
     async execute(raw: unknown, context: DelegationContext): Promise<ToolResult> {
@@ -172,7 +183,7 @@ export function defineDelegation<I, O>(spec: DelegationSpec<I, O>): Delegation {
 }
 
 export function specialistTool<T>(agent: Agent<T>, options: SpecialistToolOptions<T>): Delegation {
-  return defineDelegation({
+  const descriptor = defineDelegation({
     ...options,
     inputSchema: {
       type: "object",
@@ -198,6 +209,25 @@ export function specialistTool<T>(agent: Agent<T>, options: SpecialistToolOption
       return result.output;
     },
   });
+  return Object.freeze({
+    ...descriptor,
+    async execute(raw: unknown, context: DelegationContext): Promise<ToolResult> {
+      try {
+        return await descriptor.execute(raw, context);
+      } catch (error) {
+        if (!(error instanceof Halt) || !isLocalStop(error.state)) throw error;
+        const reason =
+          error.state.status === "limited"
+            ? `its ${error.state.limit === "elapsedMs" ? "time" : error.state.limit === "outputTokens" ? "output" : error.state.limit === "toolCalls" ? "tool-call" : "model-turn"} limit`
+            : "a model or result failure";
+        return {
+          ok: false,
+          kind: "failed",
+          content: `The specialist could not finish because of ${reason}. Continue with the other results.`,
+        };
+      }
+    },
+  });
 }
 
 /** The whole pure coordination barrier lends its parent's slot, not each join.
@@ -206,12 +236,12 @@ export async function executeDelegation(
   descriptor: Delegation,
   journal: DelegationExecution,
   parent: RunSnapshot,
-  raw: unknown,
+  raw: Record<string, unknown>,
   options: RunOptions,
   scope: ExecutionScope,
   signal: AbortSignal,
   active: () => void,
-  evidence?: ApprovalEvidence,
+  requests: RequestJournal,
 ): Promise<ToolResult> {
   let open = true;
   const started = new Map<string, Promise<void>>();
@@ -307,10 +337,6 @@ export async function executeDelegation(
         await scope.tree.save();
         active();
         const step = { operationId: journal.operationId, key, runId: saved.snapshot.runId };
-        const childEvidence =
-          evidence && equalData(evidence.path[0], step)
-            ? { path: evidence.path.slice(1), decision: evidence.decision }
-            : undefined;
         let execution: Promise<ChildEnvelope> | undefined;
         let hookOpen = true;
         let executionSettled = false;
@@ -334,8 +360,7 @@ export async function executeDelegation(
             const result = await runtime.execute(
               saved.snapshot,
               { ...inherited, signal },
-              { tree: scope.tree, depth: scope.depth + 1 },
-              childEvidence,
+              { tree: scope.tree, depth: scope.depth + 1, path: [...scope.path, step] },
             );
             executionSettled = true;
             return { snapshot: result.snapshot };
@@ -384,13 +409,6 @@ export async function executeDelegation(
           fail(
             "invalid_child_host",
             "The child hook returned an unfinished child.",
-            journal.operationId,
-          );
-        // Returning a cached suspended host segment cannot consume an SDK approval.
-        if (!execution && childEvidence && restored.state.status === "suspended")
-          fail(
-            "host_resume_unsupported",
-            "The host returned a cached suspension. Resume this child in a new or resumable host segment.",
             journal.operationId,
           );
         const previous = saved.snapshot;
@@ -448,11 +466,52 @@ export async function executeDelegation(
     return Promise.all(items.map((handle) => handle.join()));
   }
 
+  // Adapted from LangGraph.js (MIT), interrupt.ts: return a saved answer on replay.
+  // Keys replace positional matching; validation stays with the trusted coordinator.
+  let asks = Promise.resolve();
+  const asking: Promise<unknown>[] = [];
+  function ask<T>(
+    question: Omit<QuestionAsk, "type">,
+    validate: (answer: Answer) => T,
+  ): Promise<T> {
+    if (!open) throw new Error("Ask only inside the active coordinator.");
+    const work = asks.then(async () => {
+      active();
+      const record = await requests.ensure({ ...question, type: "question" });
+      if (!record.decision) throw new Halt({ status: "suspended" });
+      if (record.decision.type === "stop") {
+        scope.tree.stop();
+        throw new Halt({ status: "cancelled" });
+      }
+      if (record.decision.type === "cancel") throw new CancelledQuestion();
+      if (record.decision.type !== "answer") throw new TypeError("This question needs an answer.");
+      await requests.recheck({ ...requests.call, arguments: raw });
+      active();
+      try {
+        return validate(immutableCopy(record.decision.answer));
+      } catch (error) {
+        record.closed = "invalid";
+        await requests.open(
+          { ...question, type: "question" },
+          { code: "invalid_answer", message: messageOf(error) },
+        );
+        throw new Halt({ status: "suspended" });
+      }
+    });
+    asks = work.then(
+      () => {},
+      () => {},
+    );
+    asking.push(work);
+    void work.catch(() => {});
+    return work;
+  }
+
   let result: ToolResult | undefined;
   let failure: { error: unknown } | undefined;
   try {
     result = await untilAbort(
-      descriptor.execute(raw, Object.freeze({ child, join, conversation })),
+      descriptor.execute(raw, Object.freeze({ child, join, ask, conversation })),
       signal,
     );
   } catch (error) {
@@ -475,26 +534,43 @@ export async function executeDelegation(
       failure ??= { error };
     }
     open = false;
-    const settled = await Promise.allSettled(started.values());
-    const rejected = settled.find((item) => item.status === "rejected");
+    const settled = await Promise.allSettled([...started.values(), ...asking]);
+    const rejected =
+      settled.find(
+        (item) =>
+          item.status === "rejected" &&
+          !(item.reason instanceof Halt && item.reason.state.status === "suspended"),
+      ) ?? settled.find((item) => item.status === "rejected");
     if (rejected?.status === "rejected") failure = { error: rejected.reason };
   }
   active();
+  // A coordinator may inspect or ignore outcomes, but cannot waive cancellation, tree limits
+  // or broken host/journal contracts. All admitted children have settled at this point.
+  for (const { snapshot } of journal.children) {
+    const state = snapshot.state;
+    if (state.status === "cancelled") scope.tree.stop();
+    if (
+      (state.status === "cancelled" || state.status === "limited" || state.status === "failed") &&
+      !isLocalStop(state)
+    )
+      throw new Halt(state);
+  }
+  if (failure?.error instanceof CancelledQuestion)
+    return {
+      ok: false,
+      kind: "cancelled",
+      content: "The person cancelled this question. Continue without this action.",
+    };
   if (failure && !(failure.error instanceof Halt && failure.error.state.status === "suspended"))
     throw failure.error;
-  for (const entry of journal.children) {
-    const state = entry.snapshot.state;
-    if (state.status === "suspended") {
-      throw new Halt({
-        ...state,
-        path: [
-          { operationId: journal.operationId, key: entry.key, runId: entry.snapshot.runId },
-          ...state.path,
-        ],
-      });
-    }
-  }
+  if (
+    journal.children.some((entry) => entry.snapshot.state.status === "suspended") ||
+    requests.execution.asks?.some((record) => !record.closed && !record.decision)
+  )
+    throw new Halt({ status: "suspended" });
   if (failure) throw failure.error;
   if (!result) throw new Error("The delegation ended without a result.");
   return result;
 }
+
+class CancelledQuestion extends Error {}

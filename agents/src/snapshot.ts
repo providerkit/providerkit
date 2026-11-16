@@ -9,15 +9,18 @@ import {
   type ToolCall,
   type Turn,
 } from "@providerkit/core";
+import { isRecoveryDefinition } from "./recovery.ts";
+import { checkDecision, isAsk } from "./request.ts";
 import type {
   AgentMessage,
-  ApprovalScope,
+  RequestScope,
+  AskRecord,
   ChildPathStep,
   DelegationExecution,
   InputPart,
   ModelExecution,
   ModelSettings,
-  PendingApproval,
+  PendingRequest,
   RecordedModelSettings,
   RunDefinition,
   RunFailure,
@@ -261,7 +264,12 @@ function isSessionRef(value: unknown): value is NonNullable<RunSnapshot["session
 }
 
 export function isSessionStatus(value: unknown): value is SessionStatus {
-  if (!isRecord(value) || !isId(value.id)) return false;
+  if (
+    !isRecord(value) ||
+    !isId(value.id) ||
+    !optional(value.asks, (v) => Array.isArray(v) && v.every(isAskRecord))
+  )
+    return false;
   return (
     value.status === "pending" ||
     (value.status === "saved" && isId(value.revision)) ||
@@ -378,7 +386,8 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     typeof value.instructions === "string" &&
     isRecordedModelSettings(value.modelSettings) &&
     isNames(value.enabledTools) &&
-    isNames(value.stopAtTools)
+    isNames(value.stopAtTools) &&
+    isRecoveryDefinition(value.recovery)
   );
 }
 
@@ -392,7 +401,7 @@ export function checkOptions(
     !optional(value.signal, (signal) => signal instanceof AbortSignal) ||
     !optional(value.context, isRecord) ||
     !optional(value.onEvent, (fn) => typeof fn === "function") ||
-    !optional(value.approvalPath, isPath)
+    !optional(value.answers, isRecord)
   ) {
     throw new TypeError("Invalid run options.");
   }
@@ -423,8 +432,10 @@ export function checkOptions(
     for (const key of [
       "checkpoint",
       "authorizeResume",
-      "approvalContext",
-      "resolveApproval",
+      "prepareRequest",
+      "resolveRequest",
+      "needsApproval",
+      "answerNow",
       "beforeTool",
       "canRunConcurrently",
       "child",
@@ -437,7 +448,7 @@ export function checkOptions(
   }
 }
 
-export function isScope(value: unknown): value is ApprovalScope {
+export function isScope(value: unknown): value is RequestScope {
   return (
     isRecord(value) &&
     isId(value.actorId) &&
@@ -475,8 +486,44 @@ function isRequest(value: unknown): value is ToolRequest {
   );
 }
 
-function isApproval(value: unknown): value is PendingApproval {
-  return isRecord(value) && isRequest(value.request) && isScope(value.scope);
+function isPendingRequest(value: unknown): value is PendingRequest {
+  return (
+    isRecord(value) &&
+    isId(value.id) &&
+    isPath(value.path) &&
+    isRequest(value.call) &&
+    isScope(value.scope) &&
+    isAsk(value.ask) &&
+    positive(value.createdAt) &&
+    typeof value.definitionHash === "string" &&
+    /^sha256:[a-f0-9]{64}$/.test(value.definitionHash)
+  );
+}
+
+function isAskRecord(value: unknown): value is AskRecord {
+  if (
+    !isRecord(value) ||
+    !isPendingRequest(value.request) ||
+    !optional(value.closed, (v) =>
+      ["expired", "stale", "invalid", "stopped"].includes(String(v)),
+    ) ||
+    !optional(
+      value.problem,
+      (v) =>
+        isRecord(v) &&
+        ["expired", "stale", "invalid_answer", "refused"].includes(String(v.code)) &&
+        isId(v.message),
+    )
+  )
+    return false;
+  if (value.decision !== undefined) {
+    try {
+      checkDecision(value.request.ask, value.decision);
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function isUsage(value: unknown): value is TokenUsage {
@@ -529,6 +576,7 @@ function isToolResult(value: unknown): value is ToolResult {
           "aborted",
           "failed",
           "denied",
+          "cancelled",
           "unknown_tool",
           "disabled_tool",
           "invalid_output",
@@ -536,8 +584,23 @@ function isToolResult(value: unknown): value is ToolResult {
   );
 }
 
+function isInterrupted(value: unknown): value is { attemptId: string }[] {
+  return (
+    Array.isArray(value) &&
+    value.every((attempt) => isRecord(attempt) && isId(attempt.attemptId)) &&
+    new Set(value.map((attempt) => attempt.attemptId)).size === value.length
+  );
+}
+
 function isToolExecution(value: unknown): value is ToolExecution {
-  if (!isRecord(value) || !isId(value.id)) return false;
+  if (
+    !isRecord(value) ||
+    !isId(value.id) ||
+    !isInterrupted(value.interrupted) ||
+    value.interrupted.some((attempt) => attempt.attemptId === value.attemptId) ||
+    !optional(value.asks, (v) => Array.isArray(v) && v.every(isAskRecord))
+  )
+    return false;
   return (
     value.status === "pending" ||
     (isId(value.attemptId) &&
@@ -548,7 +611,19 @@ function isToolExecution(value: unknown): value is ToolExecution {
 }
 
 function isModel(value: unknown): value is ModelExecution {
-  if (!isRecord(value) || !isId(value.id) || !isId(value.attemptId) || !isUsage(value.usage))
+  if (
+    !isRecord(value) ||
+    !isId(value.id) ||
+    !isId(value.attemptId) ||
+    !isUsage(value.usage) ||
+    (value.billing !== "unknown" && value.billing !== "reported") ||
+    (value.status === "running" && value.billing !== "unknown") ||
+    !isInterrupted(value.interrupted) ||
+    value.interrupted.some(
+      (attempt) =>
+        attempt.attemptId === value.attemptId || !("usage" in attempt) || !isUsage(attempt.usage),
+    )
+  )
     return false;
   return (
     value.status === "running" ||
@@ -568,7 +643,7 @@ function isState(value: unknown): value is RunState {
     case "completed":
       return serializable(value.candidate);
     case "suspended":
-      return isApproval(value.approval) && isPath(value.path);
+      return Object.keys(value).length === 1;
     case "limited":
       return [
         "turns",
@@ -643,11 +718,11 @@ export function childRunId(operationId: string, key: string): string {
 export function checkTree(root: RunSnapshot): void {
   let children = 0;
   let models = 0;
-  function visit(node: RunSnapshot, depth: number): void {
+  function visit(node: RunSnapshot, depth: number, path: ChildPathStep[]): void {
     if (!equalData(node.tree, root.tree) || node.startedAt < root.tree.startedAt)
       throw new TypeError("The child belongs to a different tree or deadline.");
     if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
-    models += node.models.length;
+    models += node.models.reduce((total, model) => total + 1 + model.interrupted.length, 0);
     if (
       new Set(node.delegations.map((journal) => journal.operationId)).size !==
       node.delegations.length
@@ -673,10 +748,18 @@ export function checkTree(root: RunSnapshot): void {
         )
           throw new TypeError("A completed delegation cannot contain unfinished children.");
         children++;
-        visit(child.snapshot, depth + 1);
+        visit(child.snapshot, depth + 1, [
+          ...path,
+          { operationId: journal.operationId, key: child.key, runId: child.snapshot.runId },
+        ]);
       }
     }
     for (const model of node.models) {
+      if (model.status === "completed" && root.runId === root.tree.runId)
+        for (const tool of model.tools)
+          for (const record of tool.asks ?? [])
+            if (!equalData(record.request.path, path))
+              throw new TypeError("The request path does not match its owning call.");
       if (
         model.status === "completed" &&
         model.tools.some(
@@ -690,9 +773,33 @@ export function checkTree(root: RunSnapshot): void {
   }
   if (root.runId === root.tree.runId && root.startedAt !== root.tree.startedAt)
     throw new TypeError("The root start time does not match its tree.");
-  visit(root, 0);
+  visit(root, 0, []);
   if (children > root.tree.limits.maxChildren || models > root.tree.limits.modelCalls)
     throw new TypeError("The snapshot exceeds its tree limits.");
+}
+
+/** A later attempt must retain the exact measurements and identity of every lost attempt. */
+function checkAttemptProgress(
+  previous: {
+    attemptId?: string;
+    interrupted: { attemptId: string; usage?: TokenUsage }[];
+    usage?: TokenUsage;
+  },
+  next: { attemptId?: string; interrupted: { attemptId: string; usage?: TokenUsage }[] },
+): void {
+  if (previous.interrupted.some((attempt, index) => !equalData(attempt, next.interrupted[index])))
+    throw new TypeError("The host erased or replaced interrupted attempts.");
+  if (!previous.attemptId) return;
+  if (previous.attemptId === next.attemptId) {
+    if (previous.interrupted.length !== next.interrupted.length)
+      throw new TypeError("The host changed a current attempt's history.");
+  } else if (
+    !equalData(next.interrupted[previous.interrupted.length], {
+      attemptId: previous.attemptId,
+      ...(previous.usage ? { usage: previous.usage } : {}),
+    })
+  )
+    throw new TypeError("The host changed an attempt without retaining its receipt.");
 }
 
 /** A host cache may fill a missing receipt, never erase or replace a known effect. */
@@ -719,22 +826,38 @@ export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): vo
     throw new TypeError("The child host replaced a settled outcome.");
   for (const [index, model] of previous.models.entries()) {
     const saved = next.models[index];
-    if (!saved || saved.id !== model.id || saved.attemptId !== model.attemptId)
+    if (!saved || saved.id !== model.id)
       throw new TypeError("The child host changed a model operation.");
+    checkAttemptProgress(model, saved);
     if (model.status !== "completed") continue;
-    if (saved.status !== "completed" || !equalData(model.turn, saved.turn))
+    if (
+      saved.status !== "completed" ||
+      saved.attemptId !== model.attemptId ||
+      saved.billing !== model.billing ||
+      !equalData(model.turn, saved.turn)
+    )
       throw new TypeError("The child host replaced a completed model receipt.");
     for (const [position, tool] of model.tools.entries()) {
       const restored = saved.tools[position];
+      for (const [index, ask] of (tool.asks ?? []).entries()) {
+        const nextAsk = restored?.asks?.[index];
+        if (
+          !nextAsk ||
+          !equalData(ask.request, nextAsk.request) ||
+          (ask.decision && !equalData(ask.decision, nextAsk.decision)) ||
+          (ask.closed && ask.closed !== nextAsk.closed)
+        )
+          throw new TypeError("The child host erased or replaced a request receipt.");
+      }
       if (
         !restored ||
         (tool.status === "completed" && !equalData(tool, restored)) ||
-        (tool.status === "running" &&
-          (restored.status === "pending" ||
-            restored.status === "delegating" ||
-            restored.attemptId !== tool.attemptId))
+        (tool.status === "running" && restored.status === "delegating")
       )
         throw new TypeError("The child host replaced a tool receipt.");
+      // Pure coordination already replays across approval resumes. It has no external
+      // attempt to retain; its children carry the effect receipts checked below.
+      if (tool.status !== "delegating") checkAttemptProgress(tool, restored);
     }
   }
   for (const journal of previous.delegations) {
@@ -785,6 +908,12 @@ export function readSnapshot(
   for (const [index, model] of raw.models.entries()) {
     if (model.id !== modelId(raw.runId, index))
       throw new TypeError("Invalid model operation identity.");
+    if (
+      model.interrupted.length &&
+      (!raw.definition.recovery?.policy.inferenceOnly ||
+        model.interrupted.length >= raw.definition.recovery.policy.maxAttempts)
+    )
+      throw new TypeError("Model attempts exceed the recorded recovery policy.");
     const last = index === raw.models.length - 1;
     // A plain-text run gets one last answer with no tools. It is still a model operation
     // counted by the tree. No receipt on that extra turn may claim a tool was executed.
@@ -812,7 +941,7 @@ export function readSnapshot(
       if (
         tool.id !== toolId(model.id, position) ||
         (!last && tool.status !== "completed") ||
-        (pending && tool.status !== "pending")
+        (pending && tool.status !== "pending" && !tool.asks?.length && !tool.interrupted.length)
       ) {
         throw new TypeError("Invalid tool operation position.");
       }
@@ -841,8 +970,51 @@ export function readSnapshot(
         if (raw.definition.stopAtTools.includes(call.name) && !tool.result.final)
           throw new TypeError("A successful stopping tool must record its final result.");
       }
-      pending ||= tool.status === "pending";
-      if (tool.status !== "pending") calls++;
+      const keys = new Set<string>();
+      const originalArguments = parseToolArgs(call.arguments);
+      let clientArguments = originalArguments;
+      for (const [askIndex, record] of (tool.asks ?? []).entries()) {
+        const request = record.request;
+        if (
+          request.id !== `${tool.id}/ask/${askIndex + 1}` ||
+          request.call.operationId !== tool.id ||
+          request.call.runId !== raw.runId ||
+          request.call.agentId !== raw.agentId ||
+          request.call.version !== raw.version ||
+          !equalData(request.call.call, call) ||
+          !completeArguments(call.arguments) ||
+          !equalData(
+            request.call.arguments,
+            request.ask.type === "client" ? clientArguments : originalArguments,
+          ) ||
+          request.createdAt < raw.startedAt ||
+          (tool.status === "completed" && !record.closed && !record.decision)
+        )
+          throw new TypeError("The request does not match its journaled tool call.");
+        // A dispatch keeps the approval that preceded it, even if that approval later expired.
+        if (request.ask.type === "approval")
+          clientArguments =
+            record.decision?.type === "approve"
+              ? (record.decision.arguments ?? originalArguments)
+              : originalArguments;
+        if (!record.closed) {
+          const key =
+            request.ask.type === "question" ? `question:${request.ask.key}` : request.ask.type;
+          if (keys.has(key)) throw new TypeError("A call has duplicate open request keys.");
+          keys.add(key);
+        }
+      }
+      if (
+        tool.interrupted.length &&
+        (!raw.definition.recovery?.policy.readOnlyTools?.includes(call.name) ||
+          tool.interrupted.length + (tool.status === "pending" ? 0 : 1) >
+            raw.definition.recovery.policy.maxAttempts ||
+          tool.status === "delegating")
+      )
+        throw new TypeError("Tool attempts exceed the recorded recovery policy.");
+      pending ||= tool.status === "pending" && !tool.asks?.length && !tool.interrupted.length;
+      calls += tool.interrupted.length;
+      if (tool.status !== "pending" || tool.asks?.length) calls++;
     }
     if (
       !last &&
@@ -884,48 +1056,17 @@ export function readSnapshot(
     }
   }
   checkTree(raw);
-  if (raw.state.status === "suspended") {
-    let leaf = raw;
-    for (const [index, step] of raw.state.path.entries()) {
-      const journal = leaf.delegations.find((journal) => journal.operationId === step.operationId);
-      const child = journal?.children.find((child) => child.key === step.key);
-      if (
-        !child ||
-        child.snapshot.runId !== step.runId ||
-        child.snapshot.state.status !== "suspended" ||
-        !equalData(child.snapshot.state.path, raw.state.path.slice(index + 1)) ||
-        !equalData(child.snapshot.state.approval, raw.state.approval)
-      )
-        throw new TypeError("The approval path does not match a suspended child.");
-      leaf = child.snapshot;
-    }
-    if (
-      leaf.state.status !== "suspended" ||
-      leaf.state.path.length !== 0 ||
-      !equalData(leaf.state.approval, raw.state.approval)
+  if (
+    raw.state.status === "suspended" &&
+    !raw.models.some(
+      (model) =>
+        model.status === "completed" &&
+        model.tools.some(
+          (tool) =>
+            tool.status !== "completed" && (tool.asks?.length || tool.status === "delegating"),
+        ),
     )
-      throw new TypeError("The approval path does not match the leaf decision.");
-    const last = leaf.models.at(-1);
-    if (last?.status !== "completed")
-      throw new TypeError("The approval does not match the pending tool call.");
-    const { request } = raw.state.approval;
-    const position = last.tools.findIndex((tool) => tool.status !== "completed");
-    const call = last.turn.message.toolCalls?.[position];
-    const tool = last.tools[position];
-    if (
-      !call ||
-      !completeArguments(call.arguments) ||
-      (last.turn.finishReason !== "stop" && last.turn.finishReason !== "tool_calls") ||
-      tool?.status !== "pending" ||
-      request.runId !== leaf.runId ||
-      request.agentId !== leaf.agentId ||
-      request.version !== leaf.version ||
-      request.operationId !== tool.id ||
-      !equalData(request.call, call) ||
-      !equalData(request.arguments, parseToolArgs(call.arguments))
-    ) {
-      throw new TypeError("The approval does not match the pending tool call.");
-    }
-  }
+  )
+    throw new TypeError("A suspended run needs a journaled request or delegation.");
   return copyData(raw);
 }
