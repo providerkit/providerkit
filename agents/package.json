@@ -13,6 +13,10 @@
     "./runs": {
       "types": "./dist/runs.d.ts",
       "default": "./dist/runs.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "default": "./dist/mcp.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -41,16 +45,21 @@
   },
   "peerDependencies": {
     "@providerkit/core": "^0.30.0",
-    "@gusnips/server": "^0.19.0"
+    "@gusnips/server": "^0.19.0 || ^0.20.0",
+    "@modelcontextprotocol/sdk": "^1.32.2"
   },
   "peerDependenciesMeta": {
     "@gusnips/server": {
       "optional": true
+    },
+    "@modelcontextprotocol/sdk": {
+      "optional": true
     }
   },
   "devDependencies": {
-    "@providerkit/core": "workspace:*",
     "@gusnips/server": "^0.19.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@providerkit/core": "workspace:*",
     "@types/pg": "^8.15.0",
     "pg": "^8.16.0",
     "typescript": "^7.0.2",

@@ -6,14 +6,35 @@
   "license": "MIT",
   "author": "Gustavo Salomé",
   "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./protocol": {
       "types": "./dist/protocol.d.ts",
       "default": "./dist/protocol.js"
     },
+    "./sse": {
+      "types": "./dist/sse.d.ts",
+      "default": "./dist/sse.js"
+    },
     "./agents": {
       "types": "./dist/agents.d.ts",
       "default": "./dist/agents.js"
-    }
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "default": "./dist/ui/index.js"
+    },
+    "./markdown": {
+      "types": "./dist/markdown.d.ts",
+      "default": "./dist/markdown.js"
+    },
+    "./ag-ui": {
+      "types": "./dist/ag-ui.d.ts",
+      "default": "./dist/ag-ui.js"
+    },
+    "./styles.css": "./dist/styles.css"
   },
   "files": [
     "dist",
@@ -32,7 +53,8 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && bun run build:css",
+    "build:css": "mkdir -p dist && cat src/styles/base.css $(ls src/styles/*.css | grep -v '/base.css$') > dist/styles.css",
     "typecheck": "tsc --noEmit && tsc -p test",
     "lint": "oxlint -c ../.oxlintrc.json src test",
     "test": "vitest run",
@@ -68,5 +90,10 @@
     "type": "git",
     "url": "git+https://github.com/providerkit/providerkit.git",
     "directory": "react"
+  },
+  "dependencies": {
+    "@shadcn/react": "^0.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   }
 }

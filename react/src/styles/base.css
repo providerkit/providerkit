@@ -1,0 +1,4 @@
+/* The optional stylesheet. Every rule lives in this one layer, so any unlayered app CSS wins
+   without a specificity fight. Each UI lane adds its own partial beside this file, and the
+   build concatenates them after it into dist/styles.css. */
+@layer providerkit;
