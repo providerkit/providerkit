@@ -1,6 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import type { AttachmentRef, RequestResponse, SendInput } from "@providerkit/react";
-import { createAgentProjector } from "@providerkit/react/agents";
+import type { AttachmentRef, SendInput } from "@providerkit/react";
 import {
   emptyChatView,
   reduceChat,
@@ -9,21 +8,22 @@ import {
   type Cursor,
   type DisplayPart,
 } from "@providerkit/react/protocol";
-import { isRecord, maxFileBytes, fileTypes, type ApprovalMode, type DemoStats } from "./shared.ts";
+import {
+  isRecord,
+  maxFileBytes,
+  fileTypes,
+  Refusal,
+  type ApprovalMode,
+  type DemoStats,
+} from "./shared.ts";
+import { DemoRun } from "./runtime.ts";
+import { requestAgent } from "./flow.ts";
 import { earlierMessages, fixtureMessageId, historyPageSize, sampleFixtures } from "./samples.ts";
 import { scriptedAgent, sources } from "./scripted.ts";
 
-class Refusal extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 interface Conversation {
+  principalId: string;
+  resourceId: string;
   segment: string;
   view: ChatView;
   events: ChatEvent[];
@@ -31,16 +31,7 @@ interface Conversation {
   paused: boolean;
   sends: Map<string, { payload: string; ack: Promise<void> }>;
   files: Map<string, AttachmentRef>;
-  work?: { id: string; controller: AbortController; done: Promise<void> };
-  approvalCount: number;
-  approval?: {
-    id: string;
-    messageId: string;
-    mode: ApprovalMode;
-    expiresAt?: number;
-    decision?: string;
-    done?: Promise<void>;
-  };
+  work?: DemoRun;
   stats: DemoStats;
 }
 
@@ -61,6 +52,8 @@ function conversation(key: string): Conversation {
   let value = conversations.get(key);
   if (!value) {
     value = {
+      principalId: key.split("/")[0]!,
+      resourceId: key,
       segment: crypto.randomUUID(),
       view: emptyChatView(),
       events: [],
@@ -68,8 +61,19 @@ function conversation(key: string): Conversation {
       paused: false,
       sends: new Map(),
       files: new Map(),
-      approvalCount: 0,
-      stats: { runs: 0, modelCalls: 0, toolCalls: 0, decisions: 0, observers: 0, events: 0 },
+      stats: {
+        runs: 0,
+        modelCalls: 0,
+        toolCalls: 0,
+        decisions: 0,
+        observers: 0,
+        events: 0,
+        continuations: 0,
+        clientEffects: 0,
+        clientCompletions: 0,
+        reservations: 0,
+        gaps: 0,
+      },
     };
     conversations.set(key, value);
   }
@@ -86,7 +90,13 @@ function publish(chat: Conversation, value: ChatEvent): void {
 }
 
 function snapshot(chat: Conversation): ChatEvent {
-  return { v: 1, type: "snapshot", messages: chat.view.messages, run: chat.view.run };
+  return {
+    v: 1,
+    type: "snapshot",
+    messages: chat.view.messages,
+    run: chat.view.run,
+    inputs: chat.view.inputs,
+  };
 }
 
 function busy(chat: Conversation): boolean {
@@ -214,20 +224,47 @@ function parseInput(value: unknown, chat: Conversation): SendInput {
   return { clientId: value.clientId, text: value.text, attachments };
 }
 
-function startRun(chat: Conversation, input: SendInput): void {
-  const runId = crypto.randomUUID();
-  const messageId = crypto.randomUUID();
-  const controller = new AbortController();
-  const projector = createAgentProjector({
-    messageId,
-    runId,
-    labels: { agent: { facts: "Check the facts", format: "Check the plan" } },
-    tool: ({ call, result }) => ({
-      label: call.name === "review_sample" ? "Check the sample records" : "Read a sample record",
-      summary: result ? "The fixed sample check finished." : "Checking a fictional record.",
-    }),
-  });
-  chat.stats.runs += 1;
+function startRun(chat: Conversation, input: SendInput, flow?: ApprovalMode, gap = false): void {
+  const agent = flow ? requestAgent(chat.stats, tickMs) : scriptedAgent(chat.stats, tickMs);
+  const work = new DemoRun(
+    chat.principalId,
+    chat.resourceId,
+    agent,
+    chat.stats,
+    (event) => {
+      if (chat.work === work) publish(chat, event);
+    },
+    (run) => {
+      if (chat.work !== run || !run.snapshot) return;
+      const projected = run.projector.snapshot(run.snapshot);
+      const parts: DisplayPart[] = [...(flow ? [] : sources), ...projected.parts];
+      if (run.snapshot.state.status === "completed")
+        parts.push({
+          type: "data",
+          id: "sample-result",
+          kind: "sample-summary",
+          data: {
+            title: "Sample finished",
+            text: flow
+              ? "The request journal and handoff finished. No external service was called."
+              : "Both fictional records agree. No booking was made.",
+          },
+        });
+      publish(chat, {
+        v: 1,
+        type: "snapshot",
+        messages: chat.view.messages.map((message) =>
+          message.id === run.messageId ? { ...projected, parts } : message,
+        ),
+        run: run.projector.run(run.snapshot),
+        inputs: run.inputs(),
+      });
+    },
+    () => pause(chat),
+    flow,
+    gap,
+  );
+  chat.work = work;
   publish(chat, {
     v: 1,
     type: "message",
@@ -247,57 +284,19 @@ function startRun(chat: Conversation, input: SendInput): void {
   publish(chat, {
     v: 1,
     type: "message",
-    message: { id: messageId, role: "assistant", state: "live", parts: sources },
+    message: {
+      id: work.messageId,
+      role: "assistant",
+      state: "live",
+      parts: flow ? [] : sources,
+    },
   });
-  publish(chat, { v: 1, type: "run", run: { id: runId, messageId, status: "running" } });
-  const agent = scriptedAgent(chat.stats, tickMs);
-  // This task belongs to the server, never to the POST or an observer's AbortSignal.
-  const done = agent
-    .run("Run the fixed visit example.", {
-      runId,
-      signal: controller.signal,
-      onEvent(event) {
-        for (const display of projector.event(event)) publish(chat, display);
-      },
-    })
-    .then((outcome) => {
-      const projected = projector.snapshot(outcome.snapshot);
-      const parts: DisplayPart[] = [...sources, ...projected.parts];
-      if (outcome.status === "completed")
-        parts.push({
-          type: "data",
-          id: "sample-result",
-          kind: "sample-summary",
-          data: {
-            title: "Sample plan ready",
-            text: "Both fictional records agree. No booking was made.",
-          },
-        });
-      publish(chat, {
-        v: 1,
-        type: "snapshot",
-        messages: chat.view.messages.map((message) =>
-          message.id === messageId ? { ...projected, parts } : message,
-        ),
-        run: projector.run(outcome.snapshot),
-      });
-    })
-    .catch(() => {
-      publish(chat, {
-        v: 1,
-        type: "run",
-        run: {
-          id: runId,
-          messageId,
-          status: "failed",
-          error: {
-            code: "script_failed",
-            message: "The local script stopped unexpectedly. Send a new message to try again.",
-          },
-        },
-      });
-    });
-  chat.work = { id: runId, controller, done };
+  publish(chat, {
+    v: 1,
+    type: "run",
+    run: { id: work.id, messageId: work.messageId, status: "running" },
+  });
+  work.start();
 }
 
 async function send(chat: Conversation, request: Request, url: URL): Promise<Response> {
@@ -337,7 +336,7 @@ async function send(chat: Conversation, request: Request, url: URL): Promise<Res
     );
   if (mode === "unknown") pause(chat);
   // Reserve the clientId before the first await, so concurrent duplicates share one acceptance.
-  startRun(chat, input);
+  startRun(chat, input, undefined, url.searchParams.get("gap") === "1");
   const ack = mode === "delay" ? delay(1800) : Promise.resolve();
   chat.sends.set(input.clientId, { payload, ack });
   await ack;
@@ -381,195 +380,24 @@ async function loadHistory(chat: Conversation, url: URL): Promise<void> {
 
 function approvalMode(url: URL): ApprovalMode {
   const mode = url.searchParams.get("mode") ?? "pending";
-  if (mode === "pending" || mode === "expire" || mode === "unknown" || mode === "replace")
-    return mode;
-  throw new Refusal(400, "approval_mode", "Choose a listed approval mode.");
+  if (mode === "pending" || mode === "expire" || mode === "unknown") return mode;
+  throw new Refusal(400, "request_mode", "Choose a listed request mode.");
 }
 
-function requestApproval(chat: Conversation, mode: ApprovalMode = "pending"): void {
-  if (busy(chat))
-    throw new Refusal(409, "busy", "Finish or stop the current reply before trying an approval.");
-  if (chat.approvalCount >= (mode === "replace" ? 19 : 20))
-    throw new Refusal(
-      409,
-      "approval_limit",
-      "This demo keeps 20 sample approvals. Restart the local server to clear them.",
-    );
-  const id = `sample-approval-${++chat.approvalCount}`;
-  const messageId = `host-${id}`;
-  const expiresAt = mode === "expire" ? Date.now() + 3000 : undefined;
-  const approval = { id, messageId, mode, expiresAt };
-  chat.approval = approval;
-  publish(chat, {
-    v: 1,
-    type: "message",
-    message: {
-      id: messageId,
-      role: "assistant",
-      state: "live",
-      parts: [
-        {
-          type: "approval",
-          id,
-          title: "Show the sample summary?",
-          state: "pending",
-          ...(expiresAt === undefined ? {} : { expiresAt }),
-          summary:
-            "This host-only simulation sends nothing and does not continue an SDK run. " +
-            (mode === "expire"
-              ? "It expires in 3 seconds."
-              : mode === "unknown"
-                ? "The decision reply will be lost. Reconnect to check the saved choice."
-                : mode === "replace"
-                  ? "Submitting a choice replaces this request with a new one, without applying the old choice."
-                  : "A choice takes 1.2 seconds to appear."),
-        },
-      ],
-    },
-  });
-  publish(chat, { v: 1, type: "run", run: { id: `approval-${id}`, messageId, status: "waiting" } });
-  if (expiresAt !== undefined)
-    void delay(3000).then(() => {
-      if (chat.approval === approval && chat.view.run.status === "waiting")
-        finishApproval(
-          chat,
-          approval,
-          "expired",
-          "This sample request expired. Start another sample approval to try again.",
-        );
-    });
-}
-
-function finishApproval(
-  chat: Conversation,
-  approval: NonNullable<Conversation["approval"]>,
-  state: "approved" | "denied" | "expired",
-  text: string,
-  status: "completed" | "stopped" = "completed",
-): void {
-  publish(chat, {
-    v: 1,
-    type: "part",
-    messageId: approval.messageId,
-    part: {
-      type: "approval",
-      id: approval.id,
-      title: "Show the sample summary?",
-      state,
-      summary: text,
-    },
-  });
-  const message = chat.view.messages.find((item) => item.id === approval.messageId);
-  if (message)
-    publish(chat, {
-      v: 1,
-      type: "message",
-      message: { ...message, state: status === "stopped" ? "stopped" : "settled" },
-    });
-  publish(chat, { v: 1, type: "run", run: { ...chat.view.run, status } });
-}
-
-async function respond(chat: Conversation, request: Request): Promise<void> {
-  const value = await json(request);
-  if (!isRecord(value) || !Array.isArray(value.answers) || value.answers.length !== 1)
-    throw new Refusal(400, "answer", "Answer one sample request at a time.");
-  const answer: unknown = value.answers[0];
-  const approval = chat.approval;
-  if (
-    !approval ||
-    !isRecord(answer) ||
-    answer.requestId !== approval.id ||
-    !isRecord(answer.response) ||
-    !["approve", "deny"].includes(String(answer.response.type))
-  )
-    throw new Refusal(
-      409,
-      "request",
-      "This sample request is no longer available. Check the conversation.",
-    );
-  if (
-    answer.response.message !== undefined &&
-    (typeof answer.response.message !== "string" || answer.response.message.length > 500)
-  )
-    throw new Refusal(400, "answer", "Keep the reply under 500 characters.");
-  const response: RequestResponse =
-    answer.response.type === "approve"
-      ? { type: "approve" }
-      : {
-          type: "deny",
-          ...(typeof answer.response.message === "string"
-            ? { message: answer.response.message }
-            : {}),
-        };
-  const decision = JSON.stringify(response);
-  if (approval.decision !== undefined) {
-    if (approval.decision !== decision)
-      throw new Refusal(
-        409,
-        "decision_conflict",
-        "This request already has a different answer. Check the conversation.",
-      );
-  } else {
-    if (
-      chat.view.run.status !== "waiting" ||
-      (approval.expiresAt !== undefined && Date.now() >= approval.expiresAt)
-    )
-      throw new Refusal(
-        409,
-        "expired",
-        "This request expired or stopped. Start another sample approval.",
-      );
-    approval.decision = decision;
-    if (approval.mode === "unknown") pause(chat);
-    approval.done = (async () => {
-      await delay(1200);
-      // Stop, expiry or replacement cannot revive a request when a late result arrives.
-      if (chat.view.run.status !== "waiting" || chat.approval !== approval) return;
-      if (approval.mode === "replace") {
-        finishApproval(
-          chat,
-          approval,
-          "expired",
-          "This request was replaced. Its choice was not applied. Use the new sample request below.",
-        );
-        requestApproval(chat);
-        return;
-      }
-      chat.stats.decisions += 1;
-      finishApproval(
-        chat,
-        approval,
-        response.type === "approve" ? "approved" : "denied",
-        response.type === "approve"
-          ? "Sample summary: bring a notebook at 10:00. Nothing was sent or booked."
-          : "Sample summary skipped. Nothing was sent or booked.",
-      );
-    })();
-  }
-  await approval.done;
-  if (approval.mode === "unknown")
-    throw new Refusal(
-      503,
-      "lost_decision_ack",
-      "The sample decision reply was lost. Reconnect to check the saved choice; do not submit it again.",
-    );
+function requestApproval(chat: Conversation, mode: ApprovalMode): void {
+  if (busy(chat)) throw new Refusal(409, "busy", "Finish or stop the current reply first.");
+  if (chat.stats.runs >= 20)
+    throw new Refusal(409, "run_limit", "Restart the local server to clear its 20 sample replies.");
+  startRun(
+    chat,
+    { clientId: crypto.randomUUID(), text: "Try questions, an approved card and a handoff." },
+    mode,
+  );
 }
 
 async function stop(chat: Conversation): Promise<void> {
-  const work = chat.work;
-  if (chat.view.run.status === "waiting" && chat.approval) {
-    finishApproval(
-      chat,
-      chat.approval,
-      "expired",
-      "This sample request was stopped. Start another sample approval to try again.",
-      "stopped",
-    );
-  } else if (busy(chat) && work && work.id === chat.view.run.id) {
-    work.controller.abort();
-    await work.done;
-  }
-  await delay(350); // Make the command's pending state visible, even on loopback.
+  if (busy(chat)) await chat.work?.stop();
+  await delay(350);
 }
 
 async function upload(chat: Conversation, request: Request): Promise<Response> {
@@ -669,11 +497,18 @@ const server = Bun.serve({
         if (request.headers.get("X-Demo-Request") !== "1")
           throw new Refusal(403, "local_only", "Use the local demo page to make this request.");
         const match =
-          /^\/api\/(alex|sam)\/(visit|notes)\/(events|state|stats|send|respond|stop|upload|approval|disconnect|connect|history|fixtures|sample-image)$/.exec(
+          /^\/api\/(alex|sam)\/(visit|notes)\/(events|state|stats|send|respond|stop|upload|approval|claim|execute|complete|enqueue|recall|disconnect|connect|history|fixtures|sample-image)$/.exec(
             url.pathname,
           );
         if (!match)
           throw new Refusal(404, "not_found", "This demo page does not exist. Open the home page.");
+        // Synthetic profile selection, not authentication. A production host reads its session.
+        if (request.headers.get("X-Demo-Profile") !== match[1])
+          throw new Refusal(
+            403,
+            "profile",
+            "This request does not match the selected demo profile.",
+          );
         const chat = conversation(`${match[1]}/${match[2]}`);
         const action = match[3];
         if (request.method === "GET" && action === "events") response = observe(chat, request, url);
@@ -698,9 +533,41 @@ const server = Bun.serve({
           throw new Refusal(405, "method", "Use the demo controls for this action.");
         else if (action === "send") response = await send(chat, request, url);
         else if (action === "upload") response = await upload(chat, request);
-        else {
+        else if (
+          ["claim", "execute", "complete", "enqueue", "recall", "respond"].includes(action ?? "")
+        ) {
+          const value = await json(request);
+          const work = chat.work;
+          if (!work) throw new Refusal(409, "run", "Start a sample reply first.");
+          if (action === "respond") {
+            await work.respond(value);
+            response = new Response(null, { status: 204 });
+          } else if (action === "claim") {
+            if (!isRecord(value) || value.segment !== chat.segment)
+              throw new Refusal(409, "segment", "This action view is stale. Check for updates.");
+            response = Response.json(work.claim(value));
+          } else if (action === "enqueue") {
+            const input = parseInput(value, chat);
+            // Upload bytes remain discarded. Only their already-validated synthetic names are input.
+            const text = [input.text, ...(input.attachments ?? []).map((file) => `[${file.name}]`)]
+              .filter(Boolean)
+              .join("\n");
+            response = Response.json(
+              work.enqueue(input.clientId, text, isRecord(value) ? value.rootRunId : undefined),
+            );
+          } else if (action === "recall") {
+            response = Response.json(
+              work.recall(
+                isRecord(value) ? value.id : undefined,
+                isRecord(value) ? value.rootRunId : undefined,
+              ),
+            );
+          } else
+            response = Response.json(
+              work.action(value, action === "complete", url.searchParams.get("lose") === "1"),
+            );
+        } else {
           if (action === "stop") await stop(chat);
-          else if (action === "respond") await respond(chat, request);
           else if (action === "approval") requestApproval(chat, approvalMode(url));
           else if (action === "history") await loadHistory(chat, url);
           else if (action === "fixtures") {

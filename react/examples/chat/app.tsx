@@ -14,6 +14,8 @@ import {
   Conversation,
   MessageList,
   RunStatusDisplay,
+  InputStatusList,
+  SchemaForm,
   type ApprovalActions,
   type ConversationLabelOverrides,
   type MessageRenderers,
@@ -22,6 +24,7 @@ import { Markdown } from "@providerkit/react/markdown";
 import type { SourcePart } from "@providerkit/react/protocol";
 import "@providerkit/react/styles.css";
 import "./host.css";
+import { clientActions } from "./client-actions.ts";
 import { browserDrafts, rememberDraft, remembersDraft } from "./drafts.ts";
 import { copyPasteSample, EarlierHistory, SampleImage, SampleTool } from "./fixtures.tsx";
 import { fixtureMessageId, pasteText, sampleImageId, sampleToolId } from "./samples.ts";
@@ -57,7 +60,7 @@ const labels: ConversationLabelOverrides = {
     lost: "Live updates disconnected",
   },
   reconnect: "Reconnect",
-  approve: "Show summary",
+  approve: "Approve card",
   deny: "Skip",
 };
 const toolLabels = {
@@ -67,19 +70,40 @@ const toolLabels = {
 };
 const specialistLabels = { facts: "Fact checker", format: "Plan checker" };
 
-function HostApproval({ disabled, onRespond, state }: ApprovalActions) {
+function HostApproval({
+  disabled,
+  onRespond,
+  state,
+  request,
+  value,
+  onValueChange,
+}: ApprovalActions) {
+  const edit = request.part.type === "approval" ? request.part.edit : undefined;
+  const arguments_ = isRecord(value.data) ? value.data : edit?.value;
   return (
     <div className="host-approval-actions">
-      <p>This choice changes only the sample shown here.</p>
+      <p>Approve the label first. The card is created only when you choose Run action afterward.</p>
+      {edit && (
+        <SchemaForm
+          schema={edit.schema}
+          value={arguments_ ?? {}}
+          onChange={(data) => onValueChange({ data })}
+          disabled={disabled}
+          unsupported="This form cannot be edited here. Skip this request."
+          chooseLabel="Choose"
+          trueLabel="Yes"
+          falseLabel="No"
+        />
+      )}
       <button
         type="button"
         disabled={disabled}
-        onClick={() => void onRespond?.({ type: "approve" })}
+        onClick={() => void onRespond?.({ type: "approve", arguments: arguments_ })}
       >
-        {state === "submitting" ? "Saving choice..." : "Show sample summary"}
+        {state === "submitting" ? "Saving choice..." : "Approve this label"}
       </button>
       <button type="button" disabled={disabled} onClick={() => void onRespond?.({ type: "deny" })}>
-        Skip summary
+        Skip card
       </button>
     </div>
   );
@@ -102,7 +126,7 @@ const renderSummary: NonNullable<MessageRenderers["renderPart"]> = (part) => {
 };
 const hostApproval: MessageRenderers["renderApproval"] = (actions) => <HostApproval {...actions} />;
 
-function useRenderers(scope: DraftScope, hostStyled: boolean) {
+function useRenderers(scope: DraftScope) {
   const renderPart = useCallback<NonNullable<MessageRenderers["renderPart"]>>(
     (part, context) => {
       if (context.message.id === fixtureMessageId) {
@@ -144,7 +168,7 @@ function useRenderers(scope: DraftScope, hostStyled: boolean) {
       toolLabels,
       specialistLabels,
       onSource: openSource,
-      renderApproval: hostStyled ? hostApproval : undefined,
+      renderApproval: hostApproval,
     },
   };
 }
@@ -171,12 +195,10 @@ function SourceDetail({ source, close }: { source?: SourcePart; close: () => voi
 function Observer({
   scope,
   mode,
-  hostStyled,
   close,
 }: {
   scope: DraftScope;
   mode: TransportMode;
-  hostStyled: boolean;
   close: () => void;
 }) {
   const transport = useMemo(() => {
@@ -189,7 +211,7 @@ function Observer({
     transport,
     reconnect: { attempts: 0 },
   });
-  const { source, closeSource, renderers } = useRenderers(scope, hostStyled);
+  const { source, closeSource, renderers } = useRenderers(scope);
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     heading.current?.focus();
@@ -217,6 +239,7 @@ function Observer({
       >
         <ConnectionStatusDisplay />
         <MessageList readOnly {...renderers} renderApproval={undefined} />
+        <InputStatusList />
         <RunStatusDisplay />
       </Conversation>
       <SourceDetail source={source} close={closeSource} />
@@ -241,6 +264,8 @@ function App() {
   const [sendMode, setSendMode] = useState<SendMode>("normal");
   const [uploadMode, setUploadMode] = useState<UploadMode>("normal");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("pending");
+  const [gap, setGap] = useState(false);
+  const [loseActionReply, setLoseActionReply] = useState(false);
   const [draftFailure, setDraftFailure] = useState(false);
   const failDraftSave = useRef(false);
   // Keep the adapter identity stable so changing a fixture does not replace the open draft.
@@ -255,11 +280,20 @@ function App() {
     [],
   );
   const transport = useMemo(() => {
-    const http = sseTransport(scope, sendMode);
+    const http = sseTransport(scope, sendMode, gap);
     return mode === "port" ? portTransport(http) : http;
-  }, [scope, mode, sendMode]);
+  }, [scope, mode, sendMode, gap]);
   const attachments = useMemo(() => attachmentOptions(scope, uploadMode), [scope, uploadMode]);
-  const chat = useChat({ id: draftScopeKey(scope), transport, reconnect: { attempts: 0 } });
+  const clientTools = useMemo(
+    () => clientActions(scope, loseActionReply),
+    [scope, loseActionReply],
+  );
+  const chat = useChat({
+    id: draftScopeKey(scope),
+    transport,
+    clientTools,
+    reconnect: { attempts: 0 },
+  });
   const [remember, setRemember] = useState(() => remembersDraft(scope));
   const composer = useComposer({
     scope,
@@ -276,7 +310,7 @@ function App() {
   const [stats, setStats] = useState<Record<string, number>>();
   const actionBusy = useRef(false);
   const leaving = useRef(false);
-  const { source, closeSource, renderers } = useRenderers(scope, hostStyled);
+  const { source, closeSource, renderers } = useRenderers(scope);
   const hasDraft = Boolean(
     composer.text || composer.attachments.length || composer.draft.missingFiles,
   );
@@ -362,7 +396,7 @@ function App() {
         <h1>Try a chat without a model</h1>
         <p>
           Scripted replies and fictional records. Reload or close a view without starting the reply
-          again.
+          again. Demo profiles do not sign you in. Restarting this local server clears its work.
         </p>
       </header>
       <div className="settings" aria-label="Example settings">
@@ -477,27 +511,45 @@ function App() {
               </select>
             </label>
             <label>
-              Approval response
+              Request response
               <select
                 value={approvalMode}
                 onChange={(event) => {
                   const value = event.target.value;
-                  if (
-                    value === "pending" ||
-                    value === "expire" ||
-                    value === "unknown" ||
-                    value === "replace"
-                  )
+                  if (value === "pending" || value === "expire" || value === "unknown")
                     setApprovalMode(value);
                 }}
               >
-                <option value="pending">Pending, then show the saved choice</option>
-                <option value="expire">Expire in 3 seconds</option>
-                <option value="unknown">Lose decision acknowledgement</option>
-                <option value="replace">Replace when answered</option>
+                <option value="pending">Normal request delivery</option>
+                <option value="expire">Expire the first questions in 3 seconds</option>
+                <option value="unknown">Lose answer acknowledgement</option>
               </select>
             </label>
           </div>
+          <label className="remember">
+            <input
+              type="checkbox"
+              checked={gap}
+              onChange={(event) => setGap(event.target.checked)}
+            />
+            Omit part of the next scripted reply
+          </label>
+          <p className="hint">
+            Synthetic missing-progress fixture, not a database test. Send a normal message. Its
+            valid prefix stays marked incomplete until a saved answer arrives.
+          </p>
+          <label className="remember">
+            <input
+              type="checkbox"
+              checked={loseActionReply}
+              onChange={(event) => setLoseActionReply(event.target.checked)}
+            />
+            Lose the card action reply after creating it
+          </label>
+          <p className="hint">
+            After Run action, use Check action result, reload, or open a second tab. The host
+            recovers the same recorded card without creating another.
+          </p>
           <label className="remember">
             <input
               type="checkbox"
@@ -539,21 +591,24 @@ function App() {
             <button
               className="demo-button"
               type="button"
-              disabled={Boolean(pending) || !chat.canSend}
+              disabled={
+                Boolean(pending) || chat.run.status === "running" || chat.run.status === "waiting"
+              }
               onClick={() =>
                 void action(
-                  "Opening approval",
+                  "Starting request example",
                   () => command(scope, "approval", { mode: approvalMode }),
-                  "The sample request is ready in the conversation.",
+                  "The script is preparing two questions in the conversation.",
                 )
               }
             >
-              Try a sample approval
+              Try questions, card and handoff
             </button>
           </div>
           <p className="hint">
-            Approvals here are host-only display requests, separate from the two-specialist SDK run.
-            They do not prove SDK continuation.
+            These are real SDK requests with offline scripts. Answer one question at a time, edit or
+            deny the card, then watch the visit helper take over. Send a message while it prepares
+            to see delivery change. Recall is refused once the host has offered it to the agent.
           </p>
           <div className="actions">
             <button
@@ -651,6 +706,7 @@ function App() {
                 </button>
               }
             />
+            <InputStatusList />
             <RunStatusDisplay />
             <Composer
               key={draftScopeKey(scope)}
@@ -731,7 +787,6 @@ function App() {
           <Observer
             scope={scope}
             mode={mode}
-            hostStyled={hostStyled}
             close={() => {
               setObserverOpen(false);
               observerButton.current?.focus();
@@ -782,7 +837,12 @@ function App() {
               runs: "Replies started",
               modelCalls: "Scripted provider calls",
               toolCalls: "Sample tool calls",
-              decisions: "Choices applied",
+              decisions: "Request answers saved",
+              continuations: "SDK continuations claimed",
+              clientEffects: "Sample cards created",
+              clientCompletions: "Client completions confirmed",
+              reservations: "Messages offered to the agent",
+              gaps: "Synthetic progress gaps",
               observers: "Open observers",
               events: "Stored display updates",
             }).map(([key, label]) => (

@@ -10,6 +10,7 @@ import {
   type ChatEvent,
   type Cursor,
 } from "@providerkit/react/protocol";
+import { checkFlow } from "./check-flow.ts";
 import { portTransport } from "./transport.ts";
 import { isRecord } from "./shared.ts";
 import {
@@ -37,13 +38,18 @@ const child = Bun.spawn(
     stderr: "inherit",
   },
 );
-const timeout = setTimeout(() => child.kill(), 45000);
+const timeout = setTimeout(() => child.kill(), 90000);
 let base = "";
 
 async function request(path: string, body?: unknown, headers?: HeadersInit): Promise<Response> {
   return fetch(new URL(path, base), {
     method: body === undefined ? "GET" : "POST",
-    headers: { "X-Demo-Request": "1", "Content-Type": "application/json", ...headers },
+    headers: {
+      "X-Demo-Request": "1",
+      "X-Demo-Profile": path.split("/")[2] ?? "",
+      "Content-Type": "application/json",
+      ...headers,
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
@@ -54,13 +60,6 @@ async function state() {
   const event = parseChatEvent(await response.json());
   assert(event?.type === "snapshot");
   return event;
-}
-async function pendingApproval() {
-  const approval = (await state()).messages
-    .flatMap((message) => message.parts)
-    .find((part) => part.type === "approval" && part.state === "pending");
-  assert(approval?.type === "approval");
-  return approval;
 }
 async function counters() {
   const value: unknown = await (await request(`${path}/stats`)).json();
@@ -250,84 +249,7 @@ try {
     "text/plain; charset=utf-8",
   );
 
-  // Host display approvals are deliberately separate from the SDK specialist run.
-  assert.equal((await request(`${path}/approval`, {})).status, 204);
-  const approval = await pendingApproval();
-  const answers = { answers: [{ requestId: approval.id, response: { type: "approve" } }] };
-  const decisions = await Promise.all([
-    request(`${path}/respond`, answers),
-    request(`${path}/respond`, answers),
-  ]);
-  assert(decisions.every((reply) => reply.status === 204));
-  assert.equal((await request(`${path}/respond`, answers)).status, 204);
-  assert.equal(
-    (
-      await request(`${path}/respond`, {
-        answers: [{ requestId: approval.id, response: { type: "deny" } }],
-      })
-    ).status,
-    409,
-  );
-  assert.equal((await counters()).decisions, 1);
-  assert.equal((await counters()).modelCalls, 6);
-
-  assert.equal((await request(`${path}/approval?mode=expire`, {})).status, 204);
-  const expiring = await pendingApproval();
-  assert.equal(typeof expiring.expiresAt, "number");
-  await until(async () => (await state()).run.status === "completed");
-  assert.equal(
-    (
-      await request(`${path}/respond`, {
-        answers: [{ requestId: expiring.id, response: { type: "approve" } }],
-      })
-    ).status,
-    409,
-  );
-  assert.equal((await counters()).decisions, 1);
-
-  assert.equal((await request(`${path}/approval?mode=replace`, {})).status, 204);
-  const replaced = await pendingApproval();
-  const replaceAnswer = { answers: [{ requestId: replaced.id, response: { type: "approve" } }] };
-  const replacements = await Promise.all([
-    request(`${path}/respond`, replaceAnswer),
-    request(`${path}/respond`, replaceAnswer),
-  ]);
-  assert(replacements.every((reply) => reply.status === 204));
-  const replacement = await pendingApproval();
-  assert.notEqual(replacement.id, replaced.id);
-  assert(
-    (await state()).messages
-      .flatMap((message) => message.parts)
-      .some(
-        (part) => part.id === replaced.id && part.type === "approval" && part.state === "expired",
-      ),
-  );
-  assert.equal((await request(`${path}/respond`, replaceAnswer)).status, 409);
-  assert.equal((await counters()).decisions, 1, "Replacing a pending choice must not apply it.");
-  assert.equal((await request(`${path}/stop`, {})).status, 204);
-
-  assert.equal((await request(`${path}/approval?mode=unknown`, {})).status, 204);
-  const uncertain = await pendingApproval();
-  const uncertainAnswer = { answers: [{ requestId: uncertain.id, response: { type: "approve" } }] };
-  assert.equal((await request(`${path}/respond`, uncertainAnswer)).status, 503);
-  assert.equal((await request(`${path}/events?once=1`)).status, 503);
-  assert.equal((await counters()).decisions, 2);
-  assert.equal((await request(`${path}/respond`, uncertainAnswer)).status, 503);
-  assert.equal(
-    (await counters()).decisions,
-    2,
-    "A lost decision reply must not apply the choice twice.",
-  );
-  assert.equal((await request(`${path}/connect`, {})).status, 204);
-  const recovered = (await events()).reduce(reduceChat, emptyChatView());
-  assert(
-    recovered.messages
-      .flatMap((message) => message.parts)
-      .some(
-        (part) => part.id === uncertain.id && part.type === "approval" && part.state === "approved",
-      ),
-  );
-  assert.equal((await counters()).modelCalls, 6, "No approval fixture continues an SDK run.");
+  await checkFlow({ base, request, state, counters, events, until });
 
   assert.equal(
     (await request(`${path}/send`, { clientId: "stop-this-run", text: "Stop test" })).status,
@@ -350,7 +272,11 @@ try {
     fetch: (input, init) =>
       fetch(input, {
         ...init,
-        headers: { ...Object.fromEntries(new Headers(init?.headers)), "X-Demo-Request": "1" },
+        headers: {
+          ...Object.fromEntries(new Headers(init?.headers)),
+          "X-Demo-Request": "1",
+          "X-Demo-Profile": "sam",
+        },
       }),
   });
   const client = createChatClient({ transport: portTransport(http), reconnect: { attempts: 0 } });
@@ -388,7 +314,7 @@ try {
   const lateUpload = await fetch(new URL(`${path}/upload`, base), {
     method: "POST",
     body: new Blob(["DISCARD_UPLOAD_BODY_SAMPLE"], { type: "text/plain" }),
-    headers: { "X-Demo-Request": "1", "X-Demo-Upload": "late" },
+    headers: { "X-Demo-Request": "1", "X-Demo-Profile": "alex", "X-Demo-Upload": "late" },
   });
   assert.equal(lateUpload.status, 200);
   const lateReference: unknown = await lateUpload.json();
@@ -406,13 +332,13 @@ try {
   const failedUpload = await fetch(new URL(`${path}/upload`, base), {
     method: "POST",
     body: file,
-    headers: { "X-Demo-Request": "1", "X-Demo-Upload": "fail" },
+    headers: { "X-Demo-Request": "1", "X-Demo-Profile": "alex", "X-Demo-Upload": "fail" },
   });
   assert.equal(failedUpload.status, 503);
   const upload = await fetch(new URL(`${path}/upload`, base), {
     method: "POST",
     body: file,
-    headers: { "X-Demo-Request": "1" },
+    headers: { "X-Demo-Request": "1", "X-Demo-Profile": "alex" },
   });
   assert.equal(upload.status, 200);
   const reference: unknown = await upload.json();
@@ -425,7 +351,7 @@ try {
   );
   assert.equal((await request(`${path}/stop`, {})).status, 204);
   console.log(
-    "PASS: HTTP replay, two specialists, idempotent sends/decisions/history/fixtures, observer close, Stop, SDK projection privacy, bounded local image, discarded late upload contents, approval expiry/replacement/unknown delivery, unknown port send, preserved draft and attachment-only upload. Layout and focus still require a browser.",
+    "PASS: HTTP replay, two specialists, idempotent sends/history/fixtures, observer close, Stop, SDK projection privacy, bounded local image, discarded late upload contents, real SDK partial requests/corrections/denial/expiry/Stop, exclusive continuations, approved client input, claimed action reconciliation, handoff ownership, reserved inbox recall, late input, synthetic progress gap, unknown port send, preserved draft and attachment-only upload. Layout and focus still require a browser.",
   );
 } finally {
   clearTimeout(timeout);

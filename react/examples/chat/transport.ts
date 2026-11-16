@@ -21,19 +21,47 @@ import {
 export const demoFetch: FetchLike = (input, init) => {
   const headers = new Headers(init?.headers);
   headers.set("X-Demo-Request", "1");
+  const path =
+    typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
+  const profile = /\/api\/(alex|sam)\//.exec(path)?.[1];
+  if (profile) headers.set("X-Demo-Profile", profile);
   return fetch(input, { ...init, headers });
 };
 
-export function sseTransport(scope: DraftScope, mode: SendMode): ChatTransport {
+export function sseTransport(scope: DraftScope, mode: SendMode, gap = false): ChatTransport {
   const base = apiPath(scope);
-  return createSseTransport({
-    fetch: demoFetch,
-    send: () => `${base}/send?mode=${mode}`,
-    observe: (cursor) =>
-      `${base}/events${cursor ? `?after=${encodeURIComponent(JSON.stringify(cursor))}` : ""}`,
-    respond: () => `${base}/respond`,
-    stop: () => `${base}/stop`,
-  });
+  const receipt: NonNullable<ChatTransport["enqueue"]> = async (input, { signal }) => {
+    return inputReceipt("enqueue", input, signal);
+  };
+  async function inputReceipt(action: string, input: unknown, signal: AbortSignal) {
+    const response = await demoFetch(`${base}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal,
+    });
+    if (!response.ok)
+      throw new TransportError(response.status < 500 ? "refused" : "unknown", {
+        code: "demo_input",
+        message: await errorMessage(response),
+      });
+    const event = parseChatEvent({ v: 1, type: "input", input: await response.json() });
+    if (event?.type !== "input")
+      throw new Error("The delivery reply was incomplete. Check for updates before sending again.");
+    return event.input;
+  }
+  return {
+    ...createSseTransport({
+      fetch: demoFetch,
+      send: () => `${base}/send?mode=${mode}${gap ? "&gap=1" : ""}`,
+      observe: (cursor) =>
+        `${base}/events${cursor ? `?after=${encodeURIComponent(JSON.stringify(cursor))}` : ""}`,
+      respond: () => `${base}/respond`,
+      stop: () => `${base}/stop`,
+    }),
+    enqueue: receipt,
+    recallInput: (input, { signal }) => inputReceipt("recall", input, signal),
+  };
 }
 
 export async function command(
@@ -112,7 +140,7 @@ type PortReply =
 /** A real MessageChannel, with no Chrome APIs. Its other end wraps the SAME local HTTP host.
  * Only transport changes; createChatClient still owns all conversation and command state. */
 export function portTransport(http: ChatTransport): ChatTransport {
-  const { observe, send, respond, stop } = http;
+  const { observe, send, respond, stop, enqueue, recallInput } = http;
   if (!observe || !send || !respond || !stop)
     throw new Error("The demo port requires all four local HTTP methods.");
   async function* exchange(
@@ -187,7 +215,29 @@ export function portTransport(http: ChatTransport): ChatTransport {
       /* Commands in this host return an empty acknowledgement. */
     }
   }
+  async function inputReply(
+    work: (signal: AbortSignal) => Promise<import("@providerkit/react/protocol").DisplayInput>,
+    signal: AbortSignal,
+  ) {
+    const events = exchange(async function* (signal) {
+      yield { v: 1, type: "input", input: await work(signal) };
+    }, signal);
+    for await (const event of events) if (event.type === "input") return event.input;
+    throw new Error(
+      "The message-port reply was incomplete. Check for updates before sending again.",
+    );
+  }
   return {
+    ...(enqueue &&
+      ({
+        enqueue: (input, options) =>
+          inputReply((signal) => enqueue(input, { signal }), options.signal),
+      } satisfies Pick<ChatTransport, "enqueue">)),
+    ...(recallInput &&
+      ({
+        recallInput: (input, options) =>
+          inputReply((signal) => recallInput(input, { signal }), options.signal),
+      } satisfies Pick<ChatTransport, "recallInput">)),
     observe: (options) => exchange((signal) => observe({ ...options, signal }), options.signal),
     send: (input, options) => drain(exchange((signal) => send(input, { signal }), options.signal)),
     respond: (answers, options) =>

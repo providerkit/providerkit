@@ -159,6 +159,9 @@ export interface AgentProjector {
    * decision would look like it was running again.
    */
   event(event: AgentEvent, meta?: Pick<ChatEnvelope, "seq" | "segment">): ChatEvent[];
+  /** Call for host RunEvent records agent.gap or agent.resync, then read the journal.
+   * Text remains checkpoint-only for this projector after a gap. Never invent an attempt. */
+  gap(meta?: Pick<ChatEnvelope, "seq" | "segment">): ChatEvent[];
   /** The message as the saved run has it, with the same row ids the live events use. */
   snapshot(snapshot: RunSnapshot): DisplayMessage;
   /** The run as the saved run has it. */
@@ -475,6 +478,21 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
   >();
   const textShown = new Map<string, boolean>();
   const streaming = new Map<string, TextPart>();
+  // Progress can seal a turn before its checkpoint. Only the journal removes it from this map.
+  const uncheckpointed = new Map<string, TextPart>();
+  let checkpointOnly = false;
+
+  function gap(meta: Pick<ChatEnvelope, "seq" | "segment"> = {}): ChatEvent[] {
+    checkpointOnly = true;
+    const out: ChatEvent[] = [];
+    for (const text of uncheckpointed.values()) {
+      text.incomplete = true;
+      out.push({ v, type: "part", messageId, part: { ...text } });
+    }
+    const last = out.at(-1);
+    if (last) out[out.length - 1] = { ...last, ...meta };
+    return out;
+  }
   const running = new Map<string, { runId: string; part: ToolPart }>();
   const requests = new Map<string, AskRecord>();
   const operations = new Map<
@@ -646,14 +664,18 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       streaming.delete(speaker);
       const operation = operations.get(open.id);
       if (operation) operation.completed = true;
-      part({ ...open, settled: true });
+      open.settled = true;
+      part({ ...open });
     }
 
     switch (agentEvent.type) {
       case "operation_restart":
       case "model_chunk": {
         if (agentEvent.type === "operation_restart" && agentEvent.kind !== "model") break;
-        const content = agentEvent.type === "model_chunk" ? (agentEvent.chunk.content ?? "") : "";
+        const content =
+          !checkpointOnly && agentEvent.type === "model_chunk"
+            ? (agentEvent.chunk.content ?? "")
+            : "";
         if (!shows(speaker)) break;
         const current = streaming.get(speaker);
         if (
@@ -672,13 +694,15 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
               ...(attempt !== undefined && attempt > 1 && { attempt }),
             });
           }
-        } else if (content || (attempt !== undefined && attempt > 1)) {
+        } else if (content || checkpointOnly || (attempt !== undefined && attempt > 1)) {
           const created = {
             ...textPart(agentEvent.operationId, content, false, ownerOf(speaker)),
             ...(attempt !== undefined && attempt > 1 && { attempt }),
+            ...(checkpointOnly && { incomplete: true }),
           };
-          streaming.set(speaker, { ...created });
-          part(created);
+          streaming.set(speaker, created);
+          uncheckpointed.set(created.id, created);
+          part({ ...created });
         }
         break;
       }
@@ -789,7 +813,10 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           part(agentPart(speaker, specialist.agentId, specialist.parentId, STATUS[state.status]));
           break;
         }
-        for (const text of streaming.values()) part({ ...text, settled: true });
+        for (const text of streaming.values()) {
+          text.settled = true;
+          part({ ...text });
+        }
         streaming.clear();
         if (state.status === "running") {
           if (status !== "running") {
@@ -864,16 +891,29 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         });
         if (model.status === "running") {
           // Even empty text names the saved attempt, replacing partial output from an old one.
-          if (shown && attempt > 1)
-            parts.push({ ...textPart(model.id, "", ended, owner), attempt });
+          if (shown && (attempt > 1 || checkpointOnly)) {
+            const prefix = uncheckpointed.get(model.id);
+            parts.push({
+              ...textPart(
+                model.id,
+                checkpointOnly && (prefix?.attempt ?? 1) === attempt ? (prefix?.text ?? "") : "",
+                ended,
+                owner,
+              ),
+              ...(attempt > 1 && { attempt }),
+              ...(checkpointOnly && { incomplete: true }),
+            });
+          }
           const live = streaming.get(node.runId);
           if (live && (live.id !== model.id || (live.attempt ?? 1) !== attempt))
             streaming.delete(node.runId);
           continue;
         }
+        uncheckpointed.delete(model.id);
         if (streaming.get(node.runId)?.id === model.id) streaming.delete(node.runId);
         const { content, toolCalls = [] } = model.turn.message;
-        if (shown && content)
+        // A tool-only turn must also settle a gap or restart placeholder while its tools wait.
+        if (shown && (content || attempt > 1 || checkpointOnly))
           parts.push({
             ...textPart(model.id, content, true, owner),
             ...(attempt > 1 && { attempt }),
@@ -992,6 +1032,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
 
   return Object.freeze({
     event,
+    gap,
     snapshot,
     inputs,
     run: (saved: RunSnapshot) => ({

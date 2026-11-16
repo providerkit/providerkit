@@ -53,6 +53,7 @@ export interface ConversationLabels {
   loadFailed: string;
   jumpToLatest: string;
   messageReady: string;
+  incompleteText: string;
   role: Record<MessageRole, string>;
   message: Record<MessageState, string>;
   run: Record<RunStatus, string>;
@@ -114,6 +115,7 @@ export const defaultConversationLabels: ConversationLabels = {
   loadFailed: "Messages could not be loaded. Check your connection.",
   jumpToLatest: "Jump to latest",
   messageReady: "Message ready.",
+  incompleteText: "Part of this reply is missing. Check for updates to recover the saved answer.",
   role: { user: "You", assistant: "Assistant" },
   message: {
     sending: "Sending...",

@@ -129,6 +129,7 @@ function upsertPart(parts: readonly DisplayPart[], part: DisplayPart): readonly 
   if (held.type === "text" && part.type === "text") {
     if ((part.attempt ?? 1) < (held.attempt ?? 1)) return parts;
     if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
+    if (held.incomplete && !part.incomplete) return parts;
   }
   if (isSettled(held) && !isSettled(part)) return parts;
   return sameData(held, part) ? parts : replaceAt(parts, index, part);
@@ -161,6 +162,14 @@ function reconcile(
   const parts = incoming.parts.map((part) => {
     const mine = local.get(part.id);
     if (!mine) return part;
+    if (
+      mine.type === "text" &&
+      part.type === "text" &&
+      part.incomplete &&
+      (mine.attempt ?? 1) === (part.attempt ?? 1) &&
+      mine.text.startsWith(part.text)
+    )
+      return keep(mine, { ...part, text: mine.text });
     return keepLive && isAhead(mine, part) ? mine : keep(mine, part);
   });
   if (keepLive) {
@@ -269,7 +278,13 @@ function applyText(
   if (!message || !delta || isFinal(message)) return messages;
   const at = indexOfId(message.parts, partId);
   const part = message.parts[at];
-  if (!part || part.type !== "text" || part.settled || (part.attempt ?? 1) !== attempt)
+  if (
+    !part ||
+    part.type !== "text" ||
+    part.settled ||
+    part.incomplete ||
+    (part.attempt ?? 1) !== attempt
+  )
     return messages;
   const parts = replaceAt(message.parts, at, { ...part, text: part.text + delta });
   return replaceAt(messages, index, { ...message, parts });

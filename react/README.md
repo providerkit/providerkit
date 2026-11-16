@@ -322,6 +322,36 @@ attempts. Feed the retained log before that read, not after it. Keep logical `ru
 physical `segment` and its cursor. Browser input never chooses either execution routing or snapshot
 authority.
 
+### Recover missing progress
+
+```ts
+projector.gap();
+```
+
+Call this when the host observes `agent.gap` or `agent.resync`. These are `/runs` **RunEvent**
+records, not SDK `AgentEvent` values. Do not cast their payloads into `projector.event`.
+
+The host recipe is:
+
+1. Read the retained log in order. Project `agent` records normally. At a gap or resync, publish
+   the events returned by `projector.gap({ segment, seq })` before reading more progress.
+2. Read the authoritative execution journal after that prefix. Publish a display snapshot built
+   with `projector.snapshot(saved)`, `projector.run(saved)` and the host's full conversation and
+   input receipts. Keep the same message, logical run and physical segment identities.
+3. Continue after the recorded cursor, reconciling again at checkpoints and at the end. The
+   projector now takes text from checkpoints only for the rest of this logical run. Later deltas
+   cannot prove they include the missing span. Requests and other activity still update.
+
+A retained prefix has `TextPart.incomplete: true`. The reducer blocks deltas and ordinary patches
+from clearing that flag; an authoritative completed text snapshot can clear it. A running snapshot
+with no complete text keeps the prefix visibly incomplete, including after Stop. A real restarted
+attempt replaces only that operation's old prefix, still waiting for its complete checkpoint.
+The components show a missing-text notice even with a custom `renderText`; plain-data renderers
+must show it too. This does not start an attempt, change a segment or discard a pending send.
+
+The example's missing-progress switch tests this boundary with a synthetic omission. It does not
+exercise PostgreSQL. Checkpoints recover completed work, not every partial token lost in a crash.
+
 ## Show who answers after a handoff
 
 `RunInfo.owner` holds `{ runId, agentId, label }` for the conversation's current owner. The root
@@ -544,9 +574,20 @@ Try these flows:
   conversation. Text and confirmed references expire after 24 hours; pending local files need
   reselection. Anyone using this browser can read saved drafts. Turning the option off deletes
   that scope's saved draft. Expired records are removed on the next access.
-- Try a sample approval. The host uses the existing `respond` interface and publishes its own
-  authoritative display updates, deduplicated by request ID. This is a separate host simulation,
-  not SDK approval continuation. Connecting the SDK's new request journal is still pending.
+- Choose **Try questions, card and handoff**. Two real SDK `questionTool` requests wait together.
+  Answer either first, try a one-letter text answer, then correct it. Edit the sample card's label
+  before approving, or skip it. Expiry replaces the first questions; Stop closes the run.
+- **Run action** uses `defineClientTool` and the public claim/complete handler contract. The host
+  binds a claim to the profile, conversation, run, saved request and approved label. The fictional
+  effect and its result are recorded in server memory before replying. **Lose the card action
+  reply** lets a reload or another tab recover that result without creating another card. No
+  claim is granted again just because its result is unknown. This one-process example is not
+  production authentication, durable storage or an exactly-once external-effect guarantee.
+- Watch the visit helper take over. Send a message while it prepares; `InputStatusList` shows
+  queued, accepted and consumed separately. Recall succeeds only before the host's poll reservation,
+  even if a stale view still says queued. Late unused input stays visible and starts no new run.
+- **Omit part of the next scripted reply** marks the retained prefix incomplete and withholds later
+  deltas until its saved text arrives. This is a synthetic host boundary fixture, not a database test.
 
 Conversations, uploads and work live only in server memory. Browser reloads do not restart them;
 restarting the server clears them. Demo profiles are not authentication. This is not a production
@@ -559,9 +600,11 @@ bun --no-env-file run --filter @providerkit/react example:check
 ```
 
 It starts its own Bun subprocess on a free loopback port and stops only that process. It checks
-cursor replay, reload, observer close versus Stop, duplicate sends and decisions, projection
-privacy, unknown delivery through the port transport, draft preservation and attachment-only
-uploads. It does not run in CI or in a general check script. Example types are checked by
+cursor replay, reload, observer close versus Stop, request-keyed evidence, partial answers,
+corrections, denial, expiry, exclusive continuations, claimed client effects and result recovery,
+handoff ownership, inbox reservation versus recall, late input and synthetic missing progress.
+It also keeps the projection privacy, unknown port delivery, draft preservation, history, media
+and attachment-only upload checks. It does not run in CI or in a general check script. Example types are checked by
 `typecheck:example`; package lint includes the example files.
 
 Browser acceptance remains separate: check desktop and phone layouts, both themes, reduced

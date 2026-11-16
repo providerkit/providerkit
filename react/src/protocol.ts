@@ -58,6 +58,9 @@ export interface TextPart {
   settled: boolean;
   /** Monotone attempt number from the host's operation journal. Absent means the first. */
   attempt?: number;
+  /** Progress is known to be missing. Keep the prefix visible, but do not append deltas.
+   * Only an authoritative snapshot or a genuinely new attempt can clear this flag. */
+  incomplete?: boolean;
   /** The id of the `agent` part for the specialist that wrote this text, for a host that shows
    * a specialist's words. Absent for the main assistant's own text. */
   agentId?: string;
@@ -407,7 +410,8 @@ function readText(id: string, fields: Fields): TextPart | null {
   if (!isText(fields.text) || !isFlag(fields.settled)) return null;
   const part: TextPart = { type: "text", id, text: fields.text, settled: fields.settled };
   return optional(part, "agentId", fields.agentId, isId) &&
-    optional(part, "attempt", fields.attempt, isAttempt)
+    optional(part, "attempt", fields.attempt, isAttempt) &&
+    optional(part, "incomplete", fields.incomplete, isFlag)
     ? part
     : null;
 }

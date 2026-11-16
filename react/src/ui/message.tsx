@@ -166,7 +166,16 @@ export function Message({
           content = null;
       }
     }
-    return <Fragment key={part.id}>{content}</Fragment>;
+    return (
+      <Fragment key={part.id}>
+        {content}
+        {part.type === "text" && part.incomplete && (
+          <p className="pk-message-error" data-part="incomplete-text" role="status">
+            {labels.incompleteText}
+          </p>
+        )}
+      </Fragment>
+    );
   }
   const parts = roots.map(draw);
   for (const part of message.parts) if (!rendered.has(part.id)) parts.push(draw(part));
