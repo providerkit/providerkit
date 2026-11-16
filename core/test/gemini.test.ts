@@ -3,11 +3,13 @@
 // builds. Same shape as providers.test.ts, plus the signal the fetch must see.
 import { describe, expect, it } from "vitest";
 import { ProviderError } from "../src/errors.ts";
+import type { HostedTool } from "../src/hosted.ts";
 import {
   antigravityUserAgent,
   createGeminiProvider,
   toGeminiContents,
 } from "../src/providers/gemini.ts";
+import { collectTurn } from "../src/turn.ts";
 import type {
   ChatMessage,
   Effort,
@@ -775,5 +777,345 @@ describe("antigravityUserAgent", () => {
     expect(antigravityUserAgent("antigravity/gemini-4-argon")).toContain("antigravity/cli/");
     expect(antigravityUserAgent("gemini-3.8-flash")).toContain("antigravity/ide/");
     expect(antigravityUserAgent("claude-opus-5-5")).toContain("antigravity/ide/");
+  });
+});
+
+// ── hosted tools ──────────────────────────────────────────────────────────
+
+const SOURCE_URL = "https://cats.example/sleep";
+/** The claim holds an emoji, so its UTF-8 byte offsets and its JS indices
+ *  part. It is said twice, so only offsets converted right find the second:
+ *  matching the text alone can't tell the two apart. */
+const CLAIM = "Cats 🐈 sleep 12 to 16 hours.";
+const ANSWER = `${CLAIM} Again: ${CLAIM}`;
+const SECOND = ANSWER.lastIndexOf(CLAIM);
+const bytes = (text: string) => new TextEncoder().encode(text).length;
+const secondClaim = {
+  startIndex: bytes(ANSWER.slice(0, SECOND)),
+  endIndex: bytes(ANSWER),
+  text: CLAIM,
+};
+
+/** A grounded answer: the text, then the metadata saying what it read and
+ *  which sentence each page backs, in bytes. */
+const groundedTurn = (segment: { startIndex?: number; endIndex: number; text: string }) => [
+  candidate([{ text: ANSWER.slice(0, 7) }]),
+  candidate([{ text: ANSWER.slice(7) }]),
+  j({
+    candidates: [
+      {
+        content: { parts: [] },
+        finishReason: "STOP",
+        groundingMetadata: {
+          webSearchQueries: ["how long do cats sleep"],
+          searchEntryPoint: { renderedContent: "<div>suggestions</div>" },
+          groundingChunks: [
+            { web: { uri: SOURCE_URL, title: "cats.example" } },
+            { web: { uri: SOURCE_URL, title: "cats.example" } },
+          ],
+          groundingSupports: [{ segment, groundingChunkIndices: [0] }],
+        },
+      },
+    ],
+    usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 20, toolUsePromptTokenCount: 400 },
+  }),
+];
+
+describe("gemini hosted tools", () => {
+  const search = { hostedTools: [{ type: "web_search" as const }] };
+  const fn: ToolDefinition = { name: "save", description: "save", inputSchema: { type: "object" } };
+
+  it("sends each built-in, and none of them when the tool choice is none", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider(fetchImpl).createStream(HI, [], {
+        hostedTools: [
+          { type: "web_search" },
+          { type: "web_fetch" },
+          { type: "code_execution" },
+          { type: "file_search", storeIds: ["fileSearchStores/cats"], maxResults: 3 },
+        ],
+      }),
+    );
+    expect(seen[0]!.body.tools).toEqual([
+      { googleSearch: {} },
+      { urlContext: {} },
+      { codeExecution: {} },
+      { fileSearch: { fileSearchStoreNames: ["fileSearchStores/cats"], topK: 3 } },
+    ]);
+    // `NONE` stops only function calls here, so `none` leaves the built-ins out.
+    const none = recorder(TEXT_TURN);
+    await collect(
+      provider(none.fetchImpl).createStream(HI, [fn], { ...search, toolChoice: "none" }),
+    );
+    expect(none.seen[0]!.body.tools).toEqual([
+      { functionDeclarations: [expect.objectContaining({ name: "save" })] },
+    ]);
+  });
+
+  it("asks Gemini 3 to run built-ins beside functions, and refuses the mix on Gemini 2", async () => {
+    const mixed = recorder(TEXT_TURN);
+    await collect(provider(mixed.fetchImpl).createStream(HI, [fn], search));
+    expect(mixed.seen[0]!.body.tools).toEqual([
+      { functionDeclarations: [expect.objectContaining({ name: "save" })] },
+      { googleSearch: {} },
+    ]);
+    expect(mixed.seen[0]!.body.toolConfig).toEqual({
+      functionCallingConfig: { mode: "VALIDATED" },
+      includeServerSideToolInvocations: true,
+    });
+
+    const old = recorder(TEXT_TURN);
+    await expect(
+      collect(
+        provider(old.fetchImpl, { model: "gemini-2.5-flash" }).createStream(HI, [fn], search),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(old.seen).toHaveLength(0);
+    // Without functions, Gemini 2 searches.
+    const alone = recorder(TEXT_TURN);
+    await collect(
+      provider(alone.fetchImpl, { model: "gemini-2.5-flash" }).createStream(HI, [], search),
+    );
+    expect(alone.seen[0]!.body.tools).toEqual([{ googleSearch: {} }]);
+  });
+
+  it("refuses every field Gemini can't apply, and every tool on Antigravity", async () => {
+    const refusals: [HostedTool, Record<string, unknown>?][] = [
+      [{ type: "web_search", allowedDomains: ["cats.example"] }],
+      [{ type: "web_fetch", maxUses: 1 }],
+      [{ type: "web_search", userLocation: { country: "US" } }],
+      [{ type: "code_execution", fileIds: ["file_1"] }],
+      [{ type: "image_generation" }],
+      [
+        { type: "web_search" },
+        { id: "antigravity", baseUrl: "https://cloudcode-pa.googleapis.com" },
+      ],
+    ];
+    for (const [tool, config] of refusals) {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await expect(
+        collect(provider(fetchImpl, config).createStream(HI, [], { hostedTools: [tool] })),
+      ).rejects.toMatchObject({ kind: "invalid" });
+      expect(seen).toHaveLength(0);
+    }
+  });
+
+  it("reads grounding as one search, its pages as sources, and each supported sentence as a claim", async () => {
+    const turn = await collectTurn(
+      provider(recorder(groundedTurn(secondClaim)).fetchImpl).createStream(HI, [], search),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "web_search",
+        status: "completed",
+        input: { query: "how long do cats sleep" },
+        // One page, cited twice by the chunks, is one source of the search.
+        output: {
+          sources: [{ type: "url", url: SOURCE_URL, title: "cats.example" }],
+          searchSuggestions: "<div>suggestions</div>",
+        },
+        at: 0,
+      },
+    ]);
+    const [citation] = turn.message.citations ?? [];
+    // Bytes became JS indices: the span lands on the second claim, not the first.
+    expect(citation).toMatchObject({ anchor: "claim", start: SECOND, end: ANSWER.length });
+    expect(turn.message.content.slice(citation?.start, citation?.end)).toBe(CLAIM);
+    // The prompt the search results added bills as input too.
+    expect(turn.usage).toMatchObject({ inputTokens: 450, hostedCalls: { web_search: 1 } });
+    // Nothing to send back: grounding is not a part of the model's turn.
+    expect(turn.message.hostedItems).toBeUndefined();
+    expect(turn.message.toolCalls).toBeUndefined();
+  });
+
+  it("places a segment Google reported a byte off by its text, and drops a span that checks out nowhere", async () => {
+    // A text said once places the citation even when its bytes are a byte off
+    // (PydanticAI google.py:2379-2384).
+    const unique = `Again: ${CLAIM}`;
+    const start = bytes(ANSWER.slice(0, ANSWER.indexOf(unique)));
+    const off = groundedTurn({ startIndex: start + 1, endIndex: bytes(ANSWER) + 1, text: unique });
+    const placed = await collectTurn(
+      provider(recorder(off).fetchImpl).createStream(HI, [], search),
+    );
+    const [citation] = placed.message.citations ?? [];
+    expect(placed.message.content.slice(citation?.start, citation?.end)).toBe(unique);
+
+    // The claim is said twice, so a byte off can't be placed: the span goes.
+    const twice = groundedTurn({ ...secondClaim, startIndex: secondClaim.startIndex + 1 });
+    const unplaced = await collectTurn(
+      provider(recorder(twice).fetchImpl).createStream(HI, [], search),
+    );
+    expect(unplaced.message.citations).toEqual([
+      { source: { type: "url", url: SOURCE_URL, title: "cats.example" } },
+    ]);
+
+    const nowhere = groundedTurn({ endIndex: 4, text: "words the answer never said" });
+    const kept = await collectTurn(
+      provider(recorder(nowhere).fetchImpl).createStream(HI, [], search),
+    );
+    expect(kept.message.citations).toEqual([
+      { source: { type: "url", url: SOURCE_URL, title: "cats.example" } },
+    ]);
+  });
+
+  it("pairs each code run with its result, keeping a timed-out run as data", async () => {
+    const code = [
+      candidate([{ text: "Running it. " }]),
+      candidate([
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\n" } },
+        { executableCode: { language: "PYTHON", code: "while True: pass" } },
+        { codeExecutionResult: { outcome: "OUTCOME_DEADLINE_EXCEEDED" } },
+      ]),
+      candidate([{ text: "Done." }], "STOP"),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(code).fetchImpl).createStream(HI, [], {
+        hostedTools: [{ type: "code_execution" }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "code_execution",
+        status: "completed",
+        input: { code: "print(34)", language: "python" },
+        output: { stdout: "34\n" },
+        at: 12,
+      },
+      {
+        id: "hosted_1",
+        type: "code_execution",
+        status: "failed",
+        input: { code: "while True: pass", language: "python" },
+        error: "OUTCOME_DEADLINE_EXCEEDED",
+        at: 12,
+      },
+    ]);
+    expect(turn.finishReason).toBe("stop");
+    // The parts go back as they came, with the text as lengths.
+    expect(turn.message.hostedItems).toEqual({
+      provider: "gemini",
+      items: [
+        { length: 12 },
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\n" } },
+        { executableCode: { language: "PYTHON", code: "while True: pass" } },
+        { codeExecutionResult: { outcome: "OUTCOME_DEADLINE_EXCEEDED" } },
+        { length: 5 },
+      ],
+    });
+    // …and only to the provider that made them.
+    const history: ChatMessage[] = [...HI, turn.message, { role: "user", content: "thanks" }];
+    expect(toGeminiContents(history, "gemini").contents[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "Running it. " },
+        { executableCode: { language: "PYTHON", code: "print(34)" } },
+        { codeExecutionResult: { outcome: "OUTCOME_OK", output: "34\n" } },
+        { executableCode: { language: "PYTHON", code: "while True: pass" } },
+        { codeExecutionResult: { outcome: "OUTCOME_DEADLINE_EXCEEDED" } },
+        { text: "Done." },
+      ],
+    });
+    expect(toGeminiContents(history, "zen").contents[1]).toEqual({
+      role: "model",
+      parts: [{ text: "Running it. Done." }],
+    });
+  });
+
+  it("reads a server-side search beside a function call, and sends both back in order with their signatures", async () => {
+    const mixed = [
+      candidate([
+        {
+          toolCall: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", args: { query: "cats" } },
+          thoughtSignature: "sig_a",
+        },
+        {
+          toolResponse: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", response: { ok: true } },
+          thoughtSignature: "sig_b",
+        },
+        { functionCall: { id: "call_1", name: "save", args: { n: 1 } }, thoughtSignature: "sig_c" },
+      ]),
+      candidate([], "STOP"),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(mixed).fetchImpl).createStream(HI, [fn], search),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      { id: "srv_1", type: "web_search", status: "completed", input: { query: "cats" }, at: 0 },
+    ]);
+    expect(turn.message.toolCalls).toEqual([
+      { id: "call_1", name: "save", arguments: '{"n":1}', thoughtSignature: "sig_c" },
+    ]);
+    // The function call makes it a tool round; the search does not.
+    expect(turn.finishReason).toBe("tool_calls");
+    const result: ChatMessage = { role: "tool", toolCallId: "call_1", name: "save", content: "ok" };
+    const next = recorder(TEXT_TURN);
+    await collect(
+      provider(next.fetchImpl).createStream([...HI, turn.message, result], [fn], search),
+    );
+    expect((next.seen[0]!.body.contents as unknown[])[1]).toEqual({
+      role: "model",
+      parts: [
+        {
+          toolCall: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", args: { query: "cats" } },
+          thoughtSignature: "sig_a",
+        },
+        {
+          toolResponse: { id: "srv_1", toolType: "GOOGLE_SEARCH_WEB", response: { ok: true } },
+          thoughtSignature: "sig_b",
+        },
+        { functionCall: { id: "call_1", name: "save", args: { n: 1 } }, thoughtSignature: "sig_c" },
+      ],
+    });
+  });
+
+  it("reads URL context as one fetch per page, a failed one as data", async () => {
+    const fetched = [
+      candidate([{ text: "It is about cats." }]),
+      j({
+        candidates: [
+          {
+            content: { parts: [] },
+            finishReason: "STOP",
+            urlContextMetadata: {
+              urlMetadata: [
+                { retrievedUrl: SOURCE_URL, urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS" },
+                {
+                  retrievedUrl: "https://paywall.example",
+                  urlRetrievalStatus: "URL_RETRIEVAL_STATUS_PAYWALL",
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    ];
+    const turn = await collectTurn(
+      provider(recorder(fetched).fetchImpl).createStream(HI, [], {
+        hostedTools: [{ type: "web_fetch" }],
+      }),
+    );
+    expect(turn.message.hostedCalls).toEqual([
+      {
+        id: "hosted_0",
+        type: "web_fetch",
+        status: "completed",
+        input: { url: SOURCE_URL },
+        output: { sources: [{ type: "url", url: SOURCE_URL }] },
+        at: 0,
+      },
+      {
+        id: "hosted_1",
+        type: "web_fetch",
+        status: "failed",
+        input: { url: "https://paywall.example" },
+        error: "URL_RETRIEVAL_STATUS_PAYWALL",
+        at: 0,
+      },
+    ]);
   });
 });
