@@ -1,4 +1,23 @@
 export * from "./types.ts";
+// Named, not `export *`: the recorder, the replay fit check and the offset
+// converters are the adapters' internals, kept free to change.
+export {
+  HOSTED_TOOL_TYPES,
+  hostedRefused,
+  planHostedTools,
+  type Citation,
+  type HostedCall,
+  type HostedCallDelta,
+  type HostedFile,
+  type HostedInput,
+  type HostedItems,
+  type HostedOutput,
+  type HostedTool,
+  type HostedToolType,
+  type HostedWire,
+  type Source,
+  type UserLocation,
+} from "./hosted.ts";
 export * from "./turn.ts";
 export * from "./errors.ts";
 export * from "./retry.ts";

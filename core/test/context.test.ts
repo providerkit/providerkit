@@ -414,3 +414,36 @@ describe("guessContextWindow", () => {
     expect(guessContextWindow("some-new-model-9")).toBe(128_000);
   });
 });
+
+describe("hosted items in history", () => {
+  const searchedOnly: ChatMessage = {
+    role: "assistant",
+    content: "",
+    hostedItems: {
+      provider: "anthropic",
+      items: [
+        { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "cats" } },
+        { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] },
+      ],
+    },
+  };
+
+  it("repairHistory keeps an assistant message that carries hosted items, and stays idempotent", () => {
+    // No text and no calls, but the vendor's search is the record of that
+    // turn. Dropped as a placeholder, the next send forgets the search ran.
+    const history: ChatMessage[] = [
+      { role: "user", content: "find cats" },
+      searchedOnly,
+      { role: "user", content: "go on" },
+    ];
+    const once = repairHistory(history).messages;
+    expect(once).toEqual(history);
+    expect(repairHistory(once).messages).toEqual(once);
+  });
+
+  it("counts what the hosted items send again", () => {
+    expect(messageTokens(searchedOnly)).toBeGreaterThan(
+      messageTokens({ role: "assistant", content: "" }),
+    );
+  });
+});

@@ -211,6 +211,43 @@ describe("requireContent", () => {
     ).resolves.toHaveLength(1);
   });
 
+  it("forwards a hosted call the moment it appears, and a search alone is still no answer", async () => {
+    // Forwarded, the stream is committed: a retry above it would rerun and
+    // rebill the vendor's search and show the reader the search twice.
+    const search: ProviderChunk = {
+      type: "delta",
+      hosted: [{ index: 0, id: "ws_1", type: "web_search", status: "running" }],
+    };
+    const out: ProviderChunk[] = [];
+    const drained = (async () => {
+      for await (const chunk of requireContent(
+        "claude",
+        frames(search, { type: "finish", finishReason: "stop" }),
+      )) {
+        out.push(chunk);
+      }
+    })();
+    await expect(drained).rejects.toMatchObject({ kind: "overload" });
+    expect(out[0]).toEqual(search);
+  });
+
+  it("counts a generated image as an answer", async () => {
+    const image: ProviderChunk = {
+      type: "delta",
+      hosted: [
+        {
+          index: 0,
+          type: "image_generation",
+          status: "completed",
+          output: { images: [{ type: "image", mimeType: "image/png", data: "iVBORw0K" }] },
+        },
+      ],
+    };
+    await expect(
+      collect(requireContent("openai", frames(image, { type: "finish", finishReason: "stop" }))),
+    ).resolves.toHaveLength(2);
+  });
+
   // Production, 2026-10-01: a review capped at 2,048 tokens on a high-effort
   // model thought for all 2,048, answered "", and passed as a success 22 times.
   it("streams reasoning live but rejects a turn whose cap ran out on it", async () => {
