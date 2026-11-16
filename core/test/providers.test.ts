@@ -2475,6 +2475,34 @@ describe("openai-shape hosted web search", () => {
     ]);
   });
 
+  it.each(["config", "call"] as const)(
+    "honors prompt-only JSON beside hosted-only tools from the %s setting",
+    async (setting) => {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      const provider = createOpenAIProvider({
+        apiKey: "k",
+        model: "openai/gpt-5",
+        baseUrl: "https://openrouter.ai/api",
+        id: "openrouter",
+        fetchImpl,
+        ...(setting === "config" ? { jsonWithTools: "prompt" } : {}),
+      });
+      await collect(
+        provider.createStream(QUESTION, [], {
+          hostedTools: [{ type: "web_search" }],
+          json: { name: "answer", schema: { type: "object", properties: { claim: {} } } },
+          ...(setting === "call" ? { jsonWithTools: "prompt" } : {}),
+        }),
+      );
+      expect(seen[0]!.body.tools).toEqual([{ type: "openrouter:web_search", parameters: {} }]);
+      expect(seen[0]!.body).not.toHaveProperty("response_format");
+      expect(seen[0]!.body.messages).toEqual([
+        ...QUESTION,
+        { role: "system", content: expect.stringContaining('"claim"') },
+      ]);
+    },
+  );
+
   it("reads OpenRouter's citations as markers on the link, and its stated search count", async () => {
     const { message, usage, finishReason } = await collectTurn(
       openRouter(recorder(OPENROUTER_SEARCH_TURN).fetchImpl).createStream(QUESTION, [], {

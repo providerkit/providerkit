@@ -737,7 +737,8 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         // here the only job is to leave the response format off those calls, so
         // the schema reaches the model the one way nothing can suppress.
         const promptCarried =
-          tools.length > 0 && (opts.jsonWithTools ?? config.jsonWithTools) === "prompt";
+          (tools.length > 0 || hosted.length > 0) &&
+          (opts.jsonWithTools ?? config.jsonWithTools) === "prompt";
         const enforced =
           !promptCarried &&
           (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema";
