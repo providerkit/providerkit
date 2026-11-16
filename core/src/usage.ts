@@ -12,8 +12,21 @@
 // go stale, and where one model id is served by several hosts at different
 // prices it is the only figure that names the host that answered. When it is
 // present it wins; the caller's rate prices everything else.
+import { HOSTED_TOOL_TYPES, type HostedToolType } from "./hosted/types.ts";
 import type { TokenUsage } from "./types.ts";
 import { EMPTY_USAGE } from "./types.ts";
+
+type HostedCounts = Partial<Record<HostedToolType, number>>;
+
+/** Two count records combined type by type, each clamped at zero. */
+function combineCounts(a: HostedCounts, b: HostedCounts | undefined, sign: 1 | -1): HostedCounts {
+  const out: HostedCounts = { ...a };
+  for (const type of HOSTED_TOOL_TYPES) {
+    const count = b?.[type];
+    if (count !== undefined) out[type] = Math.max(0, (out[type] ?? 0) + sign * count);
+  }
+  return out;
+}
 
 /** USD per million tokens, as every vendor prints its price sheet, so a row
  *  can be checked against one without arithmetic. */
@@ -30,12 +43,17 @@ export interface ModelRate {
    *  (1.25×); the OpenAI-shape auto-cachers bill it at the input rate.
    *  Defaults to `input` when a vendor does not price it separately. */
   cacheWrite?: number;
+  /** USD per hosted tool call (a search, a fetch, a code run), by type, as
+   *  the vendor's price sheet states it. Billed beside the tokens; a type
+   *  left out bills nothing. */
+  hosted?: Partial<Record<HostedToolType, number>>;
 }
 
 /** Add two usage records. The sum carries no `reportedCostUsd`: a call
  *  priced by its provider plus one priced by a rate is not one bill, and
  *  `costUsd` would price the whole sum at the one figure. Accumulate cost in
- *  a `UsageTracker`, which prices each call as it arrives. */
+ *  a `UsageTracker`, which prices each call as it arrives. Nor
+ *  `contextTokens`: two calls' contexts do not add up to a window. */
 export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return {
     inputTokens: a.inputTokens + b.inputTokens,
@@ -44,6 +62,9 @@ export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     outputTokens: a.outputTokens + b.outputTokens,
     ...(a.reasoningTokens !== undefined || b.reasoningTokens !== undefined
       ? { reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0) }
+      : {}),
+    ...(a.hostedCalls || b.hostedCalls
+      ? { hostedCalls: combineCounts(a.hostedCalls ?? {}, b.hostedCalls, 1) }
       : {}),
   };
 }
@@ -61,6 +82,7 @@ export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     ...(a.reasoningTokens !== undefined
       ? { reasoningTokens: Math.max(0, a.reasoningTokens - (b.reasoningTokens ?? 0)) }
       : {}),
+    ...(a.hostedCalls ? { hostedCalls: combineCounts(a.hostedCalls, b.hostedCalls, -1) } : {}),
   };
 }
 
@@ -75,6 +97,9 @@ export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
  * part at the write rate. `cached` is clamped to `input` so an over-reporting
  * provider can neither drive the miss count negative nor bill for more prompt
  * than it was sent.
+ *
+ * Hosted tool calls bill per call at `rate.hosted`. A reported cost already
+ * includes them (OpenRouter's search fee is inside its `cost`).
  */
 export function costUsd(usage: TokenUsage, rate: ModelRate): number {
   if (usage.reportedCostUsd !== undefined) return usage.reportedCostUsd;
@@ -85,12 +110,17 @@ export function costUsd(usage: TokenUsage, rate: ModelRate): number {
   // once at the input rate, again at the write rate: 2.25× on Claude.
   const miss = Math.max(0, input - cached - written);
   const writeRate = rate.cacheWrite ?? rate.input;
+  let hosted = 0;
+  for (const type of HOSTED_TOOL_TYPES) {
+    hosted += Math.max(0, usage.hostedCalls?.[type] ?? 0) * (rate.hosted?.[type] ?? 0);
+  }
   return (
     (miss * rate.input +
       cached * rate.cacheRead +
       written * writeRate +
       Math.max(0, usage.outputTokens) * rate.output) /
-    1_000_000
+      1_000_000 +
+    hosted
   );
 }
 

@@ -1,8 +1,10 @@
 import {
+  HOSTED_TOOL_TYPES,
   isEffort,
   parseToolArgs,
   type ChatMessage,
   type FileMimeType,
+  type HostedTool,
   type ImageMimeType,
   type ImagePart,
   type TokenUsage,
@@ -329,6 +331,85 @@ export function isEnabledTools(value: unknown): boolean {
   return typeof value === "function" || isNames(value);
 }
 
+function isStringList(value: unknown): boolean {
+  // Iteration visits sparse entries too: JSON would turn those holes into null.
+  return Array.isArray(value) && [...value].every(isId);
+}
+
+// Snapshot shapes only. Core still decides which tools and fields a provider can send.
+const HOSTED_SETTINGS = {
+  web_search: {
+    allowedDomains: (value) => optional(value, isStringList),
+    blockedDomains: (value) => optional(value, isStringList),
+    maxUses: (value) => value === 0 || optional(value, positive),
+    userLocation: (value) =>
+      optional(
+        value,
+        (location) =>
+          isRecord(location) &&
+          Object.keys(location).every((key) =>
+            ["city", "region", "country", "timezone"].includes(key),
+          ) &&
+          Object.values(location).every((item) => optional(item, isId)),
+      ),
+  },
+  web_fetch: {
+    allowedDomains: (value) => optional(value, isStringList),
+    blockedDomains: (value) => optional(value, isStringList),
+    maxUses: (value) => value === 0 || optional(value, positive),
+    maxContentTokens: (value) => optional(value, positive),
+  },
+  code_execution: {
+    fileIds: (value) => optional(value, isStringList),
+  },
+  file_search: {
+    storeIds: isStringList,
+    maxResults: (value) => optional(value, positive),
+  },
+  image_generation: {
+    size: (value) =>
+      optional(value, (item) =>
+        ["auto", "1024x1024", "1024x1536", "1536x1024"].some((size) => size === item),
+      ),
+    quality: (value) =>
+      optional(value, (item) =>
+        ["auto", "low", "medium", "high"].some((quality) => quality === item),
+      ),
+    format: (value) =>
+      optional(value, (item) => ["png", "jpeg", "webp"].some((format) => format === item)),
+    background: (value) =>
+      optional(value, (item) =>
+        ["auto", "opaque", "transparent"].some((background) => background === item),
+      ),
+  },
+} satisfies {
+  [Type in HostedTool["type"]]: Record<
+    Exclude<keyof Extract<HostedTool, { type: Type }>, "type" | "optional">,
+    (value: unknown) => boolean
+  >;
+};
+
+function isHostedTools(value: unknown): value is readonly HostedTool[] {
+  if (!Array.isArray(value) || !serializable(value)) return false;
+  const seen = new Set<HostedTool["type"]>();
+  for (const tool of value) {
+    if (!isRecord(tool) || !optional(tool.optional, (item) => typeof item === "boolean"))
+      return false;
+    const type = HOSTED_TOOL_TYPES.find((type) => type === tool.type);
+    if (!type || seen.has(type)) return false;
+    seen.add(type);
+    const guards = HOSTED_SETTINGS[type];
+    if (
+      !Object.keys(tool).every(
+        (key) => key === "type" || key === "optional" || Object.hasOwn(guards, key),
+      ) ||
+      !Object.entries(guards).every(([key, guard]) => guard(tool[key]))
+    )
+      return false;
+  }
+  return true;
+}
+
 const MODEL_SETTINGS = {
   model: isId,
   maxAttempts: positive,
@@ -341,6 +422,7 @@ const MODEL_SETTINGS = {
     ["auto", "none", "required"].some((choice) => choice === value) ||
     (isRecord(value) && isId(value.name) && Object.keys(value).length === 1),
   jsonWithTools: (value) => value === "prompt" || value === "response_format",
+  hostedTools: isHostedTools,
   parallelToolCalls: (value) => typeof value === "boolean",
   serviceTier: (value) => value === "priority" || value === "flex",
   onActivity: (value) => typeof value === "function",

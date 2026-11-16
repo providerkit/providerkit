@@ -164,3 +164,87 @@ describe("drainStream", () => {
     });
   });
 });
+
+describe("collectTurn, hosted calls", () => {
+  const source = { type: "url" as const, url: "https://cats.example/sleep" };
+
+  it("assembles each hosted call by index, and never as a tool call", async () => {
+    const turn = await collectTurn(
+      replay(
+        {
+          type: "delta",
+          hosted: [{ index: 0, id: "srv_1", type: "web_search", status: "running", at: 0 }],
+        },
+        { type: "delta", hosted: [{ index: 0, input: { query: "cats" } }] },
+        { type: "delta", content: "Cats sleep." },
+        // `at` defaults to where the text was when the index first appeared,
+        // and code arrives in pieces that join.
+        { type: "delta", hosted: [{ index: 1, type: "code_execution", codeDelta: "print(" }] },
+        { type: "delta", hosted: [{ index: 1, id: "", codeDelta: "1)" }] },
+        {
+          type: "delta",
+          hosted: [{ index: 0, status: "completed", output: { sources: [source] } }],
+        },
+        {
+          type: "delta",
+          hosted: [{ index: 1, id: "code_1", status: "failed", error: "no_result" }],
+        },
+        { type: "delta", citations: [{ source, start: 0, end: 11, anchor: "claim" }] },
+        { type: "delta", hostedItems: { provider: "anthropic", items: [{ length: 11 }] } },
+        { type: "finish", finishReason: "stop" },
+      ),
+    );
+    expect(turn.message).toEqual({
+      role: "assistant",
+      content: "Cats sleep.",
+      hostedCalls: [
+        {
+          id: "srv_1",
+          type: "web_search",
+          status: "completed",
+          input: { query: "cats" },
+          output: { sources: [source] },
+          at: 0,
+        },
+        {
+          // An empty id never erases one, and the last one stated wins.
+          id: "code_1",
+          type: "code_execution",
+          status: "failed",
+          input: { code: "print(1)" },
+          error: "no_result",
+          at: 11,
+        },
+      ],
+      citations: [{ source, start: 0, end: 11, anchor: "claim" }],
+      hostedItems: { provider: "anthropic", items: [{ length: 11 }] },
+    });
+    expect(turn.finishReason).toBe("stop");
+  });
+
+  it("fails a hosted call that never says which tool ran", async () => {
+    // A record nobody can show or count: the vendor's frame was broken, the
+    // same fault as a tool call with no name.
+    await expect(
+      collectTurn(replay({ type: "delta", hosted: [{ index: 0, id: "x", status: "completed" }] })),
+    ).rejects.toMatchObject({ kind: "overload" });
+  });
+
+  it("hands drainStream's caller the calls and citations too", async () => {
+    const completion = await drainStream(
+      replay(
+        {
+          type: "delta",
+          hosted: [{ index: 0, id: "ws_1", type: "web_search", status: "completed" }],
+        },
+        { type: "delta", content: "Hi", citations: [{ source }] },
+      ),
+      "m",
+    );
+    expect(completion.hostedCalls).toEqual([
+      { id: "ws_1", type: "web_search", status: "completed", at: 0 },
+    ]);
+    expect(completion.citations).toEqual([{ source }]);
+    expect(completion.toolCalls).toEqual([]);
+  });
+});

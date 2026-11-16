@@ -34,15 +34,30 @@ function textOf(message: ChatMessage): string {
   return typeof message.content === "string" ? message.content : "";
 }
 
-/** What one message costs to re-send: its words, its reasoning, and the
- *  arguments of any calls it made. */
+/** What one message costs to re-send: its words, its reasoning, the
+ *  arguments of any calls it made, and the hosted items it replays. */
 export function messageTokens(message: ChatMessage): number {
   const extra =
     message.role === "assistant"
       ? (message.reasoning ?? "") +
         (message.toolCalls?.map((call) => call.name + call.arguments).join("") ?? "")
       : "";
-  return estimateTokens(textOf(message) + extra) + reasoningItemTokens(message);
+  return (
+    estimateTokens(textOf(message) + extra) + reasoningItemTokens(message) + hostedTokens(message)
+  );
+}
+
+/**
+ * The search results, fetched pages and code output a message replays, which
+ * the provider reads again on every send.
+ *
+ * ponytail: counted as JSON at four characters a token, which overcounts the
+ * base64 in an encrypted search result by about a third. Folding a turn early
+ * costs a cheap call; the upgrade is the provider's own count.
+ */
+function hostedTokens(message: ChatMessage): number {
+  if (message.role !== "assistant" || !message.hostedItems) return 0;
+  return estimateTokens(JSON.stringify(message.hostedItems.items));
 }
 
 /**
@@ -221,7 +236,8 @@ function orphanNote(result: ToolResult): ChatMessage {
  *   random fallback.
  * - An assistant message with no calls and only whitespace is dropped, as if
  *   it were never there, so a placeholder saved before the tools ran orphans
- *   nothing.
+ *   nothing. One that carries hosted items is kept: the vendor's search or
+ *   code run is still the record of that turn, text or not.
  *
  * No side effects, and the same input always gives the same bytes: a span's
  * output and every id depend only on what came before, so repairing a longer
@@ -259,7 +275,7 @@ export function repairHistory(
   for (const [index, message] of messages.entries()) {
     if (message.role === "assistant") {
       const calls = message.toolCalls ?? [];
-      if (calls.length === 0 && !message.content.trim()) continue;
+      if (calls.length === 0 && !message.content.trim() && !message.hostedItems) continue;
       close();
       if (calls.length === 0) {
         out.push(message);

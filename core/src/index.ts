@@ -1,8 +1,22 @@
 export * from "./types.ts";
+export * from "./hosted/types.ts";
 export * from "./turn.ts";
 export * from "./errors.ts";
 export * from "./retry.ts";
-export * from "./fallback.ts";
+export {
+  DEFAULT_FALLBACK_COOLDOWNS,
+  FallbackPool,
+  NoAvailableProviderError,
+  withConfiguredFallbacks,
+  withFallbackProviders,
+  type FallbackOptions,
+  type FallbackSpec,
+  type FallbackCandidate,
+  type ProviderFallbackConfig,
+  type Cooldown,
+  type CooldownStore,
+  type FallbackProvider,
+} from "./fallback.ts";
 export * from "./key-pool.ts";
 export * from "./watchdog.ts";
 export * from "./gate.ts";
@@ -31,10 +45,53 @@ export * from "./image.ts";
 export * from "./capability.ts";
 export * from "./attribution.ts";
 export * from "./presets.ts";
-export * from "./providers/anthropic.ts";
-export * from "./providers/openai.ts";
-export * from "./providers/responses.ts";
-export * from "./providers/gemini.ts";
+export {
+  createAnthropicProvider,
+  toAnthropicMessages,
+  type AnthropicConfig,
+} from "./providers/anthropic.ts";
+export {
+  createOpenAIProvider,
+  toOpenAIMessages,
+  effortParams,
+  openRouterCostUsd,
+  openRouterHostFor,
+  type OpenAIConfig,
+  type EffortDialect,
+} from "./providers/openai.ts";
+export {
+  createResponsesProvider,
+  toResponsesInput,
+  type ResponsesConfig,
+} from "./providers/responses.ts";
+export {
+  createGeminiProvider,
+  toGeminiContents,
+  antigravityUserAgent,
+  antigravitySessionId,
+  resolveAntigravityWireModel,
+  type GeminiConfig,
+  type GeminiContent,
+} from "./providers/gemini.ts";
 export * from "./providers/zai.ts";
-export * from "./providers/factory.ts";
-export * from "./registry.ts";
+export {
+  createPresetProvider,
+  presetAdapter,
+  OPENCODE_CLI_USER_AGENT,
+  OPENCODE_PUBLIC_API_KEY,
+  isZenFreeModel,
+  forgeOpenCodeSessionId,
+  type PresetProviderConfig,
+  type PresetAdapterConfig,
+} from "./providers/factory.ts";
+export {
+  createRegistry,
+  type ConnectionCredential,
+  type ConnectionConfig,
+  type RegistryCooldownInfo,
+  type RegistryOptions,
+  type ViewOptions,
+  type CandidateStatus,
+  type ConnectionStatus,
+  type Registry,
+} from "./registry.ts";

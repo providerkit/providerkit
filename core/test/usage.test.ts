@@ -197,3 +197,42 @@ describe("reasoningTokens", () => {
     expect(subtractUsage(thinking, usage({ reasoningTokens: 9 })).reasoningTokens).toBe(0);
   });
 });
+
+describe("hosted tool calls", () => {
+  const searched = usage({ inputTokens: 1_000, outputTokens: 100, hostedCalls: { web_search: 2 } });
+  const tokens = (1_000 * FLASH.input + 100 * FLASH.output) / 1_000_000;
+
+  it("bills each call at the caller's rate, beside the tokens", () => {
+    expect(costUsd(searched, { ...FLASH, hosted: { web_search: 0.01 } })).toBeCloseTo(
+      tokens + 0.02,
+      12,
+    );
+    // A type the rate does not price bills nothing, rather than a guess.
+    expect(costUsd(searched, FLASH)).toBeCloseTo(tokens, 12);
+  });
+
+  it("lets a reported cost win, because it already includes the searches", () => {
+    const billed = { ...searched, reportedCostUsd: 0.05 };
+    expect(costUsd(billed, { ...FLASH, hosted: { web_search: 0.01 } })).toBe(0.05);
+  });
+
+  it("adds and subtracts the counts type by type, clamped at zero", () => {
+    const sum = addUsage(searched, usage({ hostedCalls: { web_search: 1, code_execution: 1 } }));
+    expect(sum.hostedCalls).toEqual({ web_search: 3, code_execution: 1 });
+    expect(subtractUsage(sum, usage({ hostedCalls: { web_search: 5 } })).hostedCalls).toEqual({
+      web_search: 0,
+      code_execution: 1,
+    });
+    // A run that ran none carries no counts at all.
+    expect(addUsage(usage({}), usage({}))).not.toHaveProperty("hostedCalls");
+  });
+
+  it("totals and prices them across a run", () => {
+    const rate = { ...FLASH, hosted: { web_search: 0.01 } };
+    const tracker = new UsageTracker();
+    tracker.add(searched, rate);
+    tracker.add(usage({ hostedCalls: { web_search: 1 } }), rate);
+    expect(tracker.totals.hostedCalls).toEqual({ web_search: 3 });
+    expect(tracker.costUsd).toBeCloseTo(tokens + 0.03, 12);
+  });
+});

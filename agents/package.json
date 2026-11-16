@@ -45,7 +45,7 @@
     "release": "bun publish --access public"
   },
   "peerDependencies": {
-    "@providerkit/core": "^0.30.0",
+    "@providerkit/core": "^0.31.0",
     "@gusnips/server": "^0.19.0 || ^0.20.0",
     "@modelcontextprotocol/sdk": "^1.32.2"
   },

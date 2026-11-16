@@ -19,7 +19,8 @@ import { withFallbackProviders, type Cooldown, type FallbackOptions } from "./fa
 import { createGate, withGate, type Gate } from "./gate.ts";
 import { KeyPool, withKeyPool, type KeyPoolOptions, type KeyTier } from "./key-pool.ts";
 import { PROVIDER_PRESETS, type ProviderPreset, type ProviderPresetId } from "./presets.ts";
-import { presetAdapter, type PresetAdapterConfig } from "./providers/factory.ts";
+import { buildPresetAdapter, type PresetAdapterConfig } from "./providers/factory.ts";
+import type { HostedCodecs } from "./providers/hosted-codecs.ts";
 import type { RateLimitWindow } from "./rate-limit.ts";
 import type { Effort, Provider, ProviderChunk } from "./types.ts";
 import { withWatchdog, type WatchdogOptions } from "./watchdog.ts";
@@ -130,6 +131,11 @@ interface Member {
 }
 
 export function createRegistry(options: RegistryOptions): Registry {
+  return providerRegistry(options);
+}
+
+/** @internal The same registry, with codecs bound to every rebuilt adapter. */
+export function providerRegistry(options: RegistryOptions, codecs?: HostedCodecs): Registry {
   const connections = new Map<string, Connection>();
   const chainRefs = new Map(Object.entries(options.chains ?? {}));
   /** Built chains by ref, with the connections each one uses. */
@@ -264,15 +270,19 @@ export function createRegistry(options: RegistryOptions): Registry {
       // The credential's host and headers win: Copilot gives each plan its
       // own host, and the Codex backend refuses a call without its account id.
       provider = withToken(config.token, (auth) =>
-        presetAdapter(preset, { ...base, ...auth, headers: { ...headers, ...auth.headers } }),
+        buildPresetAdapter(
+          preset,
+          { ...base, ...auth, headers: { ...headers, ...auth.headers } },
+          codecs,
+        ),
       );
     } else if (config.keys) {
       // `open` builds the pool whenever `keys` is set.
       provider = withKeyPool(keyPool!, (key) =>
-        presetAdapter(preset, { ...base, headers, apiKey: key }),
+        buildPresetAdapter(preset, { ...base, headers, apiKey: key }, codecs),
       );
     } else {
-      provider = presetAdapter(preset, { ...base, headers, apiKey: config.apiKey });
+      provider = buildPresetAdapter(preset, { ...base, headers, apiKey: config.apiKey }, codecs);
     }
     // On unless turned off, where `createPresetProvider` adds one only when
     // asked. Handing apps the whole composition is the point of a registry:

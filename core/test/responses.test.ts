@@ -1,11 +1,14 @@
+import * as hosted from "../src/hosted.ts";
 // Golden transcripts for the Responses shape: real event sequences replayed
 // through the adapter, asserting the normalized chunks they must produce.
 import { describe, expect, it } from "vitest";
 import { createResponsesProvider, toResponsesInput } from "../src/providers/responses.ts";
 import { ProviderError } from "../src/errors.ts";
+import type { HostedTool } from "../src/hosted.ts";
 import type { RateLimitReading } from "../src/rate-limit.ts";
 import { collectTurn } from "../src/turn.ts";
 import type { ChatMessage, ProviderChunk, ToolDefinition } from "../src/types.ts";
+import { withWatchdog } from "../src/watchdog.ts";
 
 /**
  * Records the request and replays a canned transcript. Frames go out with the
@@ -1171,5 +1174,494 @@ describe("toResponsesInput", () => {
 
   it("leaves instructions absent when the history has no system turn", () => {
     expect(toResponsesInput([{ role: "user", content: "hi" }]).instructions).toBeUndefined();
+  });
+});
+
+// ── hosted tools ──────────────────────────────────────────────────────────
+
+const SOURCE_URL = "https://cats.example/sleep";
+/** A search, then an answer whose annotation points at the link it wrote.
+ *  The text before the link holds an emoji: the offsets count code points. */
+const LINK = `([cats.example](${SOURCE_URL}))`;
+const ANSWER = `Cats 🐈 sleep 12 to 16 hours ${LINK}.`;
+const LINK_AT = [...ANSWER].indexOf("(");
+const SEARCH_TURN = [
+  j({ type: "response.created", response: { id: "resp_1" } }),
+  j({
+    type: "response.output_item.added",
+    output_index: 0,
+    item: { type: "web_search_call", id: "ws_1", status: "in_progress" },
+  }),
+  j({ type: "response.web_search_call.in_progress", item_id: "ws_1", output_index: 0 }),
+  j({ type: "response.web_search_call.searching", item_id: "ws_1", output_index: 0 }),
+  j({ type: "response.web_search_call.completed", item_id: "ws_1", output_index: 0 }),
+  j({
+    type: "response.output_item.done",
+    output_index: 0,
+    item: {
+      type: "web_search_call",
+      id: "ws_1",
+      status: "completed",
+      action: {
+        type: "search",
+        query: "how long do cats sleep",
+        sources: [{ type: "url", url: SOURCE_URL }],
+      },
+    },
+  }),
+  j({
+    type: "response.output_item.added",
+    output_index: 1,
+    item: { type: "message", id: "msg_1" },
+  }),
+  j({
+    type: "response.output_text.delta",
+    item_id: "msg_1",
+    content_index: 0,
+    delta: ANSWER.slice(0, 12),
+  }),
+  j({
+    type: "response.output_text.delta",
+    item_id: "msg_1",
+    content_index: 0,
+    delta: ANSWER.slice(12),
+  }),
+  j({
+    type: "response.output_text.annotation.added",
+    item_id: "msg_1",
+    content_index: 0,
+    annotation_index: 0,
+    annotation: {
+      type: "url_citation",
+      url: SOURCE_URL,
+      title: "Cat sleep",
+      start_index: LINK_AT,
+      end_index: LINK_AT + [...LINK].length,
+    },
+  }),
+  j({ type: "response.output_item.done", output_index: 1, item: { type: "message", id: "msg_1" } }),
+  j({ type: "response.completed", response: { usage: USAGE } }),
+];
+
+describe("responses hosted tools", () => {
+  const provider = (over: Partial<Parameters<typeof createResponsesProvider>[0]> = {}) =>
+    hosted.createResponsesProvider({ apiKey: "k", model: "gpt-5.6", ...over });
+  const search = { hostedTools: [{ type: "web_search" as const }] };
+
+  it("sends each tool with every field it set, and asks for each one's results", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    await collect(
+      provider({ fetchImpl, replayReasoning: true }).createStream(hi, [], {
+        hostedTools: [
+          {
+            type: "web_search",
+            allowedDomains: ["cats.example"],
+            userLocation: { country: "US", city: "Boston" },
+          },
+          { type: "code_execution", fileIds: ["file_1"] },
+          { type: "file_search", storeIds: ["vs_1"], maxResults: 4 },
+          { type: "image_generation", size: "1024x1024", quality: "low", format: "webp" },
+        ],
+      }),
+    );
+    expect(seen[0]!.body.tools).toEqual([
+      {
+        type: "web_search",
+        filters: { allowed_domains: ["cats.example"] },
+        user_location: { type: "approximate", country: "US", city: "Boston" },
+      },
+      { type: "code_interpreter", container: { type: "auto", file_ids: ["file_1"] } },
+      { type: "file_search", vector_store_ids: ["vs_1"], max_num_results: 4 },
+      { type: "image_generation", size: "1024x1024", quality: "low", output_format: "webp" },
+    ]);
+    // Merged with the reasoning items it already asked for, not written over them.
+    expect(seen[0]!.body.include).toEqual([
+      "reasoning.encrypted_content",
+      "web_search_call.action.sources",
+      "code_interpreter_call.outputs",
+      "file_search_call.results",
+    ]);
+    expect(seen[0]!.body.store).toBe(false);
+  });
+
+  it("refuses what this wire can't send before any request, and on hosts nobody checked", async () => {
+    const refusals: [HostedTool, string?][] = [
+      // No use cap on this wire: sent without it, the search runs unbounded.
+      [{ type: "web_search", maxUses: 2 }],
+      [{ type: "web_fetch" }],
+      // The ChatGPT backend runs none until someone checks it does.
+      [{ type: "web_search" }, "https://chatgpt.com/backend-api/codex"],
+    ];
+    for (const [tool, baseUrl] of refusals) {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await expect(
+        collect(
+          provider({ fetchImpl, ...(baseUrl ? { baseUrl } : {}) }).createStream(hi, [], {
+            hostedTools: [tool],
+          }),
+        ),
+      ).rejects.toMatchObject({ kind: "invalid" });
+      expect(seen).toHaveLength(0);
+    }
+  });
+
+  it("reads a search as a hosted call, and a URL citation as a marker on the link", async () => {
+    const chunks = await collect(
+      provider({ fetchImpl: recorder(SEARCH_TURN).fetchImpl }).createStream(hi, [], search),
+    );
+    // Every step the search reports goes out, which the watchdog counts as progress.
+    expect(chunks.filter((chunk) => chunk.hosted?.[0]?.status === "running")).toHaveLength(4);
+    const { message, usage, finishReason } = await collectTurn(
+      (async function* () {
+        yield* chunks;
+      })(),
+    );
+    expect(message.content).toBe(ANSWER);
+    expect(message.toolCalls).toBeUndefined();
+    expect(message.hostedCalls).toEqual([
+      {
+        id: "ws_1",
+        type: "web_search",
+        status: "completed",
+        input: { query: "how long do cats sleep" },
+        output: { sources: [{ type: "url", url: SOURCE_URL }] },
+        at: 0,
+      },
+    ]);
+    const [citation] = message.citations ?? [];
+    expect(citation).toMatchObject({
+      source: { type: "url", url: SOURCE_URL, title: "Cat sleep" },
+      anchor: "marker",
+    });
+    // Code points became JS indices: the span lands on the link, emoji or not.
+    expect(message.content.slice(citation?.start, citation?.end)).toBe(LINK);
+    // Never replayed: `store` is off, and the answer carries what it found.
+    expect(message.hostedItems).toBeUndefined();
+    expect(usage.hostedCalls).toEqual({ web_search: 1 });
+    expect(finishReason).toBe("stop");
+  });
+
+  it("drops a URL citation's span when it no longer covers the link, and keeps its source", async () => {
+    const moved = SEARCH_TURN.map((frame) =>
+      frame.includes("url_citation")
+        ? frame.replace(`"start_index":${LINK_AT}`, '"start_index":0')
+        : frame,
+    );
+    expect(moved).not.toEqual(SEARCH_TURN);
+    const shifted = moved.map((frame) => frame.replace(/"end_index":\d+/, '"end_index":4'));
+    const { message } = await collectTurn(
+      provider({ fetchImpl: recorder(shifted).fetchImpl }).createStream(hi, [], search),
+    );
+    expect(message.citations).toEqual([
+      { source: { type: "url", url: SOURCE_URL, title: "Cat sleep" } },
+    ]);
+  });
+
+  it("places annotations against their own part when the answer comes in two messages", async () => {
+    const twoParts = [
+      j({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({
+        type: "response.output_text.delta",
+        item_id: "msg_1",
+        content_index: 0,
+        delta: "First. ",
+      }),
+      j({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { type: "message", id: "msg_2" },
+      }),
+      j({
+        type: "response.output_text.delta",
+        item_id: "msg_2",
+        content_index: 0,
+        delta: `See ${SOURCE_URL}`,
+      }),
+      j({
+        type: "response.output_text.annotation.added",
+        item_id: "msg_2",
+        content_index: 0,
+        annotation: {
+          type: "url_citation",
+          url: SOURCE_URL,
+          title: "Cat sleep",
+          start_index: 4,
+          end_index: 4 + SOURCE_URL.length,
+        },
+      }),
+      j({
+        type: "response.output_item.done",
+        output_index: 1,
+        item: { type: "message", id: "msg_2" },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ];
+    const { message } = await collectTurn(
+      provider({ fetchImpl: recorder(twoParts).fetchImpl }).createStream(hi, [], search),
+    );
+    const [citation] = message.citations ?? [];
+    // Offsets count from the start of their own part, which starts after "First. ".
+    expect(citation).toMatchObject({ start: 11, end: 11 + SOURCE_URL.length });
+    expect(message.content.slice(citation?.start, citation?.end)).toBe(SOURCE_URL);
+  });
+
+  it("assembles code as it streams, and reads its logs and files", async () => {
+    const code = [
+      j({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          type: "code_interpreter_call",
+          id: "ci_1",
+          status: "in_progress",
+          container_id: "cntr_1",
+          code: "",
+        },
+      }),
+      j({ type: "response.code_interpreter_call_code.delta", item_id: "ci_1", delta: "print(" }),
+      j({ type: "response.code_interpreter_call_code.delta", item_id: "ci_1", delta: "34)" }),
+      j({ type: "response.code_interpreter_call_code.done", item_id: "ci_1", code: "print(34)" }),
+      j({ type: "response.code_interpreter_call.interpreting", item_id: "ci_1" }),
+      j({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "code_interpreter_call",
+          id: "ci_1",
+          status: "completed",
+          container_id: "cntr_1",
+          code: "print(34)",
+          outputs: [
+            { type: "logs", logs: "34" },
+            { type: "image", url: "https://files.example/plot.png" },
+          ],
+        },
+      }),
+      ...TEXT_TURN.slice(1),
+    ];
+    const chunks = await collect(
+      provider({ fetchImpl: recorder(code).fetchImpl }).createStream(hi, [], {
+        hostedTools: [{ type: "code_execution" }],
+      }),
+    );
+    expect(
+      chunks.flatMap((chunk) => chunk.hosted ?? []).filter((delta) => delta.codeDelta),
+    ).toHaveLength(2);
+    const { message, usage } = await collectTurn(
+      (async function* () {
+        yield* chunks;
+      })(),
+    );
+    expect(message.hostedCalls).toEqual([
+      {
+        id: "ci_1",
+        type: "code_execution",
+        status: "completed",
+        input: { code: "print(34)", language: "python" },
+        output: {
+          stdout: "34",
+          files: [{ url: "https://files.example/plot.png", containerId: "cntr_1" }],
+        },
+        at: 0,
+      },
+    ]);
+    expect(usage.hostedCalls).toEqual({ code_execution: 1 });
+  });
+
+  it("answers with a generated image, labelled by its bytes", async () => {
+    const image = [
+      j({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "image_generation_call", id: "ig_1", status: "in_progress" },
+      }),
+      j({ type: "response.image_generation_call.generating", item_id: "ig_1" }),
+      j({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "image_generation_call",
+          id: "ig_1",
+          status: "completed",
+          result: "iVBORw0KGgoAAAA",
+          revised_prompt: "a sleeping cat",
+        },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ];
+    // Asked for webp, sent PNG: the bytes win.
+    const { message, finishReason } = await collectTurn(
+      withWatchdog(provider({ fetchImpl: recorder(image).fetchImpl })).createStream(hi, [], {
+        hostedTools: [{ type: "image_generation", format: "webp" }],
+      }),
+    );
+    // No text, and still an answer: the image is it (requireContent let it through).
+    expect(message.content).toBe("");
+    expect(message.hostedCalls?.[0]).toMatchObject({
+      status: "completed",
+      input: { prompt: "a sleeping cat" },
+      output: { images: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAA" }] },
+    });
+    expect(finishReason).toBe("stop");
+  });
+
+  it("reads file search results as file sources, and a file citation as a point", async () => {
+    const files = [
+      j({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "file_search_call", id: "fs_1", status: "in_progress" },
+      }),
+      j({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "file_search_call",
+          id: "fs_1",
+          status: "completed",
+          queries: ["cat sleep"],
+          results: [{ file_id: "file_9", filename: "cats.pdf", text: "Cats sleep a lot." }],
+        },
+      }),
+      j({
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({
+        type: "response.output_text.delta",
+        item_id: "msg_1",
+        content_index: 0,
+        delta: "They sleep.",
+      }),
+      j({
+        type: "response.output_text.annotation.added",
+        item_id: "msg_1",
+        content_index: 0,
+        annotation: { type: "file_citation", file_id: "file_9", filename: "cats.pdf", index: 11 },
+      }),
+      j({
+        type: "response.output_item.done",
+        output_index: 1,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ];
+    const { message } = await collectTurn(
+      provider({ fetchImpl: recorder(files).fetchImpl }).createStream(hi, [], {
+        hostedTools: [{ type: "file_search", storeIds: ["vs_1"] }],
+      }),
+    );
+    expect(message.hostedCalls?.[0]).toMatchObject({
+      type: "file_search",
+      input: { query: "cat sleep" },
+      output: {
+        sources: [
+          { type: "file", fileId: "file_9", title: "cats.pdf", excerpt: "Cats sleep a lot." },
+        ],
+      },
+    });
+    expect(message.citations).toEqual([
+      {
+        source: { type: "file", fileId: "file_9", title: "cats.pdf" },
+        start: 11,
+        end: 11,
+        anchor: "marker",
+      },
+    ]);
+  });
+
+  it("reads a file the code wrote as a span citation of its container, and skips a bare file path", async () => {
+    const written = [
+      j({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({
+        type: "response.output_text.delta",
+        item_id: "msg_1",
+        content_index: 0,
+        delta: "See plot.png for it.",
+      }),
+      j({
+        type: "response.output_text.annotation.added",
+        item_id: "msg_1",
+        content_index: 0,
+        annotation: {
+          type: "container_file_citation",
+          container_id: "cntr_1",
+          file_id: "cfile_1",
+          filename: "plot.png",
+          start_index: 4,
+          end_index: 12,
+        },
+      }),
+      // A path to a file the code made names no source of the answer.
+      j({
+        type: "response.output_text.annotation.added",
+        item_id: "msg_1",
+        content_index: 0,
+        annotation: { type: "file_path", file_id: "cfile_1", index: 4 },
+      }),
+      j({
+        type: "response.output_item.done",
+        output_index: 1,
+        item: { type: "message", id: "msg_1" },
+      }),
+      j({ type: "response.completed", response: { usage: USAGE } }),
+    ];
+    const { message } = await collectTurn(
+      provider({ fetchImpl: recorder(written).fetchImpl }).createStream(hi, [], {
+        hostedTools: [{ type: "code_execution" }],
+      }),
+    );
+    expect(message.citations).toEqual([
+      {
+        source: { type: "file", fileId: "cfile_1", title: "plot.png", containerId: "cntr_1" },
+        start: 4,
+        end: 12,
+        anchor: "marker",
+      },
+    ]);
+    expect(message.content.slice(4, 12)).toBe("plot.png");
+  });
+
+  it("reads a search with no action, and fails one that never finished", async () => {
+    const bare = [
+      j({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "web_search_call", id: "ws_1" },
+      }),
+      j({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: { type: "web_search_call", id: "ws_1", status: "completed" },
+      }),
+      j({
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { type: "web_search_call", id: "ws_2" },
+      }),
+      ...TEXT_TURN.slice(1),
+    ];
+    const { message } = await collectTurn(
+      provider({ fetchImpl: recorder(bare).fetchImpl }).createStream(hi, [], search),
+    );
+    expect(message.hostedCalls).toEqual([
+      { id: "ws_1", type: "web_search", status: "completed", at: 0 },
+      { id: "ws_2", type: "web_search", status: "failed", error: "no_result", at: 0 },
+    ]);
+    expect(message.content).toBe("Hello");
   });
 });

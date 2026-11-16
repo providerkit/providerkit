@@ -2,6 +2,22 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.31.0] - 2026-11-16
+
+### Added
+
+- Provider-hosted tools: tools the provider runs during its answer, such as web search, web fetch, code execution, file search and image generation. The Anthropic, Responses, Gemini and Chat Completions adapters each support the tools their endpoint can run. Support differs by provider; the [tools guide](https://providerkit.dev/guides/tools/) lists the supported combinations.
+- Opt in through `@providerkit/core/hosted`. Import provider constructors, `createRegistry` or `presetAdapter` from that entry, then pass `hostedTools` in the stream options. Keep `collectTurn` and the shared types on `@providerkit/core`. Preset model chains, nested fallbacks and registry credential changes keep the opt-in. Importing `/hosted` does not enable tools on providers built from the ordinary entry.
+- Hosted call records, citations and provider-tagged replay data on turns. `collectTurn` keeps them separate from function calls, so an app never tries to execute a tool the provider already ran. Usage can carry hosted call counts and the last pass's context size; caller-supplied rates can price those calls.
+- Unsupported tools and settings fail with `invalid` before any request. On an opted-in provider, `optional: true` can drop the whole unsupported tool, never a restriction such as a domain filter. Ordinary constructors refuse hosted options and same-provider hosted replay, even for optional tools. Gateways need `servesHostedTools` unless their support is already known.
+- Anthropic paused turns continue within the same stream, up to ten times. Hosted progress commits the stream, so a later failure cannot retry and bill the same work again. Generated images count as answers; a search record alone does not.
+
+### Bundle boundary and verification
+
+Ordinary chat imports exclude the hosted encoders and parsers. Independent paired browser builds with Bun 1.4.4 measured 81,289 minified bytes before this feature, 84,369 for ordinary chat after it and 109,106 with hosted tools enabled. The ordinary increase is 3,080 bytes, below the unchanged 12,000-byte limit. No runtime dependency was added.
+
+Focused regression tests, static Node imports, mocked calls and browser bundling passed. Live paid provider calls and an actual MV3 extension runtime were not tested. Provider-specific behavior is covered by recorded response shapes, not a claim of live verification.
+
 ## [0.30.0] - 2026-11-11
 
 ### Added

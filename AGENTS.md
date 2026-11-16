@@ -144,6 +144,7 @@ TypeScript 7 does not ship. Move it when both do.
 | ------------------------------ | ------------------------------------------------------------------------------------ |
 | `types.ts`                     | the seam — messages, tools, chunks, usage, `stripReasoning`                          |
 | `turn.ts`                      | `collectTurn`: a stream into the message to append; `drainStream` on it              |
+| `hosted.ts`                    | tools the vendor runs: neutral types, the refusal check, citations, replay fit       |
 | `errors.ts`                    | **the merged classifier** — 13 kinds named by what fixes them                        |
 | `retry.ts`                     | full-jitter backoff, Retry-After, stream retry, backup-model walker                  |
 | `watchdog.ts`                  | 60s idle on bytes, 300s progress on chunks; `withWatchdog`                           |
@@ -295,6 +296,22 @@ un-learned.
     printable ASCII is refused before any request (`key_invalid`).
     A transcription error is the exception, and keeps the vendor's words: what was sent is audio,
     which no error repeats, and the words name the fix ("Invalid file format"). The key rule holds.
+19. **A hosted tool is the vendor's work, never ours.** Each `hostedTools` entry is sent or refused
+    before any request, never dropped: a gateway that ignores a tool it doesn't know answers
+    unsearched, on the happy path, the failure `fileRefused` exists for. A field the wire can't
+    apply (a domain filter, a use cap) is refused too, because the tool sent without it does more
+    than the caller allowed; `optional` drops the whole tool, never one field. `none` sends none,
+    a forced choice beside hosted tools is refused on every wire (Anthropic's `any` can be met by
+    a vendor tool, Gemini's `ANY` cannot), and a host runs none until `servesHostedTools` says it
+    does. A hosted call is never a function call: never in `toolCalls`, never a `tool_calls`
+    finish, never answered with a `tool` message, and a failed one is data. The first hosted
+    delta commits the stream, because a retry past it reruns and rebills the vendor's tool. A
+    search alone is not an answer (invariant 13); a generated image is. `hostedItems` goes back
+    only to the provider that made it, and only while its recorded text lengths and calls still
+    match the message, so an edited answer goes back as text; Responses sends none back, since
+    `store` is off. A citation span is converted from the vendor's unit (UTF-8 bytes on Gemini,
+    code points on OpenAI) and dropped when it doesn't check out against the text, never guessed.
+    `golden.test.ts` asks all four wires the same nine hosted questions.
 
 ## Next
 

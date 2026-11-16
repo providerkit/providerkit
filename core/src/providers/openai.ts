@@ -11,6 +11,8 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
+import type { HostedToolType } from "../hosted/types.ts";
+import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
@@ -28,7 +30,7 @@ import type {
 } from "../types.ts";
 import { toDataUri } from "../types.ts";
 import { isStrictSchema, schemaPrompt } from "../schema.ts";
-import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 
 export interface OpenAIConfig extends ProviderFallbackConfig {
   apiKey: string;
@@ -139,6 +141,16 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   noSampling?: boolean;
   /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
   serviceTier?: ServiceTier;
+  /**
+   * For providers imported from `@providerkit/core/hosted`.
+   * The hosted tools this endpoint runs. This wire has one, web search.
+   * Defaults to it on openrouter.ai, which runs it as its own server tool,
+   * and on api.openai.com for the `-search-preview` models, and to none
+   * anywhere else: a gateway that ignores the tool answers unsearched
+   * without saying so. A host other than OpenRouter that runs it is sent
+   * OpenAI's `web_search_options`.
+   */
+  servesHostedTools?: readonly HostedToolType[];
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -476,7 +488,7 @@ export function toOpenAIMessages(messages: readonly ChatMessage[], provider = "o
   return out;
 }
 
-interface OpenAIChunk {
+export interface OpenAIChunk {
   choices?: {
     delta?: {
       content?: string | null;
@@ -484,6 +496,8 @@ interface OpenAIChunk {
       reasoning?: string | null;
       /** OpenRouter's normalized reasoning payload, on the final delta. */
       reasoning_details?: unknown[];
+      /** The sources a searched answer cites. */
+      annotations?: import("../hosted/openai.ts").ChatAnnotation[];
       tool_calls?: {
         index?: number;
         id?: string;
@@ -507,6 +521,8 @@ interface OpenAIChunk {
     cost?: unknown;
     is_byok?: boolean;
     cost_details?: { upstream_inference_cost?: unknown } | null;
+    /** The server tool calls OpenRouter ran for the turn. */
+    server_tool_use_details?: { web_search_requests?: number } | null;
   } | null;
   /** Present only on the in-band failure below. Never beside a choice.
    *  `code` is the numeric HTTP status on the gateways, a slug on OpenAI. */
@@ -550,6 +566,11 @@ export function openRouterCostUsd(usage: {
 }
 
 export function createOpenAIProvider(config: OpenAIConfig): Provider {
+  return openaiProvider(config);
+}
+
+/** @internal Shared by the plain and hosted entry points. */
+export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "openai";
   // Keyed on the host, not the id: the host is who sends the bill, and
@@ -570,6 +591,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       opts: StreamOptions = {},
     ): AsyncIterable<ProviderChunk> {
       validateMaxAttempts(opts.maxAttempts);
+      if (!codecs) refuseHostedTools(id, opts, messages);
       const effort = opts.effort ?? config.effort;
       const model = opts.model ?? config.model;
 
@@ -594,18 +616,25 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       const serviceTier = opts.serviceTier ?? config.serviceTier;
       if (serviceTier) request.service_tier = serviceTier;
       Object.assign(request, effortParams(config.effortDialect ?? dialectFor(id), effort, model));
-      if (tools.length > 0) {
-        request.tools = tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.inputSchema,
-          },
-        }));
+      const openRouter = isOpenRouter(baseUrl);
+      const hosted = codecs?.openai.plan(config, baseUrl, id, model, openRouter, opts);
+      if (tools.length > 0 || hosted?.tools.length) {
+        request.tools = [
+          ...tools.map((tool) => ({
+            type: "function",
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.inputSchema,
+            },
+          })),
+          ...(hosted?.tools ?? []),
+        ];
         // Only beside tools: OpenAI refuses the field on a request without any.
-        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
+        if (tools.length > 0 && opts.parallelToolCalls === false)
+          request.parallel_tool_calls = false;
       }
+      if (hosted?.searchOptions) request.web_search_options = hosted.searchOptions;
       if (opts.toolChoice && opts.toolChoice !== "auto") {
         request.tool_choice =
           typeof opts.toolChoice === "string"
@@ -620,7 +649,8 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
         // here the only job is to leave the response format off those calls, so
         // the schema reaches the model the one way nothing can suppress.
         const promptCarried =
-          tools.length > 0 && (opts.jsonWithTools ?? config.jsonWithTools) === "prompt";
+          (tools.length > 0 || hosted?.active) &&
+          (opts.jsonWithTools ?? config.jsonWithTools) === "prompt";
         const enforced =
           !promptCarried &&
           (config.jsonMode ?? (id === "openai" ? "schema" : "object")) === "schema";
@@ -687,6 +717,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       // Each call as its deltas named it, by index. The finish checks them
       // before it goes out, and they are what says the turn called a tool.
       const calls = new Map<number, ToolCallIdentity>();
+      const hostedStream = codecs?.openai.stream();
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
@@ -738,6 +769,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             chunk.usage.cached_tokens ??
             0;
           const reportedCostUsd = reportsCost ? openRouterCostUsd(chunk.usage) : undefined;
+          const hostedCalls = codecs?.openai.counts(chunk.usage);
           yield {
             type: "usage",
             usage: {
@@ -750,6 +782,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
                 ? { reasoningTokens: chunk.usage.completion_tokens_details.reasoning_tokens }
                 : {}),
               ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
+              ...(hostedCalls ? { hostedCalls } : {}),
             },
           };
         }
@@ -765,6 +798,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             out.content = delta.content;
             has = true;
           }
+          hostedStream?.delta(delta);
           // `reasoning_content` is DeepSeek's field; `reasoning` is
           // OpenRouter's normalized one. Whichever arrives is the same thing.
           const reasoning = delta.reasoning_content ?? delta.reasoning;
@@ -799,6 +833,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
 
         if (choice.finish_reason) {
           const stated = mapFinishReason(id, choice.finish_reason);
+          if (hostedStream) yield* hostedStream.close();
           const minted = settleToolCalls(id, calls.values());
           if (minted.length > 0) yield { type: "delta", toolCalls: minted };
           ended = true;
@@ -812,11 +847,13 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       // Either proof will do: some gateways send `[DONE]` with no finish, and
       // some a finish with no `[DONE]`. Neither means the socket closed early.
       if (!ended) throw streamCut(id);
-      // A `[DONE]` with no finish stated still owes its calls the same check.
+      // A `[DONE]` with no finish stated still owes its calls the same check,
+      // and its citations their place.
+      if (hostedStream) yield* hostedStream.close();
       const minted = settleToolCalls(id, calls.values());
       if (minted.length > 0) yield { type: "delta", toolCalls: minted };
     },
   };
 
-  return withConfiguredFallbacks(provider, config);
+  return configuredFallbacks(provider, config, codecs);
 }
