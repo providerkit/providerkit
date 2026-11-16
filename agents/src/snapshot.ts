@@ -1291,7 +1291,7 @@ function checkGuards(snapshot: RunSnapshot): void {
     if (snapshot.state.status === "completed" && guard.status !== "allowed")
       throw new TypeError("A completed run cannot have an unfinished or rejected guard.");
   }
-  function require(stage: GuardStage, id: string, attemptId: string): void {
+  function requireGuardVerdict(stage: GuardStage, id: string, attemptId: string): void {
     if (
       stages.includes(stage) &&
       !snapshot.guards.some(
@@ -1306,17 +1306,17 @@ function checkGuards(snapshot: RunSnapshot): void {
   }
   for (const model of allModels(snapshot)) {
     // Input checks precede admission; even running work must have passed them.
-    require("modelInput", model.id, model.attemptId);
+    requireGuardVerdict("modelInput", model.id, model.attemptId);
     if (model.status !== "completed") continue;
-    require("modelOutput", model.id, model.attemptId);
+    requireGuardVerdict("modelOutput", model.id, model.attemptId);
     for (const tool of model.tools) {
       for (const attempt of tool.retries) {
-        require("toolInput", tool.id, attempt.attemptId);
-        require("toolOutput", tool.id, attempt.attemptId);
+        requireGuardVerdict("toolInput", tool.id, attempt.attemptId);
+        requireGuardVerdict("toolOutput", tool.id, attempt.attemptId);
       }
       if (tool.status !== "completed") continue;
-      if (tool.result.ok) require("toolInput", tool.id, tool.attemptId);
-      require("toolOutput", tool.id, tool.attemptId);
+      if (tool.result.ok) requireGuardVerdict("toolInput", tool.id, tool.attemptId);
+      requireGuardVerdict("toolOutput", tool.id, tool.attemptId);
     }
   }
 }
