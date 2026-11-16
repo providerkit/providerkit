@@ -75,6 +75,11 @@ export function RunStatusDisplay({
       >
         {title}
       </span>
+      {run.owner && (
+        <p className="pk-status-text" data-part="conversation-owner">
+          {labels.conversationOwner(run.owner.label)}
+        </p>
+      )}
       {help && (
         <p className="pk-status-help" data-part="status-help">
           {help}

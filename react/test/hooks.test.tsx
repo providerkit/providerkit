@@ -177,6 +177,44 @@ describe("useChat", () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects retained send and recall callbacks after a scope change and ignores a late enqueue receipt", async () => {
+    const host = tail();
+    const receipt = Promise.withResolvers<import("../src/protocol.ts").DisplayInput>();
+    const enqueue = vi.fn<NonNullable<ChatTransport["enqueue"]>>(() => receipt.promise);
+    const recallInput = vi.fn<NonNullable<ChatTransport["recallInput"]>>();
+    const send = vi.fn<NonNullable<ChatTransport["send"]>>();
+    const transport = { observe: host.observe, enqueue, recallInput, send };
+    let latest: ChatValue | undefined;
+    const onValue = (value: ChatValue) => {
+      latest = value;
+    };
+    await act(async () =>
+      root.render(<Chat transport={transport} id="first-person" onValue={onValue} />),
+    );
+    host.latest().push({ v, type: "run", run: run("running") });
+    await settle();
+    const old = latest!;
+    let pending: ReturnType<ChatValue["send"]>;
+    await act(async () => {
+      pending = old.send("Private draft");
+    });
+    await act(async () =>
+      root.render(<Chat transport={transport} id="second-person" onValue={onValue} />),
+    );
+    expect(await old.send("Late send")).toMatchObject({ ok: false });
+    expect(await old.recallInput("old-input")).toMatchObject({ ok: false });
+    const input = enqueue.mock.calls[0]![0];
+    await act(async () => {
+      receipt.resolve({ id: input.clientId, rootRunId: input.rootRunId, status: "queued" });
+      await pending;
+    });
+    expect(latest?.inputs).toEqual([]);
+    expect(latest?.messages).toEqual([]);
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(recallInput).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("starts over for another conversation, and the last one's late events never show", async () => {
     const host = tail({ honorsAbort: false });
     const transport: ChatTransport = { observe: host.observe };

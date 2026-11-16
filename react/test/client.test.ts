@@ -7,12 +7,17 @@ import {
   type ChatClient,
   type ChatTransport,
   type EventReply,
+  type ClientToolHandler,
+  type ClientToolClaim,
+  type ClientToolClaimRequest,
+  type EnqueueInput,
 } from "../src/client.ts";
 import { useChat } from "../src/hooks.ts";
 import type {
   ApprovalPart,
   ChatEvent,
   DisplayMessage,
+  DisplayInput,
   DisplayPart,
   RunInfo,
   RunStatus,
@@ -623,6 +628,47 @@ describe("sending", () => {
     expect(client.getState().messageErrors).toEqual({});
   });
 
+  it.each(["running", "waiting"] as const)(
+    "blocks ordinary retries during a %s run even when steering is available",
+    async (state) => {
+      const host = tail();
+      const send = vi
+        .fn<Send>()
+        .mockRejectedValueOnce(new Error("Lost reply"))
+        .mockResolvedValue(undefined);
+      const enqueue = vi.fn<NonNullable<ChatTransport["enqueue"]>>(async (input) => ({
+        id: input.clientId,
+        rootRunId: input.rootRunId,
+        status: "queued",
+      }));
+      const transport = { send, enqueue, observe: host.observe };
+      const client = createChatClient({ transport });
+      const detach = client.attach();
+      const first = await client.send("Unconfirmed message");
+      if (!first.ok) throw new Error("An unknown outcome keeps the message.");
+      host.latest().push(status(run(state, "another-run"), at(1)));
+      await flush();
+
+      expect(client.getState().canSend).toBe(true);
+      expect(await client.retry(first.messageId)).toMatchObject({
+        ok: false,
+        error: { code: "busy" },
+      });
+      expect(find(client, first.messageId)?.state).toBe("failed");
+      expect(send).toHaveBeenCalledOnce();
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(await client.send("Steer the current run")).toMatchObject({ outcome: "accepted" });
+      expect(enqueue).toHaveBeenCalledOnce();
+
+      client.setOptions({ transport, allowSendWhileRunning: true });
+      expect(await client.retry(first.messageId)).toMatchObject({ outcome: "accepted" });
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1]?.[0]).toEqual(send.mock.calls[0]?.[0]);
+      expect(enqueue).toHaveBeenCalledOnce();
+      detach();
+    },
+  );
+
   it("reports acceptance when the host's copy arrives before a transport failure", async () => {
     const host = tail();
     const call = deferred<void>();
@@ -1213,7 +1259,7 @@ describe("answering", () => {
     const client = createChatClient({
       transport: { respond },
       initialMessages: [assistant("a1", [part])],
-      clientTools: { count: { run } },
+      clientTools: { count: { safety: "read-only", run } },
     });
     const detach = client.attach();
     detach();
@@ -1243,7 +1289,7 @@ describe("answering", () => {
             { type: "client-tool", id: "device", title: "Read", state: "pending", name: "read" },
           ]),
         ],
-        clientTools: { read: { run: handler } },
+        clientTools: { read: { safety: "read-only", run: handler } },
       });
       const detach = client.attach();
       const pending = client.startClientTool("device");
@@ -1283,7 +1329,7 @@ describe("answering", () => {
           { type: "client-tool", id: "device", title: "Read", state: "pending", name: "read" },
         ]),
       ],
-      clientTools: { read: { run: () => value.promise } },
+      clientTools: { read: { safety: "read-only", run: () => value.promise } },
     });
     const detach = client.attach();
     const pending = client.startClientTool("device");
@@ -1319,7 +1365,7 @@ describe("answering", () => {
           },
         ]),
       ],
-      clientTools: { read: { run: () => value.promise } },
+      clientTools: { read: { safety: "read-only", run: () => value.promise } },
     });
     const detach = client.attach();
     const pending = client.startClientTool("device");
@@ -1470,6 +1516,473 @@ describe("answering", () => {
       error: { code: "not_waiting" },
     });
     expect(respond).not.toHaveBeenCalled();
+  });
+});
+
+describe("host action claims", () => {
+  // One simulated authority shared by independent clients. This proves the binding and ordering,
+  // not distributed storage, real authentication, fencing or crash-safe persistence.
+  function authority() {
+    let state: "free" | "busy" | "unknown" | "completed" = "free";
+    let result: unknown;
+    const claim = vi.fn((request: ClientToolClaimRequest): ClientToolClaim => {
+      expect(request).toMatchObject({
+        runId: "run-1",
+        requestId: "device",
+        name: "write",
+        input: "approved input",
+      });
+      if (state === "completed") return { status: "completed", value: result };
+      if (state !== "free") return { status: state };
+      state = "busy";
+      return {
+        status: "granted",
+        complete(value) {
+          result = value;
+          state = "completed";
+        },
+      };
+    });
+    return {
+      claim,
+      uncertain() {
+        state = "unknown";
+      },
+      reconcile(value: unknown) {
+        result = value;
+        state = "completed";
+      },
+    };
+  }
+  async function device(handler: ClientToolHandler, respond: Respond = async () => {}) {
+    const host = tail();
+    const client = createChatClient({
+      transport: { observe: host.observe, respond },
+      clientTools: { write: handler },
+    });
+    const detach = client.attach();
+    host.latest().push(
+      snapshot(
+        [
+          assistant("a1", [
+            {
+              type: "client-tool",
+              id: "device",
+              name: "write",
+              title: "Write",
+              input: "approved input",
+              state: "pending",
+            },
+          ]),
+        ],
+        run("waiting"),
+        at(1),
+      ),
+    );
+    await flush();
+    return { client, host, detach };
+  }
+
+  it("requires one authoritative grant across two concurrent tabs", async () => {
+    const service = authority();
+    const work = deferred<unknown>();
+    const execute = vi.fn(() => work.promise);
+    const handler: ClientToolHandler = { safety: "claimed", claim: service.claim, run: execute };
+    const first = await device(handler);
+    const second = await device(handler);
+    expect(execute).not.toHaveBeenCalled();
+    const pending = first.client.startClientTool("device");
+    expect(await second.client.startClientTool("device")).toMatchObject({
+      ok: false,
+      error: { code: "claim_busy" },
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    work.resolve("saved result");
+    expect(await pending).toMatchObject({ ok: true, outcome: "accepted" });
+    expect(await second.client.startClientTool("device")).toMatchObject({
+      ok: true,
+      outcome: "accepted",
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    first.detach();
+    second.detach();
+  });
+
+  it.each(["execution", "delivery"] as const)(
+    "reconciles a fresh client after lost %s without executing twice",
+    async (failure) => {
+      const service = authority();
+      const execute = vi.fn(() => {
+        if (failure === "execution") {
+          service.uncertain();
+          throw new Error("Effect may have happened");
+        }
+        return "stored result";
+      });
+      const handler: ClientToolHandler = { safety: "claimed", claim: service.claim, run: execute };
+      const first = await device(handler, async () => {
+        throw new Error("Lost result delivery");
+      });
+      expect(await first.client.startClientTool("device")).toMatchObject({ outcome: "unknown" });
+      first.detach();
+      const deliver = vi.fn<Respond>(async () => {});
+      const fresh = await device(handler, deliver);
+      if (failure === "execution") {
+        expect(await fresh.client.startClientTool("device")).toMatchObject({ outcome: "unknown" });
+        expect(deliver).not.toHaveBeenCalled();
+        service.reconcile("stored result");
+      }
+      expect(await fresh.client.startClientTool("device")).toMatchObject({ outcome: "accepted" });
+      expect(deliver.mock.calls[0]?.[0]).toEqual([
+        { requestId: "device", response: { type: "result", value: "stored result" } },
+      ]);
+      expect(execute).toHaveBeenCalledOnce();
+      fresh.detach();
+    },
+  );
+
+  it("records a late execution result without delivering it from a detached view", async () => {
+    const service = authority();
+    const work = deferred<unknown>();
+    const execute = vi.fn(() => work.promise);
+    const handler: ClientToolHandler = { safety: "claimed", claim: service.claim, run: execute };
+    const deliver = vi.fn<Respond>(async () => {});
+    const first = await device(handler, deliver);
+    const pending = first.client.startClientTool("device");
+    await flush();
+    first.detach();
+    work.resolve("persist after detaching");
+    expect(await pending).toMatchObject({ outcome: "unknown" });
+    expect(deliver).not.toHaveBeenCalled();
+    const fresh = await device(handler, deliver);
+    expect(await fresh.client.startClientTool("device")).toMatchObject({ outcome: "accepted" });
+    expect(execute).toHaveBeenCalledOnce();
+    fresh.detach();
+  });
+
+  it("refuses a handler with no repeat-safety declaration", async () => {
+    const execute = vi.fn();
+    // A JavaScript consumer can omit this field. Pin both the type error and runtime refusal.
+    // @ts-expect-error A handler requires explicit safety or a durable claim.
+    const handler: ClientToolHandler = { run: execute };
+    const item = await device(handler);
+    expect(await item.client.startClientTool("device")).toMatchObject({ ok: false });
+    expect(execute).not.toHaveBeenCalled();
+    item.detach();
+  });
+
+  it.each(["denied", "busy", "unknown"] as const)("does not execute a %s claim", async (status) => {
+    const execute = vi.fn();
+    const item = await device({ safety: "claimed", claim: () => ({ status }), run: execute });
+    const result = await item.client.startClientTool("device");
+    expect(result).toMatchObject(
+      status === "unknown"
+        ? { ok: true, outcome: "unknown" }
+        : { ok: false, error: { code: `claim_${status}` } },
+    );
+    expect(execute).not.toHaveBeenCalled();
+    expect(item.client.getState().requests[0]?.local?.status).not.toBe("submitting");
+    item.detach();
+  });
+
+  it.each(["detach", "run", "segment", "expiry"])(
+    "does not execute after the claim awaited a stale %s",
+    async (change) => {
+      const claim = deferred<ClientToolClaim>();
+      const execute = vi.fn();
+      const item = await device({ safety: "claimed", claim: () => claim.promise, run: execute });
+      if (change === "expiry") {
+        const message = item.client.getState().messages[0]!;
+        item.host.latest().push(
+          snapshot(
+            [
+              {
+                ...message,
+                parts: message.parts.map((part) => ({ ...part, expiresAt: Date.now() + 1 })),
+              },
+            ],
+            run("waiting"),
+            at(2),
+          ),
+        );
+        await flush();
+      }
+      const pending = item.client.startClientTool("device");
+      if (change === "detach") item.detach();
+      else if (change === "expiry") await vi.advanceTimersByTimeAsync(2);
+      else
+        item.host
+          .latest()
+          .push(status(run("waiting", change === "run" ? "other" : "run-1"), at(1, "new")));
+      await flush();
+      claim.resolve({ status: "granted", complete() {} });
+      expect(await pending).toMatchObject({ outcome: "unknown" });
+      expect(execute).not.toHaveBeenCalled();
+      item.detach();
+    },
+  );
+
+  it.each(["completed", "granted", "skip"] as const)(
+    "unlocks a stale segment claim for explicit %s recovery without using its grant",
+    async (recovery) => {
+      const stale = deferred<ClientToolClaim>();
+      const fresh = deferred<ClientToolClaim>();
+      const claim = vi
+        .fn<(request: ClientToolClaimRequest) => Promise<ClientToolClaim>>()
+        .mockReturnValueOnce(stale.promise)
+        .mockReturnValueOnce(fresh.promise);
+      const execute = vi.fn();
+      const complete = vi.fn();
+      const deliver = vi.fn<Respond>(async () => {});
+      const item = await device({ safety: "claimed", claim, run: execute }, deliver);
+      const pending = item.client.startClientTool("device");
+      item.host.latest().push(status(run("waiting"), at(1, "continued")));
+      await flush();
+      expect(claim.mock.calls[0]?.[0].signal.aborted).toBe(true);
+      expect(item.client.getState().requests[0]).toMatchObject({
+        canReconcile: true,
+        local: { status: "unconfirmed" },
+      });
+
+      const checking =
+        recovery === "skip"
+          ? item.client.respond("device", { type: "cancel" })
+          : item.client.startClientTool("device");
+      expect(item.client.getState().requests[0]?.local?.status).toBe("submitting");
+      stale.resolve({ status: "granted", complete });
+      expect(await pending).toMatchObject({ outcome: "unknown" });
+      // The old grant must not clear the newer check or Skip submission.
+      expect(item.client.getState().requests[0]?.local?.status).toBe("submitting");
+      if (recovery !== "skip") {
+        expect(claim).toHaveBeenCalledTimes(2);
+        expect(claim.mock.calls[1]?.[0]).toMatchObject({
+          requestId: "device",
+          runId: "run-1",
+          segment: "continued",
+          name: "write",
+          input: "approved input",
+        });
+        fresh.resolve(
+          recovery === "completed"
+            ? { status: "completed", value: "Host-reconciled result" }
+            : { status: "granted", complete },
+        );
+      }
+      expect(await checking).toEqual({
+        ok: true,
+        outcome: recovery === "granted" ? "unknown" : "accepted",
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(complete).not.toHaveBeenCalled();
+      if (recovery === "granted") expect(deliver).not.toHaveBeenCalled();
+      else {
+        expect(deliver).toHaveBeenCalledOnce();
+        expect(deliver.mock.calls[0]?.[0]).toEqual([
+          {
+            requestId: "device",
+            response:
+              recovery === "skip"
+                ? { type: "cancel" }
+                : { type: "result", value: "Host-reconciled result" },
+          },
+        ]);
+      }
+      item.detach();
+    },
+  );
+
+  it("rechecks the host before delivering a retained result in a new segment", async () => {
+    const service = authority();
+    const execute = vi.fn(() => "Stored result");
+    const deliver = vi
+      .fn<Respond>()
+      .mockRejectedValueOnce(new Error("Lost delivery"))
+      .mockResolvedValue(undefined);
+    const item = await device({ safety: "claimed", claim: service.claim, run: execute }, deliver);
+    expect(await item.client.startClientTool("device")).toMatchObject({ outcome: "unknown" });
+    item.host.latest().push(status(run("waiting"), at(1, "continued")));
+    await flush();
+    expect(await item.client.startClientTool("device")).toMatchObject({ outcome: "accepted" });
+    expect(service.claim).toHaveBeenCalledTimes(2);
+    expect(service.claim.mock.calls[1]?.[0].segment).toBe("continued");
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledOnce();
+    item.detach();
+  });
+
+  it("does not deliver an unrecorded result or replay it after a completion write fails", async () => {
+    const execute = vi.fn(() => "local result");
+    const complete = vi.fn(() => {
+      throw new Error("Persistence unknown");
+    });
+    const deliver = vi.fn<Respond>(async () => {});
+    const item = await device(
+      { safety: "claimed", claim: () => ({ status: "granted", complete }), run: execute },
+      deliver,
+    );
+    expect(await item.client.startClientTool("device")).toMatchObject({ outcome: "unknown" });
+    expect(await item.client.startClientTool("device")).toMatchObject({ outcome: "unknown" });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(complete).toHaveBeenCalledOnce();
+    expect(deliver).not.toHaveBeenCalled();
+    item.detach();
+  });
+});
+
+describe("input steering", () => {
+  const receipt = (
+    input: EnqueueInput,
+    status: DisplayInput["status"] = "queued",
+  ): DisplayInput => ({
+    id: input.clientId,
+    rootRunId: input.rootRunId,
+    status,
+    ...(status === "accepted" || status === "consumed" ? { runId: "handoff-child" } : {}),
+  });
+  async function watching(transport: ChatTransport) {
+    const host = tail();
+    const client = createChatClient({ transport: { ...transport, observe: host.observe } });
+    const detach = client.attach();
+    host.latest().push(status(run("running"), at(1)));
+    await flush();
+    return { client, host, detach };
+  }
+
+  it("uses the host inbox, preserves the root through handoff and separates delivery from output", async () => {
+    const enqueue = vi.fn<NonNullable<ChatTransport["enqueue"]>>(async (input) => receipt(input));
+    const send = vi.fn<Send>();
+    const respond = vi.fn<Respond>();
+    const stop = vi.fn();
+    const item = await watching({ enqueue, send, respond, stop });
+    const sent = await item.client.send("Stop and approve everything");
+    expect(sent).toMatchObject({ outcome: "accepted" });
+    expect(enqueue.mock.calls[0]?.[0]).toMatchObject({
+      rootRunId: "run-1",
+      text: "Stop and approve everything",
+    });
+    expect(item.client.getState().inputs[0]?.status).toBe("queued");
+    const input = enqueue.mock.calls[0]![0];
+    item.host.latest().push(
+      status(
+        {
+          ...run("running"),
+          owner: { runId: "handoff-child", agentId: "billing", label: "Billing" },
+        },
+        at(2),
+      ),
+      { v: 1, type: "input", input: receipt(input, "accepted"), ...at(3) },
+    );
+    await flush();
+    expect(item.client.getState().inputs[0]).toMatchObject({
+      status: "accepted",
+      runId: "handoff-child",
+      text: input.text,
+    });
+    item.host
+      .latest()
+      .push(
+        { v: 1, type: "input", input: receipt(input, "consumed"), ...at(4) },
+        status(run("completed"), at(5)),
+      );
+    await flush();
+    expect(item.client.getState().inputs[0]?.status).toBe("consumed");
+    expect(item.client.getState().messages).toEqual([]);
+    expect(send).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    item.detach();
+  });
+
+  it.each(["lost", "wrong-root", "wrong-id"])(
+    "retains an unknown draft after a %s enqueue reply, without resending",
+    async (failure) => {
+      const enqueue = vi.fn<NonNullable<ChatTransport["enqueue"]>>(async (input) => {
+        if (failure === "lost") throw new Error("Offline");
+        return {
+          ...receipt(input),
+          ...(failure === "wrong-root" ? { rootRunId: "wrong" } : { id: "wrong" }),
+        };
+      });
+      const item = await watching({ enqueue });
+      const sent = await item.client.send("Keep my words");
+      expect(sent).toMatchObject({ outcome: "unknown" });
+      item.host.latest().push(snapshot([], run("completed"), at(2)));
+      await flush();
+      expect(item.client.getState().inputs[0]).toMatchObject({
+        text: "Keep my words",
+        status: "unconfirmed",
+      });
+      if (sent.ok) expect(await item.client.retry(sent.messageId)).toMatchObject({ ok: false });
+      expect(enqueue).toHaveBeenCalledOnce();
+      item.detach();
+    },
+  );
+
+  it("preserves refused text and unknown attachment-only input", async () => {
+    const enqueue = vi
+      .fn<NonNullable<ChatTransport["enqueue"]>>()
+      .mockRejectedValueOnce(
+        new TransportError("refused", { code: "full", message: "Wait before sending more." }),
+      )
+      .mockRejectedValueOnce(new Error("Unknown delivery"));
+    const item = await watching({ enqueue });
+    expect(await item.client.send("Keep my draft")).toMatchObject({
+      ok: false,
+      input: { text: "Keep my draft" },
+    });
+    expect(item.client.getState().inputs).toEqual([]);
+    const attachments = [{ id: "file", name: "Draft.txt", mediaType: "text/plain" }];
+    expect(await item.client.send({ attachments })).toMatchObject({ outcome: "unknown" });
+    expect(item.client.getState().inputs[0]).toMatchObject({ attachments, status: "unconfirmed" });
+    item.detach();
+  });
+
+  it("keeps a queued-at-completion message and asks the host, not the queued label, about recall", async () => {
+    let claimed = false;
+    const recallInput = vi.fn<NonNullable<ChatTransport["recallInput"]>>(async (input) => {
+      if (claimed)
+        throw new TransportError("refused", {
+          code: "claimed",
+          message: "Already claimed. Check the answer.",
+        });
+      return { ...input, status: "recalled" };
+    });
+    const item = await watching({ enqueue: async (input) => receipt(input), recallInput });
+    await item.client.send("Arrived too late");
+    const id = item.client.getState().inputs[0]!.id;
+    item.host.latest().push(snapshot([], run("completed"), at(2)));
+    await flush();
+    expect(item.client.getState().inputs[0]).toMatchObject({ status: "queued", canRecall: true });
+    // Simulates poll reserving the input before checkpoint/acknowledge. The UI is still queued.
+    claimed = true;
+    expect(await item.client.recallInput(id)).toMatchObject({
+      ok: false,
+      error: { code: "claimed" },
+    });
+    expect(item.client.getState().inputs[0]?.status).toBe("queued");
+    claimed = false;
+    expect(await item.client.recallInput(id)).toEqual({ ok: true });
+    expect(item.client.getState().inputs[0]).toMatchObject({
+      status: "recalled",
+      canRecall: false,
+    });
+    item.detach();
+  });
+
+  it.each(["detach", "root"])("drops a late enqueue callback after %s changes", async (change) => {
+    const result = deferred<DisplayInput>();
+    const enqueue = vi.fn<NonNullable<ChatTransport["enqueue"]>>(() => result.promise);
+    const item = await watching({ enqueue });
+    const pending = item.client.send("Old scope");
+    if (change === "detach") item.detach();
+    else {
+      item.host.latest().push(status(run("running", "new-root"), at(2)));
+      await flush();
+    }
+    result.resolve(receipt(enqueue.mock.calls[0]![0]));
+    expect(await pending).toMatchObject({ outcome: "unknown" });
+    expect(item.client.getState().inputs[0]?.status).toBe("unconfirmed");
+    item.detach();
   });
 });
 

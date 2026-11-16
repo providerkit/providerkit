@@ -121,7 +121,7 @@ const midRun = () =>
 
 describe("emptyChatView", () => {
   it("starts with no messages, an idle run and no cursor", () => {
-    expect(emptyChatView()).toEqual({ messages: [], run: { status: "idle" } });
+    expect(emptyChatView()).toEqual({ messages: [], run: { status: "idle" }, inputs: [] });
     expect("cursor" in emptyChatView()).toBe(false);
     expect(emptyChatView()).not.toBe(emptyChatView());
   });

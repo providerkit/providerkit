@@ -30,6 +30,7 @@ export {
 } from "./approval.tsx";
 export { QuestionFields, type QuestionFieldsProps } from "./question.tsx";
 export { SchemaForm, formFields, type SchemaFormProps, type FormField } from "./schema-form.tsx";
+export { InputStatusList, type InputStatusListProps } from "./inputs.tsx";
 export { Sources, type SourcesProps } from "./sources.tsx";
 export {
   RunStatusDisplay,

@@ -32,6 +32,7 @@ export interface ChatValue extends ChatState {
   send: ChatClient["send"];
   retry: ChatClient["retry"];
   startClientTool: ChatClient["startClientTool"];
+  recallInput: ChatClient["recallInput"];
   stop: ChatClient["stop"];
   respond: ChatClient["respond"];
   reconnect: ChatClient["reconnect"];
@@ -90,6 +91,12 @@ function useClient(options: UseChatOptions): ChatClient {
     };
     return {
       ...client,
+      send: async (input: Parameters<ChatClient["send"]>[0]) =>
+        committed.current === client ? client.send(input) : unavailable,
+      retry: async (id: string) => (committed.current === client ? client.retry(id) : unavailable),
+      recallInput: async (id: string) =>
+        committed.current === client ? client.recallInput(id) : unavailable,
+      stop: async () => (committed.current === client ? client.stop() : unavailable),
       respond,
       startClientTool: async (id: string) =>
         committed.current === client ? client.startClientTool(id) : unavailable,
@@ -119,6 +126,7 @@ export function useChat(options: UseChatOptions): ChatValue {
       send: client.send,
       retry: client.retry,
       startClientTool: client.startClientTool,
+      recallInput: client.recallInput,
       stop: client.stop,
       respond: client.respond,
       reconnect: client.reconnect,

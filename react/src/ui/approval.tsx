@@ -144,7 +144,10 @@ function RequestContent({
   const state: RequestDisplayState =
     part.state !== "pending" ? part.state : isExpired ? "expired" : (decision?.status ?? "pending");
   const allowed = part.canAnswer !== false && request.canRespond !== false;
-  const disabled = !allowed || !onRespond || (state !== "pending" && state !== "failed");
+  const reconcilable =
+    part.type === "client-tool" && request.canReconcile === true && state === "unconfirmed";
+  const disabled =
+    !allowed || !onRespond || (state !== "pending" && state !== "failed" && !reconcilable);
   const customApproval =
     part.type === "approval" && !!(part.edit || part.approveForm || part.denyForm);
   const unsupported =
@@ -416,7 +419,7 @@ function RequestContent({
                     aria-busy={state === "submitting"}
                     onClick={() => void start()}
                   >
-                    {labels.runClientAction}
+                    {reconcilable ? labels.checkClientAction : labels.runClientAction}
                   </button>
                 )}
                 <button

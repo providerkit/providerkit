@@ -12,6 +12,9 @@ import {
   questionTool,
   type Decision,
   defineDelegation,
+  defineHandoff,
+  createMemoryInbox,
+  type InputReceipt,
   type Agent,
   type AgentEvent,
   type AgentHost,
@@ -782,6 +785,204 @@ describe("request journals and attempts", () => {
   });
 });
 
+describe("handoff and input projection", () => {
+  it("shows only the conversation handoff chain, live and restored, with registered labels", async () => {
+    const privateTarget = defineAgent({
+      id: "private-target",
+      version: "1",
+      instructions: "Private instructions",
+      provider: fake([turn({ text: ["Private specialist transcript"] })]),
+    });
+    const helper = defineAgent({
+      id: "helper",
+      version: "1",
+      instructions: "Help",
+      provider: fake([turn({ calls: [call("internal_transfer")] })]),
+      tools: [
+        defineHandoff({ name: "internal_transfer", description: "Transfer", to: privateTarget }),
+      ],
+    });
+    const final = defineAgent({
+      id: "final",
+      version: "1",
+      instructions: "Answer",
+      provider: fake([turn({ text: ["Permitted final answer"], reasoning: "Private reasoning" })]),
+    });
+    const target = defineAgent({
+      id: "target",
+      version: "1",
+      instructions: "Transfer",
+      provider: fake([
+        turn({
+          text: ["Permitted target words"],
+          calls: [call("last_transfer", { note: "Private target note" })],
+        }),
+      ]),
+      tools: [defineHandoff({ name: "last_transfer", description: "Transfer", to: final })],
+    });
+    const root = defineAgent({
+      id: "root",
+      version: "1",
+      instructions: "Delegate then transfer",
+      provider: fake([
+        turn({ calls: [call("consult", { input: "Private helper input" })] }),
+        turn({ text: ["Root words"], calls: [call("transfer", { note: "Private root note" })] }),
+      ]),
+      tools: [
+        helper.asTool({ name: "consult", description: "Consult" }),
+        defineHandoff({ name: "transfer", description: "Transfer", to: target }),
+      ],
+    });
+    const { events, saves, outcome } = await withSaves(root, "Private user input");
+    expect(outcome.status).toBe("completed");
+    const last = outcome.handoffs.at(-1)!;
+    const options: AgentProjectorOptions = {
+      messageId: "answer",
+      runId: outcome.runId,
+      agentId: "root",
+      labels: {
+        agent: { target: "Target label", final: "Final label" },
+        run: { [last.childRunId]: "Run override" },
+      },
+    };
+    const projector = createAgentProjector(options);
+    const view = play(project(projector, events));
+    const saved = createAgentProjector(options).snapshot(outcome.snapshot);
+    expect(view.messages[0]).toEqual(saved);
+    expect(view.run.owner).toEqual({
+      runId: last.childRunId,
+      agentId: "final",
+      label: "Run override",
+    });
+    expect(createAgentProjector(options).run(outcome.snapshot).owner).toEqual(view.run.owner);
+    expect(saved.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([
+      "Root words",
+      "Permitted target words",
+      "Permitted final answer",
+    ]);
+    expect(saved.parts.find((part) => part.id === last.childRunId)).toMatchObject({
+      type: "agent",
+      kind: "handoff",
+      agentId: "final",
+      label: "Run override",
+      toolId: last.operationId,
+    });
+    expect(JSON.stringify([view, saved])).not.toContain("Private");
+    for (const save of saves) {
+      const restored = openAt(options, events, save);
+      expect(restored.run.owner).toEqual(view.run.owner);
+      expect(rows(restored.messages[0])).toEqual(rows(saved));
+    }
+    const hidden = createAgentProjector({ ...options, text: (source) => source.root });
+    expect(JSON.stringify(hidden.snapshot(outcome.snapshot))).not.toContain("Permitted");
+  });
+
+  it("reads receipt.runId, accepts a handoff recipient and reconstructs input delivery without content", async () => {
+    const inbox = createMemoryInbox("input-root");
+    const target = defineAgent({
+      id: "target",
+      version: "1",
+      instructions: "Answer",
+      provider: fake([turn({ text: ["Answer"] })]),
+    });
+    const root = defineAgent({
+      id: "root",
+      version: "1",
+      instructions: "Transfer",
+      provider: fake([turn({ calls: [call("transfer")] })]),
+      tools: [defineHandoff({ name: "transfer", description: "Transfer", to: target })],
+    });
+    const events: AgentEvent[] = [];
+    const saves: RunSnapshot[] = [];
+    const outcome = await root.run("Private original", {
+      runId: "input-root",
+      host: {
+        inbox,
+        checkpoint: (saved) => {
+          saves.push(saved);
+        },
+      },
+      onEvent(event) {
+        events.push(event);
+        if (event.type === "handoff")
+          inbox.enqueue({ id: "steer", content: "Private steering text" });
+      },
+    });
+    expect(outcome.status).toBe("completed");
+    const projector = createAgentProjector({
+      messageId: "answer",
+      runId: "input-root",
+      agentId: "root",
+    });
+    const inputEvents = events.filter((event) => event.type === "input");
+    expect(inputEvents.map((event) => event.receipt.status)).toContain("accepted");
+    const receipt = outcome.inputs[0]!;
+    expect(receipt.runId).toBe(outcome.handoffs[0]?.childRunId);
+    expect(projector.event({ type: "input", receipt: { ...receipt, rootRunId: "wrong" } })).toEqual(
+      [],
+    );
+    const live = play(project(projector, events));
+    const expected = {
+      id: "steer",
+      rootRunId: "input-root",
+      runId: receipt.runId,
+      status: "consumed",
+    };
+    expect(projector.inputs(outcome.snapshot)).toEqual([expected]);
+    const restored = play(
+      overWire([
+        {
+          v: 1,
+          type: "snapshot",
+          messages: [projector.snapshot(outcome.snapshot)],
+          run: projector.run(outcome.snapshot),
+          inputs: projector.inputs(outcome.snapshot),
+        },
+      ]),
+      live,
+    );
+    expect(restored.inputs).toEqual([expected]);
+    expect(JSON.stringify(restored)).not.toContain("Private");
+    expect(
+      saves.some((saved) => projector.inputs(saved).some((input) => input.status === "accepted")),
+    ).toBe(true);
+    const optedIn = createAgentProjector({
+      messageId: "answer",
+      runId: "input-root",
+      input: (input) => ({
+        text: typeof input.content === "string" ? input.content : "Attached file",
+      }),
+    });
+    expect(optedIn.inputs(outcome.snapshot)[0]?.text).toBe("Private steering text");
+  });
+
+  it("does not settle a live text or restart the run for an input receipt", () => {
+    const projector = createAgentProjector({ messageId: "answer", runId: "root" });
+    const chunk = (content: string): AgentEvent => ({
+      type: "model_chunk",
+      runId: "root",
+      operationId: "model",
+      attemptId: "attempt",
+      chunk: { type: "delta", content },
+    });
+    const receipt: InputReceipt = {
+      id: "input",
+      rootRunId: "root",
+      runId: "root",
+      status: "accepted",
+      beforeModel: 0,
+      modelId: "model",
+    };
+    const view = play(
+      project(projector, [chunk("First"), { type: "input", receipt }, chunk(" second")]),
+    );
+    expect(view.messages[0]?.parts).toEqual([
+      { type: "text", id: "model", text: "First second", settled: false },
+    ]);
+    expect(view.inputs).toHaveLength(1);
+  });
+});
+
 describe("createAgentProjector", () => {
   it.each([
     ["one after the other", false],
@@ -795,6 +996,7 @@ describe("createAgentProjector", () => {
       const projector = createAgentProjector({
         messageId: "answer",
         runId: outcome.runId,
+        agentId: "lead",
         labels: { agent: { researcher: "Researcher" } },
       });
       const view = play(project(projector, seen.events));
@@ -824,7 +1026,12 @@ describe("createAgentProjector", () => {
       expect({ ...live, parts: [] }).toEqual({ ...saved, parts: [] });
       if (!together) expect(live).toEqual(saved);
       expect(view.run).toEqual(projector.run(outcome.snapshot));
-      expect(view.run).toEqual({ id: outcome.runId, status: "completed", messageId: "answer" });
+      expect(view.run).toEqual({
+        id: outcome.runId,
+        status: "completed",
+        messageId: "answer",
+        owner: { runId: outcome.runId, agentId: "lead", label: "lead" },
+      });
 
       // A text row closes when its turn ends, not when the run does: the first tool call closes
       // the lead's first words, while the run itself is still going.
@@ -995,7 +1202,12 @@ describe("createAgentProjector", () => {
     for (const at of [...saves, { snapshot: outcome.snapshot, after: events.length }]) {
       const view = openAt(options, events, at);
       expect(view.messages[0]).toEqual(saved);
-      expect(view.run).toEqual({ id: outcome.runId, status: "waiting", messageId: "answer" });
+      expect(view.run).toEqual({
+        id: outcome.runId,
+        status: "waiting",
+        messageId: "answer",
+        owner: { runId: outcome.runId, agentId: "lead", label: "lead" },
+      });
     }
   });
 
@@ -1345,12 +1557,18 @@ describe("createAgentProjector", () => {
       const options = {
         messageId: "answer",
         runId: pending.runId,
+        agentId: "assistant",
         labels: { tool: { send: "Send the update" } },
       };
       const waiting = play(project(createAgentProjector(options), first.events, "s1"));
       const request = pending.requests[0]!;
       const { operationId } = request.call;
-      expect(waiting.run).toEqual({ id: pending.runId, status: "waiting", messageId: "answer" });
+      expect(waiting.run).toEqual({
+        id: pending.runId,
+        status: "waiting",
+        messageId: "answer",
+        owner: { runId: pending.runId, agentId: "assistant", label: "assistant" },
+      });
       expect(waiting.messages).toEqual([
         {
           id: "answer",
@@ -1824,7 +2042,11 @@ describe("createAgentProjector", () => {
         },
       });
       expect(outcome.status).toBe(ending === "stopped" ? "cancelled" : ending);
-      const projector = createAgentProjector({ messageId: "answer", runId: outcome.runId });
+      const projector = createAgentProjector({
+        messageId: "answer",
+        runId: outcome.runId,
+        agentId: "lead",
+      });
       const view = play(project(projector, seen.events));
       expect(view.messages[0]).toEqual(projector.snapshot(outcome.snapshot));
       expect(view.run).toEqual(projector.run(outcome.snapshot));

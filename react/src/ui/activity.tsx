@@ -130,6 +130,7 @@ export function SpecialistActivity({
       data-state={agent.state}
       data-agent-id={agent.id}
       data-parent-id={agent.parentId}
+      data-kind={agent.kind}
     >
       <div id={headingId} className="pk-activity-heading" data-part="activity-heading">
         <span className="pk-activity-label" data-part="activity-label">
@@ -139,6 +140,11 @@ export function SpecialistActivity({
           {labels.run[agent.state]}
         </span>
       </div>
+      {agent.kind === "handoff" && (
+        <p className="pk-activity-summary" data-part="handoff">
+          {labels.handoff}
+        </p>
+      )}
       {children && (
         <div className="pk-specialist-children" data-part="specialist-children">
           {children}

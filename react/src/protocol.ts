@@ -118,6 +118,28 @@ export interface AgentPart {
   parentId?: string;
   label: string;
   state: AgentState;
+  kind?: "delegation" | "handoff";
+  toolId?: string;
+}
+
+/** The registered agent now responsible for this conversation, not an execution route. */
+export interface ConversationOwner {
+  runId: string;
+  agentId: string;
+  label: string;
+}
+
+export type InputStatus = "queued" | "accepted" | "consumed" | "recalled";
+
+/** Delivery only. Consumed means a model call finished with this input, not that it obeyed it. */
+export interface DisplayInput {
+  id: string;
+  rootRunId: string;
+  /** Actual recipient, which can change through handoff. Required after acceptance. */
+  runId?: string;
+  status: InputStatus;
+  /** Only viewer-safe text explicitly supplied by the host or typed on this client. */
+  text?: string;
 }
 
 /** Request ids are opaque answer keys, never tool operation ids or browser-supplied routes. */
@@ -222,6 +244,7 @@ export interface RunInfo {
   status: RunStatus;
   /** The message this run is writing. */
   messageId?: string;
+  owner?: ConversationOwner;
   error?: DisplayError;
 }
 
@@ -252,7 +275,9 @@ export type ChatEvent = ChatEnvelope &
         type: "snapshot";
         messages: readonly DisplayMessage[];
         run: RunInfo;
+        inputs?: readonly DisplayInput[];
       }
+    | { type: "input"; input: DisplayInput }
     | {
         /** Adds a message, or updates the one with the same `id` (for an echo, the same
          * `clientId`). An update only adds: parts it does not list stay. It cannot reopen a
@@ -427,7 +452,9 @@ function readAgent(id: string, fields: Fields): AgentPart | null {
   if (!isText(fields.label) || !isAgentState(fields.state)) return null;
   const part: AgentPart = { type: "agent", id, label: fields.label, state: fields.state };
   return optional(part, "parentId", fields.parentId, isId) &&
-    optional(part, "agentId", fields.agentId, isId)
+    optional(part, "agentId", fields.agentId, isId) &&
+    optional(part, "toolId", fields.toolId, isId) &&
+    optional(part, "kind", fields.kind, oneOf({ delegation: true, handoff: true }))
     ? part
     : null;
 }
@@ -592,11 +619,35 @@ function readError(value: unknown): DisplayError | null {
   return optional(error, "retryable", value.retryable, isFlag) ? error : null;
 }
 
+function readInput(value: unknown): DisplayInput | null {
+  if (
+    !isRecord(value) ||
+    !isId(value.id) ||
+    !isId(value.rootRunId) ||
+    !oneOf<InputStatus>({ queued: true, accepted: true, consumed: true, recalled: true })(
+      value.status,
+    )
+  )
+    return null;
+  if ((value.status === "accepted" || value.status === "consumed") && !isId(value.runId))
+    return null;
+  const input: DisplayInput = { id: value.id, rootRunId: value.rootRunId, status: value.status };
+  return optional(input, "runId", value.runId, isId) && optional(input, "text", value.text, isText)
+    ? input
+    : null;
+}
+
 function readRun(value: unknown): RunInfo | null {
   if (!isRecord(value) || !isRunStatus(value.status)) return null;
   const run: RunInfo = { status: value.status };
   if (!optional(run, "id", value.id, isId) || !optional(run, "messageId", value.messageId, isId))
     return null;
+  if (value.owner != null) {
+    const owner = value.owner;
+    if (!isRecord(owner) || !isId(owner.runId) || !isId(owner.agentId) || !isText(owner.label))
+      return null;
+    run.owner = { runId: owner.runId, agentId: owner.agentId, label: owner.label };
+  }
   if (value.error !== undefined && value.error !== null) {
     const error = readError(value.error);
     if (!error) return null;
@@ -624,7 +675,24 @@ export function parseChatEvent(value: unknown): ChatEvent | null {
     case "snapshot": {
       const messages = readMessages(value.messages);
       const run = readRun(value.run);
-      return messages && run ? { ...envelope, type: "snapshot", messages, run } : null;
+      if (!messages || !run) return null;
+      if (value.inputs == null) return { ...envelope, type: "snapshot", messages, run };
+      if (!Array.isArray(value.inputs)) return null;
+      const inputs: DisplayInput[] = [];
+      for (const raw of value.inputs) {
+        const input = readInput(raw);
+        if (
+          !input ||
+          inputs.some((held) => held.id === input.id && held.rootRunId === input.rootRunId)
+        )
+          return null;
+        inputs.push(input);
+      }
+      return { ...envelope, type: "snapshot", messages, run, inputs };
+    }
+    case "input": {
+      const input = readInput(value.input);
+      return input ? { ...envelope, type: "input", input } : null;
     }
     case "message": {
       const message = readMessage(value.message);

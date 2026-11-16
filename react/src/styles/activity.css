@@ -5,6 +5,8 @@
     .pk-approval,
     .pk-sources,
     .pk-run-status,
+    .pk-inputs,
+    .pk-input,
     .pk-connection-status
   ) {
     min-inline-size: 0;
@@ -14,7 +16,7 @@
     line-height: var(--pk-line-height, 1.6);
   }
 
-  :where(.pk-tool, .pk-specialist, .pk-approval) {
+  :where(.pk-tool, .pk-specialist, .pk-approval, .pk-input) {
     padding-block: 0.75em;
   }
 

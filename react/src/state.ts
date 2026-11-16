@@ -13,6 +13,7 @@ import {
   type ChatEvent,
   type DisplayMessage,
   type DisplayPart,
+  type DisplayInput,
   type RunInfo,
   type RunStatus,
 } from "./protocol.ts";
@@ -28,12 +29,13 @@ export interface Cursor {
 export interface ChatView {
   messages: readonly DisplayMessage[];
   run: RunInfo;
+  inputs: readonly DisplayInput[];
   /** Absent until an event with a `seq` was taken in. */
   cursor?: Cursor;
 }
 
 export function emptyChatView(): ChatView {
-  return { messages: [], run: { status: "idle" } };
+  return { messages: [], run: { status: "idle" }, inputs: [] };
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -305,6 +307,8 @@ function applyEvent(
         messages: applyText(messages, event.messageId, event.partId, event.delta, event.attempt),
         run,
       };
+    case "input":
+      return { messages, run };
     case "run":
       return { messages, run: applyRun(run, event.run, continued) };
   }
@@ -332,6 +336,43 @@ function applyEvent(
  * whose `messages` and `run` are the old objects. Compare those two to know if anything a
  * person sees has moved.
  */
+/** An old queued view cannot undo acceptance or prove that recall is safe. */
+function upsertInput(
+  inputs: readonly DisplayInput[],
+  incoming: DisplayInput,
+): readonly DisplayInput[] {
+  const index = inputs.findIndex(
+    (item) => item.id === incoming.id && item.rootRunId === incoming.rootRunId,
+  );
+  const held = inputs[index];
+  if (!held) return [...inputs, incoming];
+  if (
+    (held.runId && incoming.runId && held.runId !== incoming.runId) ||
+    (held.status === "recalled" &&
+      incoming.status !== "recalled" &&
+      incoming.status !== "queued") ||
+    (incoming.status === "recalled" && held.status !== "recalled" && held.status !== "queued")
+  )
+    return inputs;
+  const status =
+    held.status === "consumed" ||
+    held.status === "recalled" ||
+    (held.status === "accepted" && incoming.status !== "consumed")
+      ? held.status
+      : incoming.status;
+  // Live SDK receipts omit text. A compatible snapshot can fill it in without undoing delivery.
+  const runId = held.runId ?? incoming.runId;
+  const text = incoming.text ?? held.text;
+  const next = keep(held, {
+    id: held.id,
+    rootRunId: held.rootRunId,
+    status,
+    ...(runId !== undefined && { runId }),
+    ...(text !== undefined && { text }),
+  });
+  return next === held ? inputs : replaceAt(inputs, index, next);
+}
+
 export function reduceChat(view: ChatView, event: ChatEvent): ChatView {
   const { cursor } = view;
   const { seq, segment } = event;
@@ -342,7 +383,16 @@ export function reduceChat(view: ChatView, event: ChatEvent): ChatView {
   // it is usually the start of a replay, and its `running` is as old as the rest of it.
   const continued = seq !== undefined && cursor !== undefined && !sameSegment;
   const { messages, run } = applyEvent(view, event, continued);
+  let inputs =
+    run.id === view.run.id
+      ? view.inputs
+      : view.inputs.filter((input) => input.rootRunId === run.id);
+  const incoming =
+    event.type === "snapshot" ? (event.inputs ?? []) : event.type === "input" ? [event.input] : [];
+  for (const input of incoming) if (input.rootRunId === run.id) inputs = upsertInput(inputs, input);
+  inputs = keepList(view.inputs, inputs);
   const next = seq === undefined ? cursor : segment === undefined ? { seq } : { segment, seq };
-  if (messages === view.messages && run === view.run && next === cursor) return view;
-  return next ? { messages, run, cursor: next } : { messages, run };
+  if (messages === view.messages && run === view.run && inputs === view.inputs && next === cursor)
+    return view;
+  return next ? { messages, run, inputs, cursor: next } : { messages, run, inputs };
 }

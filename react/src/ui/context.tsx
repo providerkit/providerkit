@@ -7,6 +7,7 @@ import type {
   CommandResult,
   ConnectionStatus,
   RequestResponse,
+  InputView,
   RespondResult,
 } from "../client.ts";
 import type {
@@ -30,6 +31,7 @@ export interface ConversationData extends Partial<Omit<ChatState, "messages" | "
   stop?: () => void | CommandResult | Promise<void | CommandResult>;
   respond?: RespondToRequest;
   startClientTool?: ChatClient["startClientTool"];
+  recallInput?: ChatClient["recallInput"];
   reconnect?: () => void | Promise<void>;
 }
 
@@ -69,6 +71,15 @@ export interface ConversationLabels {
   sendAnswer: string;
   skipRequest: string;
   runClientAction: string;
+  checkClientAction: string;
+  handoff: string;
+  conversationOwner: (label: string) => string;
+  inputs: string;
+  input: Record<InputView["status"], string>;
+  queuedAfterCompletion: string;
+  recallInput: string;
+  recallingInput: string;
+  recallFailed: string;
   clientActionWarning: string;
   clientActionUnavailable: string;
   sources: string;
@@ -160,8 +171,24 @@ export const defaultConversationLabels: ConversationLabels = {
   sendAnswer: "Send answer",
   skipRequest: "Skip",
   runClientAction: "Run action",
-  clientActionWarning:
-    "Run this action only if it has not already finished. Reloading this page cannot tell whether an earlier action finished.",
+  checkClientAction: "Check action result",
+  handoff: "Took over the conversation",
+  conversationOwner: (label) => `Conversation with ${label}`,
+  inputs: "Messages sent during this answer",
+  input: {
+    sending: "Sending...",
+    unconfirmed: "Delivery is not confirmed. Check for updates before sending again.",
+    queued: "Waiting for the agent to receive this message.",
+    accepted: "Received. It may not have been used in an answer yet.",
+    consumed: "Included in the agent's work. Check the answer to see how it was used.",
+    recalled: "Recalled. The agent will not receive this message.",
+  },
+  queuedAfterCompletion:
+    "The answer ended. Check for updates before sending this waiting message again.",
+  recallInput: "Recall message",
+  recallingInput: "Recalling...",
+  recallFailed: "Recall was not confirmed. Check for updates before sending this message again.",
+  clientActionWarning: "This action runs on this device. Closing the page does not undo it.",
   clientActionUnavailable:
     "This app cannot run this action. Open it in the app that supports it, or skip this request.",
   sources: "Sources",
@@ -201,6 +228,7 @@ export function useConversationLabels(overrides?: ConversationLabelOverrides): C
     message: { ...defaultConversationLabels.message, ...labels?.message, ...overrides?.message },
     run: { ...defaultConversationLabels.run, ...labels?.run, ...overrides?.run },
     tool: { ...defaultConversationLabels.tool, ...labels?.tool, ...overrides?.tool },
+    input: { ...defaultConversationLabels.input, ...labels?.input, ...overrides?.input },
     connection: {
       ...defaultConversationLabels.connection,
       ...labels?.connection,

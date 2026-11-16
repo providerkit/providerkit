@@ -111,7 +111,7 @@ hooks; call `attach()` to observe and call the returned function to detach.
 requirement, so another state library can use it too.
 
 Events use `v: 1` and stable message and part IDs. The event types are `snapshot`, `message`,
-`part`, `text` and `run`. A server that supports replay includes `segment` and `seq` in the JSON
+`part`, `text`, `run` and `input`. Input receipts report delivery, not an answer. A server that supports replay includes `segment` and `seq` in the JSON
 data. The SSE parser does not expose `id:` fields, so an SSE ID alone is not enough.
 
 `parseChatEvent` validates a received value. `reduceChat` applies a valid event, drops duplicate
@@ -255,6 +255,7 @@ A pure, read-only handler can look like this:
 ```ts
 const clientTools = {
   countText: {
+    safety: "read-only",
     run(input: unknown) {
       if (typeof input !== "string") throw new TypeError("Expected sample text.");
       return { length: input.length };
@@ -264,21 +265,50 @@ const clientTools = {
 ```
 
 Pass that registry to `useChat` or `createChatClient`. Call `chat.startClientTool(requestId)` only
-from an explicit user action, never from an effect or a replay listener. The default card offers
-Run action with a warning that reload cannot prove whether an earlier action finished. A handler
-must check its input and respect its cancellation signal. Detaching marks unfinished device work
-unconfirmed, not still submitting. It never reruns the handler or sends a delayed result on its own.
-After reattaching the same client, the host can cancel the pending request or explicitly call
-`startClientTool` to send a completed result retained in memory. This requires the same request,
-logical run and segment. If no result is known, the call stays unknown and does not run again.
+from an explicit user action, never from an effect or a replay listener. Every handler declares
+`safety: "read-only"` or `"repeatable"` only when repeating it is safe. All other handlers require
+`safety: "claimed"` and a host-owned `claim` function. A warning is not a substitute for a claim.
 
-For writes, a host-provided durable claim must guard the actual action if the app cannot safely
-rely on manual review. The claim must bind the authenticated viewer and exact saved request,
-exclude a second dispatch across tabs and reloads, and reconcile uncertain completion. A literal
-idempotency key or an in-memory set is not that capability. This package does not promise
-exactly-once execution. After uncertain execution, it does not rerun the handler. If only result
-delivery failed, a manual retry submits the retained result instead. After reload, reconciliation
-belongs to the host. The SDK still validates the returned result and current permissions.
+```ts
+import type { ClientToolHandler } from "@providerkit/react";
+import { claimPublish, publish } from "./authorized-actions.ts";
+
+const publishAction: ClientToolHandler = {
+  safety: "claimed",
+  claim: claimPublish,
+  run: publish,
+};
+```
+
+These functions belong to your app. `claim` receives `requestId`, logical `runId`, optional
+`segment`, handler `name`, viewer-safe `input` and an abort `signal`. It returns one of:
+
+- `{ status: "granted", complete(value) }`: exclusive permission to run once. The client awaits
+  `complete` to save the result before sending it to the SDK. This function must be idempotent.
+- `{ status: "completed", value }`: send the saved, validated result without running again.
+- `{ status: "denied" | "busy" | "unknown" }`: do not run. Denied and busy show a refusal;
+  unknown keeps the request unconfirmed for host reconciliation.
+
+The app binds the claim and completion functions to authenticated endpoints. The server must bind
+principal, resource, logical run and exact saved request/input; validate access and values; persist
+claims and results; exclude concurrent tabs; and reconcile uncertain effects before granting again.
+An expired lease is not proof that an effect did not happen. A literal key or a local Map is not
+this authority. The tests use one simulated claim service across separate clients to check this
+binding, not real distributed storage. This package does not promise exactly-once execution.
+
+Handlers validate input and respect cancellation. A grant received after the view closes, the
+request expires or its run/segment changes does not execute locally. The host must reconcile any
+unused grant. If the same request remains open after a segment change, **Check action result**
+asks the host again, even if this client has a saved result. It never uses the old grant or reruns
+the handler. If execution starts, closing the view cannot undo it. A result that arrives afterward
+still goes through its bound `complete` function, but is not sent as a delayed SDK response.
+
+A failed claim, interrupted execution or failed completion stays uncertain. It never reruns here.
+An explicit `startClientTool` can ask the host for reconciliation. A second grant cannot rerun work
+this client already considers uncertain. If only SDK result delivery failed, it sends the retained
+result instead. A fresh client asks the same durable claim service. The default card offers
+**Check action result** when that check is available. The SDK still checks current permissions and
+validates the returned result.
 
 ### Recover an interrupted attempt
 
@@ -290,7 +320,83 @@ one. Other specialists and completed operations stay intact.
 An authoritative `snapshot` seeds the projector from saved attempt receipts, including interrupted
 attempts. Feed the retained log before that read, not after it. Keep logical `runId` separate from
 physical `segment` and its cursor. Browser input never chooses either execution routing or snapshot
-authority. Handoff ownership and steering displays remain separate integration work.
+authority.
+
+## Show who answers after a handoff
+
+`RunInfo.owner` holds `{ runId, agentId, label }` for the conversation's current owner. The root
+logical `run.id` does not change when a child takes over. Supply the projector's optional `agentId`
+when you need the root label before the first snapshot or handoff.
+
+The projector reads the SDK's `handoff` receipt (`runId`, `childRunId`, `from`, `to` and
+`operationId`). It marks the target's agent part with `kind: "handoff"` and `toolId`, then shows
+that target's answer text under its row. A snapshot rebuilds this from `delegations[].kind`, the
+registered `target` and child snapshots. No ID is parsed. `labels.agent` uses registered agent IDs;
+`labels.run` overrides a particular run. The components' `specialistLabels` support both too.
+
+Only the root's handoff chain gains default text visibility. An ordinary specialist's transcript,
+including its own handoffs, stays hidden. Notes, history and reasoning never cross by default.
+The `text` callback can further restrict visibility; a child source includes `handoff: true` only
+when it belongs to the conversation chain. Current SDK handoffs accept text-output agents only.
+There is no structured-output handoff support.
+
+## Send a message while the agent works
+
+```ts
+await chat.send("Use the shorter version.");
+```
+
+Add `enqueue` to your `ChatTransport` to enable this during a running or waiting run. The same
+send action uses `enqueue` instead of `send`; outside a run it still uses `send`. You can add it
+beside the methods returned by `createSseTransport`. Leave `allowSendWhileRunning` off unless your
+host separately supports overlapping ordinary sends. Retries still use ordinary `send` and stay
+blocked during an active run unless you enable that option. No composer changes are needed.
+
+`enqueue(input, { signal })` receives the usual `SendInput` plus `rootRunId`. The host authenticates
+the person, checks the conversation/run, validates text and attachment references, and persists
+immutable user content through its SDK `InputInbox` binding. Use `clientId` as the inbox input ID.
+A browser's root ID is only a requested destination. The host chooses the actual recipient, which
+may be a handoff child. This endpoint never approves tools, stops work or starts another run.
+
+Return a `DisplayInput` with the matching `id` and `rootRunId` and one of these states:
+
+- `queued`: saved by the host, not yet accepted by the SDK.
+- `accepted`: checkpointed by the SDK; include the actual recipient's `runId`.
+- `consumed`: a model call including it finished; include that recipient's `runId`. This does not
+  prove that the model followed the message, and is not completed assistant output.
+
+A successful enqueue returns the existing send outcome `accepted`, meaning delivery to the host.
+Its `messageId` is the steering input ID, not a new transcript message.
+Only then may the composer clear the submitted draft. A lost reply or mismatched receipt returns
+`unknown` and keeps the text unconfirmed. Refusal keeps the draft for correction. Nothing resends
+input, drains a queue or starts a follow-up run automatically, including after completion.
+
+Send delivery updates as `{ v: 1, type: "input", input }`. The SDK event holds its recipient in
+`event.receipt.runId`, not a top-level `runId`. The projector handles that shape and refuses a
+receipt with another `rootRunId`. `projectInputReceipt` is also available from `/agents` for a host
+acknowledgement handler. `projector.inputs(snapshot)` rebuilds accepted/consumed receipts without
+raw content. Its optional `input` callback can return viewer-safe text. Include those receipts and
+still-queued host inbox entries in the display snapshot's `inputs` array. Later updates can add
+viewer-safe text without moving delivery backward or changing a known recipient. A snapshot's
+omission is not proof that a queued message was discarded. Keep late input visible even when the
+run ends.
+
+`chat.inputs` reports delivery separately from `chat.messages`. `InputStatusList` from `/ui` draws
+these values, or accepts plain `inputs`, `run`, `scopeKey` and `onRecall` props. It never sends text.
+
+### Recall only when the host can prove it is safe
+
+`recallInput` is optional on the transport. Without it there is no recall button. It receives
+`{ id, rootRunId }` and `{ signal }`, then returns a matching `DisplayInput` with `status: "recalled"`
+only after the host has excluded acceptance. It may refuse with `TransportError("refused", error)`
+or return an accepted/consumed receipt instead. A failed or unknown recall preserves the text.
+
+A stale `queued` view is not proof that recall is safe. SDK poll is non-destructive, checkpoint
+comes before acknowledgement, and the agent may have taken the input while the inbox still says
+queued. A host offering recall must reserve against poll or reconcile that race under its own
+transaction/lease. Refuse once claimed or accepted. `createMemoryInbox` alone has no safe recall
+capability. Never implement recall by deleting its queued entry. The UI offers only a manual host
+check, never a local claim that the agent did not see the message.
 
 ## Use the optional components
 

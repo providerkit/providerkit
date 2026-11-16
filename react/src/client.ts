@@ -17,11 +17,13 @@
  */
 import {
   PROTOCOL_VERSION,
+  parseChatEvent,
   isRequestPart,
   type RequestPart,
   type AttachmentPart,
   type ChatEvent,
   type DisplayError,
+  type DisplayInput,
   type DisplayMessage,
   type DisplayPart,
   type MessageState,
@@ -76,14 +78,36 @@ import {
 } from "./requests.ts";
 export type { RequestAnswer, RequestResponse, QuestionAnswer } from "./requests.ts";
 
-export interface ClientToolHandler {
-  /** Called only by an explicit startClientTool action, never by observation or replay.
-   * Validate input here. Server policy still validates results and permissions. */
+export interface ClientToolClaimRequest {
+  requestId: string;
+  runId: string;
+  segment?: string;
+  name: string;
+  input: unknown;
+  signal: AbortSignal;
+}
+
+/** Host authority, not a local lock. A grant must exclude every other device and survive reload.
+ * complete must persist the result idempotently before delivery. Reconcile uncertain work in claim;
+ * never grant it again merely because a lease expired. Authenticate and validate on the host. */
+export type ClientToolClaim =
+  | { status: "granted"; complete(value: unknown): void | Promise<void> }
+  | { status: "completed"; value: unknown }
+  | { status: "denied" | "busy" | "unknown" };
+
+export type ClientToolHandler = {
+  /** Manual dispatch only. Validate input and respect cancellation; abort is not rollback. */
   run(
     input: unknown,
     context: { signal: AbortSignal; requestId: string },
   ): unknown | Promise<unknown>;
-}
+} & (
+  | { safety: "read-only" | "repeatable" }
+  | {
+      safety: "claimed";
+      claim(request: ClientToolClaimRequest): ClientToolClaim | Promise<ClientToolClaim>;
+    }
+);
 
 export type RespondResult =
   | { ok: true; outcome: "accepted" | "unknown" }
@@ -111,7 +135,30 @@ export interface EventReply {
  * Hand the client only events that `parseChatEvent` returned. To say what became of a command,
  * throw a `TransportError`. Anything else thrown counts as an unknown outcome.
  */
+export interface EnqueueInput extends SendInput {
+  /** A requested destination, never permission. The host checks the principal and saved run. */
+  rootRunId: string;
+}
+
+export interface InputView extends Omit<DisplayInput, "status"> {
+  status: DisplayInput["status"] | "sending" | "unconfirmed";
+  canRecall: boolean;
+  /** Confirmed upload references from this client's submitted draft, never local File objects. */
+  attachments?: readonly AttachmentRef[];
+  recalling?: boolean;
+  error?: DisplayError;
+}
+
 export interface ChatTransport {
+  /** Active-run sends use this instead of send. Authorize and persist immutable user content in
+   * the run's InputInbox. Receipt id must equal clientId. Never create a new run or grant tool authority. */
+  enqueue?(input: EnqueueInput, options: { signal: AbortSignal }): Promise<DisplayInput>;
+  /** Optional host capability. Reserve/reconcile against inbox poll + checkpoint, not just its
+   * queued label. Refuse after claim/acceptance. createMemoryInbox alone cannot implement this. */
+  recallInput?(
+    input: { id: string; rootRunId: string },
+    options: { signal: AbortSignal },
+  ): Promise<DisplayInput>;
   /** Called once per message the person sends, and once more only when they ask (`retry`). */
   send?(input: SendInput, options: { signal: AbortSignal }): Promise<void | EventReply>;
   /** The host's events after `cursor`, or from the start without one. The client opens one at a
@@ -164,6 +211,8 @@ export interface RequestView {
   /** Capabilities of this client, not execution permission. Absent for plain-data hosts. */
   canRespond?: boolean;
   canRun?: boolean;
+  /** A manual check can reconcile a durable claim or deliver a retained result, without rerunning. */
+  canReconcile?: boolean;
   /** The message the request sits in. */
   messageId: string;
   /** An answer from this client that the host has not acted on yet. */
@@ -191,6 +240,8 @@ export interface ChatState {
   error?: DisplayError;
   /** Every request that is waiting, in reading order. */
   requests: readonly RequestView[];
+  /** User input delivery, never completed assistant output. */
+  inputs: readonly InputView[];
   /** By message id: why a message this client sent shows as failed. `unconfirmed` means it may
    * not have arrived, and `retry` sends it again. */
   messageErrors: Readonly<Record<string, DisplayError>>;
@@ -228,12 +279,12 @@ export interface ChatClientOptions {
   transport: ChatTransport;
   /** What to show before the host says anything, such as a transcript rendered on the server. */
   initialMessages?: readonly DisplayMessage[];
-  /** Lets `send` go while a run is active, for a host that queues messages or steers the run
-   * with them. Off by default: the client refuses the send and the text stays with the person. */
+  /** Permits overlapping ordinary sends and retries. Off by default. A host with `enqueue`
+   * can accept steering input during a run without enabling this option. */
   allowSendWhileRunning?: boolean;
   reconnect?: ReconnectOptions;
-  /** App-owned handlers, never model-authored code. All dispatch is manual. A state-changing
-   * handler must disclose uncertain outcomes, including after reload, or use a durable host claim. */
+  /** App-owned handlers with an explicit repeat-safety declaration or a durable host claim.
+   * All dispatch is manual. Disclosure or a browser key alone never authorizes a write. */
   clientTools?: Readonly<Record<string, ClientToolHandler>>;
 }
 
@@ -263,6 +314,8 @@ export interface ChatClient {
   /** Explicit user action only. Never wire this to an effect or a replay listener. After a result
    * delivery failure, this resubmits the saved result, never reruns the handler. */
   startClientTool(requestId: string): Promise<RespondResult>;
+  /** Manual recall through a host that can fence the race with input acceptance. */
+  recallInput(inputId: string): Promise<CommandResult>;
   /** Opens a fresh observation, with a full budget of tries, after the connection was lost. */
   reconnect(): void;
   /** A new transport or changed settings, for what comes next. `initialMessages` is read once,
@@ -331,6 +384,12 @@ interface DeviceRun {
   segment: string | undefined;
   response?: Extract<RequestResponse, { type: "result" }>;
   outcome: "running" | "result" | "unknown";
+}
+
+interface InputSend {
+  input: EnqueueInput;
+  phase: "sending" | "unconfirmed" | "accepted";
+  receipt?: DisplayInput;
 }
 
 interface Stream {
@@ -444,6 +503,7 @@ function sameState(left: ChatState, right: ChatState): boolean {
     left.connection === right.connection &&
     left.error === right.error &&
     left.requests === right.requests &&
+    left.inputs === right.inputs &&
     left.messageErrors === right.messageErrors &&
     left.canSend === right.canSend &&
     left.canStop === right.canStop &&
@@ -469,6 +529,9 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   const sends = new Map<string, Send>();
   const answers = new Map<string, Answer>();
   const deviceRuns = new Map<string, DeviceRun>();
+  const inputSends = new Map<string, InputSend>();
+  const inputCommands = new Map<AbortController, string>();
+  const recalls = new Map<string, { pending: boolean; error?: DisplayError }>();
   const commands = new Set<AbortController>();
   // Controller identity is the command generation: an older reply cannot replace newer work.
   let latestCommand: AbortController | undefined;
@@ -491,6 +554,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   // What the last build handed out, so the next one can hand out the same objects.
   let shown: readonly DisplayMessage[] = view.messages;
   let waiting: readonly RequestView[] = [];
+  let inputs: readonly InputView[] = [];
   let failures: Readonly<Record<string, DisplayError>> = {};
   let state = build(undefined);
   let notified = state;
@@ -537,7 +601,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   }
 
   function build(previous: ChatState | undefined): ChatState {
-    const { transport, allowSendWhileRunning } = settings;
+    const { transport } = settings;
     const status = statusOf();
     const lost = connection === "lost";
     const next: ChatState = {
@@ -546,9 +610,14 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       status,
       connection,
       requests: listRequests(),
+      inputs: listInputs(),
       messageErrors: errorsOf(),
       canSend:
-        transport.send !== undefined && (allowSendWhileRunning === true || status === "ready"),
+        canSendOrdinary(status) ||
+        (!stopping &&
+          isActive(view.run.status) &&
+          Boolean(view.run.id) &&
+          transport.enqueue !== undefined),
       canStop:
         status !== "ready" &&
         status !== "stopping" &&
@@ -557,6 +626,15 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     };
     if (problem) next.error = problem.error;
     return previous && sameState(previous, next) ? previous : next;
+  }
+
+  // An ordinary retry can start work. The ability to steer an active run does not permit it.
+  function canSendOrdinary(status = statusOf()): boolean {
+    return (
+      !stopping &&
+      settings.transport.send !== undefined &&
+      (settings.allowSendWhileRunning === true || status === "ready")
+    );
   }
 
   function statusOf(): ChatStatus {
@@ -602,6 +680,12 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
           part.name !== undefined &&
           settings.clientTools !== undefined &&
           Object.hasOwn(settings.clientTools, part.name);
+        const canReconcile =
+          canRun &&
+          part.type === "client-tool" &&
+          part.name !== undefined &&
+          (settings.clientTools?.[part.name]?.safety === "claimed" ||
+            Boolean(deviceRuns.get(part.id)?.response));
         const held = waiting[next.length];
         next.push(
           held &&
@@ -609,13 +693,61 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
             held.messageId === message.id &&
             held.local === local &&
             held.canRespond === canRespond &&
-            held.canRun === canRun
+            held.canRun === canRun &&
+            held.canReconcile === canReconcile
             ? held
-            : { part, messageId: message.id, canRespond, canRun, ...(local && { local }) },
+            : {
+                part,
+                messageId: message.id,
+                canRespond,
+                canRun,
+                canReconcile,
+                ...(local && { local }),
+              },
         );
       }
     waiting = keepList(waiting, next);
     return waiting;
+  }
+
+  function listInputs(): readonly InputView[] {
+    const records: InputView[] = view.inputs.map((input) => ({ ...input, canRecall: false }));
+    for (const [id, entry] of inputSends) {
+      const index = records.findIndex(
+        (input) => input.id === id && input.rootRunId === entry.input.rootRunId,
+      );
+      const receipt = records[index] ?? entry.receipt;
+      const value: InputView = {
+        id,
+        rootRunId: entry.input.rootRunId,
+        text: entry.input.text,
+        attachments: entry.input.attachments,
+        status: entry.phase === "sending" ? "sending" : "unconfirmed",
+        canRecall: false,
+        ...receipt,
+      };
+      if (index < 0) records.push(value);
+      else records[index] = value;
+    }
+    const next = records.map((input, index) => {
+      const recall = recalls.get(input.id);
+      const value = {
+        ...input,
+        canRecall:
+          input.status === "queued" &&
+          input.rootRunId === view.run.id &&
+          Boolean(settings.transport.recallInput),
+        ...(recall && { recalling: recall.pending, error: recall.error }),
+      };
+      const held = inputs[index];
+      return held &&
+        Object.keys(value).length === Object.keys(held).length &&
+        Object.entries(value).every(([key, item]) => Reflect.get(held, key) === item)
+        ? held
+        : value;
+    });
+    inputs = keepList(inputs, next);
+    return inputs;
   }
 
   function errorsOf(): Readonly<Record<string, DisplayError>> {
@@ -641,7 +773,8 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     // A numbered no-op is a duplicate. An unnumbered snapshot can still report a new refusal
     // with identical display fields, so it must reconcile this submission's local feedback.
     if (next === view && event.seq !== undefined) return false;
-    const changed = next.messages !== view.messages || next.run !== view.run;
+    const changed =
+      next.messages !== view.messages || next.run !== view.run || next.inputs !== view.inputs;
     const from = view.cursor;
     if (from && next.cursor && next.cursor.segment !== from.segment)
       left.add(segmentKey(from.segment));
@@ -664,6 +797,15 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   /** Only fresh host events reach here. Unrelated progress cannot repeat an earlier refusal. */
   function settle(reported: readonly DisplayPart[] = []): boolean {
     let changed = false;
+    for (const input of view.inputs) {
+      const entry = inputSends.get(input.id);
+      if (entry && entry.input.rootRunId === input.rootRunId) {
+        entry.receipt = input;
+        entry.phase = "accepted";
+      }
+    }
+    for (const [controller, rootRunId] of inputCommands)
+      if (view.run.id !== rootRunId) controller.abort();
     for (const id of sends.keys()) if (!stillSending(view.messages, id)) sends.delete(id);
     for (const [id, answer] of answers) {
       const part = openRequest(view.messages, id);
@@ -688,7 +830,12 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       }
     }
     for (const [id, device] of deviceRuns)
-      if (openRequest(view.messages, id) !== device.part) device.controller.abort();
+      if (
+        openRequest(view.messages, id) !== device.part ||
+        view.run.id !== device.runId ||
+        view.cursor?.segment !== device.segment
+      )
+        device.controller.abort();
     if (starting && view.run !== starting) starting = undefined;
     const going = isActive(view.run.status) || starting !== undefined;
     if (!going) stopping = false;
@@ -877,6 +1024,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       attached -= 1;
       if (attached > 0) return;
       for (const device of deviceRuns.values()) device.controller.abort();
+      for (const controller of inputCommands.keys()) controller.abort();
       cancelRetry();
       if (stream?.kind === "observe") close();
       if (!stream && connection !== "lost") connection = "idle";
@@ -890,8 +1038,15 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     // Whitespace alone says nothing, so it is dropped. Any other text goes as typed.
     const body = text.trim() ? text : "";
     if (!body && attachments.length === 0) return { ok: false, error: EMPTY };
+    if (isActive(view.run.status) && view.run.id && settings.transport.enqueue)
+      return enqueue({
+        clientId: createId(),
+        text: body,
+        ...(attachments.length && { attachments }),
+        rootRunId: view.run.id,
+      });
     if (!settings.transport.send) return { ok: false, error: CANNOT_SEND };
-    if (!getState().canSend) return { ok: false, error: BUSY };
+    if (!canSendOrdinary()) return { ok: false, error: BUSY };
     const clientId = createId();
     take({
       v: PROTOCOL_VERSION,
@@ -911,6 +1066,111 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     };
     sends.set(clientId, entry);
     return deliver(clientId, entry);
+  }
+
+  function checkedInput(value: unknown, id: string, rootRunId: string): DisplayInput {
+    const event = parseChatEvent({ v: PROTOCOL_VERSION, type: "input", input: value });
+    if (event?.type !== "input" || event.input.id !== id || event.input.rootRunId !== rootRunId)
+      throw new Error("The input receipt does not match this send.");
+    return event.input;
+  }
+
+  async function enqueue(input: EnqueueInput): Promise<SendResult> {
+    const submit = settings.transport.enqueue;
+    if (!submit || stopping) return { ok: false, error: BUSY };
+    const entry: InputSend = { input, phase: "sending" };
+    inputSends.set(input.clientId, entry);
+    const controller = new AbortController();
+    inputCommands.set(controller, input.rootRunId);
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        if (!entry.receipt) entry.phase = "unconfirmed";
+        now();
+      },
+      { once: true },
+    );
+    now();
+    try {
+      const receipt = checkedInput(
+        await submit(input, { signal: controller.signal }),
+        input.clientId,
+        input.rootRunId,
+      );
+      if (receipt.status === "recalled") throw new Error("This send has no enqueue receipt.");
+      if (!controller.signal.aborted && view.run.id === input.rootRunId)
+        take({ v: PROTOCOL_VERSION, type: "input", input: receipt });
+    } catch (error) {
+      if (
+        !entry.receipt &&
+        !controller.signal.aborted &&
+        view.run.id === input.rootRunId &&
+        error instanceof TransportError &&
+        error.outcome === "refused"
+      ) {
+        inputSends.delete(input.clientId);
+        now();
+        return { ok: false, error: error.error, input };
+      }
+    } finally {
+      inputCommands.delete(controller);
+    }
+    if (!entry.receipt) entry.phase = "unconfirmed";
+    now();
+    if (!controller.signal.aborted && view.run.id === input.rootRunId) watch();
+    return { ok: true, messageId: input.clientId, outcome: entry.receipt ? "accepted" : "unknown" };
+  }
+
+  async function recallInput(id: string): Promise<CommandResult> {
+    const input = getState().inputs.find((item) => item.id === id);
+    const recall = settings.transport.recallInput;
+    if (!input?.canRecall || !recall || recalls.get(id)?.pending)
+      return {
+        ok: false,
+        error: fixed(
+          "cannot_recall",
+          "This message cannot be recalled here. Check its delivery before sending more.",
+        ),
+      };
+    const controller = new AbortController();
+    inputCommands.set(controller, input.rootRunId);
+    const unknown = fixed(
+      "recall_unknown",
+      "Recall was not confirmed. Check for updates before sending this message again.",
+    );
+    const current = () => !controller.signal.aborted && view.run.id === input.rootRunId;
+    recalls.set(id, { pending: true });
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        recalls.set(id, { pending: false, error: unknown });
+        now();
+      },
+      { once: true },
+    );
+    now();
+    try {
+      const receipt = checkedInput(
+        await recall({ id, rootRunId: input.rootRunId }, { signal: controller.signal }),
+        id,
+        input.rootRunId,
+      );
+      if (!current()) return { ok: false, error: unknown };
+      take({ v: PROTOCOL_VERSION, type: "input", input: receipt });
+      const recalled = view.inputs.find((item) => item.id === id)?.status === "recalled";
+      const error = recalled
+        ? undefined
+        : fixed("recall_refused", "The agent may already have this message. It was not recalled.");
+      recalls.set(id, { pending: false, ...(error && { error }) });
+      return error ? { ok: false, error } : { ok: true };
+    } catch (error) {
+      const shown = error instanceof TransportError ? error.error : unknown;
+      if (current()) recalls.set(id, { pending: false, error: shown });
+      return { ok: false, error: shown };
+    } finally {
+      inputCommands.delete(controller);
+      now();
+    }
   }
 
   async function deliver(id: string, entry: Send): Promise<SendResult> {
@@ -950,7 +1210,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     const entry = sends.get(messageId);
     if (!entry || entry.phase !== "unconfirmed") return { ok: false, error: NOTHING_TO_RETRY };
     if (!settings.transport.send) return { ok: false, error: CANNOT_SEND };
-    if (!getState().canSend) return { ok: false, error: BUSY };
+    if (!canSendOrdinary()) return { ok: false, error: BUSY };
     entry.phase = "sending";
     return deliver(messageId, entry);
   }
@@ -1092,20 +1352,39 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     if (!part || part.type !== "client-tool") return { ok: false, error: NOT_WAITING };
     const error = checkResponse(part, { type: "result", value: null });
     if (error) return { ok: false, error };
-    const held = deviceRuns.get(requestId);
-    if (held) {
-      if (held.part !== part || held.runId !== view.run.id || held.segment !== view.cursor?.segment)
-        return { ok: false, error: NOT_WAITING };
-      if (held.response) return respond(requestId, held.response);
-      return held.outcome === "running"
-        ? { ok: false, error: ANSWERING }
-        : { ok: true, outcome: "unknown" };
-    }
     const handler =
       part.name && settings.clientTools && Object.hasOwn(settings.clientTools, part.name)
         ? settings.clientTools[part.name]
         : undefined;
-    if (!handler || !settings.transport.respond) return { ok: false, error: CANNOT_ANSWER };
+    if (
+      !handler ||
+      !settings.transport.respond ||
+      !(
+        handler.safety === "read-only" ||
+        handler.safety === "repeatable" ||
+        (handler.safety === "claimed" && typeof handler.claim === "function")
+      )
+    )
+      return { ok: false, error: CANNOT_ANSWER };
+    const held = deviceRuns.get(requestId);
+    if (held) {
+      const sameSegment = held.segment === view.cursor?.segment;
+      if (
+        held.part !== part ||
+        held.runId !== view.run.id ||
+        (!sameSegment && handler.safety !== "claimed")
+      )
+        return { ok: false, error: NOT_WAITING };
+      // Crossing a segment needs a fresh host check, even when a result is retained locally.
+      if (sameSegment && held.response) return respond(requestId, held.response);
+      if (held.outcome === "running") return { ok: false, error: ANSWERING };
+      if (handler.safety !== "claimed") return { ok: true, outcome: "unknown" };
+    }
+    if (handler.safety === "claimed" && !view.run.id)
+      return {
+        ok: false,
+        error: fixed("claim_scope", "Reload this request before running the action."),
+      };
     const controller = new AbortController();
     const segment = view.cursor?.segment;
     const before = view.run;
@@ -1118,11 +1397,12 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     answers.set(requestId, mine);
     function unconfirm(): void {
       if (device.outcome === "running") device.outcome = "unknown";
+      // Clear only this submission's lock. A segment change invalidates its grant, not the
+      // still-pending logical request's ability to be skipped or checked with the host.
       if (
         answers.get(requestId) !== mine ||
         openRequest(view.messages, requestId) !== part ||
-        view.run.id !== before.id ||
-        view.cursor?.segment !== segment
+        view.run.id !== before.id
       )
         return;
       answers.set(requestId, {
@@ -1138,24 +1418,68 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       });
       now();
     }
-    // A handler can ignore abort or never settle. Release its submission lock at detach/Stop,
-    // without assuming its effects stopped or allowing it to run again.
+    // A handler can ignore abort or never settle. Release its submission lock when this
+    // execution scope closes, without assuming its effects stopped or allowing it to run again.
     controller.signal.addEventListener("abort", unconfirm, { once: true });
     now();
+    const current = () =>
+      !controller.signal.aborted &&
+      openRequest(view.messages, requestId) === part &&
+      view.run.id === before.id &&
+      view.cursor?.segment === segment &&
+      !checkResponse(part, { type: "result", value: null });
     try {
-      const value = await handler.run(part.input, { signal: controller.signal, requestId });
-      device.response = { type: "result", value };
-      device.outcome = "result";
+      if (handler.safety === "claimed") {
+        if (!before.id || !part.name) return { ok: false, error: NOT_WAITING };
+        const claim = await handler.claim({
+          requestId,
+          runId: before.id,
+          segment,
+          name: part.name,
+          input: part.input,
+          signal: controller.signal,
+        });
+        // A successful host claim is not permission to run in a view that closed while it awaited.
+        if (!current()) {
+          unconfirm();
+          return { ok: true, outcome: "unknown" };
+        }
+        if (claim.status === "denied" || claim.status === "busy") {
+          const error = fixed(
+            `claim_${claim.status}`,
+            claim.status === "denied"
+              ? "This action is not permitted. Ask the app owner for access, or skip it."
+              : "This action is already claimed. Check for updates before trying again.",
+          );
+          // No local execution began. A later manual action may check the host again.
+          if (!held) deviceRuns.delete(requestId);
+          else device.outcome = "unknown";
+          answers.set(requestId, { part, local: { ...mine.local, status: "failed", error } });
+          now();
+          return { ok: false, error };
+        }
+        if (claim.status === "completed") device.response = { type: "result", value: claim.value };
+        else if (claim.status === "granted" && !held) {
+          if (typeof claim.complete !== "function")
+            throw new TypeError("A claim needs durable completion.");
+          const value = await handler.run(part.input, { signal: controller.signal, requestId });
+          // Persist even if this view detached during execution. The bound host completion checks
+          // its principal/request again. No late result is delivered by this client.
+          await claim.complete(value);
+          device.response = { type: "result", value };
+        }
+        // Unknown work, including a surprising second grant, is never dispatched again here.
+        device.outcome = device.response ? "result" : "unknown";
+      } else {
+        const value = await handler.run(part.input, { signal: controller.signal, requestId });
+        device.response = { type: "result", value };
+        device.outcome = "result";
+      }
     } catch {
-      // Never expose a handler error that might contain input, or guess that no effect happened.
+      // Neither a failed claim nor failed completion proves that nothing happened.
       device.outcome = "unknown";
     }
-    if (
-      controller.signal.aborted ||
-      openRequest(view.messages, requestId) !== part ||
-      view.run.id !== before.id ||
-      view.cursor?.segment !== segment
-    ) {
+    if (!current()) {
       unconfirm();
       return { ok: true, outcome: "unknown" };
     }
@@ -1191,6 +1515,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     stop,
     respond,
     startClientTool,
+    recallInput,
     reconnect,
     setOptions,
   });
