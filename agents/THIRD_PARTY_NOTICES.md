@@ -8,8 +8,14 @@ block has a short comment that names its source. Their copyright notices and lic
 - Source: [TanStack/ai](https://github.com/TanStack/ai/tree/1888233ddb501d14b17aa9a5f3497373a0e9242e),
   `packages/ai-harness/src/inline-media.ts`, `packages/ai-harness/src/media.ts`,
   `packages/ai-harness/src/handoff.ts`, `packages/ai-harness/src/log-records.ts`,
+  `packages/ai-harness/src/log.ts`,
   `packages/ai-harness/src/session/turn-parts.ts` (`steering` and `joinSteers`) and
   `packages/ai/src/interrupt-serialization.ts`.
+- Used in: `src/progress.ts`, adjacent delta folding, timed batching and a single writer.
+  Changed: only compatible text or reasoning folds, never tool calls. Buffers have count and
+  byte limits. Unknown writes are not replayed; a new persisted gap record is required before
+  execution continues. The host owns sequence numbers and uncertain-write reconciliation.
+  `test/progress.test.ts` checks fold equivalence, barriers, bounds and failures.
 - Used in: `src/steering.ts`, joining queued user messages before a model call, in order,
   committing them before removing them from pending delivery, and excluding delegated children.
   Changed: a bounded host inbox supplies immutable ids; the existing execution journal records

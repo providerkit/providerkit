@@ -1468,6 +1468,8 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       attemptId: snapshot.attemptId,
       state: snapshot.state,
     });
+    // Includes the final state event, before a child host receipt or session append can land.
+    await host?.progress?.flush();
     const record = recordOf(snapshot);
     const state = snapshot.state;
     if (state.status === "completed") {

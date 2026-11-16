@@ -334,6 +334,13 @@ export interface AgentHost {
   /** New user messages for the root's active conversation owner, never every specialist.
    * A durable host must supply durable authenticated storage. Does not answer human requests. */
   inbox?: InputInbox;
+  /** Required progress storage, separate from best-effort onEvent. push synchronously accepts
+   * a frozen event into a bounded buffer; flush must report any write failure, not hide it.
+   * The loop awaits flush before every checkpoint and final outcome, including children. */
+  progress?: {
+    push(event: AgentEvent): void;
+    flush(): Promise<void>;
+  };
   /** Persist the whole snapshot before returning. Writes are serialized within this attempt. */
   checkpoint?: (snapshot: RunSnapshot) => void | Promise<void>;
   /** Load/compare authoritative state and check ownership and freshness, or throw.

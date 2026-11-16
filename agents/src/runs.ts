@@ -1,4 +1,13 @@
-import type { createRuns, Run, RunEvent, RunHandler, StoredRun } from "@gusnips/server/runs";
+import type {
+  createRuns,
+  ChildResult,
+  ChildSpec,
+  Run,
+  RunEvent,
+  StoredRun,
+} from "@gusnips/server/runs";
+import { createProgress, type EventDurability } from "./progress.ts";
+export type { EventDurability, ProgressGap } from "./progress.ts";
 import { AGENT_RUNTIME } from "./delegation.ts";
 import {
   checkOptions,
@@ -30,6 +39,20 @@ export type BackgroundRuns = Pick<
   ReturnType<typeof createRuns>,
   "create" | "read" | "tail" | "cancel"
 >;
+
+/** Minimum worker capabilities. Server 0.19/0.20 remain valid in best-effort mode,
+ * including their child callbacks; only awaited mode needs append. */
+export interface BackgroundWorker extends Pick<
+  Run,
+  "id" | "owner" | "input" | "checkpoint" | "resumed" | "crashes" | "signal" | "save" | "emit"
+> {
+  append?: (events: readonly { type: string; data?: unknown }[]) => Promise<void>;
+  child<T>(
+    key: string,
+    spec: ChildSpec,
+    fn: (run: BackgroundWorker) => Promise<T>,
+  ): Promise<ChildResult<T>>;
+}
 
 export interface Continuation {
   /** Unique authorization claim, distinct from both the logical run and the host row. */
@@ -68,7 +91,10 @@ export interface BackgroundOptions<T> {
   agent: Agent<T>;
   /** Dedicated handler key for this agent version. */
   kind: string;
+  /** Injected create must resolve after its transaction commits. Only then is enqueue called. */
   runs: BackgroundRuns;
+  /** Coalesced progress uses emit by default. Awaited mode needs Run.append (server 0.21+). */
+  events?: EventDurability;
   /** Await durable queue acceptance. A worker calls runs.drive(id, background.handlers).
    * The host must also run runs.sweep on boot and periodically, and drain on shutdown. */
   enqueue: (id: string) => Promise<void>;
@@ -135,7 +161,17 @@ function settled(raw: unknown): Settled {
 /** Background work uses the host's lease, queue and cancellation. Children stay in-process.
  * Usage remains in stable SDK receipts; this binding never calls additive Run.spend. */
 export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
-  const { agent, kind, runs, enqueue, historyLimit, prepareHistory } = options;
+  const {
+    agent,
+    kind,
+    runs,
+    enqueue,
+    historyLimit,
+    prepareHistory,
+    events = "best-effort",
+  } = options;
+  if (events !== "best-effort" && events !== "awaited")
+    throw new TypeError('events must be "best-effort" or "awaited".');
   if (!isId(kind) || typeof enqueue !== "function" || typeof options.policy !== "function")
     throw new TypeError(
       "Provide a run kind, a durable enqueue callback and a trusted policy factory.",
@@ -252,8 +288,26 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     return created;
   }
 
-  async function drive(run: Run): Promise<Settled> {
+  async function drive(run: BackgroundWorker): Promise<Settled> {
     run.signal.throwIfAborted();
+    // Capability refusal happens before policy, model or tool work. No timer survives drive.
+    const progress = createProgress(run, events);
+    try {
+      return await execute(run, progress);
+    } finally {
+      try {
+        await progress.flush();
+      } finally {
+        await progress.dispose();
+      }
+    }
+  }
+
+  async function execute(
+    run: BackgroundWorker,
+    progress: ReturnType<typeof createProgress>,
+  ): Promise<Settled> {
+    const signal = AbortSignal.any([run.signal, progress.signal]);
     const initial = segment(run.input);
     const snapshot = restore(run.checkpoint ?? initial.snapshot, initial.snapshot);
     const trusted = await untilAbort(
@@ -280,8 +334,10 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
         ),
         run.signal,
       );
-    const parents = new Map<string, Run>([[snapshot.runId, run]]);
+    if (run.resumed) await progress.resync(run.crashes);
+    const parents = new Map<string, BackgroundWorker>([[snapshot.runId, run]]);
     const host: AgentHost & { authorizeResume: BackgroundPolicy["authorizeResume"] } = {
+      progress,
       authorizeResume(saved) {
         run.signal.throwIfAborted();
         return untilAbort(Promise.resolve(trusted.authorizeResume(saved)), run.signal);
@@ -342,12 +398,11 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       Object.entries(initial.continuation?.answers ?? {}).filter(([id]) => pending.has(id)),
     );
     const result = await agent.resume(snapshot, {
-      signal: run.signal,
+      signal,
       context: trusted.context,
       host,
       ...(session ? { session } : {}),
       answers,
-      onEvent: (event) => run.emit("agent", event),
     });
     // The portable loop reports cancellation as data. The run service needs its control
     // exception back, or a cancelled/lost/draining worker could record a successful job.
@@ -359,7 +414,8 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     };
   }
 
-  const handlers: Readonly<Record<string, RunHandler>> = Object.freeze({ [kind]: drive });
+  const handlers: Readonly<Record<string, (run: BackgroundWorker) => Promise<unknown>>> =
+    Object.freeze({ [kind]: drive });
   return Object.freeze({
     handlers,
     /** Saves the run before returning its id. With `sessionId`, the session's history is read

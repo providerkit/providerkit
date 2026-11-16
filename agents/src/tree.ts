@@ -44,6 +44,8 @@ export function fail(code: string, message: string, operationId?: string): never
 /** Progress is not the durable journal, and an observer cannot stop execution. It gets a
  * frozen copy, is never awaited, and whatever it throws or rejects with is dropped. */
 export function emitEvent(options: RunOptions, event: AgentEvent): void {
+  // Storage is not an observer. Its failures must reach execution and the checkpoint barrier.
+  options.host?.progress?.push(immutableCopy(event));
   try {
     void Promise.resolve(options.onEvent?.(immutableCopy(event))).catch(() => {});
   } catch {
@@ -236,22 +238,40 @@ export class ExecutionTree {
     const saved = immutableCopy(this.root);
     // Every descendant writes the whole root through this one queue. Capturing at
     // enqueue time keeps a slow earlier save from erasing a newer child's receipt.
-    this.writes = this.writes.then(async () => {
-      await this.options.host?.checkpoint?.(saved);
+    // Seal progress at the same boundary as the snapshot, not when a queued write eventually
+    // runs. Handle its rejection now even if an older checkpoint is still pending.
+    const progress = (async () => {
+      try {
+        await this.options.host?.progress?.flush();
+        return { ok: true as const };
+      } catch (cause) {
+        return { ok: false as const, cause };
+      }
+    })();
+    const write = this.writes.then(async () => {
+      if (this.checkpointFailure) throw new Halt(this.checkpointFailure);
+      try {
+        const flushed = await progress;
+        if (!flushed.ok) throw flushed.cause;
+        await this.options.host?.checkpoint?.(saved);
+      } catch (error) {
+        this.checkpointFailure = {
+          status: "failed",
+          error: {
+            code: "checkpoint_failed",
+            message: `Checkpoint failed: ${messageOf(error)}. Reconcile stored state before resuming.`,
+          },
+        };
+        this.broken.abort(error);
+        throw new Halt(this.checkpointFailure);
+      }
     });
-    try {
-      await this.writes;
-    } catch (error) {
-      this.checkpointFailure ??= {
-        status: "failed",
-        error: {
-          code: "checkpoint_failed",
-          message: `Checkpoint failed: ${messageOf(error)}. Reconcile stored state before resuming.`,
-        },
-      };
-      this.broken.abort(error);
-      throw new Halt(this.checkpointFailure);
-    }
+    // Fail closed through checkpointFailure, not a poisoned promise chain.
+    this.writes = write.then(
+      () => {},
+      () => {},
+    );
+    await write;
   }
 
   stop(): void {

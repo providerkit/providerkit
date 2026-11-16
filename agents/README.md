@@ -888,9 +888,9 @@ refused, not converted.
 
 ## Background runs
 
-`@providerkit/agents/runs` binds an agent to `@gusnips/server/runs` 0.19 or later. Install that
-optional peer only when using this entry. Supply your existing run service, durable queue callback
-and trusted policy factory:
+`@providerkit/agents/runs` binds an agent to `@gusnips/server/runs` 0.19, 0.20 or 0.21.
+Awaited progress needs 0.21. Install that optional peer only when using this entry. Supply your
+existing run service, durable queue callback and trusted policy factory:
 
 ```ts
 import { createBackgroundAgent } from "@providerkit/agents/runs";
@@ -915,6 +915,12 @@ for these connections. A stored job without a worker and recovery sweep does not
 
 `start` saves the input before returning an ID. If queueing fails, `BackgroundEnqueueError.id`
 identifies the saved run. Requeue that ID or let the sweep find it; do not create another run.
+
+You can inject `runs.create` to save the run and your own records in one transaction. It must
+resolve only after commit, not from inside an uncommitted outer transaction. The SDK calls
+`enqueue` afterward. A rollback must reject creation, so nothing is queued. Never keep that
+transaction open through model or tool execution. The host owns its transaction client and
+must reconcile an unknown commit before trying creation again.
 
 `start` takes the same input as `run`. For a conversation, pass a session factory and the
 conversation's id:
@@ -952,6 +958,70 @@ holds the whole conversation: keep it, and every raw event `observe` yields, on 
 Pass an observer signal to `observe` or `wait` to stop listening. That does not cancel the work.
 `cancel(owner, id)` cancels the whole run tree. Children execute in-process under their root's
 lease; they are not independently owned distributed jobs.
+
+### Stored progress
+
+Background storage merges adjacent text or reasoning deltas from the same run, operation and
+attempt. Only single-field text deltas with the same provider source merge. Tool calls, usage,
+signatures, other payloads and boundary events stay separate. Raw `onEvent` callbacks on portable
+runs still receive every original event, without waiting for storage.
+
+By default, `events: "best-effort"` sends these records through `Run.emit`. The SDK flushes its
+buffer after 100 ms, at a boundary event, at a checkpoint and before returning an outcome.
+This does not await database writes: storage failures still go to the host's `onError`. Older
+server minors remain valid, and this mode cannot bound the host's own unacknowledged emit queue.
+
+To await storage, set the option when binding the agent:
+
+```ts
+const jobs = createBackgroundAgent({
+  agent: writer,
+  kind: "writer-v1",
+  runs,
+  enqueue,
+  policy,
+  events: "awaited",
+});
+```
+
+The worker requires `Run.append` before any model or tool work. Events are stored in order, with
+one append in flight. Every journal save waits for earlier progress, and every outcome waits for
+its final state event, including child outcomes. Input acknowledgement still follows the saved
+journal. This is not one atomic event-and-checkpoint transaction. A crash between writes can
+leave events ahead of a checkpoint, or omit a state event emitted after its checkpoint.
+
+`observe` still yields raw host `RunEvent` rows. Their types are:
+
+- `agent`: the existing `AgentEvent`, possibly with merged text.
+- `agent.gap`: `{ dropped, unconfirmed }`. Counts refer to original events before merging.
+  `dropped` means the buffer refused them. `unconfirmed` means an append rejected and may already
+  have stored them. It does not mean they are definitely missing.
+- `agent.resync`: `{ crashes }`, stored before a recovered worker resumes the agent in awaited mode.
+- `end`: the host's terminal record, after its handler finishes.
+
+On a gap or resync, read the saved run and rebuild the display from its journal before applying
+later events. A gap is not proof that work failed, and an event is not proof that a checkpoint
+committed. The execution journal remains authoritative. Continue strictly after the last `seq`;
+the cursor belongs to that physical run id. A request continuation returns a new id and cursor.
+Observation never replays an effect or starts a model attempt.
+
+Each buffer holds at most 64 records and 256 KiB of UTF-8 event JSON, counted before merging.
+There is one waiting buffer and one in-flight batch. Overflow drops a suffix, never reorders it;
+a new gap record follows that prefix. An oversized event is dropped too. In awaited mode, a
+rejected append is never resent by the SDK. It tries to append a new uncertainty marker instead.
+Execution continues only after that marker is stored. If even the marker fails, the worker stops
+and reports the storage failure. Stop and lease loss also stop writes, without undoing effects.
+An in-flight append is allowed to settle before cleanup; it is not abandoned or replayed.
+
+A killed worker can lose the still-buffered tail. The next worker's resync marker tells readers
+to reload; it cannot count those lost events. A final checkpoint can recover settled output, not
+every partial token. Raw logs contain private reasoning, tool arguments and results: keep them
+server-side, apply the host's access and retention rules, and project only safe display data.
+
+Custom portable hosts can implement `AgentHost.progress` with synchronous `push` and awaited
+`flush`. `push` accepts a frozen event into bounded storage; `flush` must surface write failures.
+Unlike `onEvent`, these failures are not ignored. The SDK awaits this hook at every journal-save
+boundary and final outcome. It supplies no lease or storage of its own.
 
 ### Background request policy
 

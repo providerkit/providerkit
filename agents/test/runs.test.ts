@@ -330,6 +330,284 @@ async function counts(task: string) {
 }
 
 describe("background binding on local Postgres", () => {
+  it("progress: stores coalesced child turns before checkpoints and final events before end", async () => {
+    const leaf = defineAgent({
+      ...base,
+      id: "streaming-child",
+      provider: {
+        id: "fake",
+        model: "fake",
+        async *createStream() {
+          yield { type: "delta", content: "child " };
+          yield { type: "delta", content: "answer" };
+          yield answer("");
+        },
+      },
+    });
+    const root = parent("streaming-root", leaf);
+    const background = createBackgroundAgent({
+      agent: root.agent,
+      kind: "progress",
+      runs,
+      enqueue,
+      policy: closedPolicy,
+      events: "awaited",
+    });
+    const { id } = await background.start("alice", "Delegate");
+    const handler = background.handlers.progress;
+    if (!handler) throw new Error("Missing handler");
+    let checked = 0;
+    expect(
+      await runs.drive(id, {
+        progress: (run) =>
+          handler({
+            ...run,
+            async save(raw) {
+              const saved = root.agent[AGENT_RUNTIME].restore(raw);
+              const nodes = [
+                saved,
+                ...saved.delegations.flatMap((entry) =>
+                  entry.children.map((child) => child.snapshot),
+                ),
+              ];
+              const { rows } = await pool.query<{ data: unknown }>(
+                `SELECT data FROM ${schema}.run_events WHERE run_id=$1 AND type='agent' ORDER BY seq`,
+                [id],
+              );
+              for (const node of nodes)
+                for (const model of node.models) {
+                  if (model.status !== "completed") continue;
+                  const chunks = rows
+                    .map((row) => row.data)
+                    .filter(
+                      (event) =>
+                        isRecord(event) &&
+                        event.type === "model_chunk" &&
+                        event.operationId === model.id,
+                    );
+                  expect(chunks.length).toBeGreaterThan(0);
+                  checked++;
+                }
+              await run.save(raw);
+            },
+          }),
+      }),
+    ).toBe("succeeded");
+    expect(checked).toBeGreaterThan(0);
+    const events = [];
+    for await (const event of background.observe("alice", id)) events.push(event);
+    expect(events.at(-1)?.type).toBe("end");
+    expect(events.at(-2)?.data).toMatchObject({ type: "state", state: { status: "completed" } });
+    const child = (await background.read("alice", id)).snapshot.delegations[0]?.children[0]
+      ?.snapshot;
+    expect(
+      events
+        .filter(
+          (event) =>
+            isRecord(event.data) &&
+            event.data.type === "model_chunk" &&
+            event.data.runId === child?.runId,
+        )
+        .map((event) => event.data),
+    ).toContainEqual(
+      expect.objectContaining({ chunk: { type: "delta", content: "child answer" } }),
+    );
+    const cursor = events[1]?.seq;
+    if (cursor === undefined) throw new Error("Missing cursor");
+    const replay = [];
+    for await (const event of background.observe("alice", id, cursor)) replay.push(event);
+    expect(replay).toEqual(events.filter((event) => event.seq > cursor));
+  });
+
+  it.each(["lost-reply", "unavailable"] as const)(
+    "progress: surfaces %s without replaying writes or effects",
+    async (fault) => {
+      let effects = 0;
+      const wire = fake((count) => (count === 0 ? call("write") : answer("done")));
+      const agent = defineAgent({
+        ...base,
+        provider: wire.provider,
+        tools: [
+          defineTool({
+            name: "write",
+            description: "Write",
+            inputSchema: { type: "object" },
+            async run() {
+              effects++;
+              return "written";
+            },
+          }),
+        ],
+      });
+      const background = createBackgroundAgent({
+        agent,
+        kind: "progress-failure",
+        runs,
+        enqueue,
+        policy: closedPolicy,
+        events: "awaited",
+      });
+      const { id } = await background.start("alice", "Write once");
+      const handler = background.handlers["progress-failure"];
+      if (!handler) throw new Error("Missing handler");
+      let writes = 0;
+      const outcome = await runs.drive(id, {
+        "progress-failure": (run) =>
+          handler({
+            ...run,
+            async append(events) {
+              writes++;
+              if (fault === "unavailable") throw new Error("Progress storage unavailable");
+              await run.append(events);
+              if (writes === 1) throw new Error("Commit acknowledgement lost");
+            },
+          }),
+      });
+      const saved = await background.read("alice", id);
+      const { rows } = await pool.query<{ type: string; data: unknown }>(
+        `SELECT type, data FROM ${schema}.run_events WHERE run_id=$1 ORDER BY seq`,
+        [id],
+      );
+      if (fault === "unavailable") {
+        expect(outcome).toBe("failed");
+        expect(saved.error?.message).toContain("could not be saved or marked incomplete");
+        expect(saved.snapshot.models.at(-1)?.status).toBe("running");
+        expect(effects).toBe(0);
+        expect(writes).toBe(2);
+        expect(rows.filter((row) => row.type === "agent.gap")).toEqual([]);
+      } else {
+        expect(outcome).toBe("succeeded");
+        expect(saved.outcome?.status).toBe("completed");
+        expect(effects).toBe(1);
+        expect(wire.calls()).toBe(2);
+        expect(rows.filter((row) => row.type === "agent.gap")).toEqual([
+          { type: "agent.gap", data: { dropped: 0, unconfirmed: 1 } },
+        ]);
+        const first = rows.find((row) => row.type === "agent");
+        expect(rows.filter((row) => JSON.stringify(row) === JSON.stringify(first))).toHaveLength(1);
+      }
+    },
+  );
+
+  it.each(["lost", "cancelled"] as const)(
+    "progress: fences an append after %s and never finishes successfully",
+    async (control) => {
+      const store = service();
+      const wire = fake(() => answer("answer"));
+      const background = createBackgroundAgent({
+        agent: defineAgent({ ...base, provider: wire.provider }),
+        kind: "progress-control",
+        runs: store,
+        enqueue,
+        policy: closedPolicy,
+        events: "awaited",
+      });
+      const { id } = await background.start("alice", "Wait");
+      const handler = background.handlers["progress-control"];
+      if (!handler) throw new Error("Missing handler");
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const stopped = Promise.withResolvers<void>();
+      const driving = store.drive(id, {
+        "progress-control": (run) =>
+          handler({
+            ...run,
+            async append(events) {
+              run.signal.addEventListener("abort", () => stopped.resolve(), { once: true });
+              entered.resolve();
+              await release.promise;
+              await run.append(events);
+            },
+          }),
+      });
+      try {
+        await entered.promise;
+        if (control === "lost")
+          await pool.query(`UPDATE ${schema}.runs SET lease_token=$2 WHERE id=$1`, [
+            id,
+            crypto.randomUUID(),
+          ]);
+        else await background.cancel("alice", id);
+        await stopped.promise;
+        release.resolve();
+        expect(await driving).toBe(control);
+        const saved = await background.read("alice", id);
+        expect(saved.status).not.toBe("succeeded");
+        expect(saved.snapshot.models.at(-1)?.status).toBe("running");
+      } finally {
+        release.resolve();
+        await driving;
+        if (control === "lost") await background.cancel("alice", id);
+      }
+    },
+  );
+
+  it("progress: awaits injected transaction commit before enqueue and preserves the id on uncertain enqueue", async () => {
+    const wire = fake(() => answer("done"));
+    const agent = defineAgent({ ...base, provider: wire.provider });
+    let rollback = true;
+    let createdId = "";
+    let inTransaction = false;
+    const enqueue = vi.fn(async (id: string) => {
+      expect(inTransaction).toBe(false);
+      expect(await runs.read(id, "alice")).not.toBeNull();
+      expect(
+        (await pool.query(`SELECT id FROM ${schema}.resources WHERE id=$1`, [id])).rowCount,
+      ).toBe(1);
+      throw new Error("Queue acknowledgement lost");
+    });
+    const background = createBackgroundAgent({
+      agent,
+      kind: "progress-create",
+      enqueue,
+      policy: closedPolicy,
+      events: "awaited",
+      runs: {
+        ...runs,
+        async create(spec) {
+          const client = await pool.connect();
+          try {
+            inTransaction = true;
+            await client.query("BEGIN");
+            const created = await runs.create(spec, client);
+            createdId = created.id;
+            await client.query(`INSERT INTO ${schema}.resources VALUES ($1, 'alice', '1')`, [
+              created.id,
+            ]);
+            expect(await runs.read(created.id, "alice")).toBeNull();
+            expect(enqueue).not.toHaveBeenCalled();
+            if (rollback) throw new Error("Host transaction rolled back");
+            await client.query("COMMIT");
+            return created;
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          } finally {
+            inTransaction = false;
+            client.release();
+          }
+        },
+      },
+    });
+    await expect(background.start("alice", "Write")).rejects.toThrow("rolled back");
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(await runs.read(createdId, "alice")).toBeNull();
+    expect(
+      (await pool.query(`SELECT id FROM ${schema}.resources WHERE id=$1`, [createdId])).rowCount,
+    ).toBe(0);
+    rollback = false;
+    const result = background.start("alice", "Write");
+    await expect(result).rejects.toMatchObject({
+      name: "BackgroundEnqueueError",
+      id: expect.any(String),
+    });
+    await expect(result).rejects.toMatchObject({ id: createdId });
+    expect(enqueue).toHaveBeenCalledExactlyOnceWith(createdId);
+    expect(wire.calls()).toBe(0);
+    expect(await runs.drive(createdId, background.handlers)).toBe("succeeded");
+    expect(wire.calls()).toBe(1);
+  });
+
   it("passes the authenticated host inbox through and saves inputs before acknowledgement", async () => {
     const started = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -362,6 +640,7 @@ describe("background binding on local Postgres", () => {
     const background = createBackgroundAgent({
       agent,
       kind: "inbox",
+      events: "awaited",
       runs,
       enqueue,
       policy(context) {
