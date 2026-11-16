@@ -480,6 +480,44 @@ describe("guarded interrupted-operation recovery", () => {
     },
   );
 
+  it.each(["web_search", "code_execution"] as const)(
+    "refuses replay with explicit %s settings even on an inference-only profile",
+    async (hostedType) => {
+      const model = wire([text("first"), text("must not replay")]);
+      const agent = defineAgent({
+        ...base,
+        provider: model.provider,
+        recovery,
+        modelSettings: { hostedTools: [{ type: hostedType }] },
+      });
+      const crash = crashModel();
+      await agent.run("Work", { host: crash.host });
+      const result = await agent.resume(crash.snapshot(), { host: { authorizeResume } });
+      expect(result).toMatchObject({
+        status: "failed",
+        error: { code: "interrupted_operation" },
+      });
+      expect(model.sent).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("rejects saved replay attempts for explicitly configured hosted tools", async () => {
+    const model = wire([text()]);
+    const agent = defineAgent({
+      ...base,
+      provider: model.provider,
+      recovery,
+      modelSettings: { hostedTools: [{ type: "code_execution" }] },
+    });
+    const crash = crashModel();
+    await agent.run("Work", { host: crash.host });
+    const forged = crash.snapshot();
+    const operation = forged.models[0];
+    if (!operation) throw new Error("Missing model checkpoint");
+    operation.interrupted.push({ attemptId: "earlier-model-attempt", usage });
+    expect(() => agent[AGENT_RUNTIME].restore(forged)).toThrow("recovery policy");
+  });
+
   it.each(["deadline", "cancel"] as const)(
     "does not reset or bypass %s on replay",
     async (stop) => {

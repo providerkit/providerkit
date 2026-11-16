@@ -993,6 +993,7 @@ export function readSnapshot(
     if (
       model.interrupted.length &&
       (!raw.definition.recovery?.policy.inferenceOnly ||
+        !!raw.definition.modelSettings.hostedTools?.length ||
         model.interrupted.length >= raw.definition.recovery.policy.maxAttempts)
     )
       throw new TypeError("Model attempts exceed the recorded recovery policy.");

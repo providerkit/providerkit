@@ -1134,9 +1134,12 @@ export function defineAgent<T>(definition: AgentDefinition<T>): Agent<T | string
       previous?: Extract<ModelExecution, { status: "running" }>,
     ): Promise<CompletedModel> {
       active();
+      // Hosted actions may run before any local tool call appears. Their explicit presence
+      // overrides a profile's inference-only claim when an interrupted call is recovered.
       if (previous)
         requireRecovery(
-          snapshot.definition.recovery?.policy.inferenceOnly === true,
+          snapshot.definition.recovery?.policy.inferenceOnly === true &&
+            !snapshot.definition.modelSettings.hostedTools?.length,
           previous.interrupted.length,
           snapshot.definition.recovery,
           previous.id,

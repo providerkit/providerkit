@@ -607,8 +607,9 @@ const reader = defineAgent({
 
 `inferenceOnly: true` is your host's assertion about the configured provider, including its
 wrappers and defaults. Never set it for provider-hosted search, code execution or any other
-remote tool. Leave it out to refuse interrupted model calls. `readOnlyTools` is an explicit
-allow-list, not a tool hint: each named tool must also have `isReadOnly: true`. A replay requires
+remote tool. An interrupted call with a non-empty recorded `modelSettings.hostedTools` list is
+refused even if this flag is set. Leave it out to refuse interrupted model calls. `readOnlyTools`
+is an explicit allow-list, not a tool hint: each named tool must also have `isReadOnly: true`. A replay requires
 `host.beforeTool`, which checks access again before invocation. Read-only does not mean free:
 a repeated request can incur another charge or return newer data.
 
