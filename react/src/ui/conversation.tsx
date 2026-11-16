@@ -86,6 +86,9 @@ export function MessageList({
   renderText,
   renderPart,
   renderApproval,
+  renderRequest,
+  renderForm,
+  onStartClientTool,
   toolLabels,
   specialistLabels,
   onSource,
@@ -189,6 +192,9 @@ export function MessageList({
                         renderText={renderText}
                         renderPart={renderPart}
                         renderApproval={renderApproval}
+                        renderRequest={renderRequest}
+                        renderForm={renderForm}
+                        onStartClientTool={onStartClientTool}
                         toolLabels={toolLabels}
                         specialistLabels={specialistLabels}
                         onSource={onSource}

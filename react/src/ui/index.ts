@@ -20,7 +20,16 @@ export {
   type ToolCallProps,
   type SpecialistActivityProps,
 } from "./activity.tsx";
-export { ApprovalCard, type ApprovalCardProps, type ApprovalActions } from "./approval.tsx";
+export {
+  ApprovalCard,
+  RequestCard,
+  type ApprovalCardProps,
+  type ApprovalActions,
+  type RequestActions,
+  type RequestCardProps,
+} from "./approval.tsx";
+export { QuestionFields, type QuestionFieldsProps } from "./question.tsx";
+export { SchemaForm, formFields, type SchemaFormProps, type FormField } from "./schema-form.tsx";
 export { Sources, type SourcesProps } from "./sources.tsx";
 export {
   RunStatusDisplay,
@@ -39,4 +48,5 @@ export {
   type ConversationLabelOverrides,
   type RespondToRequest,
   type ApprovalDisplayState,
+  type RequestDisplayState,
 } from "./context.tsx";

@@ -7,12 +7,14 @@
  * `document`, so they render on a server: observation starts in an effect, which a server never
  * runs.
  */
-import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   createChatClient,
   type ChatClient,
   type ChatClientOptions,
   type ChatState,
+  type RequestAnswer,
+  type RequestResponse,
 } from "./client.ts";
 
 export interface UseChatOptions extends ChatClientOptions {
@@ -25,8 +27,11 @@ export interface UseChatOptions extends ChatClientOptions {
 export type UseAgentRunOptions = Omit<UseChatOptions, "allowSendWhileRunning">;
 
 export interface ChatValue extends ChatState {
+  /** Local view identity, not sent to the host. Request cards use it to discard another scope's drafts. */
+  scopeKey?: string;
   send: ChatClient["send"];
   retry: ChatClient["retry"];
+  startClientTool: ChatClient["startClientTool"];
   stop: ChatClient["stop"];
   respond: ChatClient["respond"];
   reconnect: ChatClient["reconnect"];
@@ -34,6 +39,7 @@ export interface ChatValue extends ChatState {
 
 /** The same state without what belongs to sending: a panel that watches a run never writes in it. */
 export interface AgentRunValue extends Omit<ChatState, "canSend" | "messageErrors"> {
+  scopeKey?: string;
   stop: ChatClient["stop"];
   respond: ChatClient["respond"];
   reconnect: ChatClient["reconnect"];
@@ -59,7 +65,36 @@ function useClient(options: UseChatOptions): ChatClient {
   // Strict Mode attaches, detaches and attaches the same client again: the second observation
   // replaces the first, which closes.
   useEffect(() => client.attach(), [client]);
-  return client;
+  const committed = useRef<ChatClient | undefined>(undefined);
+  useLayoutEffect(() => {
+    committed.current = client;
+    return () => {
+      committed.current = undefined;
+    };
+  }, [client]);
+  return useMemo(() => {
+    const unavailable = {
+      ok: false as const,
+      error: {
+        code: "not_waiting",
+        message: "This view is closed. Open the current request to answer it.",
+      },
+    };
+    const respond: ChatClient["respond"] = async (
+      id: string | readonly RequestAnswer[],
+      response?: RequestResponse,
+    ) => {
+      if (committed.current !== client) return unavailable;
+      if (typeof id !== "string") return client.respond(id);
+      return response ? client.respond(id, response) : unavailable;
+    };
+    return {
+      ...client,
+      respond,
+      startClientTool: async (id: string) =>
+        committed.current === client ? client.startClientTool(id) : unavailable,
+    };
+  }, [client]);
 }
 
 function useClientState(client: ChatClient): ChatState {
@@ -80,13 +115,15 @@ export function useChat(options: UseChatOptions): ChatValue {
   return useMemo(
     () => ({
       ...state,
+      scopeKey: options.id,
       send: client.send,
       retry: client.retry,
+      startClientTool: client.startClientTool,
       stop: client.stop,
       respond: client.respond,
       reconnect: client.reconnect,
     }),
-    [client, state],
+    [client, state, options.id],
   );
 }
 
@@ -102,9 +139,10 @@ export function useAgentRun(options: UseAgentRunOptions): AgentRunValue {
     const { canSend: _canSend, messageErrors: _messageErrors, ...rest } = state;
     return {
       ...rest,
+      scopeKey: options.id,
       stop: client.stop,
       respond: client.respond,
       reconnect: client.reconnect,
     };
-  }, [client, state]);
+  }, [client, state, options.id]);
 }

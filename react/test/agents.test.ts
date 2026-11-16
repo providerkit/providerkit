@@ -8,11 +8,15 @@ import {
 } from "@providerkit/core";
 import {
   defineAgent,
+  defineClientTool,
+  questionTool,
+  type Decision,
   defineDelegation,
   type Agent,
   type AgentEvent,
   type AgentHost,
   type RunSnapshot,
+  type PendingRequest,
 } from "@providerkit/agents";
 import {
   createAgentProjector,
@@ -112,10 +116,27 @@ function approvals(
 ) {
   return {
     authorizeResume() {},
-    approvalContext: () => ({ ...scope, expiresAt: Date.now() + 60_000 }),
-    resolveApproval: () => answer,
+    prepareRequest: () => ({ scope: { ...scope, expiresAt: Date.now() + 60_000 } }),
+    resolveRequest: () => ({ type: answer === "approved" ? "approve" : "deny" }),
     beforeTool() {},
   } satisfies AgentHost;
+}
+
+/** Evidence stays keyed by the request, never a browser-supplied child route. */
+function evidenceFor(snapshot: RunSnapshot, evidence: unknown): Record<string, unknown> {
+  for (const model of snapshot.models) {
+    if (model.status !== "completed") continue;
+    for (const tool of model.tools)
+      for (const record of tool.asks ?? [])
+        if (tool.status !== "completed" && !record.closed && !record.decision)
+          return { [record.request.id]: evidence };
+  }
+  for (const delegation of snapshot.delegations)
+    for (const child of delegation.children) {
+      const found = evidenceFor(child.snapshot, evidence);
+      if (Object.keys(found).length) return found;
+    }
+  return {};
 }
 
 /** Every event goes through JSON and the client's parser, as it would over a socket. */
@@ -181,6 +202,9 @@ function rows(message: DisplayMessage | undefined): Record<string, DisplayPart[]
 function ownerOf(part: DisplayPart): string {
   switch (part.type) {
     case "text":
+    case "approval":
+    case "question":
+    case "client-tool":
     case "tool":
       return part.agentId ?? "root";
     case "agent":
@@ -220,10 +244,12 @@ function settled(part: DisplayPart): boolean {
     case "text":
       return part.settled;
     case "tool":
-      return part.state !== "running";
+      return part.state !== "running" && part.state !== "waiting";
     case "agent":
       return part.state !== "running" && part.state !== "waiting";
     case "approval":
+    case "question":
+    case "client-tool":
       return part.state !== "pending";
     default:
       return true;
@@ -336,6 +362,425 @@ function team(together: boolean) {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("request journals and attempts", () => {
+  it("projects sibling questions, partial answers and closed receipts from real SDK runs", async () => {
+    const makeChild = (id: string) =>
+      defineAgent({
+        id,
+        version: "1",
+        instructions: "Ask.",
+        provider: fake([
+          turn({
+            calls: [
+              call("ask_question", {
+                message: `Question ${id}`,
+                choices: [{ id: "one", label: "One" }],
+              }),
+            ],
+          }),
+          turn({ text: ["Private child answer"] }),
+        ]),
+        tools: [questionTool()],
+      });
+    const a = makeChild("a");
+    const b = makeChild("b");
+    const root = defineAgent({
+      id: "root",
+      version: "1",
+      instructions: "Ask both.",
+      provider: fake([turn({ calls: [call("consult")] }), turn({ text: ["Done"] })]),
+      tools: [
+        defineDelegation({
+          name: "consult",
+          description: "Ask both.",
+          inputSchema: { type: "object" },
+          validate: () => undefined,
+          specialists: [a, b],
+          run: async (_input, context) =>
+            (
+              await context.join([context.child("a", a, "Ask."), context.child("b", b, "Ask.")])
+            ).map((item) => item.status),
+        }),
+      ],
+    });
+    let decision: Decision = {
+      type: "answer",
+      answer: { choices: ["missing"] },
+      receipt: "private-receipt",
+    };
+    const host = { ...approvals(), resolveRequest: () => decision };
+    const first = record();
+    const pending = await root.run("Ask both", { host, onEvent: first.onEvent });
+    if (pending.status !== "suspended") throw new Error(pending.status);
+    expect(pending.requests).toHaveLength(2);
+    const projector = createAgentProjector({
+      messageId: "reply",
+      runId: pending.runId,
+      request: ({ request }) =>
+        request.ask.type === "question"
+          ? { title: request.ask.message, choices: request.ask.choices }
+          : undefined,
+    });
+    const live = play(project(projector, first.events));
+    const pendingDisplay = projector.snapshot(pending.snapshot);
+    expect(rows(live.messages[0])).toEqual(rows(pendingDisplay));
+    expect(pendingDisplay.parts.filter((part) => part.type === "question")).toHaveLength(2);
+    const [one, two] = pending.requests;
+    if (!one || !two) throw new Error("Missing sibling requests");
+    const invalid = await root.resume(pending.snapshot, { host, answers: { [one.id]: "claim" } });
+    if (invalid.status !== "suspended") throw new Error(invalid.status);
+    expect(invalid.requests.find((request) => request.id === one.id)?.problem?.code).toBe(
+      "invalid_answer",
+    );
+    decision = { type: "answer", answer: { choices: ["one"] }, receipt: "private-receipt" };
+    const partial = await root.resume(invalid.snapshot, { host, answers: { [one.id]: "claim" } });
+    if (partial.status !== "suspended") throw new Error(partial.status);
+    expect(partial.requests.map((request) => request.id)).toEqual([two.id]);
+    const restored = createAgentProjector({ messageId: "reply", runId: pending.runId }).snapshot(
+      partial.snapshot,
+    );
+    expect(
+      restored.parts.filter((part) => part.type === "question").map((part) => part.state),
+    ).toEqual(["answered", "pending"]);
+    const done = await root.resume(partial.snapshot, { host, answers: { [two.id]: "claim" } });
+    expect(done.status).toBe("completed");
+    const wire = JSON.stringify(
+      createAgentProjector({ messageId: "reply", runId: pending.runId }).snapshot(done.snapshot),
+    );
+    expect(wire).not.toContain("private-receipt");
+    expect(wire).not.toContain("Question a");
+    expect(wire).not.toContain("Private child answer");
+  });
+
+  it("closes every request when a Stop decision ends a waiting tree", async () => {
+    const effect = vi.fn(async () => "not called");
+    const agent = defineAgent({
+      id: "root",
+      version: "1",
+      instructions: "Ask",
+      provider: fake([turn({ calls: [call("first"), call("second")] })]),
+      tools: [
+        tool("first", effect, { approval: true }),
+        tool("second", effect, { approval: true }),
+      ],
+    });
+    const host = { ...approvals(), resolveRequest: (): Decision => ({ type: "stop" }) };
+    const seen = record();
+    const waiting = await agent.run("Ask", { host, onEvent: seen.onEvent });
+    if (waiting.status !== "suspended") throw new Error(waiting.status);
+    expect(waiting.requests).toHaveLength(2);
+    const stopped = await agent.resume(waiting.snapshot, {
+      host,
+      answers: evidenceFor(waiting.snapshot, "claim"),
+      onEvent: seen.onEvent,
+    });
+    expect(stopped.status).toBe("cancelled");
+    const projector = createAgentProjector({ messageId: "reply", runId: waiting.runId });
+    const live = play(project(projector, seen.events));
+    const saved = projector.snapshot(stopped.snapshot);
+    expect(live.messages[0]).toEqual(saved);
+    expect(
+      saved.parts.filter((part) => part.type === "approval").map((part) => part.state),
+    ).toEqual(["stopped", "stopped"]);
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("keeps distinct coordinator questions open and reconstructs an invalid form replacement", async () => {
+    const schema = {
+      type: "object" as const,
+      properties: { note: { type: "string" } },
+      required: ["note"],
+    };
+    const agent = defineAgent({
+      id: "coordinator",
+      version: "1",
+      instructions: "Ask",
+      provider: fake([turn({ calls: [call("collect")] }), turn({ text: ["Done"] })]),
+      tools: [
+        defineDelegation({
+          name: "collect",
+          description: "Collect two answers",
+          inputSchema: { type: "object" },
+          validate: () => undefined,
+          specialists: [],
+          run: async (_input, context) =>
+            Promise.allSettled([
+              context.ask({ key: "first", message: "First form", schema }, (answer) => {
+                if (
+                  !answer.data ||
+                  typeof answer.data !== "object" ||
+                  !("note" in answer.data) ||
+                  answer.data.note !== "private-form-answer"
+                )
+                  throw new Error("private-form-problem");
+                return answer.data;
+              }),
+              context.ask({ key: "second", message: "Second question" }, (answer) => answer.text),
+            ]),
+        }),
+      ],
+    });
+    let decision: Decision = { type: "answer", answer: { data: { note: "wrong" } } };
+    const host = {
+      ...approvals(),
+      resolveRequest: (request: PendingRequest): Decision =>
+        request.ask.type === "question" && request.ask.key === "second"
+          ? { type: "answer", answer: { text: "Second answer" } }
+          : decision,
+    };
+    const seen = record();
+    const waiting = await agent.run("Ask", { host, onEvent: seen.onEvent });
+    if (waiting.status !== "suspended") throw new Error(waiting.status);
+    expect(waiting.requests).toHaveLength(2);
+    const projector = createAgentProjector({ messageId: "reply", runId: waiting.runId });
+    const live = play(project(projector, seen.events));
+    expect(
+      live.messages[0]?.parts.filter(
+        (part) => part.type === "question" && part.state === "pending",
+      ),
+    ).toHaveLength(2);
+    const invalid = await agent.resume(waiting.snapshot, {
+      host,
+      answers: Object.fromEntries(waiting.requests.map((request) => [request.id, "claim"])),
+    });
+    if (invalid.status !== "suspended") throw new Error(invalid.status);
+    const saved = projector.snapshot(invalid.snapshot);
+    expect(
+      saved.parts.filter((part) => part.type === "question").map((part) => part.state),
+    ).toEqual(["invalid", "answered", "pending"]);
+    expect(JSON.stringify(saved)).not.toContain("private-form-problem");
+    decision = {
+      type: "answer",
+      answer: { data: { note: "private-form-answer" } },
+      receipt: "private-form-receipt",
+    };
+    const first = invalid.requests.find(
+      (request) => request.ask.type === "question" && request.ask.key === "first",
+    )!;
+    const answered = await agent.resume(invalid.snapshot, {
+      host,
+      answers: { [first.id]: "claim" },
+    });
+    expect(answered.status).toBe("completed");
+    const wire = JSON.stringify(projector.snapshot(answered.snapshot));
+    expect(wire).not.toContain("private-form-answer");
+    expect(wire).not.toContain("private-form-receipt");
+  });
+
+  it("projects only approved effective client input, never original args or decision receipts", async () => {
+    const clientTool = defineClientTool({
+      name: "inspect",
+      description: "Read a sample.",
+      needsApproval: true,
+      inputSchema: { type: "object" },
+      validate: (value) => value,
+      result: { schema: { type: "object" }, validate: (value) => value },
+    });
+    const agent = defineAgent({
+      id: "reader",
+      version: "1",
+      instructions: "Read.",
+      tools: [clientTool],
+      provider: fake([
+        turn({ calls: [call("inspect", { text: "private-original" })] }),
+        turn({ text: ["Done"] }),
+      ]),
+    });
+    let decision: Decision = {
+      type: "approve",
+      arguments: { text: "approved-input" },
+      data: { note: "private-decision-data" },
+      receipt: "private-receipt",
+    };
+    const host = {
+      ...approvals(),
+      prepareRequest: () => ({
+        scope: {
+          actorId: "private-actor",
+          resource: { id: "private-resource", version: "private-version" },
+          expiresAt: Date.now() + 60_000,
+        },
+        ask: {
+          type: "approval" as const,
+          editable: true,
+          approveSchema: { type: "object" as const },
+        },
+      }),
+      resolveRequest: () => decision,
+    };
+    // The host changes approval presentation only, not the subsequent client request.
+    const prepare = host.prepareRequest;
+    const policy: AgentHost & { authorizeResume(): void } = {
+      ...host,
+      prepareRequest: (request) =>
+        request.ask.type === "approval" ? prepare() : { scope: prepare().scope },
+    };
+    const log = record();
+    const approval = await agent.run("Read", { host: policy, onEvent: log.onEvent });
+    if (approval.status !== "suspended") throw new Error(approval.status);
+    const waiting = await agent.resume(approval.snapshot, {
+      host: policy,
+      answers: evidenceFor(approval.snapshot, "claim"),
+      onEvent: log.onEvent,
+    });
+    if (waiting.status !== "suspended") throw new Error(waiting.status);
+    expect(waiting.requests[0]?.ask.type).toBe("client");
+    expect(waiting.requests[0]?.call.arguments).toEqual({ text: "approved-input" });
+    expect(waiting.requests[0]?.call.call.arguments).toContain("private-original");
+    const exposed = createAgentProjector({
+      messageId: "reply",
+      runId: waiting.runId,
+      clientTools: { inspect: (args) => ({ text: args.text }) },
+    });
+    expect(
+      exposed.snapshot(waiting.snapshot).parts.find((part) => part.type === "client-tool"),
+    ).toMatchObject({ name: "inspect", input: { text: "approved-input" }, canAnswer: true });
+    decision = {
+      type: "result",
+      value: { text: "private-client-result" },
+      receipt: "private-result-receipt",
+    };
+    const done = await agent.resume(waiting.snapshot, {
+      host: policy,
+      answers: evidenceFor(waiting.snapshot, "claim"),
+      onEvent: log.onEvent,
+    });
+    expect(done.status).toBe("completed");
+    const safe = createAgentProjector({ messageId: "reply", runId: done.runId });
+    const wire = JSON.stringify([...project(safe, log.events), safe.snapshot(done.snapshot)]);
+    for (const secret of [
+      "private-original",
+      "private-actor",
+      "private-resource",
+      "private-version",
+      "private-decision-data",
+      "private-receipt",
+      "private-client-result",
+      "private-result-receipt",
+      "approved-input",
+    ])
+      expect(wire).not.toContain(secret);
+  });
+
+  it.each([true, false])(
+    "replaces model attempts with restart event present=%s and rejects old progress",
+    (restart) => {
+      const projector = createAgentProjector({ messageId: "reply", runId: "run" });
+      const chunk = (attemptId: string, content: string): AgentEvent => ({
+        type: "model_chunk",
+        runId: "run",
+        operationId: "model",
+        attemptId,
+        chunk: { type: "delta", content },
+      });
+      let view = play(project(projector, [chunk("old", "Discard this")]));
+      if (restart)
+        view = play(
+          project(
+            projector,
+            [
+              {
+                type: "operation_restart",
+                kind: "model",
+                runId: "run",
+                operationId: "model",
+                previousAttemptId: "old",
+                attemptId: "new",
+              },
+            ],
+            "second",
+          ),
+          view,
+        );
+      view = play(
+        project(
+          projector,
+          [
+            chunk("new", "New"),
+            chunk("old", "Wrong"),
+            {
+              type: "state",
+              runId: "run",
+              attemptId: "old",
+              state: { status: "completed", candidate: "wrong" },
+            },
+            chunk("new", " answer"),
+          ],
+          "third",
+        ),
+        view,
+      );
+      expect(view.messages[0]?.parts).toEqual([
+        { type: "text", id: "model", text: "New answer", settled: false, attempt: 2 },
+      ]);
+      view = play(
+        project(
+          projector,
+          [
+            {
+              type: "state",
+              runId: "run",
+              attemptId: "new",
+              state: { status: "completed", candidate: "answer" },
+            },
+          ],
+          "final",
+        ),
+        view,
+      );
+      expect(projector.event(chunk("old", "Wrong"))).toEqual([]);
+      expect(projector.event(chunk("new", "Also wrong"))).toEqual([]);
+      expect(view.run.status).toBe("completed");
+    },
+  );
+
+  it("uses saved attempt receipts when a fresh observer missed the restart", async () => {
+    const seen = record();
+    const outcome = await defineAgent({
+      id: "reader",
+      version: "1",
+      instructions: "Read",
+      provider: fake([turn({ text: ["Saved"] })]),
+    }).run("Read", { runId: "run", onEvent: seen.onEvent });
+    const saved = structuredClone(outcome.snapshot);
+    const model = saved.models[0]!;
+    model.interrupted = [{ attemptId: "old", usage }];
+    saved.state = { status: "running" };
+    saved.models[0] = {
+      id: model.id,
+      attemptId: saved.attemptId,
+      interrupted: model.interrupted,
+      status: "running",
+      usage,
+      billing: "unknown",
+    };
+    const projector = createAgentProjector({ messageId: "reply", runId: "run" });
+    let view = play(opening(projector, saved));
+    expect(
+      projector.event({
+        type: "model_chunk",
+        runId: "run",
+        operationId: model.id,
+        attemptId: "old",
+        chunk: { type: "delta", content: "Wrong" },
+      }),
+    ).toEqual([]);
+    view = play(
+      project(projector, [
+        {
+          type: "model_chunk",
+          runId: "run",
+          operationId: model.id,
+          attemptId: saved.attemptId,
+          chunk: { type: "delta", content: "Fresh" },
+        },
+      ]),
+      view,
+    );
+    expect(view.messages[0]?.parts[0]).toMatchObject({ text: "Fresh", attempt: 2 });
+  });
+});
 
 describe("createAgentProjector", () => {
   it.each([
@@ -641,7 +1086,7 @@ describe("createAgentProjector", () => {
     const continuing = record();
     const done = await clerk.resume(pending.snapshot, {
       host,
-      decision: "yes",
+      answers: evidenceFor(pending.snapshot, "yes"),
       onEvent: continuing.onEvent,
     });
     expect(done.status).toBe("completed");
@@ -688,7 +1133,10 @@ describe("createAgentProjector", () => {
     });
     expect(sketch(clerkView.snapshot(pending.snapshot))).toEqual(["approval file pending"]);
     // The checked result is a tool call too, and it is never a row.
-    expect(sketch(clerkView.snapshot(done.snapshot))).toEqual(["tool file done"]);
+    expect(sketch(clerkView.snapshot(done.snapshot))).toEqual([
+      "approval file approved",
+      "tool file done",
+    ]);
     expect(text).not.toContain("submit_result");
   });
 
@@ -900,7 +1348,8 @@ describe("createAgentProjector", () => {
         labels: { tool: { send: "Send the update" } },
       };
       const waiting = play(project(createAgentProjector(options), first.events, "s1"));
-      const { operationId } = pending.approval.request;
+      const request = pending.requests[0]!;
+      const { operationId } = request.call;
       expect(waiting.run).toEqual({ id: pending.runId, status: "waiting", messageId: "answer" });
       expect(waiting.messages).toEqual([
         {
@@ -910,10 +1359,11 @@ describe("createAgentProjector", () => {
           parts: [
             {
               type: "approval",
-              id: operationId,
+              id: request.id,
+              toolId: operationId,
               title: "Send the update",
               state: "pending",
-              expiresAt: pending.approval.scope.expiresAt,
+              expiresAt: pending.requests[0]!.scope.expiresAt,
             },
           ],
         },
@@ -927,17 +1377,18 @@ describe("createAgentProjector", () => {
       const second = record();
       const done = await assistant.resume(pending.snapshot, {
         host,
-        decision: "ok",
+        answers: evidenceFor(pending.snapshot, "ok"),
         onEvent: second.onEvent,
       });
       expect(done.status).toBe("completed");
-      const view = play(project(createAgentProjector(options), second.events, "s2"), waiting);
+      // A continuation needs the retained log or an authoritative snapshot to identify decisions.
+      const view = play(project(projector, second.events, "s2"), waiting);
       expect(sketch(view.messages[0])).toEqual(
         answer === "approved"
-          ? ["tool Send the update done", 'text "Sent."']
-          : ["approval Send the update denied", 'text "Not sent."'],
+          ? ["approval Send the update approved", "tool Send the update done", 'text "Sent."']
+          : ["approval Send the update denied", "tool Send the update failed", 'text "Not sent."'],
       );
-      expect(view.messages[0]?.parts[0]?.id).toBe(operationId);
+      expect(view.messages[0]?.parts[0]?.id).toBe(request.id);
       expect(view.messages[0]).toEqual(projector.snapshot(done.snapshot));
       expect(view.run).toEqual(projector.run(done.snapshot));
       expect(send).toHaveBeenCalledTimes(answer === "approved" ? 1 : 0);
@@ -959,20 +1410,25 @@ describe("createAgentProjector", () => {
     const projector = createAgentProjector({
       messageId: "answer",
       runId: pending.runId,
-      approval: ({ call }) => ({ id: `ticket-${call.id}`, title: "Send the update?" }),
+      request: () => ({ title: "Send the update?" }),
     });
     const waiting = play(project(projector, first.events, "s1"));
     expect(waiting.messages[0]?.parts).toEqual([
       {
         type: "approval",
-        id: "ticket-call-send",
+        id: pending.requests[0]!.id,
+        toolId: pending.requests[0]!.call.operationId,
         title: "Send the update?",
         state: "pending",
-        expiresAt: pending.approval.scope.expiresAt,
+        expiresAt: pending.requests[0]!.scope.expiresAt,
       },
     ]);
     const second = record();
-    await assistant.resume(pending.snapshot, { host, decision: "ok", onEvent: second.onEvent });
+    await assistant.resume(pending.snapshot, {
+      host,
+      answers: evidenceFor(pending.snapshot, "ok"),
+      onEvent: second.onEvent,
+    });
     // One projector for the whole run, so it knows the request and closes it.
     const view = play(project(projector, second.events, "s2"), waiting);
     expect(sketch(view.messages[0])).toEqual([
@@ -982,7 +1438,7 @@ describe("createAgentProjector", () => {
     ]);
   });
 
-  it("marks a request expired when the run ends without the call", async () => {
+  it("reconstructs an expired request and its replacement without running the call", async () => {
     vi.useFakeTimers();
     const send = vi.fn(async () => "sent");
     const assistant = defineAgent({
@@ -994,10 +1450,12 @@ describe("createAgentProjector", () => {
     });
     const host = {
       ...approvals(),
-      approvalContext: () => ({
-        actorId: "person-1",
-        resource: { id: "thread-1", version: "1" },
-        expiresAt: Date.now() + 20,
+      prepareRequest: () => ({
+        scope: {
+          actorId: "person-1",
+          resource: { id: "thread-1", version: "1" },
+          expiresAt: Date.now() + 20,
+        },
       }),
     };
     const first = record();
@@ -1010,31 +1468,20 @@ describe("createAgentProjector", () => {
     const second = record();
     const failed = await assistant.resume(pending.snapshot, {
       host,
-      decision: "ok",
+      answers: evidenceFor(pending.snapshot, "ok"),
       onEvent: second.onEvent,
     });
-    expect(failed.status).toBe("failed");
+    expect(failed.status).toBe("suspended");
     expect(send).not.toHaveBeenCalled();
     const view = play(project(projector, second.events, "s2"), waiting);
-    // Live, the request can no longer be answered, so it stops asking.
-    expect(sketch(view.messages[0])).toEqual(["approval send expired"]);
-    expect(view.run).toMatchObject({ status: "failed", error: { code: "approval_expired" } });
-    // The saved run keeps no trace of a request that never ran, so its snapshot has no row
-    // for it, and a client that takes that snapshot drops the row.
+    expect(sketch(view.messages[0])).toEqual(["approval send stale", "approval send pending"]);
+    expect(view.run.status).toBe("waiting");
+    // Only the saved journal knows why the old request closed. It retains both records.
     const saved = play(opening(projector, failed.snapshot), view);
-    expect(saved.messages[0]).toEqual(projector.snapshot(failed.snapshot));
-    expect(saved.messages[0]?.parts).toEqual([]);
-    // A client that has the final save before the log, from each segment through a projector of
-    // its own, does not get the request back: it would wait in a finished message forever.
-    const late = play(
-      [
-        ...project(createAgentProjector(options), first.events, "s1"),
-        ...project(createAgentProjector(options), second.events, "s2"),
-      ],
-      play(opening(projector, failed.snapshot)),
-    );
-    expect(late.messages[0]).toEqual(projector.snapshot(failed.snapshot));
-    expect(late.run).toEqual(projector.run(failed.snapshot));
+    expect(sketch(saved.messages[0])).toEqual(["approval send expired", "approval send pending"]);
+    expect(saved.messages[0]?.parts[0]?.id).toBe(pending.requests[0]!.id);
+    const late = play(project(projector, first.events, "s1"), saved);
+    expect(late.messages[0]).toEqual(saved.messages[0]);
   });
 
   it.each([
@@ -1091,8 +1538,7 @@ describe("createAgentProjector", () => {
     const second = record();
     const done = await lead.resume(pending.snapshot, {
       host,
-      decision: "ok",
-      approvalPath: pending.path,
+      answers: evidenceFor(pending.snapshot, "ok"),
       onEvent: second.onEvent,
     });
     expect(done.status).toBe(cut === "lead" ? "limited" : "completed");
@@ -1103,15 +1549,20 @@ describe("createAgentProjector", () => {
       runId: pending.runId,
       labels: { agent: { clerk: "Clerk" } },
     });
-    const saved = projector.snapshot(done.snapshot);
+    const saved = createAgentProjector({
+      messageId: "answer",
+      runId: pending.runId,
+      labels: { agent: { clerk: "Clerk" } },
+    }).snapshot(done.snapshot);
     expect(sketch(saved)).toEqual(
       cut === "lead"
-        ? ["tool ask_clerk failed", "agent Clerk stopped"]
+        ? ["tool ask_clerk failed", "agent Clerk stopped", "approval file stopped"]
         : [
             "tool consult done",
             "agent middle limited",
             "tool ask_clerk failed by middle",
             "agent Clerk stopped under middle",
+            "approval file approved",
             'text "Done."',
           ],
     );
@@ -1122,8 +1573,10 @@ describe("createAgentProjector", () => {
       ...project(projector, second.events, "s2"),
     ]);
     expect(live.messages[0]?.parts.every(settled)).toBe(true);
-    expect(sketch(live.messages[0])).toContain("approval file expired");
-    expect(live.messages[0]?.parts.filter((part) => part.type !== "approval")).toEqual(saved.parts);
+    expect(sketch(live.messages[0])).toContain(
+      cut === "lead" ? "approval file stopped" : "approval file approved",
+    );
+    expect(live.messages[0]?.parts).toEqual(saved.parts);
     expect(play(opening(projector, done.snapshot), live).messages[0]).toEqual(saved);
   });
 
@@ -1159,7 +1612,9 @@ describe("createAgentProjector", () => {
       tools: [fetchPage],
     }).run("Read both pages.", { host: { canRunConcurrently: () => true }, onEvent: seen.onEvent });
     const is = (type: string, callId: string) => (event: AgentEvent) =>
-      event.type === type && "request" in event && event.request.call.id === callId;
+      (event.type === "tool_start" || event.type === "tool_result") &&
+      event.type === type &&
+      event.request.call.id === callId;
     await seen.until(is("tool_start", "call-a"));
     await seen.until(is("tool_start", "call-b"));
     gates.b.resolve();
@@ -1250,8 +1705,7 @@ describe("createAgentProjector", () => {
     const second = record();
     const done = await lead.resume(pending.snapshot, {
       host,
-      decision: "ok",
-      approvalPath: pending.path,
+      answers: evidenceFor(pending.snapshot, "ok"),
       onEvent: second.onEvent,
     });
     expect(done.status).toBe("completed");
@@ -1281,6 +1735,7 @@ describe("createAgentProjector", () => {
     expect(sketch(view.messages[0])).toEqual([
       "tool ask_clerk done",
       "agent Clerk completed",
+      "approval file approved",
       "tool file done by Clerk",
       'text "The clerk filed it."',
     ]);

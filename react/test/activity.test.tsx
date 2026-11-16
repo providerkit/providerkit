@@ -9,7 +9,7 @@ import {
   type RequestView,
 } from "../src/client.ts";
 import { useAgentRun } from "../src/hooks.ts";
-import type { AgentPart, SourcePart, ToolPart } from "../src/protocol.ts";
+import type { AgentPart, ApprovalPart, SourcePart, ToolPart } from "../src/protocol.ts";
 import { SpecialistActivity, ToolCall } from "../src/ui/activity.tsx";
 import { ApprovalCard, type ApprovalActions } from "../src/ui/approval.tsx";
 import { Sources } from "../src/ui/sources.tsx";
@@ -45,7 +45,8 @@ function button(part: string): HTMLButtonElement {
   if (!element) throw new Error(`Missing button: ${part}`);
   return element;
 }
-const request = (overrides: Partial<RequestView> = {}): RequestView => ({
+type ApprovalRequest = RequestView & { part: ApprovalPart };
+const request = (overrides: Partial<ApprovalRequest> = {}): ApprovalRequest => ({
   messageId: "answer",
   part: {
     type: "approval",

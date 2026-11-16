@@ -18,6 +18,60 @@
     padding-block: 0.75em;
   }
 
+  :where(.pk-request-fields, .pk-request-field) {
+    display: grid;
+    gap: 0.5em;
+    min-inline-size: 0;
+    margin-block: 0.75em;
+  }
+
+  :where(.pk-request-fields fieldset) {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    min-inline-size: 0;
+  }
+
+  :where(.pk-request-field input, .pk-request-field textarea, .pk-request-field select) {
+    box-sizing: border-box;
+    inline-size: 100%;
+    min-block-size: 44px;
+    padding: 0.5em;
+    border: 1px solid var(--pk-border-color, currentColor);
+    border-radius: var(--pk-radius, 0.375em);
+    background: var(--pk-background, transparent);
+    color: inherit;
+    font: inherit;
+    font-size: max(1em, 16px);
+  }
+
+  :where(
+    .pk-request-fields input,
+    .pk-request-fields textarea,
+    .pk-request-fields select
+  ):focus-visible {
+    outline: 2px solid var(--pk-focus-color, currentColor);
+    outline-offset: 2px;
+  }
+
+  :where(.pk-request-choice) {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5em;
+    padding-block: 0.5em;
+    min-block-size: 44px;
+    box-sizing: border-box;
+    cursor: pointer;
+  }
+
+  :where(.pk-request-choice-help) {
+    display: block;
+  }
+  :where(.pk-request-fields :disabled) {
+    cursor: default;
+    opacity: 0.65;
+  }
+
   :where(.pk-activity-heading) {
     display: flex;
     flex-wrap: wrap;

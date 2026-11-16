@@ -10,7 +10,7 @@ import type {
   TextPart,
 } from "../protocol.ts";
 import { SpecialistActivity, ToolCall } from "./activity.tsx";
-import { ApprovalCard, type ApprovalCardProps } from "./approval.tsx";
+import { RequestCard, type ApprovalCardProps, type RequestCardProps } from "./approval.tsx";
 import {
   uiClass,
   useConversationData,
@@ -33,6 +33,9 @@ export interface MessageRenderers {
   /** Return undefined for the default, null to hide a part. Unknown data draws nothing. */
   renderPart?: (part: DisplayPart, context: PartRenderContext) => ReactNode;
   renderApproval?: ApprovalCardProps["renderActions"];
+  renderRequest?: RequestCardProps["renderActions"];
+  renderForm?: RequestCardProps["renderForm"];
+  onStartClientTool?: RequestCardProps["onStartClientTool"];
   toolLabels?: Readonly<Record<string, string>>;
   /** Keyed by run id or registered agentId; never parsed from an opaque run id. */
   specialistLabels?: Readonly<Record<string, string>>;
@@ -58,6 +61,9 @@ export function Message({
   renderText,
   renderPart,
   renderApproval,
+  renderRequest,
+  renderForm,
+  onStartClientTool,
   toolLabels,
   specialistLabels,
   onSource,
@@ -120,15 +126,26 @@ export function Message({
             </SpecialistActivity>
           );
           break;
+        case "question":
+        case "client-tool":
         case "approval": {
-          const local = requests?.find(
+          const request = requests?.find(
             (request) => request.part.id === part.id && request.messageId === message.id,
-          )?.local;
+          );
           content = (
-            <ApprovalCard
-              request={{ part, messageId: message.id, local }}
+            <RequestCard
+              request={{
+                ...request,
+                part,
+                messageId: message.id,
+                canRespond: message.state === "live" ? request?.canRespond : false,
+              }}
               onRespond={onRespond}
-              renderActions={renderApproval}
+              onStartClientTool={onStartClientTool}
+              renderForm={renderForm}
+              renderActions={
+                part.type === "approval" ? (renderApproval ?? renderRequest) : renderRequest
+              }
               labels={overrides}
             />
           );

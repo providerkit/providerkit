@@ -15,6 +15,10 @@ export type {
   ReconnectOptions,
   RequestAnswer,
   RequestResponse,
+  QuestionAnswer,
+  Respond,
+  RespondResult,
+  ClientToolHandler,
   RequestView,
   SendInput,
   SendResult,
@@ -48,6 +52,11 @@ export type {
 // parser and the reducer stay on `/protocol`.
 export type {
   ApprovalPart,
+  QuestionPart,
+  ClientToolPart,
+  RequestPart,
+  RequestState,
+  FormSchema,
   ChatEvent,
   Cursor,
   DisplayError,

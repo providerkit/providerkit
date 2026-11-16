@@ -15,7 +15,8 @@
 import type { ToolCall } from "@providerkit/core";
 import type {
   AgentEvent,
-  PendingApproval,
+  AskRecord,
+  PendingRequest,
   RESULT_TOOL_NAME,
   RunSnapshot,
   RunState,
@@ -26,7 +27,9 @@ import {
   type AgentPart,
   type AgentState,
   type ApprovalPart,
-  type ApprovalState,
+  type RequestPart,
+  type QuestionPart,
+  type FormSchema,
   type ChatEnvelope,
   type ChatEvent,
   type DisplayError,
@@ -70,27 +73,21 @@ export interface ToolDisplay {
   data?: unknown;
 }
 
-export interface ApprovalActivity extends ToolActivity {
-  /** Present while the call waits for a decision. Its scope is what your host handed the SDK:
-   * the actor and the resource leave only if you copy them out. */
-  pending?: PendingApproval;
-}
+/** Server-only journal data. Never spread this into a display part. */
+export type RequestActivity = AskRecord;
 
-export interface ApprovalDisplay {
-  /** What the client sends back with the decision. Defaults to `operationId`, which keeps the
-   * request and its call in one row: once the call runs, its tool row takes the request's
-   * place, and a saved run draws the same thing. An id of your own gives the request a row of
-   * its own, which a saved run no longer has once the call ran. Make it depend on the call
-   * alone: a denied call is drawn again from the saved run.
-   *
-   * A request whose call never runs (the run hit a limit or was stopped first, or your `tool`
-   * callback hides the call) is closed only by the projector that drew it, or by the next
-   * snapshot. */
-  id?: string;
-  title: string;
+export interface RequestDisplay {
+  title?: string;
   summary?: string;
-  /** Epoch milliseconds. Defaults to the expiry in the approval scope. */
-  expiresAt?: number;
+  canAnswer?: boolean;
+  problem?: DisplayError;
+  choices?: QuestionPart["choices"];
+  multiple?: boolean;
+  freeText?: boolean;
+  schema?: FormSchema;
+  edit?: ApprovalPart["edit"];
+  approveForm?: FormSchema;
+  denyForm?: FormSchema;
 }
 
 /** A run whose model text could be shown: the one this projector draws, or a specialist. */
@@ -113,9 +110,14 @@ export interface AgentProjectorOptions {
   /** Return `null` to hide a call. That is decided from the call before it has a result, so a
    * call is shown for its whole life or never. Called again with the result for the final row. */
   tool?: (activity: ToolActivity) => ToolDisplay | null | undefined;
-  /** Draws a request for a decision, and the same request once it is denied (then `pending` is
-   * absent and `result` holds the denial). Without it the title is the tool's label. */
-  approval?: (activity: ApprovalActivity) => ApprovalDisplay;
+  /** Opts viewer-safe question fields, edited inputs and decision data into display. Without
+   * it, questions and client actions show a generic, non-actionable waiting row. */
+  request?: (activity: RequestActivity) => RequestDisplay | null | undefined;
+  /** Explicitly authorize each device input. Receives effective, approved arguments, NOT the
+   * model's original JSON string. The callback must validate and filter for this viewer. */
+  clientTools?: Readonly<
+    Record<string, (arguments_: Record<string, unknown>, request: PendingRequest) => unknown>
+  >;
   /** Without it a failure shows its code and a sentence that says nothing private. */
   error?: (state: Extract<RunState, { status: "failed" | "limited" }>) => DisplayError;
   /** Which runs' model text is shown. The default shows the root's only. */
@@ -186,12 +188,6 @@ function isOver(state: RunState): boolean {
   return state.status !== "running" && state.status !== "suspended";
 }
 
-/** A denial comes back as the call's result, and it is the request's outcome, not a tool that
- * failed, so it keeps the request's row. */
-function isDenied(result: ToolResult): boolean {
-  return !result.ok && result.kind === "denied";
-}
-
 /** A call to a tool the agent does not have, whose name is the model's own text. Only the result
  * tells, so a save written between the SDK reserving such a call and refusing it still names
  * it. Closing that moment is the SDK's: it would check its tools before it reserves a call. */
@@ -220,8 +216,11 @@ function activityOf(request: {
 function speakerOf(event: AgentEvent): string | undefined {
   switch (event.type) {
     case "model_chunk":
+    case "operation_restart":
     case "state":
       return event.runId;
+    case "request":
+      return event.request.call.runId;
     case "tool_start":
     case "tool_result":
       return event.request.runId;
@@ -307,18 +306,82 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     return part;
   }
 
-  function approvalPart(activity: ApprovalActivity, state: ApprovalState): ApprovalPart {
-    const display = options.approval?.(activity);
-    const part: ApprovalPart = {
-      type: "approval",
-      id: display?.id ?? activity.operationId,
-      title: display?.title ?? lookup(options.labels?.tool, activity.call.name),
-      state,
+  function requestPart(record: AskRecord, ended = false): RequestPart {
+    const { request, decision, closed } = record;
+    const display = options.request?.(record);
+    const problem =
+      display?.problem ??
+      (record.problem
+        ? {
+            code: record.problem.code,
+            message: "The answer was not accepted. Review this request and try again.",
+          }
+        : undefined);
+    const base = {
+      id: request.id,
+      toolId: request.call.operationId,
+      ...(request.call.runId !== root && { agentId: request.call.runId }),
+      title:
+        display?.title ??
+        (request.ask.type === "approval"
+          ? lookup(options.labels?.tool, request.call.call.name)
+          : "Waiting for a response"),
+      expiresAt: request.scope.expiresAt,
+      ...(display?.summary !== undefined && { summary: display.summary }),
+      ...(problem !== undefined && { problem }),
     };
-    if (display?.summary !== undefined) part.summary = display.summary;
-    const expiresAt = display?.expiresAt ?? activity.pending?.scope.expiresAt;
-    if (state === "pending" && expiresAt !== undefined) part.expiresAt = expiresAt;
-    return part;
+    const ending =
+      closed ??
+      (decision?.type === "stop"
+        ? "stopped"
+        : decision?.type === "cancel"
+          ? "cancelled"
+          : undefined);
+    if (request.ask.type === "approval") {
+      return {
+        ...base,
+        type: "approval",
+        state:
+          ending ??
+          (decision?.type === "approve"
+            ? "approved"
+            : decision?.type === "deny"
+              ? "denied"
+              : ended
+                ? "stopped"
+                : "pending"),
+        ...(display === null && { canAnswer: false }),
+        ...(display?.canAnswer !== undefined && { canAnswer: display.canAnswer }),
+        ...(display?.edit !== undefined && { edit: display.edit }),
+        ...(display?.approveForm !== undefined && { approveForm: display.approveForm }),
+        ...(display?.denyForm !== undefined && { denyForm: display.denyForm }),
+      };
+    }
+    const state = ending ?? (decision ? "answered" : ended ? "stopped" : "pending");
+    if (request.ask.type === "client") {
+      const name = request.call.call.name;
+      const project =
+        options.clientTools && Object.hasOwn(options.clientTools, name)
+          ? options.clientTools[name]
+          : undefined;
+      return {
+        ...base,
+        type: "client-tool",
+        state,
+        canAnswer: Boolean(project) && display?.canAnswer !== false && display !== null,
+        ...(project && { name, input: project(request.call.arguments, request) }),
+      };
+    }
+    return {
+      ...base,
+      type: "question",
+      state,
+      canAnswer: Boolean(display?.title) && display?.canAnswer !== false,
+      ...(display?.choices !== undefined && { choices: display.choices }),
+      ...(display?.multiple !== undefined && { multiple: display.multiple }),
+      ...(display?.freeText !== undefined && { freeText: display.freeText }),
+      ...(display?.schema !== undefined && { schema: display.schema }),
+    };
   }
 
   function agentPart(
@@ -357,7 +420,33 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
   const textShown = new Map<string, boolean>();
   const streaming = new Map<string, TextPart>();
   const running = new Map<string, { runId: string; part: ToolPart }>();
-  const requests = new Map<string, ApprovalPart>();
+  const requests = new Map<string, AskRecord>();
+  const operations = new Map<
+    string,
+    { attemptId: string; attempt: number; old: Set<string>; completed: boolean }
+  >();
+  const endedRuns = new Set<string>();
+  const runAttempts = new Map<string, { current: string; old: Set<string> }>();
+
+  function attemptOf(id: string, attemptId: string, previous?: string): number | undefined {
+    let held = operations.get(id);
+    if (!held) {
+      held = {
+        attemptId,
+        attempt: previous ? 2 : 1,
+        old: new Set(previous ? [previous] : []),
+        completed: false,
+      };
+      operations.set(id, held);
+    } else if (held.old.has(attemptId) || held.completed) return undefined;
+    else if (held.attemptId !== attemptId) {
+      held.old.add(held.attemptId);
+      if (previous) held.old.add(previous);
+      held.attemptId = attemptId;
+      held.attempt += 1;
+    }
+    return held.attempt;
+  }
 
   function shows(runId: string): boolean {
     let shown = textShown.get(runId);
@@ -387,6 +476,13 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
    * calls still running fail, and its specialists still running or waiting stop. A saved run
    * draws them the same way. */
   function endUnder(part: (value: DisplayPart) => void, ended: string): void {
+    endedRuns.add(ended);
+    for (const [id, record] of requests) {
+      if (record.decision || record.closed || !within(record.request.call.runId, ended)) continue;
+      const closed: AskRecord = { ...record, closed: "stopped" };
+      requests.set(id, closed);
+      part(requestPart(closed));
+    }
     for (const [id, entry] of running) {
       if (!within(entry.runId, ended)) continue;
       running.delete(id);
@@ -395,6 +491,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     for (const [runId, specialist] of specialists) {
       if (runId === ended || specialist.over || !within(runId, ended)) continue;
       specialist.over = true;
+      endedRuns.add(runId);
       part(agentPart(runId, specialist.agentId, specialist.parentId, "stopped"));
     }
   }
@@ -409,11 +506,50 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       throw new TypeError("A sequence number is a whole number, 0 or more.");
     if (segment !== undefined && (typeof segment !== "string" || !segment))
       throw new TypeError("A segment is a non-empty string.");
-    const speaker = speakerOf(agentEvent);
+    const speaker =
+      agentEvent.type === "decision"
+        ? requests.get(agentEvent.requestId)?.request.call.runId
+        : speakerOf(agentEvent);
     // A run no child event named here (a log read from the middle, or a child event that was
     // lost) has no row to file under, and it is never taken for the root. The next snapshot
     // draws it.
     if (speaker === undefined || (speaker !== root && !specialists.has(speaker))) return [];
+    if (endedRuns.has(root) || endedRuns.has(speaker)) return [];
+    if (agentEvent.type === "request") {
+      const held = requests.get(agentEvent.request.id);
+      if (held?.decision || held?.closed) return [];
+    }
+    const executionAttempt =
+      "attemptId" in agentEvent
+        ? agentEvent.attemptId
+        : agentEvent.type === "tool_start" || agentEvent.type === "tool_result"
+          ? agentEvent.request.attemptId
+          : undefined;
+    if (executionAttempt !== undefined) {
+      let held = runAttempts.get(speaker);
+      if (held?.old.has(executionAttempt)) return [];
+      if (!held) {
+        held = { current: executionAttempt, old: new Set() };
+        runAttempts.set(speaker, held);
+      } else if (held.current !== executionAttempt) {
+        held.old.add(held.current);
+        held.current = executionAttempt;
+      }
+      if (agentEvent.type === "operation_restart") held.old.add(agentEvent.previousAttemptId);
+    }
+    let attempt: number | undefined;
+    if (agentEvent.type === "model_chunk" || agentEvent.type === "operation_restart") {
+      attempt = attemptOf(
+        agentEvent.operationId,
+        agentEvent.attemptId,
+        agentEvent.type === "operation_restart" ? agentEvent.previousAttemptId : undefined,
+      );
+      if (attempt === undefined) return [];
+    }
+    if (agentEvent.type === "tool_start" || agentEvent.type === "tool_result") {
+      const operation = operations.get(agentEvent.request.operationId);
+      if (operation?.completed || operation?.old.has(agentEvent.request.attemptId)) return [];
+    }
     const out: ChatEvent[] = [];
     const part = (value: DisplayPart) => out.push({ v, type: "part", messageId, part: value });
     if (!announced) {
@@ -425,7 +561,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       });
     }
     const rootState = agentEvent.type === "state" && speaker === root;
-    if (!rootState && status !== "running") {
+    if (!rootState && agentEvent.type !== "decision" && status !== "running") {
       status = "running";
       out.push({ v, type: "run", run: { id: root, status, messageId } });
     }
@@ -433,38 +569,94 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     // has ended. The text row closes with all of its text, which a client that missed a delta
     // takes whole.
     const open = streaming.get(speaker);
-    if (open && !(agentEvent.type === "model_chunk" && agentEvent.operationId === open.id)) {
+    if (
+      open &&
+      !(
+        (agentEvent.type === "model_chunk" || agentEvent.type === "operation_restart") &&
+        agentEvent.operationId === open.id
+      )
+    ) {
       streaming.delete(speaker);
+      const operation = operations.get(open.id);
+      if (operation) operation.completed = true;
       part({ ...open, settled: true });
     }
 
     switch (agentEvent.type) {
+      case "operation_restart":
       case "model_chunk": {
-        const { content } = agentEvent.chunk;
-        if (!content || !shows(speaker)) break;
+        if (agentEvent.type === "operation_restart" && agentEvent.kind !== "model") break;
+        const content = agentEvent.type === "model_chunk" ? (agentEvent.chunk.content ?? "") : "";
+        if (!shows(speaker)) break;
         const current = streaming.get(speaker);
-        if (current) {
-          current.text += content;
-          out.push({ v, type: "text", messageId, partId: current.id, delta: content });
-        } else {
-          // The first chunk creates the row with its own text, so the creation is the
-          // numbered event: a client never holds a row that a delta could not reach.
-          const created = textPart(agentEvent.operationId, content, false, ownerOf(speaker));
+        if (
+          current &&
+          current.id === agentEvent.operationId &&
+          (current.attempt ?? 1) === attempt
+        ) {
+          if (content) {
+            current.text += content;
+            out.push({
+              v,
+              type: "text",
+              messageId,
+              partId: current.id,
+              delta: content,
+              ...(attempt !== undefined && attempt > 1 && { attempt }),
+            });
+          }
+        } else if (content || (attempt !== undefined && attempt > 1)) {
+          const created = {
+            ...textPart(agentEvent.operationId, content, false, ownerOf(speaker)),
+            ...(attempt !== undefined && attempt > 1 && { attempt }),
+          };
           streaming.set(speaker, { ...created });
           part(created);
         }
         break;
       }
+      case "request": {
+        const request = agentEvent.request;
+        const held = requests.get(request.id);
+        if (held?.decision || held?.closed) break;
+        for (const [id, record] of requests) {
+          if (
+            id === request.id ||
+            record.decision ||
+            record.closed ||
+            record.request.call.operationId !== request.call.operationId ||
+            record.request.ask.type !== request.ask.type ||
+            (record.request.ask.type === "question" &&
+              request.ask.type === "question" &&
+              record.request.ask.key !== request.ask.key)
+          )
+            continue;
+          const closed: AskRecord = { ...record, closed: "stale" };
+          requests.set(id, closed);
+          part(requestPart(closed));
+        }
+        const active = running.get(request.call.operationId);
+        if (active) {
+          active.part = { ...active.part, state: "waiting" };
+          part(active.part);
+        }
+        const record = { request };
+        requests.set(request.id, record);
+        part(requestPart(record));
+        break;
+      }
+      case "decision": {
+        const record = requests.get(agentEvent.requestId);
+        if (!record || record.decision || record.closed) break;
+        const decided = { ...record, decision: agentEvent.decision };
+        requests.set(agentEvent.requestId, decided);
+        part(requestPart(decided));
+        break;
+      }
       case "tool_start": {
         const { request } = agentEvent;
+        attemptOf(request.operationId, request.attemptId);
         const row = toolPart(activityOf(request), ownerOf(request.runId), "running");
-        const ask = requests.get(request.operationId);
-        if (ask) {
-          requests.delete(request.operationId);
-          // With the default id the tool row below replaces the request, the same way a saved
-          // run draws it. Only a request with a row of its own needs closing.
-          if (!row || ask.id !== row.id) part({ ...ask, state: "approved" });
-        }
         if (row) {
           running.set(row.id, { runId: request.runId, part: row });
           part(row);
@@ -472,21 +664,16 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         break;
       }
       case "tool_result": {
-        // A call can end without starting: an unknown tool, arguments that are not one JSON
-        // object, or a denial. The row is drawn whole from the result.
         const { request, result } = agentEvent;
+        attemptOf(request.operationId, request.attemptId);
+        const operation = operations.get(request.operationId);
+        if (operation) operation.completed = true;
         running.delete(request.operationId);
-        const activity = { ...activityOf(request), result };
-        const ask = requests.get(request.operationId);
-        requests.delete(request.operationId);
-        if (isDenied(result)) {
-          const denied = approvalPart(activity, "denied");
-          if (ask && ask.id !== denied.id) part({ ...ask, state: "denied" });
-          part(denied);
-          break;
-        }
-        if (ask) part({ ...ask, state: "approved" });
-        const row = toolPart(activity, ownerOf(request.runId), result.ok ? "done" : "failed");
+        const row = toolPart(
+          { ...activityOf(request), result },
+          ownerOf(request.runId),
+          result.ok ? "done" : "failed",
+        );
         if (row) part(row);
         break;
       }
@@ -494,7 +681,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         const { runId, agentId } = agentEvent;
         // A run is never filed under itself or under one of its own specialists, so the walk
         // in `within` always ends.
-        if (runId === root || within(speaker, runId)) break;
+        if (runId === root || within(speaker, runId) || endedRuns.has(runId)) break;
         // Sent again when the child resumes, with the same identity: one row, updated.
         const parentId = ownerOf(speaker);
         specialists.set(runId, { agentId, parentId, over: false });
@@ -519,21 +706,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           }
           break;
         }
-        if (state.status === "suspended") {
-          const { approval } = state;
-          const ask = approvalPart(
-            { ...activityOf(approval.request), pending: approval },
-            "pending",
-          );
-          requests.set(approval.request.operationId, ask);
-          part(ask);
-        } else {
-          // Nothing still going will finish now, and a request can no longer be answered. A
-          // saved run draws the same rows the same way, except the request, which it no longer
-          // has.
+        if (state.status !== "suspended") {
           endUnder(part, root);
-          for (const ask of requests.values()) part({ ...ask, state: "expired" });
-          requests.clear();
           if (state.status === "completed")
             for (const value of options.output?.(state.candidate) ?? []) part(value);
           out.push({
@@ -558,51 +732,100 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
    * rows arrive in the order things happened, so two specialists that ran at once interleave
    * there and not here. The rows and each agent's own order are the same. */
   function snapshot(saved: RunSnapshot): DisplayMessage {
+    if (saved.runId !== root) throw new TypeError("The snapshot belongs to another run.");
     const parts: DisplayPart[] = [];
-    const waiting = saved.state.status === "suspended" ? saved.state.approval : undefined;
+    status = STATUS[saved.state.status];
+    announced = true;
 
-    /** `over` is true under a run that ended: nothing there goes on either. */
     function visit(node: RunSnapshot, owner: string | undefined, over: boolean): void {
       const ended = over || isOver(node.state);
+      const old = new Set(runAttempts.get(node.runId)?.old);
+      for (const model of node.models) {
+        for (const item of model.interrupted) old.add(item.attemptId);
+        if (model.attemptId !== node.attemptId) old.add(model.attemptId);
+      }
+      old.delete(node.attemptId);
+      runAttempts.set(node.runId, { current: node.attemptId, old });
+      if (ended) endedRuns.add(node.runId);
       const shown = showsText(
         owner === undefined
           ? { root: true, runId: node.runId }
           : { root: false, runId: node.runId, agentId: node.agentId },
       );
       for (const model of node.models) {
-        // A model turn still running has no text saved yet: live events carry it.
-        if (model.status !== "completed") continue;
+        const attempt = model.interrupted.length + 1;
+        operations.set(model.id, {
+          attemptId: model.attemptId,
+          attempt,
+          old: new Set(model.interrupted.map((item) => item.attemptId)),
+          completed: model.status === "completed" || ended,
+        });
+        if (model.status === "running") {
+          // Even empty text names the saved attempt, replacing partial output from an old one.
+          if (shown && attempt > 1)
+            parts.push({ ...textPart(model.id, "", ended, owner), attempt });
+          const live = streaming.get(node.runId);
+          if (live && (live.id !== model.id || (live.attempt ?? 1) !== attempt))
+            streaming.delete(node.runId);
+          continue;
+        }
+        if (streaming.get(node.runId)?.id === model.id) streaming.delete(node.runId);
         const { content, toolCalls = [] } = model.turn.message;
-        if (shown && content) parts.push(textPart(model.id, content, true, owner));
-        for (const [index, tool] of model.tools.entries()) {
-          const call = toolCalls[index];
-          if (!call) continue;
-          const activity = activityOf({
-            operationId: tool.id,
-            runId: node.runId,
-            agentId: node.agentId,
-            call,
+        if (shown && content)
+          parts.push({
+            ...textPart(model.id, content, true, owner),
+            ...(attempt > 1 && { attempt }),
           });
-          if (tool.status === "pending") {
-            // Not started, so not drawn, unless it is the call the run waits on.
-            if (waiting?.request.operationId === tool.id)
-              parts.push(approvalPart({ ...activity, pending: waiting }, "pending"));
-            continue;
+        for (const [index, tool] of model.tools.entries()) {
+          if (ended || tool.status === "completed") running.delete(tool.id);
+          const questions = (tool.asks ?? []).filter(
+            (record) => record.request.ask.type === "question",
+          );
+          for (const record of tool.asks ?? []) {
+            requests.set(record.request.id, record);
+            if (record.request.ask.type !== "question")
+              parts.push(requestPart(record, ended || tool.status === "completed"));
           }
-          let row: DisplayPart | null;
-          if (tool.status === "completed") {
-            const finished = { ...activity, result: tool.result };
-            row = isDenied(tool.result)
-              ? approvalPart(finished, "denied")
-              : toolPart(finished, owner, tool.result.ok ? "done" : "failed");
-          } else row = toolPart(activity, owner, ended ? "failed" : "running");
-          if (row) parts.push(row);
+          if (tool.status !== "pending")
+            operations.set(tool.id, {
+              attemptId: tool.attemptId,
+              attempt: tool.interrupted.length + 1,
+              old: new Set(tool.interrupted.map((item) => item.attemptId)),
+              completed: tool.status === "completed" || ended,
+            });
+          const call = toolCalls[index];
+          if (call && (tool.status !== "pending" || questions.length)) {
+            const activity = activityOf({
+              operationId: tool.id,
+              runId: node.runId,
+              agentId: node.agentId,
+              call,
+            });
+            const row =
+              tool.status === "completed"
+                ? toolPart(
+                    { ...activity, result: tool.result },
+                    owner,
+                    tool.result.ok ? "done" : "failed",
+                  )
+                : toolPart(
+                    activity,
+                    owner,
+                    ended
+                      ? "failed"
+                      : questions.some((record) => !record.decision && !record.closed)
+                        ? "waiting"
+                        : "running",
+                  );
+            if (row) parts.push(row);
+          }
+          for (const record of questions)
+            parts.push(requestPart(record, ended || tool.status === "completed"));
           const journal = node.delegations.find((entry) => entry.operationId === tool.id);
           for (const child of journal?.children ?? []) {
             const { runId, agentId, state } = child.snapshot;
-            // A specialist still going when a run above it ended will not go on. The live side
-            // stops it at that moment.
             const shownState = ended && !isOver(state) ? "stopped" : STATUS[state.status];
+            specialists.set(runId, { agentId, parentId: owner, over: ended || isOver(state) });
             parts.push(agentPart(runId, agentId, owner, shownState));
             visit(child.snapshot, runId, ended);
           }

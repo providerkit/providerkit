@@ -993,7 +993,7 @@ describe("answering", () => {
       error: { code: "answering" },
     });
     call.resolve();
-    expect(await pending).toEqual({ ok: true });
+    expect(await pending).toEqual({ ok: true, outcome: "accepted" });
     expect(respond).toHaveBeenCalledTimes(1);
     expect(respond.mock.calls[0]?.[0]).toEqual([
       { requestId: "op1", response: { type: "approve" } },
@@ -1019,7 +1019,10 @@ describe("answering", () => {
     );
     await flush();
     const held = find(client, "a1")?.parts[0];
-    expect(await client.respond("op1", { type: "approve" })).toEqual({ ok: true });
+    expect(await client.respond("op1", { type: "approve" })).toEqual({
+      ok: true,
+      outcome: "accepted",
+    });
     expect(host.opened).toHaveLength(2);
     expect(host.observe.mock.calls[0]?.[0].signal.aborted).toBe(true);
     expect(host.opened[1]?.cursor).toEqual({ segment: "s1", seq: 10 });
@@ -1040,6 +1043,63 @@ describe("answering", () => {
     expect(host.opened[2]?.cursor).toEqual({ segment: "s2", seq: 2 });
   });
 
+  it.each(["stream", "observation"] as const)(
+    "keeps the continuation %s after observation closes the answered request",
+    async (delivery) => {
+      const host = tail();
+      const call = deferred<void | EventReply>();
+      const respond = vi.fn<Respond>(() => call.promise);
+      const client = createChatClient({ transport: { observe: host.observe, respond } });
+      client.attach();
+      host.latest().push(snapshot([assistant("a1", [approval("q")])], run("waiting"), at(1)));
+      await flush();
+      const pending = client.respond("q", { type: "approve" });
+      host
+        .latest()
+        .push(patch("a1", approval("q", "approved"), at(1, "continued")))
+        .end();
+      await flush();
+      expect(client.getState().requests).toEqual([]);
+      const completed = snapshot(
+        [assistant("a1", [text("t1", "Continued answer", true)], "settled")],
+        run("completed"),
+        at(2, "continued"),
+      );
+      call.resolve(
+        delivery === "stream" ? { events: new Feed().push(completed).end() } : undefined,
+      );
+      expect(await pending).toEqual({ ok: true, outcome: "accepted" });
+      if (delivery === "observation") {
+        expect(host.opened).toHaveLength(2);
+        host.latest().push(completed).end();
+      }
+      await flush();
+      expect(textOf(client, "a1", "t1")).toBe("Continued answer");
+      expect(client.getState()).toMatchObject({ status: "ready", connection: "idle" });
+      expect(respond).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("drains an answer reply without replacing another logical run", async () => {
+    const host = tail();
+    const call = deferred<EventReply>();
+    const client = createChatClient({
+      transport: { observe: host.observe, respond: () => call.promise },
+    });
+    client.attach();
+    host.latest().push(snapshot([assistant("a1", [approval("q")])], run("waiting"), at(1)));
+    await flush();
+    const pending = client.respond("q", { type: "approve" });
+    host.latest().push(snapshot([], run("waiting", "other-run"), at(1, "other")));
+    await flush();
+    call.resolve({
+      events: new Feed().push(snapshot([], run("completed"), at(1, "old-continuation"))).end(),
+    });
+    await pending;
+    await flush();
+    expect(client.getState().run).toEqual(run("waiting", "other-run"));
+  });
+
   it("brings the buttons back with the error when the host refuses the answer", async () => {
     const respond = vi
       .fn<Respond>()
@@ -1057,7 +1117,10 @@ describe("answering", () => {
       response: { type: "deny", message: "Not this one" },
       error: { code: "expired", message: "This request expired." },
     });
-    expect(await client.respond("op1", { type: "approve" })).toEqual({ ok: true });
+    expect(await client.respond("op1", { type: "approve" })).toEqual({
+      ok: true,
+      outcome: "accepted",
+    });
     expect(client.getState().requests[0]?.local?.status).toBe("submitting");
   });
 
@@ -1066,15 +1129,338 @@ describe("answering", () => {
       throw new Error("socket hang up");
     });
     const { host, client } = await waitingClient(respond);
-    expect(await client.respond("op1", { type: "approve" })).toMatchObject({
-      ok: false,
-      error: { code: "unconfirmed" },
+    expect(await client.respond("op1", { type: "approve" })).toEqual({
+      ok: true,
+      outcome: "unknown",
     });
     expect(client.getState().requests[0]?.local?.status).toBe("unconfirmed");
     expect(host.opened).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(120_000);
     expect(respond).toHaveBeenCalledTimes(1);
   });
+
+  it("submits batches and partial answers without losing refused values", async () => {
+    const respond = vi
+      .fn<Respond>()
+      .mockRejectedValueOnce(
+        new TransportError("refused", { code: "invalid_answer", message: "Review your answer." }),
+      )
+      .mockResolvedValue(undefined);
+    const question = {
+      type: "question" as const,
+      id: "q",
+      title: "Which one?",
+      state: "pending" as const,
+      choices: [{ id: "a", label: "A" }],
+    };
+    const client = createChatClient({
+      transport: { respond },
+      initialMessages: [assistant("a1", [question, approval("a")])],
+    });
+    const batch = [
+      { requestId: "q", response: { type: "answer" as const, answer: { choices: ["a"] } } },
+      { requestId: "a", response: { type: "approve" as const } },
+    ];
+    expect(await client.respond(batch)).toMatchObject({ ok: false });
+    expect(respond.mock.calls[0]?.[0]).toEqual(batch);
+    expect(client.getState().requests.map((request) => request.local?.response)).toEqual(
+      batch.map((answer) => answer.response),
+    );
+    expect(await client.respond([batch[0]!])).toEqual({ ok: true, outcome: "accepted" });
+    expect(respond.mock.calls[1]?.[0]).toEqual([batch[0]]);
+    expect(client.getState().requests[1]?.local?.status).toBe("failed");
+  });
+
+  it.each(["replacement", "segment"])("drops late answer failures after %s", async (change) => {
+    const call = deferred<void>();
+    const host = tail();
+    const client = createChatClient({
+      transport: { observe: host.observe, respond: () => call.promise },
+    });
+    client.attach();
+    host.latest().push(put(assistant("a1", [approval("q")]), at(1)), status(run("waiting"), at(2)));
+    await flush();
+    const pending = client.respond("q", { type: "approve" });
+    if (change === "replacement")
+      host.latest().push(snapshot([assistant("a1", [approval("q2")])], run("waiting"), at(3)));
+    else host.latest().push(status(run("running"), at(1, "new")));
+    await flush();
+    const held = client.getState().requests;
+    call.reject(new TransportError("refused", { code: "old", message: "Old refusal" }));
+    await pending;
+    expect(client.getState().requests).toBe(held);
+    expect(JSON.stringify(client.getState())).not.toContain("Old refusal");
+  });
+
+  it("never dispatches a client tool on observation and only retries its saved result", async () => {
+    // Pure read-only sample: transforms a host-approved string, with no browser or network effects.
+    const run = vi.fn((input: unknown) => {
+      if (typeof input !== "string") throw new TypeError("Expected text");
+      return { length: input.length };
+    });
+    const respond = vi
+      .fn<Respond>()
+      .mockRejectedValueOnce(new Error("Lost reply"))
+      .mockResolvedValue(undefined);
+    const part = {
+      type: "client-tool" as const,
+      id: "device",
+      title: "Count sample text",
+      state: "pending" as const,
+      name: "count",
+      input: "sample",
+    };
+    const client = createChatClient({
+      transport: { respond },
+      initialMessages: [assistant("a1", [part])],
+      clientTools: { count: { run } },
+    });
+    const detach = client.attach();
+    detach();
+    client.attach();
+    expect(run).not.toHaveBeenCalled();
+    expect(await client.startClientTool("device")).toEqual({ ok: true, outcome: "unknown" });
+    expect(client.getState().requests[0]?.local?.response).toEqual({
+      type: "result",
+      value: { length: 6 },
+    });
+    expect(await client.startClientTool("device")).toEqual({ ok: true, outcome: "accepted" });
+    expect(run).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(respond.mock.calls[1]?.[0]).toEqual(respond.mock.calls[0]?.[0]);
+  });
+
+  it.each(["result", "failure"] as const)(
+    "unlocks a detached device action without rerunning it after a late %s",
+    async (completion) => {
+      const value = deferred<unknown>();
+      const handler = vi.fn(() => value.promise);
+      const respond = vi.fn<Respond>(async () => {});
+      const client = createChatClient({
+        transport: { respond },
+        initialMessages: [
+          assistant("a1", [
+            { type: "client-tool", id: "device", title: "Read", state: "pending", name: "read" },
+          ]),
+        ],
+        clientTools: { read: { run: handler } },
+      });
+      const detach = client.attach();
+      const pending = client.startClientTool("device");
+      detach();
+      expect(client.getState().requests[0]?.local?.status).toBe("unconfirmed");
+      client.attach();
+      expect(await client.startClientTool("device")).toEqual({ ok: true, outcome: "unknown" });
+      if (completion === "result") value.resolve({ text: "Saved result" });
+      else value.reject(new Error("Private handler error"));
+      expect(await pending).toEqual({ ok: true, outcome: "unknown" });
+      expect(respond).not.toHaveBeenCalled();
+      expect(JSON.stringify(client.getState())).not.toContain("Private handler error");
+      if (completion === "result") {
+        expect(await client.startClientTool("device")).toEqual({ ok: true, outcome: "accepted" });
+        expect(respond.mock.calls[0]?.[0]).toEqual([
+          { requestId: "device", response: { type: "result", value: { text: "Saved result" } } },
+        ]);
+      } else {
+        expect(await client.startClientTool("device")).toEqual({ ok: true, outcome: "unknown" });
+        expect(await client.respond("device", { type: "cancel" })).toEqual({
+          ok: true,
+          outcome: "accepted",
+        });
+      }
+      expect(handler).toHaveBeenCalledOnce();
+      expect(respond).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("can cancel detached device work before its handler settles", async () => {
+    const value = deferred<unknown>();
+    const respond = vi.fn<Respond>(async () => {});
+    const client = createChatClient({
+      transport: { respond },
+      initialMessages: [
+        assistant("a1", [
+          { type: "client-tool", id: "device", title: "Read", state: "pending", name: "read" },
+        ]),
+      ],
+      clientTools: { read: { run: () => value.promise } },
+    });
+    const detach = client.attach();
+    const pending = client.startClientTool("device");
+    detach();
+    client.attach();
+    expect(await client.respond("device", { type: "cancel" })).toEqual({
+      ok: true,
+      outcome: "accepted",
+    });
+    value.resolve("Late result");
+    await pending;
+    expect(respond).toHaveBeenCalledOnce();
+    expect(client.getState().requests[0]?.local).toEqual({
+      status: "submitting",
+      response: { type: "cancel" },
+    });
+  });
+
+  it("does not send a delayed device result after detaching", async () => {
+    const value = deferred<unknown>();
+    const respond = vi.fn<Respond>(async () => {});
+    const client = createChatClient({
+      transport: { respond },
+      initialMessages: [
+        assistant("a1", [
+          {
+            type: "client-tool",
+            id: "device",
+            title: "Read",
+            state: "pending",
+            name: "read",
+            input: {},
+          },
+        ]),
+      ],
+      clientTools: { read: { run: () => value.promise } },
+    });
+    const detach = client.attach();
+    const pending = client.startClientTool("device");
+    detach();
+    value.resolve({ text: "Late result" });
+    expect(await pending).toEqual({ ok: true, outcome: "unknown" });
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it("refuses expired, display-only and mismatched responses before transport", async () => {
+    const respond = vi.fn<Respond>(async () => {});
+    const client = createChatClient({
+      transport: { respond },
+      initialMessages: [
+        assistant("a1", [
+          { ...approval("expired"), expiresAt: 0 },
+          { type: "question", id: "hidden", title: "Waiting", state: "pending", canAnswer: false },
+          {
+            type: "question",
+            id: "question",
+            title: "Choose",
+            state: "pending",
+            choices: [{ id: "one", label: "One" }],
+          },
+        ]),
+      ],
+    });
+    expect((await client.respond("expired", { type: "approve" })).ok).toBe(false);
+    expect((await client.respond("hidden", { type: "answer", answer: { text: "Draft" } })).ok).toBe(
+      false,
+    );
+    expect((await client.respond("question", { type: "approve" })).ok).toBe(false);
+    expect(
+      (await client.respond("question", { type: "answer", answer: { choices: ["missing"] } })).ok,
+    ).toBe(false);
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it("keeps submitted values when an authoritative read rejects the answer", async () => {
+    const host = tail();
+    const call = deferred<void>();
+    const respond = vi.fn<Respond>(() => call.promise);
+    const question = {
+      type: "question" as const,
+      id: "q",
+      title: "Your name",
+      state: "pending" as const,
+    };
+    const client = createChatClient({ transport: { observe: host.observe, respond } });
+    client.attach();
+    host.latest().push(put(assistant("a1", [question]), at(1)), status(run("waiting"), at(2)));
+    await flush();
+    const response = { type: "answer" as const, answer: { text: "Keep this answer" } };
+    const sending = client.respond("q", response);
+    const problem = { code: "invalid_answer", message: "Review your answer and try again." };
+    host
+      .latest()
+      .push(
+        snapshot([assistant("a1", [{ ...question, problem }])], run("waiting"), at(1, "continued")),
+      );
+    await flush();
+    call.resolve();
+    await sending;
+    expect(client.getState().requests[0]?.local).toEqual({
+      status: "failed",
+      response,
+      error: problem,
+    });
+    expect(respond).toHaveBeenCalledOnce();
+  });
+
+  it.each(["snapshot", "part", "message", "unnumbered snapshot"] as const)(
+    "unlocks a repeated rejection from a fresh %s and ignores unrelated progress",
+    async (update) => {
+      const host = tail();
+      const problem = { code: "invalid_answer", message: "Review your answer and try again." };
+      const question = {
+        type: "question" as const,
+        id: "q",
+        title: "Your name",
+        state: "pending" as const,
+        problem,
+      };
+      const call = deferred<void>();
+      const respond = vi
+        .fn<Respond>()
+        .mockImplementationOnce(() => call.promise)
+        .mockResolvedValue(undefined);
+      const client = createChatClient({ transport: { observe: host.observe, respond } });
+      client.attach();
+      host.latest().push(snapshot([assistant("a1", [question])], run("waiting"), at(1)));
+      await flush();
+      const response = { type: "answer" as const, answer: { text: "Keep this answer" } };
+      const pending = client.respond("q", response);
+      host
+        .latest()
+        .push(
+          snapshot([assistant("a1", [question])], run("waiting"), at(1)),
+          status(run("waiting"), at(2)),
+          patch("a1", text("other", "Unrelated output"), at(3)),
+        );
+      await flush();
+      expect(client.getState().requests[0]?.local?.status).toBe("submitting");
+      const held = client.getState().requests[0]?.part;
+      let event: ChatEvent;
+      switch (update) {
+        case "part":
+          event = patch("a1", { ...question }, at(4));
+          break;
+        case "message":
+          event = put(assistant("a1", [{ ...question }]), at(4));
+          break;
+        default:
+          event = snapshot(
+            [assistant("a1", [{ ...question }])],
+            run("waiting"),
+            update === "snapshot" ? at(4) : {},
+          );
+      }
+      host.latest().push(event);
+      await flush();
+      expect(client.getState().requests[0]?.part).toBe(held);
+      expect(client.getState().requests[0]?.local).toEqual({
+        status: "failed",
+        response,
+        error: problem,
+      });
+      call.resolve();
+      await pending;
+      host
+        .latest()
+        .push(snapshot([assistant("a1", [question])], run("waiting"), at(5)))
+        .end();
+      await flush();
+      expect(client.getState().connection).toBe("idle");
+      expect(
+        await client.respond("q", { type: "answer", answer: { text: "Corrected answer" } }),
+      ).toEqual({ ok: true, outcome: "accepted" });
+      expect(respond).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("refuses an answer to a request that no longer waits", async () => {
     const respond = vi.fn<Respond>(async () => {});

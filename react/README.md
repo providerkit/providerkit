@@ -159,6 +159,139 @@ result supplied through that callback can become text or a host-rendered data ca
 The host's conversation store remains the source of the person's messages. A run input can hold
 private context and must not become a user message on screen.
 
+## Answer requests
+
+Requests have their own IDs. A tool can ask more than once, so never use its operation ID as the
+answer key or parse a request ID to find a child run. The server looks up that ID in its saved journal.
+
+```ts
+await chat.respond(requestId, { type: "approve" });
+await chat.respond(requestId, { type: "answer", answer: { text: "Use the short version." } });
+```
+
+`respond` also accepts a list. Send several answers together when your host starts one continuation
+for the batch. Partial batches are supported; unanswered requests remain open. The host must claim
+a continuation and prevent concurrent answers from starting the same work twice.
+
+```ts
+await chat.respond([
+  { requestId: firstId, response: { type: "approve" } },
+  { requestId: secondId, response: { type: "answer", answer: { choices: ["short"] } } },
+]);
+```
+
+Responses are `approve`, `deny`, `answer`, `result`, `cancel` and `stop`. An approval can include
+replacement `arguments` and form `data` only when the host exposes those controls. An answer holds
+`choices`, `text` or `data` under `answer`; a client result uses `value`. Stop goes on its own.
+`parseRequestAnswers` checks the wire shape, not permission. The server still resolves evidence
+through the SDK's `resolveRequest` and passes request-keyed evidence to `resume(snapshot, { answers })`.
+Never turn a browser response directly into a trusted SDK decision.
+
+The response result has `outcome: "accepted" | "unknown"`. Accepted means delivery, not approval
+or completion. Only host updates close requests. A refusal keeps the submitted values for correction.
+An unknown outcome keeps them unconfirmed and is never resent automatically. Read the saved
+conversation before offering a manual retry. Keep the same authenticated principal and conversation
+in the hook's `id`; change it when either changes. Retained hook callbacks stop working after that
+scope closes. Plain clients must also be replaced when their scope changes. Hooks pass that local
+identity to `Conversation` as `scopeKey`. Plain-data hosts and standalone `RequestCard` users must
+set `scopeKey` too when a screen can change account or conversation. It resets in-memory request
+drafts and retained callbacks even if two scopes use the same message IDs. It is never rendered
+or sent as execution authority.
+
+### Choose what the viewer sees
+
+The projector reads open and closed `asks` records under every tool and child. A decided, closed
+or finished record is never pending. It preserves closed requests on reload without exposing
+answers, edited arguments, receipt tokens, scope identities or private problem messages.
+
+Questions and client actions show a generic waiting row by default. Use `request` to return only
+fields this viewer may read. Do not spread the raw request or its decision into display data.
+
+```ts
+const projector = createAgentProjector({
+  messageId,
+  runId,
+  request: ({ request }) => {
+    // Check viewer access here before returning question text or choices.
+    if (request.ask.type !== "question") return undefined;
+    return { title: request.ask.message, choices: request.ask.choices };
+  },
+});
+```
+
+Return `canAnswer: false` for a viewer who can read but cannot answer. A question needs an explicit
+title before it becomes answerable. The callback is also where the host can supply a safe problem
+message, a form schema or approval edit controls. Approval schemas and edits use a host action slot;
+the default card offers Skip instead of silently dropping required fields.
+
+`RequestCard`, `QuestionFields` and `SchemaForm` are composable. `QuestionFields` and `SchemaForm`
+are controlled: pass their values and change callbacks. `RequestCard` keeps drafts in memory by
+request ID, or accepts controlled `value` and `onValueChange` props. It never clears an answer on
+submission, refusal or closure. Plain-data hosts can report rejection with a new pending `part`
+that includes `problem`; the card restores its controls without requiring `RequestView.local`.
+Keep controlled values in the host if cards can leave the transcript.
+There is no automatic storage. Use a host-owned, principal-and-conversation-scoped draft adapter
+if you need persistence, and disclose what is saved. Replacing a request must not move its old
+answer into the new request.
+
+Use `renderRequest` on `MessageList`, or `renderActions` on a card, for host dialogs and custom
+controls. The slot's callbacks still check expiry, closure and unmount. Use `renderForm` for richer
+forms. The built-in subset supports up to 20 flat fields: strings with length bounds, numbers and
+integers with bounds, booleans, string enums and unique arrays of string enums (up to 100 options).
+Unknown keywords refuse the whole form. This includes `pattern`, `$ref`, nested objects, defaults
+and conditional schemas. Nothing fetches schemas, runs code or evaluates model-written regexes.
+The card explains the limit and offers Skip. Native controls help with input; the host must validate
+all fields again. Labels, including recovery text, can be replaced through `labels`.
+
+### Run a client action
+
+Client handlers are app code registered by name. Receiving a request, reconnecting, mounting in
+Strict Mode or reloading never runs a handler. The server opts an input into display with a
+`clientTools` callback. It receives `PendingRequest.call.arguments`, the effective approved input,
+not the original model-written `call.call.arguments` string. Filter and validate it for the viewer.
+
+A pure, read-only handler can look like this:
+
+```ts
+const clientTools = {
+  countText: {
+    run(input: unknown) {
+      if (typeof input !== "string") throw new TypeError("Expected sample text.");
+      return { length: input.length };
+    },
+  },
+};
+```
+
+Pass that registry to `useChat` or `createChatClient`. Call `chat.startClientTool(requestId)` only
+from an explicit user action, never from an effect or a replay listener. The default card offers
+Run action with a warning that reload cannot prove whether an earlier action finished. A handler
+must check its input and respect its cancellation signal. Detaching marks unfinished device work
+unconfirmed, not still submitting. It never reruns the handler or sends a delayed result on its own.
+After reattaching the same client, the host can cancel the pending request or explicitly call
+`startClientTool` to send a completed result retained in memory. This requires the same request,
+logical run and segment. If no result is known, the call stays unknown and does not run again.
+
+For writes, a host-provided durable claim must guard the actual action if the app cannot safely
+rely on manual review. The claim must bind the authenticated viewer and exact saved request,
+exclude a second dispatch across tabs and reloads, and reconcile uncertain completion. A literal
+idempotency key or an in-memory set is not that capability. This package does not promise
+exactly-once execution. After uncertain execution, it does not rerun the handler. If only result
+delivery failed, a manual retry submits the retained result instead. After reload, reconciliation
+belongs to the host. The SDK still validates the returned result and current permissions.
+
+### Recover an interrupted attempt
+
+`operation_restart` replaces one operation's partial text. `model_chunk.attemptId` also detects
+a new attempt if the restart event was missed. The display wire carries a monotone `attempt`
+number on restarted text and its deltas. Older attempts cannot append to or replace the newer
+one. Other specialists and completed operations stay intact.
+
+An authoritative `snapshot` seeds the projector from saved attempt receipts, including interrupted
+attempts. Feed the retained log before that read, not after it. Keep logical `runId` separate from
+physical `segment` and its cursor. Browser input never chooses either execution routing or snapshot
+authority. Handoff ownership and steering displays remain separate integration work.
+
 ## Use the optional components
 
 Keep your own header and layout. The components accept the hook values or equivalent data from

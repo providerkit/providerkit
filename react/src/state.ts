@@ -8,7 +8,14 @@
  *
  * Pure: it never changes its input, and it returns the same object when nothing changed.
  */
-import type { ChatEvent, DisplayMessage, DisplayPart, RunInfo, RunStatus } from "./protocol.ts";
+import {
+  isRequestPart,
+  type ChatEvent,
+  type DisplayMessage,
+  type DisplayPart,
+  type RunInfo,
+  type RunStatus,
+} from "./protocol.ts";
 
 /** Where a client stands in the host's event log. Hand it back to resume after it. */
 export interface Cursor {
@@ -95,10 +102,12 @@ function isSettled(part: DisplayPart): boolean {
     case "text":
       return part.settled;
     case "tool":
-      return part.state !== "running";
+      return part.state !== "running" && part.state !== "waiting";
     case "agent":
       return !isActive(part.state);
     case "approval":
+    case "question":
+    case "client-tool":
       return part.state !== "pending";
     default:
       return true;
@@ -115,6 +124,10 @@ function upsertPart(parts: readonly DisplayPart[], part: DisplayPart): readonly 
   const index = indexOfId(parts, part.id);
   const held = parts[index];
   if (!held) return [...parts, part];
+  if (held.type === "text" && part.type === "text") {
+    if ((part.attempt ?? 1) < (held.attempt ?? 1)) return parts;
+    if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
+  }
   if (isSettled(held) && !isSettled(part)) return parts;
   return sameData(held, part) ? parts : replaceAt(parts, index, part);
 }
@@ -130,6 +143,7 @@ function isAhead(held: DisplayPart, incoming: DisplayPart): boolean {
     incoming.type === "text" &&
     !held.settled &&
     !incoming.settled &&
+    (held.attempt ?? 1) === (incoming.attempt ?? 1) &&
     held.text.startsWith(incoming.text)
   );
 }
@@ -149,7 +163,9 @@ function reconcile(
   });
   if (keepLive) {
     const known = new Set(incoming.parts.map((part) => part.id));
-    for (const mine of held.parts) if (!isSettled(mine) && !known.has(mine.id)) parts.push(mine);
+    // Requests are authoritative records, not streamed text the save might lack.
+    for (const mine of held.parts)
+      if (!isSettled(mine) && !isRequestPart(mine) && !known.has(mine.id)) parts.push(mine);
   }
   return keep(held, { ...incoming, parts: keepList(held.parts, parts) });
 }
@@ -244,13 +260,15 @@ function applyText(
   messageId: string,
   partId: string,
   delta: string,
+  attempt = 1,
 ): readonly DisplayMessage[] {
   const index = indexOfId(messages, messageId);
   const message = messages[index];
   if (!message || !delta || isFinal(message)) return messages;
   const at = indexOfId(message.parts, partId);
   const part = message.parts[at];
-  if (!part || part.type !== "text" || part.settled) return messages;
+  if (!part || part.type !== "text" || part.settled || (part.attempt ?? 1) !== attempt)
+    return messages;
   const parts = replaceAt(message.parts, at, { ...part, text: part.text + delta });
   return replaceAt(messages, index, { ...message, parts });
 }
@@ -283,7 +301,10 @@ function applyEvent(
     case "part":
       return { messages: applyPart(messages, event.messageId, event.part), run };
     case "text":
-      return { messages: applyText(messages, event.messageId, event.partId, event.delta), run };
+      return {
+        messages: applyText(messages, event.messageId, event.partId, event.delta, event.attempt),
+        run,
+      };
     case "run":
       return { messages, run: applyRun(run, event.run, continued) };
   }

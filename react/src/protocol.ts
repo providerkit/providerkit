@@ -19,9 +19,18 @@ export type MessageRole = "user" | "assistant";
  * written. The other three are final. */
 export type MessageState = "sending" | "live" | "settled" | "failed" | "stopped";
 
-export type ToolState = "running" | "done" | "failed";
+export type ToolState = "running" | "waiting" | "done" | "failed";
 
-export type ApprovalState = "pending" | "approved" | "denied" | "expired";
+export type ApprovalState =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "cancelled"
+  | "expired"
+  | "stale"
+  | "invalid"
+  | "stopped";
+export type RequestState = ApprovalState | "answered";
 
 /** `waiting` means the run needs the person (an approval). `limited` means a turn, tool, time or
  * output limit ended it. */
@@ -47,6 +56,8 @@ export interface TextPart {
   /** False while it streams. Once true, a delta no longer adds to it and a patch cannot make it
    * stream again. Only a snapshot can. */
   settled: boolean;
+  /** Monotone attempt number from the host's operation journal. Absent means the first. */
+  attempt?: number;
   /** The id of the `agent` part for the specialist that wrote this text, for a host that shows
    * a specialist's words. Absent for the main assistant's own text. */
   agentId?: string;
@@ -109,16 +120,58 @@ export interface AgentPart {
   state: AgentState;
 }
 
-/** A decision the run is waiting for. Its `id` is what the client sends back with the decision:
- * an opaque request id that only the host can interpret. */
-export interface ApprovalPart {
-  type: "approval";
+/** Request ids are opaque answer keys, never tool operation ids or browser-supplied routes. */
+export interface RequestBase {
   id: string;
+  toolId?: string;
+  agentId?: string;
   title: string;
   summary?: string;
-  state: ApprovalState;
-  /** Epoch milliseconds. */
   expiresAt?: number;
+  /** False means display-only. Server authorization is still required when true. */
+  canAnswer?: boolean;
+  problem?: DisplayError;
+}
+
+/** Host-approved schema. Built-in controls refuse unsupported requirements. */
+export type FormSchema = Readonly<Record<string, unknown>>;
+
+export interface ApprovalPart extends RequestBase {
+  type: "approval";
+  state: ApprovalState;
+  edit?: { schema: FormSchema; value: Record<string, unknown> };
+  approveForm?: FormSchema;
+  denyForm?: FormSchema;
+}
+
+export interface RequestChoice {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface QuestionPart extends RequestBase {
+  type: "question";
+  state: Exclude<RequestState, "approved" | "denied">;
+  choices?: readonly RequestChoice[];
+  multiple?: boolean;
+  freeText?: boolean;
+  schema?: FormSchema;
+}
+
+/** Merely receiving this part never authorizes a browser action. */
+export interface ClientToolPart extends RequestBase {
+  type: "client-tool";
+  state: Exclude<RequestState, "approved" | "denied">;
+  /** Only present when the host authorizes this handler and its input for the viewer. */
+  name?: string;
+  input?: unknown;
+}
+
+export type RequestPart = ApprovalPart | QuestionPart | ClientToolPart;
+
+export function isRequestPart(part: DisplayPart): part is RequestPart {
+  return part.type === "approval" || part.type === "question" || part.type === "client-tool";
 }
 
 /** A card of the app's own, in reading order. The client draws it with the renderer the app
@@ -137,7 +190,7 @@ export type DisplayPart =
   | SourcePart
   | ToolPart
   | AgentPart
-  | ApprovalPart
+  | RequestPart
   | DataPart;
 
 /** Named apart from core's `ChatMessage`, which is provider history and not something to draw. */
@@ -222,6 +275,8 @@ export type ChatEvent = ChatEnvelope &
         messageId: string;
         partId: string;
         delta: string;
+        /** Must match the current text part. Absent means the first attempt. */
+        attempt?: number;
       }
     | {
         /** A run that ended does not start again under the same `id`, except in a snapshot or
@@ -271,13 +326,24 @@ const isMessageState = oneOf<MessageState>({
   failed: true,
   stopped: true,
 });
-const isToolState = oneOf<ToolState>({ running: true, done: true, failed: true });
-const isApprovalState = oneOf<ApprovalState>({
+const isToolState = oneOf<ToolState>({ running: true, waiting: true, done: true, failed: true });
+const isRequestState = oneOf<RequestState>({
   pending: true,
   approved: true,
   denied: true,
+  answered: true,
+  cancelled: true,
   expired: true,
+  stale: true,
+  invalid: true,
+  stopped: true,
 });
+function isApprovalState(value: unknown): value is ApprovalState {
+  return isRequestState(value) && value !== "answered";
+}
+function isAttempt(value: unknown): value is number {
+  return isSeq(value) && value >= 1;
+}
 const isRunStatus = oneOf<RunStatus>({
   idle: true,
   running: true,
@@ -315,7 +381,10 @@ type Fields = Record<string, unknown>;
 function readText(id: string, fields: Fields): TextPart | null {
   if (!isText(fields.text) || !isFlag(fields.settled)) return null;
   const part: TextPart = { type: "text", id, text: fields.text, settled: fields.settled };
-  return optional(part, "agentId", fields.agentId, isId) ? part : null;
+  return optional(part, "agentId", fields.agentId, isId) &&
+    optional(part, "attempt", fields.attempt, isAttempt)
+    ? part
+    : null;
 }
 
 function readAttachment(id: string, fields: Fields): AttachmentPart | null {
@@ -363,13 +432,81 @@ function readAgent(id: string, fields: Fields): AgentPart | null {
     : null;
 }
 
-function readApproval(id: string, fields: Fields): ApprovalPart | null {
-  if (!isText(fields.title) || !isApprovalState(fields.state)) return null;
-  const part: ApprovalPart = { type: "approval", id, title: fields.title, state: fields.state };
+function requestFields<T extends RequestPart>(part: T, fields: Fields): T | null {
+  if (fields.problem != null) {
+    const problem = readError(fields.problem);
+    if (!problem) return null;
+    part.problem = problem;
+  }
   return optional(part, "summary", fields.summary, isText) &&
+    optional(part, "toolId", fields.toolId, isId) &&
+    optional(part, "agentId", fields.agentId, isId) &&
+    optional(part, "canAnswer", fields.canAnswer, isFlag) &&
     optional(part, "expiresAt", fields.expiresAt, isTime)
     ? part
     : null;
+}
+
+function readApproval(id: string, fields: Fields): ApprovalPart | null {
+  if (!isText(fields.title) || !isApprovalState(fields.state)) return null;
+  const part: ApprovalPart = { type: "approval", id, title: fields.title, state: fields.state };
+  if (fields.edit != null) {
+    if (!isRecord(fields.edit) || !isRecord(fields.edit.schema) || !isRecord(fields.edit.value))
+      return null;
+    part.edit = { schema: fields.edit.schema, value: fields.edit.value };
+  }
+  return optional(part, "approveForm", fields.approveForm, isRecord) &&
+    optional(part, "denyForm", fields.denyForm, isRecord)
+    ? requestFields(part, fields)
+    : null;
+}
+
+function readQuestion(id: string, fields: Fields): QuestionPart | null {
+  if (
+    !isText(fields.title) ||
+    !isRequestState(fields.state) ||
+    fields.state === "approved" ||
+    fields.state === "denied"
+  )
+    return null;
+  const part: QuestionPart = { type: "question", id, title: fields.title, state: fields.state };
+  if (fields.choices != null) {
+    if (!Array.isArray(fields.choices) || fields.choices.length > 100) return null;
+    const choices: RequestChoice[] = [];
+    const ids = new Set<string>();
+    for (const value of fields.choices) {
+      if (!isRecord(value) || !isId(value.id) || !isText(value.label) || ids.has(value.id))
+        return null;
+      const choice: RequestChoice = { id: value.id, label: value.label };
+      if (!optional(choice, "description", value.description, isText)) return null;
+      choices.push(choice);
+      ids.add(choice.id);
+    }
+    part.choices = choices;
+  }
+  return optional(part, "multiple", fields.multiple, isFlag) &&
+    optional(part, "freeText", fields.freeText, isFlag) &&
+    optional(part, "schema", fields.schema, isRecord)
+    ? requestFields(part, fields)
+    : null;
+}
+
+function readClientTool(id: string, fields: Fields): ClientToolPart | null {
+  if (
+    !isText(fields.title) ||
+    !isRequestState(fields.state) ||
+    fields.state === "approved" ||
+    fields.state === "denied"
+  )
+    return null;
+  const part: ClientToolPart = {
+    type: "client-tool",
+    id,
+    title: fields.title,
+    state: fields.state,
+  };
+  if (fields.input !== undefined) part.input = fields.input;
+  return optional(part, "name", fields.name, isId) ? requestFields(part, fields) : null;
 }
 
 /** `kind` picks the app's renderer, so it is an id. `data` has no shape of its own, like a
@@ -396,6 +533,10 @@ function readPart(value: unknown): DisplayPart | null | undefined {
       return known(readAgent);
     case "approval":
       return known(readApproval);
+    case "question":
+      return known(readQuestion);
+    case "client-tool":
+      return known(readClientTool);
     case "data":
       return known(readData);
     default:
@@ -497,9 +638,15 @@ export function parseChatEvent(value: unknown): ChatEvent | null {
     }
     case "text": {
       const { messageId, partId, delta } = value;
-      return isId(messageId) && isId(partId) && isText(delta)
-        ? { ...envelope, type: "text", messageId, partId, delta }
-        : null;
+      if (!isId(messageId) || !isId(partId) || !isText(delta)) return null;
+      const event: Extract<ChatEvent, { type: "text" }> = {
+        ...envelope,
+        type: "text",
+        messageId,
+        partId,
+        delta,
+      };
+      return optional(event, "attempt", value.attempt, isAttempt) ? event : null;
     }
     case "run": {
       const run = readRun(value.run);
@@ -510,5 +657,7 @@ export function parseChatEvent(value: unknown): ChatEvent | null {
   }
 }
 
+export { checkResponse, parseRequestAnswers } from "./requests.ts";
+export type { QuestionAnswer, RequestResponse, RequestAnswer } from "./requests.ts";
 export { emptyChatView, reduceChat } from "./state.ts";
 export type { ChatView, Cursor } from "./state.ts";

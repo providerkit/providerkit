@@ -17,7 +17,8 @@
  */
 import {
   PROTOCOL_VERSION,
-  type ApprovalPart,
+  isRequestPart,
+  type RequestPart,
   type AttachmentPart,
   type ChatEvent,
   type DisplayError,
@@ -67,13 +68,30 @@ export interface SendInput {
   attachments?: readonly AttachmentRef[];
 }
 
-/** A person's answer to a request the run waits on. An approval takes these two. */
-export type RequestResponse = { type: "approve" } | { type: "deny"; message?: string };
+import {
+  checkResponse,
+  parseRequestAnswers,
+  type RequestAnswer,
+  type RequestResponse,
+} from "./requests.ts";
+export type { RequestAnswer, RequestResponse, QuestionAnswer } from "./requests.ts";
 
-export interface RequestAnswer {
-  /** The request part's id. Opaque: only the host can interpret it. */
-  requestId: string;
-  response: RequestResponse;
+export interface ClientToolHandler {
+  /** Called only by an explicit startClientTool action, never by observation or replay.
+   * Validate input here. Server policy still validates results and permissions. */
+  run(
+    input: unknown,
+    context: { signal: AbortSignal; requestId: string },
+  ): unknown | Promise<unknown>;
+}
+
+export type RespondResult =
+  | { ok: true; outcome: "accepted" | "unknown" }
+  | { ok: false; error: DisplayError };
+
+export interface Respond {
+  (requestId: string, response: RequestResponse): Promise<RespondResult>;
+  (answers: readonly RequestAnswer[]): Promise<RespondResult>;
 }
 
 /** A reply that is itself the event stream, like the response of a POST. */
@@ -103,8 +121,7 @@ export interface ChatTransport {
    * the run as the client holds it: until the host names the run a message started, that is the
    * run before it, so a host that stops by conversation can ignore it. */
   stop?(run: RunInfo): Promise<void>;
-  /** Answers to requests the run waits on. The client sends one per call today; the list is
-   * there for answers that have to go together. */
+  /** Answers one request or an explicit batch. Partial batches leave other requests open. */
   respond?(
     answers: readonly RequestAnswer[],
     options: { signal: AbortSignal },
@@ -143,7 +160,10 @@ export type ConnectionStatus = "idle" | "connecting" | "open" | "reconnecting" |
 
 /** A request the run waits on, with what this client did about it. */
 export interface RequestView {
-  part: ApprovalPart;
+  part: RequestPart;
+  /** Capabilities of this client, not execution permission. Absent for plain-data hosts. */
+  canRespond?: boolean;
+  canRun?: boolean;
   /** The message the request sits in. */
   messageId: string;
   /** An answer from this client that the host has not acted on yet. */
@@ -212,6 +232,9 @@ export interface ChatClientOptions {
    * with them. Off by default: the client refuses the send and the text stays with the person. */
   allowSendWhileRunning?: boolean;
   reconnect?: ReconnectOptions;
+  /** App-owned handlers, never model-authored code. All dispatch is manual. A state-changing
+   * handler must disclose uncertain outcomes, including after reload, or use a durable host claim. */
+  clientTools?: Readonly<Record<string, ClientToolHandler>>;
 }
 
 export interface ChatClient {
@@ -236,7 +259,10 @@ export interface ChatClient {
    * open. Without `transport.stop`, closes the stream the run lives in and marks it stopped here. */
   stop(): Promise<CommandResult>;
   /** Answers a request. It shows as submitting until the host changes the request or the run. */
-  respond(requestId: string, response: RequestResponse): Promise<CommandResult>;
+  respond: Respond;
+  /** Explicit user action only. Never wire this to an effect or a replay listener. After a result
+   * delivery failure, this resubmits the saved result, never reruns the handler. */
+  startClientTool(requestId: string): Promise<RespondResult>;
   /** Opens a fresh observation, with a full budget of tries, after the connection was lost. */
   reconnect(): void;
   /** A new transport or changed settings, for what comes next. `initialMessages` is read once,
@@ -293,11 +319,18 @@ const SHOWN = {
 } as const satisfies Record<Send["phase"], MessageState | undefined>;
 
 interface Answer {
-  /** The request and the run as they were when the answer went out. A host event that changes
-   * either one is the host's reply to it. */
-  part: ApprovalPart;
-  run: RunInfo;
+  /** The request as it was when the answer went out. A host event can close it or reject the answer. */
+  part: RequestPart;
   local: NonNullable<RequestView["local"]>;
+}
+
+interface DeviceRun {
+  part: RequestPart;
+  controller: AbortController;
+  runId: string | undefined;
+  segment: string | undefined;
+  response?: Extract<RequestResponse, { type: "result" }>;
+  outcome: "running" | "result" | "unknown";
 }
 
 interface Stream {
@@ -361,11 +394,13 @@ function stillSending(messages: readonly DisplayMessage[], id: string): boolean 
 }
 
 /** The request with this id, while it still waits. From the end: requests are recent. */
-function openRequest(messages: readonly DisplayMessage[], id: string): ApprovalPart | undefined {
-  for (let index = messages.length - 1; index >= 0; index--)
-    for (const part of messages[index]?.parts ?? [])
-      if (part.type === "approval" && part.id === id)
-        return part.state === "pending" ? part : undefined;
+function openRequest(messages: readonly DisplayMessage[], id: string): RequestPart | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (!message || isFinal(message)) continue;
+    for (const part of message.parts)
+      if (isRequestPart(part) && part.id === id) return part.state === "pending" ? part : undefined;
+  }
   return undefined;
 }
 
@@ -386,11 +421,16 @@ function seal(part: DisplayPart): DisplayPart {
     case "text":
       return part.settled ? part : { ...part, settled: true };
     case "tool":
-      return part.state === "running" ? { ...part, state: "failed" } : part;
+      return part.state === "running" || part.state === "waiting"
+        ? { ...part, state: "failed" }
+        : part;
     case "agent":
       return isActive(part.state) ? { ...part, state: "stopped" } : part;
     case "approval":
-      return part.state === "pending" ? { ...part, state: "expired" } : part;
+    case "question":
+    case "client-tool":
+      // An aborted connection cannot decide a server request.
+      return part;
     default:
       return part;
   }
@@ -428,6 +468,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   const left = new Set<string>();
   const sends = new Map<string, Send>();
   const answers = new Map<string, Answer>();
+  const deviceRuns = new Map<string, DeviceRun>();
   const commands = new Set<AbortController>();
   // Controller identity is the command generation: an older reply cannot replace newer work.
   let latestCommand: AbortController | undefined;
@@ -552,15 +593,25 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     const next: RequestView[] = [];
     for (const message of view.messages)
       for (const part of message.parts) {
-        if (part.type !== "approval" || part.state !== "pending") continue;
+        if (isFinal(message) || !isRequestPart(part) || part.state !== "pending") continue;
         const local = answers.get(part.id)?.local;
+        const canRespond = settings.transport.respond !== undefined;
+        const canRun =
+          canRespond &&
+          part.type === "client-tool" &&
+          part.name !== undefined &&
+          settings.clientTools !== undefined &&
+          Object.hasOwn(settings.clientTools, part.name);
         const held = waiting[next.length];
         next.push(
-          held && held.part === part && held.messageId === message.id && held.local === local
+          held &&
+            held.part === part &&
+            held.messageId === message.id &&
+            held.local === local &&
+            held.canRespond === canRespond &&
+            held.canRun === canRun
             ? held
-            : local
-              ? { part, messageId: message.id, local }
-              : { part, messageId: message.id },
+            : { part, messageId: message.id, canRespond, canRun, ...(local && { local }) },
         );
       }
     waiting = keepList(waiting, next);
@@ -587,33 +638,63 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     const next = reduceChat(view, event);
     // Even an unchanged idle snapshot confirms the host was read. EOF alone cannot do that.
     if (event.type === "snapshot" || event.type === "run") initialized = true;
-    if (next === view) return false;
+    // A numbered no-op is a duplicate. An unnumbered snapshot can still report a new refusal
+    // with identical display fields, so it must reconcile this submission's local feedback.
+    if (next === view && event.seq !== undefined) return false;
     const changed = next.messages !== view.messages || next.run !== view.run;
     const from = view.cursor;
     if (from && next.cursor && next.cursor.segment !== from.segment)
       left.add(segmentKey(from.segment));
     view = next;
-    settle();
-    return changed;
+    let reported: readonly DisplayPart[] = [];
+    switch (event.type) {
+      case "snapshot":
+        reported = event.messages.flatMap((message) => message.parts);
+        break;
+      case "message":
+        reported = event.message.parts;
+        break;
+      case "part":
+        reported = [event.part];
+        break;
+    }
+    return settle(reported) || changed;
   }
 
-  /** The view moved: what the host just said may answer something this client is waiting on. */
-  function settle(): void {
+  /** Only fresh host events reach here. Unrelated progress cannot repeat an earlier refusal. */
+  function settle(reported: readonly DisplayPart[] = []): boolean {
+    let changed = false;
     for (const id of sends.keys()) if (!stillSending(view.messages, id)) sends.delete(id);
     for (const [id, answer] of answers) {
       const part = openRequest(view.messages, id);
-      if (!part) answers.delete(id);
-      else if (
-        answer.local.status === "submitting" &&
-        (part !== answer.part || view.run !== answer.run)
-      )
+      if (!part) {
         answers.delete(id);
+        changed = true;
+      } else if (
+        part !== answer.part ||
+        (part.problem &&
+          answer.local.status !== "failed" &&
+          reported.some((item) => item.id === id))
+      ) {
+        // A saved rejection is authoritative feedback, not confirmation of the earlier POST.
+        // Keep the submitted value while detaching its now-stale delivery callback.
+        if (part.problem)
+          answers.set(id, {
+            part,
+            local: { status: "failed", response: answer.local.response, error: part.problem },
+          });
+        else answers.delete(id);
+        changed = true;
+      }
     }
+    for (const [id, device] of deviceRuns)
+      if (openRequest(view.messages, id) !== device.part) device.controller.abort();
     if (starting && view.run !== starting) starting = undefined;
     const going = isActive(view.run.status) || starting !== undefined;
     if (!going) stopping = false;
     if (!going && problem?.source === "stop") problem = undefined;
     stale = true;
+    return changed;
   }
 
   function cancelRetry(): void {
@@ -765,7 +846,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
 
   /** The host took a command. Its reply is the stream it returned, or comes on an observation. */
   function accepted(
-    before: RunInfo,
+    before: RunInfo | undefined,
     reply: void | EventReply,
     controller: AbortController,
     refresh = false,
@@ -795,6 +876,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       here = false;
       attached -= 1;
       if (attached > 0) return;
+      for (const device of deviceRuns.values()) device.controller.abort();
       cancelRetry();
       if (stream?.kind === "observe") close();
       if (!stream && connection !== "lost") connection = "idle";
@@ -903,6 +985,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   }
 
   async function stop(): Promise<CommandResult> {
+    for (const device of deviceRuns.values()) device.controller.abort();
     const { transport } = settings;
     const { status, canStop } = getState();
     // Pressed as the run ended, or pressed twice: there is nothing left to stop.
@@ -932,47 +1015,156 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     return { ok: true };
   }
 
-  async function respond(requestId: string, response: RequestResponse): Promise<CommandResult> {
+  const respond: Respond = async (
+    idOrAnswers: string | readonly RequestAnswer[],
+    response?: RequestResponse,
+  ): Promise<RespondResult> => {
     const { transport } = settings;
     if (!transport.respond) return { ok: false, error: CANNOT_ANSWER };
-    const part = openRequest(view.messages, requestId);
-    if (!part) return { ok: false, error: NOT_WAITING };
-    if (answers.get(requestId)?.local.status === "submitting")
-      return { ok: false, error: ANSWERING };
+    const batch = parseRequestAnswers(
+      typeof idOrAnswers === "string" ? [{ requestId: idOrAnswers, response }] : idOrAnswers,
+    );
+    if (!batch)
+      return {
+        ok: false,
+        error: { code: "invalid_answer", message: "Send one answer per request." },
+      };
     const before = view.run;
-    const mine: Answer = { part, run: before, local: { status: "submitting", response } };
-    answers.set(requestId, mine);
+    const segment = view.cursor?.segment;
+    const entries: [string, Answer][] = [];
+    for (const answer of batch) {
+      const part = openRequest(view.messages, answer.requestId);
+      if (!part) return { ok: false, error: NOT_WAITING };
+      const error = checkResponse(part, answer.response);
+      if (error) return { ok: false, error };
+      if (answers.get(part.id)?.local.status === "submitting")
+        return { ok: false, error: ANSWERING };
+      entries.push([part.id, { part, local: { status: "submitting", response: answer.response } }]);
+    }
+    if (batch.length > 1 && batch.some((answer) => answer.response.type === "stop"))
+      return { ok: false, error: { code: "invalid_answer", message: "Send Stop on its own." } };
+    for (const [id, entry] of entries) answers.set(id, entry);
     const controller = beginCommand();
+    const current = () =>
+      !controller.signal.aborted &&
+      view.cursor?.segment === segment &&
+      view.run.id === before.id &&
+      entries.some(
+        ([id, entry]) => answers.get(id) === entry && openRequest(view.messages, id) === entry.part,
+      );
     now();
     let reply: void | EventReply;
     try {
-      reply = await transport.respond([{ requestId, response }], { signal: controller.signal });
+      reply = await transport.respond(batch, { signal: controller.signal });
     } catch (error) {
       commands.delete(controller);
-      const refusal =
-        error instanceof TransportError && error.outcome === "refused" ? error : undefined;
-      const shown = refusal ? refusal.error : UNCONFIRMED_ANSWER;
-      const held = answers.get(requestId);
-      // A newer answer to the same request is the person's latest word. A request that closed
-      // meanwhile was settled by the host, and has nowhere left to show the error.
-      if (held === mine || held === undefined) {
-        const open = openRequest(view.messages, requestId);
-        if (open) {
-          const status = refusal ? "failed" : "unconfirmed";
-          answers.set(requestId, {
-            part: open,
-            run: view.run,
-            local: { status, response, error: shown },
+      const refusal = error instanceof TransportError && error.outcome === "refused";
+      const shown = refusal ? error.error : UNCONFIRMED_ANSWER;
+      if (current())
+        for (const [id, entry] of entries) {
+          if (answers.get(id) !== entry || openRequest(view.messages, id) !== entry.part) continue;
+          answers.set(id, {
+            ...entry,
+            local: {
+              status: refusal ? "failed" : "unconfirmed",
+              response: entry.local.response,
+              error: shown,
+            },
           });
-        } else answers.delete(requestId);
-      }
+        }
       now();
       if (!refusal && latestCommand === controller && !controller.signal.aborted) watch(true);
-      return { ok: false, error: shown };
+      return refusal ? { ok: false, error: shown } : { ok: true, outcome: "unknown" };
     }
-    accepted(before, reply, controller, true);
+    // Observation can close the request or advance its segment before this reply arrives.
+    // The latest command still owns its continuation, but not a different logical run.
+    // Request feedback already received must not create a new wait for the run to start.
+    if (view.run.id === before.id)
+      accepted(current() ? before : undefined, reply, controller, true);
+    else if (reply) void read(reply.events, "command", controller, false);
+    else commands.delete(controller);
     now();
-    return { ok: true };
+    return { ok: true, outcome: "accepted" };
+  };
+
+  async function startClientTool(requestId: string): Promise<RespondResult> {
+    const part = openRequest(view.messages, requestId);
+    if (!part || part.type !== "client-tool") return { ok: false, error: NOT_WAITING };
+    const error = checkResponse(part, { type: "result", value: null });
+    if (error) return { ok: false, error };
+    const held = deviceRuns.get(requestId);
+    if (held) {
+      if (held.part !== part || held.runId !== view.run.id || held.segment !== view.cursor?.segment)
+        return { ok: false, error: NOT_WAITING };
+      if (held.response) return respond(requestId, held.response);
+      return held.outcome === "running"
+        ? { ok: false, error: ANSWERING }
+        : { ok: true, outcome: "unknown" };
+    }
+    const handler =
+      part.name && settings.clientTools && Object.hasOwn(settings.clientTools, part.name)
+        ? settings.clientTools[part.name]
+        : undefined;
+    if (!handler || !settings.transport.respond) return { ok: false, error: CANNOT_ANSWER };
+    const controller = new AbortController();
+    const segment = view.cursor?.segment;
+    const before = view.run;
+    const device: DeviceRun = { part, controller, runId: before.id, segment, outcome: "running" };
+    deviceRuns.set(requestId, device);
+    const mine: Answer = {
+      part,
+      local: { status: "submitting", response: { type: "result", value: null } },
+    };
+    answers.set(requestId, mine);
+    function unconfirm(): void {
+      if (device.outcome === "running") device.outcome = "unknown";
+      if (
+        answers.get(requestId) !== mine ||
+        openRequest(view.messages, requestId) !== part ||
+        view.run.id !== before.id ||
+        view.cursor?.segment !== segment
+      )
+        return;
+      answers.set(requestId, {
+        ...mine,
+        local: {
+          ...mine.local,
+          status: "unconfirmed",
+          error: {
+            code: "unconfirmed",
+            message: "The action may have finished. Check its result before doing it again.",
+          },
+        },
+      });
+      now();
+    }
+    // A handler can ignore abort or never settle. Release its submission lock at detach/Stop,
+    // without assuming its effects stopped or allowing it to run again.
+    controller.signal.addEventListener("abort", unconfirm, { once: true });
+    now();
+    try {
+      const value = await handler.run(part.input, { signal: controller.signal, requestId });
+      device.response = { type: "result", value };
+      device.outcome = "result";
+    } catch {
+      // Never expose a handler error that might contain input, or guess that no effect happened.
+      device.outcome = "unknown";
+    }
+    if (
+      controller.signal.aborted ||
+      openRequest(view.messages, requestId) !== part ||
+      view.run.id !== before.id ||
+      view.cursor?.segment !== segment
+    ) {
+      unconfirm();
+      return { ok: true, outcome: "unknown" };
+    }
+    if (device.response) {
+      if (answers.get(requestId) === mine) answers.delete(requestId);
+      return respond(requestId, device.response);
+    }
+    unconfirm();
+    return { ok: true, outcome: "unknown" };
   }
 
   function reconnect(): void {
@@ -998,6 +1190,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     retry,
     stop,
     respond,
+    startClientTool,
     reconnect,
     setOptions,
   });
