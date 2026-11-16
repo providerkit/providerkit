@@ -96,6 +96,12 @@ export class ExecutionTree {
     );
   }
 
+  /** A failed checkpoint fails every later one, so the host's saved journal stops at the last
+   * write that succeeded and the returned state was never stored. */
+  get checkpointFailed(): boolean {
+    return this.checkpointFailure !== undefined;
+  }
+
   active(): void {
     if (this.checkpointFailure) throw new Halt(this.checkpointFailure);
     if (this.options.signal?.aborted) throw new Halt({ status: "cancelled" });

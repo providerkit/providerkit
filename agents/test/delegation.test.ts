@@ -14,6 +14,8 @@ import {
   type Agent,
   type AgentEvent,
   type AgentHost,
+  type AgentInput,
+  type AgentMessage,
   type ChildEnvelope,
   type DelegationContext,
   type RunOutcome,
@@ -1289,5 +1291,127 @@ describe("specialist delegation", () => {
     });
     expect(done.status).toBe("completed");
     expect(after.children()).toEqual(expected);
+  });
+
+  it("gives a child only its input unless the coordinator forwards the conversation", async () => {
+    const plainWire = wire([text("plain")]);
+    const plain = defineAgent({ ...base, id: "plain", provider: plainWire.provider });
+    const informedWire = wire([text("informed")]);
+    const informed = defineAgent({ ...base, id: "informed", provider: informedWire.provider });
+    const reasoningItems = { provider: "fake", items: [{ encrypted_content: "kept" }] };
+    const rootWire = wire([
+      [{ type: "delta", reasoningItems }, ...calls(call("lookup"))],
+      calls(call("coordinate")),
+      text("All done"),
+    ]);
+    const task: AgentMessage = { role: "user", content: "Summarize what we found." };
+    const root = defineAgent({
+      ...base,
+      id: "root",
+      instructions: "Coordinate the work.",
+      provider: rootWire.provider,
+      tools: [
+        ordinary("lookup", async () => "Found it"),
+        coordinator([plain, informed], async (context) => {
+          expect(Object.isFrozen(context.conversation)).toBe(true);
+          expect(Object.isFrozen(context.conversation[0])).toBe(true);
+          return context.join([
+            context.child("plain", plain, "Summarize what we found."),
+            context.child("informed", informed, { messages: [...context.conversation, task] }),
+          ]);
+        }),
+      ],
+    });
+    const result = await root.run({
+      messages: [
+        { role: "user", content: "Earlier question" },
+        { role: "assistant", content: "Earlier answer" },
+        { role: "user", content: "Find it." },
+      ],
+    });
+    expect(result.status).toBe("completed");
+    const childSystem = { role: "system", content: base.instructions };
+    expect(plainWire.histories[0]).toEqual([childSystem, task]);
+    // Coordinator code is trusted: the parent's provider-owned fields ride along. The root's
+    // system prompt and the round that called the coordinator stay out.
+    expect(informedWire.histories[0]).toEqual([
+      childSystem,
+      { role: "user", content: "Earlier question" },
+      { role: "assistant", content: "Earlier answer" },
+      { role: "user", content: "Find it." },
+      { role: "assistant", content: "", reasoningItems, toolCalls: [call("lookup")] },
+      { role: "tool", toolCallId: "wire-lookup", name: "lookup", content: "Found it" },
+      task,
+    ]);
+    const forwarded = JSON.stringify(informedWire.histories[0]);
+    expect(forwarded).not.toContain("Coordinate the work.");
+    expect(forwarded).not.toContain("wire-coordinate");
+  });
+
+  it.each([
+    ["parts", "child_key_conflict"],
+    ["history", "child_key_conflict"],
+    ["nothing after normalizing", "completed"],
+  ] as const)("compares a reused child key's input when %s changed", async (change, outcome) => {
+    const childWire = wire([text("child")]);
+    const child = defineAgent({ ...base, id: "child", provider: childWire.provider });
+    const context: AgentMessage[] = [
+      { role: "user", content: "Context" },
+      { role: "assistant", content: "Noted" },
+    ];
+    const original: AgentInput = {
+      messages: [...context, { role: "user", content: [{ type: "text", text: "Task" }] }],
+    };
+    const replayed: AgentInput =
+      change === "parts"
+        ? { messages: [...context, { role: "user", content: [{ type: "text", text: "Other" }] }] }
+        : change === "history"
+          ? {
+              messages: [
+                { role: "user", content: "Other context" },
+                { role: "assistant", content: "Noted" },
+                { role: "user", content: [{ type: "text", text: "Task" }] },
+              ],
+            }
+          : {
+              // A blank part is dropped, so this is the same child input.
+              messages: [
+                ...context,
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: " " },
+                    { type: "text", text: "Task" },
+                  ],
+                },
+              ],
+            };
+    let replay = false;
+    const root = defineAgent({
+      ...base,
+      id: "root",
+      provider: wire([calls(call("coordinate")), text("done")]).provider,
+      tools: [
+        coordinator(
+          [child],
+          async (coordination) =>
+            (await coordination.child("key", child, replay ? replayed : original).join()).status,
+        ),
+      ],
+    });
+    let durable: RunSnapshot | undefined;
+    await root.run("work", {
+      host: {
+        checkpoint(snapshot) {
+          durable = structuredClone(snapshot);
+          if (snapshot.delegations[0]?.children[0]?.snapshot.state.status === "completed")
+            throw new Error("Stopped after child");
+        },
+      },
+    });
+    replay = true;
+    const result = await root.resume(checkpoint(durable), { host: { authorizeResume } });
+    expect(result.status === "failed" ? result.error.code : result.status).toBe(outcome);
+    expect(childWire.histories).toHaveLength(1);
   });
 });

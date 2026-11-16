@@ -1,18 +1,37 @@
-import { parseToolArgs, type TokenUsage, type ToolCall, type Turn } from "@providerkit/core";
+import {
+  isEffort,
+  parseToolArgs,
+  type ChatMessage,
+  type FileMimeType,
+  type ImageMimeType,
+  type ImagePart,
+  type TokenUsage,
+  type ToolCall,
+  type Turn,
+} from "@providerkit/core";
 import type {
+  AgentMessage,
   ApprovalScope,
   ChildPathStep,
   DelegationExecution,
+  InputPart,
   ModelExecution,
+  ModelSettings,
   PendingApproval,
+  RecordedModelSettings,
+  RunDefinition,
+  RunFailure,
   RunLimits,
   RunOptions,
   RunSnapshot,
   RunState,
+  Session,
+  SessionStatus,
   ToolExecution,
   ToolRequest,
   ToolResult,
   TreeLimits,
+  UserContent,
 } from "./types.ts";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -88,10 +107,11 @@ export function readLimits(value: unknown = {}): RunLimits {
     toolCalls: value.toolCalls ?? 32,
     elapsedMs: value.elapsedMs ?? 300_000,
     parallelTools: value.parallelTools ?? 3,
+    inlineBytes: value.inlineBytes ?? 5_000_000,
   };
   if (!isLimits(limits)) {
     throw new TypeError(
-      "Agent limits must be positive finite integers; elapsedMs must fit a timer.",
+      "Agent limits must be positive finite integers (inlineBytes may be 0); elapsedMs must fit a timer.",
     );
   }
   return limits;
@@ -104,7 +124,157 @@ function isLimits(value: unknown): value is RunLimits {
     positive(value.toolCalls) &&
     positive(value.elapsedMs) &&
     value.elapsedMs <= 2_147_483_647 &&
-    positive(value.parallelTools)
+    positive(value.parallelTools) &&
+    finite(value.inlineBytes) &&
+    Number.isSafeInteger(value.inlineBytes)
+  );
+}
+
+const IMAGE_TYPES: readonly ImageMimeType[] = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+];
+
+export function isImageMime(value: unknown): value is ImageMimeType {
+  return IMAGE_TYPES.some((type) => type === value);
+}
+
+/** Core's file types, with an RFC 6838 subtype and no parameters, so the value a provider
+ * receives is the plain media type it documents. */
+export function isFileMime(value: unknown): value is FileMimeType {
+  return (
+    typeof value === "string" &&
+    /^(?:application|audio|video|text)\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/.test(value)
+  );
+}
+
+// Ported from TanStack AI (MIT), packages/ai-harness/src/inline-media.ts: check base64 and
+// count its bytes from the length, without decoding. Stricter here: no whitespace and padded
+// to a multiple of four, because the text goes to the provider exactly as given.
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+export function isBase64(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value.length % 4 === 0 && BASE64.test(value)
+  );
+}
+
+function decodedBytes(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return (base64.length / 4) * 3 - padding;
+}
+
+/** Decoded bytes of every inline image and file: user parts and tool images alike. */
+export function inlineBytes(history: readonly AgentMessage[], input: UserContent): number {
+  let total = 0;
+  const count = (parts: readonly InputPart[]) => {
+    for (const part of parts)
+      if (part.type === "image" || part.type === "file") total += decodedBytes(part.data);
+  };
+  for (const message of history) {
+    if (message.role === "user" && typeof message.content !== "string") count(message.content);
+    if (message.role === "tool" && message.images) count(message.images);
+  }
+  if (typeof input !== "string") count(input);
+  return total;
+}
+
+function isImage(value: unknown): value is ImagePart {
+  return (
+    isRecord(value) && value.type === "image" && isImageMime(value.mimeType) && isBase64(value.data)
+  );
+}
+
+export function isPart(value: unknown): value is InputPart {
+  if (!isRecord(value)) return false;
+  switch (value.type) {
+    case "text":
+      return typeof value.text === "string";
+    case "image":
+      return isImage(value);
+    case "file":
+      return isFileMime(value.mimeType) && isBase64(value.data);
+    case "media":
+      return isId(value.id) && (isImageMime(value.mimeType) || isFileMime(value.mimeType));
+    default:
+      return false;
+  }
+}
+
+/** A frozen new turn: non-empty text, or at least one part. */
+export function isTurnContent(value: unknown): value is UserContent {
+  return isId(value) || (Array.isArray(value) && value.length > 0 && value.every(isPart));
+}
+
+function isAssistant(value: unknown): value is Extract<ChatMessage, { role: "assistant" }> {
+  return (
+    isRecord(value) &&
+    value.role === "assistant" &&
+    typeof value.content === "string" &&
+    optional(value.reasoning, (v) => typeof v === "string") &&
+    optional(value.reasoningDetails, Array.isArray) &&
+    optional(
+      value.reasoningItems,
+      (v) => isRecord(v) && typeof v.provider === "string" && Array.isArray(v.items),
+    ) &&
+    optional(value.toolCalls, (v) => Array.isArray(v) && v.every(isCall))
+  );
+}
+
+/** Shape only. Who may send which message is the input normalizer's rule, not this one. */
+export function isAgentMessage(value: unknown): value is AgentMessage {
+  if (!isRecord(value)) return false;
+  switch (value.role) {
+    case "user":
+      return (
+        typeof value.content === "string" ||
+        (Array.isArray(value.content) && value.content.every(isPart))
+      );
+    case "assistant":
+      return isAssistant(value);
+    case "tool":
+      return (
+        isId(value.toolCallId) &&
+        isId(value.name) &&
+        typeof value.content === "string" &&
+        optional(value.images, (v) => Array.isArray(v) && v.every(isImage))
+      );
+    default:
+      return false;
+  }
+}
+
+function isFailure(value: unknown): value is RunFailure {
+  return (
+    isRecord(value) && isId(value.code) && isId(value.message) && optional(value.operationId, isId)
+  );
+}
+
+export function isRevision(value: unknown): value is string | null {
+  return value === null || isId(value);
+}
+
+function isSessionRef(value: unknown): value is NonNullable<RunSnapshot["session"]> {
+  return isRecord(value) && isId(value.id) && isRevision(value.revision);
+}
+
+export function isSessionStatus(value: unknown): value is SessionStatus {
+  if (!isRecord(value) || !isId(value.id)) return false;
+  return (
+    value.status === "pending" ||
+    (value.status === "saved" && isId(value.revision)) ||
+    (value.status === "unsaved" && isFailure(value.error))
+  );
+}
+
+export function isSession(value: unknown): value is Session {
+  return (
+    isRecord(value) &&
+    isId(value.id) &&
+    typeof value.load === "function" &&
+    typeof value.append === "function"
   );
 }
 
@@ -143,7 +313,79 @@ function isPath(value: unknown): value is ChildPathStep[] {
   );
 }
 
-export function checkOptions(value: unknown): asserts value is RunOptions {
+export function isNames(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isId) && new Set(value).size === value.length;
+}
+
+export function isEnabledTools(value: unknown): boolean {
+  return typeof value === "function" || isNames(value);
+}
+
+const MODEL_SETTINGS = {
+  model: isId,
+  maxAttempts: positive,
+  effort: (value) => typeof value === "string" && isEffort(value),
+  maxTokens: positive,
+  temperature: finite,
+  topP: (value) => finite(value) && value <= 1,
+  stopSequences: (value) => Array.isArray(value) && value.every(isId),
+  toolChoice: (value) =>
+    ["auto", "none", "required"].some((choice) => choice === value) ||
+    (isRecord(value) && isId(value.name) && Object.keys(value).length === 1),
+  jsonWithTools: (value) => value === "prompt" || value === "response_format",
+  parallelToolCalls: (value) => typeof value === "boolean",
+  serviceTier: (value) => value === "priority" || value === "flex",
+  onActivity: (value) => typeof value === "function",
+  onRateLimit: (value) => typeof value === "function",
+} satisfies Record<keyof ModelSettings, (value: unknown) => boolean>;
+
+function isModelSettings(value: unknown): value is ModelSettings {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) => Object.hasOwn(MODEL_SETTINGS, key)) &&
+    Object.entries(MODEL_SETTINGS).every(([key, guard]) => optional(value[key], guard))
+  );
+}
+
+export function isRecordedModelSettings(value: unknown): value is RecordedModelSettings {
+  return (
+    isModelSettings(value) && value.onActivity === undefined && value.onRateLimit === undefined
+  );
+}
+
+export function readModelSettings(value: unknown = {}): ModelSettings {
+  if (!isModelSettings(value))
+    throw new TypeError(
+      "Invalid modelSettings. Use core StreamOptions without signal, sessionId or json; the agent owns those fields.",
+    );
+  // Undefined means inherit, not erase a lower-precedence value. Keep observers outside the
+  // JSON copy: they do not change the request and may close over process-local services.
+  const defined = Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  );
+  if (!isModelSettings(defined)) throw new TypeError("Invalid modelSettings.");
+  const { onActivity, onRateLimit, ...data } = defined;
+  return {
+    ...copyData(data),
+    ...(onActivity ? { onActivity } : {}),
+    ...(onRateLimit ? { onRateLimit } : {}),
+  };
+}
+
+function isRunDefinition(value: unknown): value is RunDefinition {
+  return (
+    isRecord(value) &&
+    typeof value.instructions === "string" &&
+    isRecordedModelSettings(value.modelSettings) &&
+    isNames(value.enabledTools) &&
+    isNames(value.stopAtTools)
+  );
+}
+
+export function checkOptions(
+  value: unknown,
+  use: "run" | "resume" = "run",
+): asserts value is RunOptions {
   if (
     !isRecord(value) ||
     !optional(value.runId, isId) ||
@@ -154,6 +396,28 @@ export function checkOptions(value: unknown): asserts value is RunOptions {
   ) {
     throw new TypeError("Invalid run options.");
   }
+  if (!optional(value.session, isSession))
+    throw new TypeError("A session needs an id and load and append functions.");
+  if (!optional(value.historyLimit, positive))
+    throw new TypeError("historyLimit must be a positive whole number.");
+  if (!optional(value.prepareHistory, (fn) => typeof fn === "function"))
+    throw new TypeError("prepareHistory must be a function.");
+  if (!optional(value.enabledTools, isEnabledTools))
+    throw new TypeError(
+      "enabledTools must be an allow-list of unique tool names, or a function returning one.",
+    );
+  if (value.modelSettings !== undefined) readModelSettings(value.modelSettings);
+  // ResumeOptions leaves these out, but a JavaScript caller can still pass them. Say so,
+  // rather than ignore a value someone set.
+  if (
+    use === "resume" &&
+    [value.historyLimit, value.prepareHistory, value.modelSettings, value.enabledTools].some(
+      (item) => item !== undefined,
+    )
+  )
+    throw new TypeError(
+      "historyLimit, prepareHistory, modelSettings and enabledTools apply when a run starts. A resumed run keeps its recorded history and definition.",
+    );
   if (value.host !== undefined) {
     if (!isRecord(value.host)) throw new TypeError("The run host must be an object.");
     for (const key of [
@@ -164,6 +428,7 @@ export function checkOptions(value: unknown): asserts value is RunOptions {
       "beforeTool",
       "canRunConcurrently",
       "child",
+      "loadMedia",
     ]) {
       if (!optional(value.host[key], (fn) => typeof fn === "function")) {
         throw new TypeError(`host.${key} must be a function.`);
@@ -227,18 +492,9 @@ export function isUsage(value: unknown): value is TokenUsage {
 }
 
 function isTurn(value: unknown): value is Turn {
-  if (!isRecord(value) || !isUsage(value.usage) || !isRecord(value.message)) return false;
-  const message = value.message;
+  if (!isRecord(value) || !isUsage(value.usage)) return false;
   return (
-    message.role === "assistant" &&
-    typeof message.content === "string" &&
-    optional(message.reasoning, (v) => typeof v === "string") &&
-    optional(message.reasoningDetails, Array.isArray) &&
-    optional(
-      message.reasoningItems,
-      (v) => isRecord(v) && typeof v.provider === "string" && Array.isArray(v.items),
-    ) &&
-    optional(message.toolCalls, (v) => Array.isArray(v) && v.every(isCall)) &&
+    isAssistant(value.message) &&
     [null, "stop", "length", "tool_calls", "content_filter"].some(
       (v) => v === value.finishReason,
     ) &&
@@ -263,11 +519,20 @@ function isToolResult(value: unknown): value is ToolResult {
     isRecord(value) &&
     typeof value.content === "string" &&
     (value.ok === true
-      ? value.kind === undefined
+      ? value.kind === undefined &&
+        optional(value.final, (final) => isRecord(final) && serializable(final.candidate))
       : value.ok === false &&
-        ["invalid_input", "timeout", "aborted", "failed", "denied", "unknown_tool"].some(
-          (kind) => kind === value.kind,
-        ))
+        value.final === undefined &&
+        [
+          "invalid_input",
+          "timeout",
+          "aborted",
+          "failed",
+          "denied",
+          "unknown_tool",
+          "disabled_tool",
+          "invalid_output",
+        ].some((kind) => kind === value.kind))
   );
 }
 
@@ -316,12 +581,7 @@ function isState(value: unknown): value is RunState {
         "treeElapsedMs",
       ].some((v) => v === value.limit);
     case "failed":
-      return (
-        isRecord(value.error) &&
-        isId(value.error.code) &&
-        isId(value.error.message) &&
-        optional(value.error.operationId, isId)
-      );
+      return isFailure(value.error);
     default:
       return false;
   }
@@ -342,12 +602,18 @@ function isDelegationJournal(value: unknown): value is DelegationExecution {
   );
 }
 
+/** Format 3 only. A format 2 snapshot from 0.1.0 has no reader: it is refused, not migrated. */
 function isSnapshot(value: unknown): value is RunSnapshot {
   return (
     isRecord(value) &&
-    value.format === 2 &&
-    [value.agentId, value.version, value.runId, value.attemptId, value.input].every(isId) &&
+    value.format === 3 &&
+    [value.agentId, value.version, value.runId, value.attemptId].every(isId) &&
     positive(value.startedAt) &&
+    isRunDefinition(value.definition) &&
+    Array.isArray(value.history) &&
+    value.history.every(isAgentMessage) &&
+    isTurnContent(value.input) &&
+    optional(value.session, isSessionRef) &&
     isLimits(value.limits) &&
     Array.isArray(value.models) &&
     value.models.every(isModel) &&
@@ -433,7 +699,10 @@ export function checkTree(root: RunSnapshot): void {
 export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): void {
   if (
     previous.runId !== next.runId ||
-    previous.input !== next.input ||
+    !equalData(previous.definition, next.definition) ||
+    !equalData(previous.history, next.history) ||
+    !equalData(previous.input, next.input) ||
+    !equalData(previous.session, next.session) ||
     previous.startedAt !== next.startedAt ||
     previous.agentId !== next.agentId ||
     previous.version !== next.version ||
@@ -481,6 +750,24 @@ export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): vo
   }
 }
 
+/** The selected result is journal data, not a second invocation of the tool. Model order
+ * wins even when a later tool in a parallel batch finishes first. */
+export function finalToolResult(
+  model: Extract<ModelExecution, { status: "completed" }>,
+  stopAtTools: readonly string[],
+  resultTool?: string,
+): { candidate: unknown } | undefined {
+  const calls = model.turn.message.toolCalls ?? [];
+  for (const [index, call] of calls.entries()) {
+    const tool = model.tools[index];
+    if (tool?.status !== "completed" || !tool.result.ok) continue;
+    if (calls.length === 1 && call.name === resultTool)
+      return { candidate: parseToolArgs(call.arguments) };
+    if (stopAtTools.includes(call.name) && tool.result.final) return tool.result.final;
+  }
+  return undefined;
+}
+
 /** Validate the journal as well as its fields, so a cursor cannot skip unrecorded work. */
 export function readSnapshot(
   raw: unknown,
@@ -499,6 +786,17 @@ export function readSnapshot(
     if (model.id !== modelId(raw.runId, index))
       throw new TypeError("Invalid model operation identity.");
     const last = index === raw.models.length - 1;
+    // A plain-text run gets one last answer with no tools. It is still a model operation
+    // counted by the tree. No receipt on that extra turn may claim a tool was executed.
+    if (
+      index >= limits.turns &&
+      (resultTool ||
+        index !== limits.turns ||
+        (model.status === "completed" && model.tools.some((tool) => tool.status !== "pending")))
+    )
+      throw new TypeError(
+        "The final tool-free turn cannot execute tools or exceed the turn allowance.",
+      );
     if (model.status === "running") {
       if (!last) throw new TypeError("A model operation has an unknown outcome before later work.");
       continue;
@@ -532,6 +830,17 @@ export function readSnapshot(
       ) {
         throw new TypeError("An unfinished model turn cannot have executed tools.");
       }
+      if (tool.status === "completed" && tool.result.ok) {
+        if (
+          !raw.definition.enabledTools.includes(call.name) ||
+          raw.definition.modelSettings.toolChoice === "none"
+        )
+          throw new TypeError("A disabled tool cannot have a successful result.");
+        if (tool.result.final && !raw.definition.stopAtTools.includes(call.name))
+          throw new TypeError("This tool is not configured to produce a final result.");
+        if (raw.definition.stopAtTools.includes(call.name) && !tool.result.final)
+          throw new TypeError("A successful stopping tool must record its final result.");
+      }
       pending ||= tool.status === "pending";
       if (tool.status !== "pending") calls++;
     }
@@ -541,15 +850,16 @@ export function readSnapshot(
         model.turn.finishReason === null ||
         model.turn.finishReason === "length" ||
         model.turn.finishReason === "content_filter" ||
-        (tools.length === 1 &&
-          tools[0]?.name === resultTool &&
-          model.tools[0]?.status === "completed" &&
-          model.tools[0].result.ok))
+        finalToolResult(model, raw.definition.stopAtTools, resultTool))
     ) {
       throw new TypeError("A finished model turn cannot have later work.");
     }
   }
-  if (raw.models.length > limits.turns || calls > limits.toolCalls)
+  if (
+    raw.models.length > limits.turns + (resultTool ? 0 : 1) ||
+    calls > limits.toolCalls ||
+    inlineBytes(raw.history, raw.input) > limits.inlineBytes
+  )
     throw new TypeError("The snapshot exceeds this agent's limits.");
   const last = raw.models.at(-1);
   if (raw.state.status === "completed") {
@@ -563,19 +873,12 @@ export function readSnapshot(
       throw new TypeError("A completed run must have a completed final turn.");
     }
     const tools = last.turn.message.toolCalls ?? [];
-    let candidate: unknown;
-    if (resultTool) {
-      if (
-        tools.length === 1 &&
-        tools[0]?.name === resultTool &&
-        last.tools[0]?.status === "completed" &&
-        last.tools[0].result.ok
-      ) {
-        candidate = parseToolArgs(tools[0].arguments);
-      }
-    } else if (tools.length === 0 && last.turn.message.content.trim()) {
-      candidate = last.turn.message.content;
-    }
+    const final = finalToolResult(last, raw.definition.stopAtTools, resultTool);
+    const candidate = final
+      ? final.candidate
+      : !resultTool && tools.length === 0 && last.turn.message.content.trim()
+        ? last.turn.message.content
+        : undefined;
     if (candidate === undefined || !equalData(candidate, raw.state.candidate)) {
       throw new TypeError("The completed result does not match its recorded turn.");
     }

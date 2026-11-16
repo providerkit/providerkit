@@ -44,6 +44,92 @@ provider as supplied; it does not add another retry loop.
 Change the agent's version when its instructions, tools or result contract change. A saved run
 from another version is refused rather than resumed under different rules.
 
+## Model settings
+
+Give the agent an output ceiling, especially on services that reserve the whole context window
+when no ceiling is set:
+
+```ts
+const writer = defineAgent({
+  id: "writer",
+  version: "1",
+  instructions: "Explain technical topics in short sentences.",
+  provider,
+  modelSettings: { maxTokens: 2_048 },
+});
+```
+
+Override settings for one run:
+
+```ts
+await writer.run("Explain database indexes.", { modelSettings: { maxTokens: 512 } });
+```
+
+`ModelSettings` is core's `StreamOptions` without `signal`, `sessionId` or `json`. The SDK owns
+those three: use `RunOptions.signal` to stop, and `output` for checked results. Provider defaults
+apply first, agent settings override them, and run settings win last. Unset or `undefined` fields
+inherit; `0` and `false` do not. All settings go to every model call. Support still depends on the
+provider, which may refuse a setting.
+
+The resolved settings are saved in `snapshot.definition.modelSettings`. Resume cannot change
+them. The two observers, `onActivity` and `onRateLimit`, are functions, so they stay in memory
+rather than in JSON. After a restart, only observers from the rebuilt agent apply; reattach
+progress through `onEvent`.
+
+`toolChoice` accepts `"auto"`, `"none"`, `"required"` or `{ name: "lookup" }`. A named tool must
+be enabled. After a tool call, a forced choice becomes `"auto"` for the rest of that run,
+including after resume. `"none"` stays `"none"`: calls a provider returns anyway are refused.
+A checked-output agent refuses `"none"` at creation because it needs `submit_result` to finish.
+
+## Instructions and tools per run
+
+Build instructions from trusted host context:
+
+```ts
+const writer = defineAgent({
+  id: "writer",
+  version: "1",
+  instructions: (run) => `Reply in ${run.context.locale ?? "en"}.`,
+  provider,
+});
+await writer.run("Explain database indexes.", { context: { locale: "es" } });
+```
+
+The callback receives a `RunContext`: the agent id and version, run id, prepared history, new
+input, host `context` and cancellation `signal`. History and input are frozen copies. Host
+services in `context`, such as a database handle, stay in memory and are not saved.
+
+`enabledTools` takes registered tool names or a function that returns them:
+
+```ts
+const reader = defineAgent({
+  id: "reader",
+  version: "1",
+  instructions: "Read the records you need, then answer.",
+  provider,
+  tools: [lookup, update],
+  enabledTools: (run) => (run.context.canWrite ? ["lookup", "update"] : ["lookup"]),
+});
+await reader.run("Find this record.", { enabledTools: ["lookup"] });
+```
+
+An empty list disables ordinary tools. The reserved `submit_result` stays enabled when there
+is an output contract. A run may narrow the agent's list, never enable a tool its policy disabled.
+Tools keep their definition order, which is part of the provider's cached prompt. Disabled tools
+are hidden from the model and refused if it calls them anyway, before approval or invocation.
+`beforeTool` must still check current access: a saved allow-list is not authorization.
+
+Instructions and tool selection resolve once, after history preparation and before the first
+checkpoint. They are saved in `snapshot.definition`, alongside the model settings and stopping
+tools. A resumed run uses that record, even if host context changed. It never calls these
+functions again. If a function throws, creation throws before any model call or checkpoint.
+Keep paid work and effects out of these callbacks: a process that dies before the first save
+can call them again.
+
+A specialist resolves its own definition using the shared host context, but never inherits its
+parent's run-level model settings or tool selection. Reusing a saved child never resolves it
+again.
+
 ## Results and progress
 
 ```ts
@@ -85,6 +171,154 @@ Reasoning without an answer is not success. A provider's length-limited answer i
 a complete result. Increase the provider's output allowance when appropriate rather than blindly
 repeating a paid request.
 
+## Conversations
+
+Pass the thread's messages. The last one is the new user turn:
+
+```ts
+const result = await writer.run({
+  messages: [
+    { role: "user", content: "Explain database indexes." },
+    { role: "assistant", content: "An index is a sorted copy of one column." },
+    { role: "user", content: "When does an index slow things down?" },
+  ],
+});
+```
+
+The agent's `instructions` are its system prompt, so a conversation never carries a system
+message: one is refused. So is an empty list, or one whose last message is not a user turn. A tool
+call in the history never runs. The run answers it as interrupted and runs only the calls the
+model makes now.
+
+`result.history` holds the earlier messages, the new turn and every settled round, without the
+system prompt. Send it back next time with the next turn added. `result.newMessages` holds only
+what this run added. Invalid input throws a `TypeError` before anything is saved or loaded.
+
+A browser can forge the history it sends. The run keeps only the fields a model reads: it drops
+`reasoningDetails`, `reasoningItems` and each call's `thoughtSignature`, which belong to the
+provider, and it refuses a tool result that answers no call. The model still reads every word
+of that history, so `beforeTool` must check each action, as it already does.
+
+### Images and files
+
+A user turn can be a list of parts:
+
+```ts
+await writer.run([
+  { type: "text", text: "What does this chart show?" },
+  { type: "image", mimeType: "image/png", data: chartBase64 },
+]);
+```
+
+An image must be JPEG, PNG, WebP or GIF. A file part (`type: "file"`) takes an `application/`,
+`audio/`, `video/` or `text/` type. Core sends files only to Gemini; the other adapters refuse
+them, and the run fails. Bytes are padded base64 text. A blank text part beside an attachment is
+dropped.
+
+A run accepts 5 MB of inline images and files across its history and new turn
+(`limits.inlineBytes`). The snapshot keeps them, and every checkpoint writes the whole snapshot
+again, so larger files belong behind a reference.
+
+### Media references
+
+Keep the bytes on your server and send a reference:
+
+```ts
+await writer.run(
+  [
+    { type: "text", text: "Summarize this report." },
+    { type: "media", id: "upload-81", mimeType: "application/pdf" },
+  ],
+  { host: { loadMedia: (ref, run) => readUpload(ref.id, run.signal) } },
+);
+```
+
+The run stores only the id. Right before a model call it asks `host.loadMedia` for the bytes as
+base64, once per id per attempt. The bytes go into the provider request and nowhere else: not the
+snapshot, the outcome, the session or an event. With no loader, or one that fails, the run fails
+with `media_unavailable` before the model call starts.
+
+`loadMedia` must check that the run's owner may read that id. The bytes behind an id must never
+change: one earlier byte that changes makes the provider bill its whole prompt cache again. Set
+`limits.inlineBytes: 0` to accept references only.
+
+### Sessions
+
+A session keeps the conversation on your server, so each request sends only the new turn:
+
+```ts
+import { createMemorySession } from "@providerkit/agents";
+
+const thread = createMemorySession();
+await writer.run("Explain database indexes.", { session: thread });
+const next = await writer.run("When do they slow down writes?", { session: thread });
+```
+
+The run loads the history once, before it saves anything, and freezes it in the snapshot. When
+the run ends (completed, failed, cancelled or limited) and its last checkpoint is saved, it
+appends the new turn and its settled rounds once, keyed by its run ID. A run waiting for approval
+appends when it finishes. A run the person stops still saves the turn they sent. The background
+binding is the exception: cancelling a background run stops all of its writes, the session's
+included.
+
+`historyLimit` loads only the newest messages. A window that starts inside a tool round is
+repaired before it is sent. `prepareHistory` runs once on the history, before the run is saved,
+to trim or summarize it. It runs before the first checkpoint, so a paid summary can run again if
+the process dies before that save.
+
+`next.session` says what happened to the turn:
+
+| Status    | Meaning                                                                                |
+| --------- | -------------------------------------------------------------------------------------- |
+| `saved`   | The session has it, at `revision`.                                                     |
+| `pending` | Not appended yet: the run waits, its last checkpoint failed, or no session was passed. |
+| `unsaved` | The append failed. Read `error.code` and `error.message`.                              |
+
+`session_conflict` means another turn landed after this run loaded the history, say from a
+second tab while this run waited for approval. Load the conversation again before you continue
+it. An append that fails never changes the run's own status.
+
+Resume never loads a session again. Pass the run's own session to `resume` so the turn is
+appended when the run settles; another session is refused. A specialist never gets its parent's
+session.
+
+`createMemorySession` keeps everything in this process and loses it when the process ends. For
+your own store, implement `Session` (`load` and `append`) and check it with
+`await checkSession(() => createTestSession())`. It writes to fresh sessions, so point it at a
+test database.
+
+### Edit or regenerate a turn
+
+Send the conversation up to the user turn whose answer you want again:
+
+```ts
+await writer.run({ messages: messages.slice(0, userTurnIndex + 1) });
+```
+
+To edit that turn, replace it and leave out everything after it:
+
+```ts
+await writer.run({
+  messages: [
+    ...messages.slice(0, userTurnIndex),
+    { role: "user", content: "Explain indexes with one short SQL query." },
+  ],
+});
+```
+
+Both calls start a new run; `resume` continues an existing one. A session only appends, so start
+another one from the earlier messages, for example
+`createMemorySession({ messages: messages.slice(0, userTurnIndex) })`, then send the edited turn
+with that session. Things the agent already did, like a sent email, stay done.
+
+### What a browser may see
+
+Snapshots, receipts, raw progress events and session revisions are for your server. They hold
+prompts, tool arguments and results, and the fields a provider owns, which `model_chunk` events
+carry too. Send a browser the display data your server builds. When it needs the messages, send
+`toClientMessages(result.history)`, which leaves out the provider-owned fields. Replace inline
+bytes with references, and serve the bytes from a route that checks access.
+
 ## Tools and checked output
 
 Pass core `Tool` instances in `tools`. Their input validation, timeouts and error outcomes remain
@@ -96,6 +330,35 @@ For a checked result, supply `output.schema` and `output.validate`. The schema t
 to submit; the validator checks the actual value. Return the desired TypeScript value or throw a
 message explaining what to correct. The SDK reserves the `submit_result` tool name for this path.
 A validator should be pure: it can run again when a completed result is restored.
+
+### End on a tool result
+
+When a tool already has the answer, avoid paying the model to rewrite it:
+
+```ts
+const finder = defineAgent({
+  id: "finder",
+  version: "1",
+  instructions: "Use lookup to find matching records.",
+  provider,
+  tools: [lookup],
+  stopAtTools: ["lookup"],
+});
+```
+
+The run ends after that tool succeeds, without another model call. A text agent returns the
+summary the tool supplies. With an `output` contract, the tool's raw output must pass its validator;
+the summary still goes into history. A failure or rejected result goes back to the model to
+correct. An invalid result does not undo the tool's effects.
+
+`stopAtTools` names ordinary host tools, not delegations or `submit_result`. If a turn calls
+several tools, all of them settle before the run ends. The first successful stopping tool in the
+model's call order supplies the answer, regardless of which one finishes first.
+
+Core tools marked `isTerminal: true` also stop the run this way, but must be called alone. For
+these host tools the final answer comes from the tool's result, not its input. `submit_result`
+still validates its input. Stopping results are recorded in the tool receipt, so resume never
+repeats a finished effect or asks the model to rephrase it.
 
 ## Specialists and parallel work
 
@@ -116,10 +379,10 @@ const editor = defineAgent({
 });
 ```
 
-The specialist gets the explicit input sent to it, not the parent's conversation. Its result returns
+The specialist gets only the input sent to it, not the parent's conversation. Its result returns
 to the orchestrator; this is not a conversation handoff. Each agent can use a different core provider.
 `asTool` propagates a specialist's stopped outcome. Use `defineDelegation` when your code needs to
-combine several explicit child outcomes.
+combine several explicit child outcomes, or to share the conversation.
 
 A delegation declares its fixed `specialists` list, input schema and validator. Inside its `run`
 callback, start children before joining them:
@@ -134,9 +397,22 @@ Children start immediately, subject to the shared limit. Joining returns outcome
 requested, not the order they finish. Check their statuses and return only what the parent needs,
 not their full snapshots. A suspended child pauses the parent instead of becoming a success string.
 
+A child takes the same input as `run`: text, parts or `{ messages }`. To let a child read what came
+before, forward `context.conversation`, the parent's messages before this tool call, without the
+system prompt or the unfinished round:
+
+```ts
+const review = context.child("review", reviewer, {
+  messages: [...context.conversation, { role: "user", content: input }],
+});
+```
+
+Your coordinator is trusted code, so provider-owned fields in the forwarded messages are kept.
+Media references stay references, and the child reads them through the same `host.loadMedia`.
+
 Coordination callbacks must be pure: use `child` and `join` for work. The callback can run again
-after an interruption, but completed children are reused. Reusing a child key with different input
-or a different agent is refused. Every admitted child settles before the delegation ends.
+after an interruption, but completed children are reused. Reusing a child key with a different
+input, history or agent is refused. Every admitted child settles before the delegation ends.
 
 A child key becomes part of the child's run ID and of every operation ID under it. Progress events
 carry those IDs, and a screen that shows the run may send them to a browser. So key children by
@@ -144,8 +420,12 @@ position or by a fixed name, such as `topic-1`, and never by their input.
 
 ## Limits and usage
 
-Per-run defaults are 12 model turns, 32 tool calls, 5 minutes and at most 3 approved concurrent
-ordinary tools. Change these through `limits` when configuring an agent.
+Per-run defaults are 12 model turns, 32 tool calls, 5 minutes, at most 3 approved concurrent
+ordinary tools and 5 MB (`inlineBytes: 5_000_000`) of inline images and files. Change these
+through `limits` when configuring an agent. Once a text agent uses all its model turns, it gets
+one final call with no tools to answer from what it found. That call still counts against the
+tree's model-call and time budgets. Any tool calls it returns are refused. Checked-output agents
+keep the hard turn cap because a tool-free call cannot submit their result.
 
 The root's `treeLimits` apply across all descendants:
 
@@ -189,8 +469,9 @@ crash, so resume refuses to repeat it automatically. An email, payment or paid m
 finished before its result was saved. Reconcile that outcome or use a receiving service that
 honors an idempotency key; a checkpoint alone cannot make the action happen exactly once.
 
-Snapshots include prompts, tool arguments and results. The host owns access, storage and retention.
-Progress events are not a substitute for saved execution state.
+Snapshots include the conversation, prompts, tool arguments and results. The host owns access,
+storage and retention. Progress events are not a substitute for saved execution state. This
+version writes snapshot format 3. A format 2 snapshot from 0.1.0 is refused, not converted.
 
 ## Background runs
 
@@ -222,9 +503,38 @@ for these connections. A stored job without a worker and recovery sweep does not
 `start` saves the input before returning an ID. If queueing fails, `BackgroundEnqueueError.id`
 identifies the saved run. Requeue that ID or let the sweep find it; do not create another run.
 
+`start` takes the same input as `run`. For a conversation, pass a session factory and the
+conversation's id:
+
+```ts
+const jobs = createBackgroundAgent({
+  agent: writer,
+  kind: "writer-v1",
+  runs,
+  enqueue,
+  policy,
+  session: openConversation,
+});
+const { id } = await jobs.start(authenticatedOwner, "Add a section on costs.", { sessionId });
+```
+
+`openConversation(owner, id)` is your trusted code, and returns a `Session`. It must check that
+the owner may use that conversation: an id from a request is not authorization. `start` reads the history inside the authenticated
+request and freezes it in the saved run. The worker gets the session again from the factory, with
+the stored owner, and appends the turn when the run settles; `saved.outcome.session` says whether
+that worked. `historyLimit` and `prepareHistory` on `createBackgroundAgent` apply in `start`.
+Media references are read in the worker through `policy.loadMedia`.
+
+`start` also takes `context`, `modelSettings` and `enabledTools`. Build these in trusted server
+code. Context is available to the definition callbacks while `start` runs, but is not stored.
+Only the resolved definition is saved. The worker's tools get fresh context from `policy.context`.
+Background `start` refuses model-setting observers because functions cannot survive the queue.
+Put them on the agent instead.
+
 `read` and `wait` return two statuses. `saved.status` describes the host worker run;
 `saved.outcome?.status` describes the agent. A successful worker run can contain a suspended or
-failed agent outcome. Read the latter before treating the answer as complete.
+failed agent outcome. Read the latter before treating the answer as complete. `saved.snapshot`
+holds the whole conversation: keep it, and every raw event `observe` yields, on the server.
 
 Pass an observer signal to `observe` or `wait` to stop listening. That does not cancel the work.
 `cancel(owner, id)` cancels the whole run tree. Children execute in-process under their root's
@@ -265,14 +575,19 @@ From the repository root, run `bun install` and `bun run build`. Then, from `age
 bun run lint
 bun run typecheck
 bunx vitest run test/lifecycle.test.ts
+bunx vitest run test/definition.test.ts
 bunx vitest run test/delegation.test.ts
+bunx vitest run test/input.test.ts
+bunx vitest run test/session.test.ts
 bun examples/basic.ts
 bun examples/specialists.ts
+bun examples/conversation.ts
 ```
 
 These checks and examples use fake providers and tools. They do not call a live model or any app.
 The basic example runs a model/tool round. The specialist example runs a manager with two children
-and returns their notes in order. Neither needs an API key.
+and returns their notes in order. The conversation example runs two turns on a session, one with
+a picture sent by reference. None needs an API key.
 
 The background integration file needs a disposable local PostgreSQL database named
 `providerkit_agents`. It creates and drops its own schema and starts worker processes that it
