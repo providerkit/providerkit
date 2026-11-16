@@ -2299,3 +2299,162 @@ describe("anthropic hosted tools", () => {
     });
   });
 });
+
+/** An answer whose link sits after an emoji, so the annotation's code point
+ *  offsets and the text's JS indices differ by one. */
+const LINK = `([cats.example](${SOURCE_URL}))`;
+const SEARCHED = `Cats 🐈 sleep 12 to 16 hours ${LINK}.`;
+const OPENROUTER_SEARCH_TURN = [
+  j({ choices: [{ index: 0, delta: { role: "assistant", content: SEARCHED.slice(0, 20) } }] }),
+  j({
+    choices: [
+      {
+        index: 0,
+        delta: {
+          content: SEARCHED.slice(20),
+          annotations: [
+            {
+              type: "url_citation",
+              url_citation: {
+                url: SOURCE_URL,
+                title: "Cat sleep",
+                start_index: [...SEARCHED].indexOf("("),
+                end_index: [...SEARCHED].indexOf("(") + [...LINK].length,
+                content: "Cats sleep 12 to 16 hours.",
+              },
+            },
+          ],
+        },
+        finish_reason: "stop",
+      },
+    ],
+  }),
+  j({
+    choices: [],
+    usage: {
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      cost: 0.02,
+      server_tool_use_details: { web_search_requests: 1 },
+    },
+  }),
+];
+
+describe("openai-shape hosted web search", () => {
+  const openRouter = (fetchImpl: typeof fetch) =>
+    createOpenAIProvider({
+      apiKey: "k",
+      model: "openai/gpt-5",
+      baseUrl: "https://openrouter.ai/api",
+      id: "openrouter",
+      fetchImpl,
+    });
+
+  it("sends OpenRouter's own search tool, with every field", async () => {
+    const { seen, fetchImpl } = recorder(OPENROUTER_SEARCH_TURN);
+    await collect(
+      openRouter(fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [
+          {
+            type: "web_search",
+            maxUses: 2,
+            allowedDomains: ["cats.example"],
+            blockedDomains: ["dogs.example"],
+            userLocation: { country: "US" },
+          },
+        ],
+      }),
+    );
+    expect(seen[0]!.body.tools).toEqual([
+      {
+        type: "openrouter:web_search",
+        parameters: {
+          user_location: { type: "approximate", country: "US" },
+          allowed_domains: ["cats.example"],
+          excluded_domains: ["dogs.example"],
+          max_uses: 2,
+        },
+      },
+    ]);
+  });
+
+  it("reads OpenRouter's citations as markers on the link, and its stated search count", async () => {
+    const { message, usage, finishReason } = await collectTurn(
+      openRouter(recorder(OPENROUTER_SEARCH_TURN).fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [{ type: "web_search" }],
+      }),
+    );
+    const [citation] = message.citations ?? [];
+    expect(citation).toMatchObject({
+      source: { type: "url", url: SOURCE_URL, title: "Cat sleep" },
+      anchor: "marker",
+    });
+    expect(message.content.slice(citation?.start, citation?.end)).toBe(LINK);
+    // This wire states no record of the search, only its citations and count.
+    expect(message.hostedCalls).toBeUndefined();
+    expect(usage).toMatchObject({ hostedCalls: { web_search: 1 }, reportedCostUsd: 0.02 });
+    expect(finishReason).toBe("stop");
+  });
+
+  it("asks OpenAI's search models through web_search_options, which take no restriction", async () => {
+    const searcher = (fetchImpl: typeof fetch) =>
+      createOpenAIProvider({ apiKey: "k", model: "gpt-5-search-preview", fetchImpl });
+    const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+    await collect(
+      searcher(fetchImpl).createStream(QUESTION, [], {
+        hostedTools: [{ type: "web_search", userLocation: { city: "Lisbon" } }],
+      }),
+    );
+    expect(seen[0]!.body.web_search_options).toEqual({
+      user_location: { type: "approximate", approximate: { city: "Lisbon" } },
+    });
+    expect(seen[0]!.body).not.toHaveProperty("tools");
+
+    const filtered = recorder(OPENAI_TEXT_TURN);
+    await expect(
+      collect(
+        searcher(filtered.fetchImpl).createStream(QUESTION, [], {
+          hostedTools: [{ type: "web_search", allowedDomains: ["cats.example"] }],
+        }),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(filtered.seen).toHaveLength(0);
+  });
+
+  it("refuses a search anywhere else, and every other hosted type everywhere", async () => {
+    const elsewhere: [Record<string, unknown>, HostedTool][] = [
+      [{ model: "gpt-5" }, { type: "web_search" }],
+      [
+        { model: "deepseek-chat", baseUrl: "https://api.deepseek.com", id: "deepseek" },
+        { type: "web_search" },
+      ],
+      [{ model: "openai/gpt-5", baseUrl: "https://openrouter.ai/api" }, { type: "code_execution" }],
+    ];
+    for (const [config, tool] of elsewhere) {
+      const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+      await expect(
+        collect(
+          createOpenAIProvider({ apiKey: "k", model: "m", fetchImpl, ...config }).createStream(
+            QUESTION,
+            [],
+            { hostedTools: [tool] },
+          ),
+        ),
+      ).rejects.toMatchObject({ kind: "invalid" });
+      expect(seen).toHaveLength(0);
+    }
+  });
+
+  it("lets a preset say what its endpoint runs", async () => {
+    const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+    await collect(
+      createPresetProvider("groq", {
+        apiKey: "k",
+        model: "compound",
+        servesHostedTools: ["web_search"],
+        fetchImpl,
+      }).createStream(QUESTION, [], { hostedTools: [{ type: "web_search" }] }),
+    );
+    expect(seen[0]!.body.web_search_options).toEqual({});
+  });
+});

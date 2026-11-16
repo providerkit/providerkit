@@ -11,6 +11,15 @@ import {
   streamError,
   validateMaxAttempts,
 } from "../errors.ts";
+import {
+  codePointIndex,
+  hostedCounts,
+  planHostedTools,
+  servedAt,
+  type Citation,
+  type HostedTool,
+  type HostedToolType,
+} from "../hosted.ts";
 import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
 import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
@@ -139,6 +148,82 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   noSampling?: boolean;
   /** Default `service_tier` for every call; `StreamOptions.serviceTier` wins. */
   serviceTier?: ServiceTier;
+  /**
+   * The hosted tools this endpoint runs. This wire has one, web search.
+   * Defaults to it on openrouter.ai, which runs it as its own server tool,
+   * and on api.openai.com for the `-search-preview` models, and to none
+   * anywhere else: a gateway that ignores the tool answers unsearched
+   * without saying so. A host other than OpenRouter that runs it is sent
+   * OpenAI's `web_search_options`.
+   */
+  servesHostedTools?: readonly HostedToolType[];
+}
+
+/**
+ * Web search as this wire carries it. OpenRouter runs it as its own server
+ * tool, which takes every field (PydanticAI openrouter.py:840-853,1349-1355,
+ * MIT). OpenAI's search models take `web_search_options`, which has room for a
+ * location and nothing that restricts the search (PydanticAI
+ * openai/_chat_model.py:357-358,975-987).
+ */
+function webSearchFields(openRouter: boolean): Partial<Record<HostedToolType, readonly string[]>> {
+  return {
+    web_search: openRouter
+      ? ["allowedDomains", "blockedDomains", "maxUses", "userLocation"]
+      : ["userLocation"],
+  };
+}
+
+function openRouterWebSearch(tool: Extract<HostedTool, { type: "web_search" }>): unknown {
+  return {
+    type: "openrouter:web_search",
+    parameters: {
+      ...(tool.userLocation
+        ? { user_location: { type: "approximate", ...tool.userLocation } }
+        : {}),
+      allowed_domains: tool.allowedDomains,
+      excluded_domains: tool.blockedDomains,
+      max_uses: tool.maxUses,
+    },
+  };
+}
+
+/** A chat annotation: OpenRouter's and OpenAI's search models nest it the same way. */
+interface ChatAnnotation {
+  type?: string;
+  url_citation?: {
+    url?: string;
+    title?: string;
+    start_index?: number;
+    end_index?: number;
+    content?: string;
+  };
+}
+
+/**
+ * A `url_citation` as a citation. Its offsets count code points and select the
+ * link the model wrote, so the span is kept only when it still contains the
+ * URL; otherwise the source stays and the span goes (PydanticAI
+ * openai/_citations.py:44-47,96-120, MIT).
+ */
+function chatCitation(annotation: ChatAnnotation, text: string): Citation | undefined {
+  const cited = annotation.url_citation;
+  if (annotation.type !== "url_citation" || !cited?.url) return undefined;
+  const source = {
+    type: "url" as const,
+    url: cited.url,
+    ...(cited.title ? { title: cited.title } : {}),
+    ...(cited.content ? { excerpt: cited.content } : {}),
+  };
+  const start =
+    cited.start_index === undefined ? undefined : codePointIndex(text, cited.start_index);
+  const end = cited.end_index === undefined ? undefined : codePointIndex(text, cited.end_index);
+  return start !== undefined &&
+    end !== undefined &&
+    start < end &&
+    text.slice(start, end).includes(cited.url)
+    ? { source, start, end, anchor: "marker" }
+    : { source };
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -484,6 +569,8 @@ interface OpenAIChunk {
       reasoning?: string | null;
       /** OpenRouter's normalized reasoning payload, on the final delta. */
       reasoning_details?: unknown[];
+      /** The sources a searched answer cites. */
+      annotations?: ChatAnnotation[];
       tool_calls?: {
         index?: number;
         id?: string;
@@ -507,6 +594,8 @@ interface OpenAIChunk {
     cost?: unknown;
     is_byok?: boolean;
     cost_details?: { upstream_inference_cost?: unknown } | null;
+    /** The server tool calls OpenRouter ran for the turn. */
+    server_tool_use_details?: { web_search_requests?: number } | null;
   } | null;
   /** Present only on the in-band failure below. Never beside a choice.
    *  `code` is the numeric HTTP status on the gateways, a slug on OpenAI. */
@@ -594,17 +683,45 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       const serviceTier = opts.serviceTier ?? config.serviceTier;
       if (serviceTier) request.service_tier = serviceTier;
       Object.assign(request, effortParams(config.effortDialect ?? dialectFor(id), effort, model));
-      if (tools.length > 0) {
-        request.tools = tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.inputSchema,
-          },
-        }));
+      const openRouter = isOpenRouter(baseUrl);
+      // On OpenAI's own API only its search models search (PydanticAI
+      // profiles/openai.py:640-641).
+      const searches = model.includes("-search-preview") ? (["web_search"] as const) : [];
+      const hosted = planHostedTools(
+        id,
+        {
+          name: "OpenAI chat",
+          serves: (
+            config.servesHostedTools ??
+            (openRouter ? ["web_search"] : servedAt(baseUrl, "api.openai.com", searches))
+          ).filter((type) => type === "web_search"),
+          fields: webSearchFields(openRouter),
+        },
+        opts,
+      );
+      const webSearch = hosted.find(
+        (tool): tool is Extract<HostedTool, { type: "web_search" }> => tool.type === "web_search",
+      );
+      if (tools.length > 0 || (webSearch && openRouter)) {
+        request.tools = [
+          ...tools.map((tool) => ({
+            type: "function",
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.inputSchema,
+            },
+          })),
+          ...(webSearch && openRouter ? [openRouterWebSearch(webSearch)] : []),
+        ];
         // Only beside tools: OpenAI refuses the field on a request without any.
-        if (opts.parallelToolCalls === false) request.parallel_tool_calls = false;
+        if (tools.length > 0 && opts.parallelToolCalls === false)
+          request.parallel_tool_calls = false;
+      }
+      if (webSearch && !openRouter) {
+        request.web_search_options = webSearch.userLocation
+          ? { user_location: { type: "approximate", approximate: webSearch.userLocation } }
+          : {};
       }
       if (opts.toolChoice && opts.toolChoice !== "auto") {
         request.tool_choice =
@@ -687,6 +804,18 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       // Each call as its deltas named it, by index. The finish checks them
       // before it goes out, and they are what says the turn called a tool.
       const calls = new Map<number, ToolCallIdentity>();
+      // The answer so far, and the annotations on it, which are placed once
+      // the text they index is whole: at the finish. This wire states no
+      // record of the search itself, only what the answer cites and a count.
+      let text = "";
+      const annotations: ChatAnnotation[] = [];
+      function* cite(): Generator<ProviderChunk> {
+        const citations = annotations.splice(0).flatMap((annotation) => {
+          const citation = chatCitation(annotation, text);
+          return citation ? [citation] : [];
+        });
+        if (citations.length > 0) yield { type: "delta", citations };
+      }
       for await (const data of streamSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
@@ -738,6 +867,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
             chunk.usage.cached_tokens ??
             0;
           const reportedCostUsd = reportsCost ? openRouterCostUsd(chunk.usage) : undefined;
+          // OpenRouter states the searches it ran and bills them inside `cost`.
+          const hostedCalls = hostedCounts({
+            web_search: chunk.usage.server_tool_use_details?.web_search_requests,
+          });
           yield {
             type: "usage",
             usage: {
@@ -750,6 +883,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
                 ? { reasoningTokens: chunk.usage.completion_tokens_details.reasoning_tokens }
                 : {}),
               ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
+              ...(hostedCalls ? { hostedCalls } : {}),
             },
           };
         }
@@ -763,8 +897,10 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
           let has = false;
           if (delta.content) {
             out.content = delta.content;
+            text += delta.content;
             has = true;
           }
+          if (delta.annotations?.length) annotations.push(...delta.annotations);
           // `reasoning_content` is DeepSeek's field; `reasoning` is
           // OpenRouter's normalized one. Whichever arrives is the same thing.
           const reasoning = delta.reasoning_content ?? delta.reasoning;
@@ -799,6 +935,7 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
 
         if (choice.finish_reason) {
           const stated = mapFinishReason(id, choice.finish_reason);
+          yield* cite();
           const minted = settleToolCalls(id, calls.values());
           if (minted.length > 0) yield { type: "delta", toolCalls: minted };
           ended = true;
@@ -812,7 +949,9 @@ export function createOpenAIProvider(config: OpenAIConfig): Provider {
       // Either proof will do: some gateways send `[DONE]` with no finish, and
       // some a finish with no `[DONE]`. Neither means the socket closed early.
       if (!ended) throw streamCut(id);
-      // A `[DONE]` with no finish stated still owes its calls the same check.
+      // A `[DONE]` with no finish stated still owes its calls the same check,
+      // and its citations their place.
+      yield* cite();
       const minted = settleToolCalls(id, calls.values());
       if (minted.length > 0) yield { type: "delta", toolCalls: minted };
     },

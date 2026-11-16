@@ -33,6 +33,7 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 import { withConfiguredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
+import type { HostedToolType } from "../hosted.ts";
 import type { FetchLike } from "../transport.ts";
 
 export interface PresetProviderConfig extends ProviderFallbackConfig {
@@ -93,6 +94,10 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
   /** Default `service_tier` for every call on the OpenAI and Responses shapes;
    *  `StreamOptions.serviceTier` wins. Anthropic and Gemini presets refuse it. */
   serviceTier?: ServiceTier;
+  /** The hosted tools this endpoint runs, once you have checked it. Absent,
+   *  each adapter decides by host: the vendor's own API runs its documented
+   *  set, every gateway none. See `StreamOptions.hostedTools`. */
+  servesHostedTools?: readonly HostedToolType[];
   fetchImpl?: FetchLike;
 }
 
@@ -298,7 +303,7 @@ export async function forgeOpenCodeSessionId(sessionId?: string): Promise<string
  * OpenCode's own `read` (`cc-proxy/src/providers/opencode/mod.rs`). A call with
  * `Read` sends it as `read` and gets `Read` back; a call with neither gets a
  * decoy `read` the model is told not to call (and `toolChoice: "none"` when the
- * caller passed no tools).
+ * caller passed no tools, and no hosted tools either, which `none` would drop).
  */
 function offerOpenCodeRead(
   messages: ChatMessage[],
@@ -323,7 +328,8 @@ function offerOpenCodeRead(
     return {
       messages,
       tools: [...tools, decoy],
-      opts: tools.length === 0 ? { ...opts, toolChoice: "none" } : opts,
+      opts:
+        tools.length === 0 && !opts.hostedTools?.length ? { ...opts, toolChoice: "none" } : opts,
       renamedRead: false,
     };
   }
