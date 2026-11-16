@@ -57,7 +57,7 @@ function keep<T>(held: T, next: T): T {
   return sameData(held, next) ? held : next;
 }
 
-function keepList<T>(held: readonly T[], next: readonly T[]): readonly T[] {
+export function keepList<T>(held: readonly T[], next: readonly T[]): readonly T[] {
   return held.length === next.length && next.every((item, index) => item === held[index])
     ? held
     : next;
@@ -75,7 +75,7 @@ function indexOfId(items: readonly { id: string }[], id: string): number {
   return -1;
 }
 
-function isActive(status: RunStatus): boolean {
+export function isActive(status: RunStatus): boolean {
   return status === "running" || status === "waiting";
 }
 
@@ -84,7 +84,7 @@ function isOver(status: RunStatus): boolean {
   return status !== "idle" && !isActive(status);
 }
 
-function isFinal(message: DisplayMessage): boolean {
+export function isFinal(message: DisplayMessage): boolean {
   return message.state !== "sending" && message.state !== "live";
 }
 
