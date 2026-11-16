@@ -5,7 +5,7 @@ import { copyData, isRecord } from "../snapshot.ts";
 import { combineUsage } from "./journal.ts";
 import type { CaseResult, EvalCounts, EvalGroup, EvalReport, ScoreAggregate } from "./types.ts";
 
-export function counts(rows: readonly CaseResult[]): EvalCounts {
+export function counts(rows: readonly Pick<CaseResult, "status">[]): EvalCounts {
   const count = (status: CaseResult["status"]) =>
     rows.filter((row) => row.status === status).length;
   const passed = count("passed");
@@ -57,14 +57,12 @@ export function reportGroups(rows: readonly CaseResult[], ks: readonly number[])
   });
 }
 
-export function summarize(rows: readonly CaseResult[]): EvalReport["summary"] {
+function aggregateScores(rows: readonly Pick<CaseResult, "id" | "scores">[]): ScoreAggregate[] {
   const scores = new Map<
     string,
     { scorer: string; name: string; rows: { id: string; score: CaseResult["scores"][number] }[] }
   >();
-  const statuses = new Map<string, number>();
   for (const row of rows) {
-    if (row.run) statuses.set(row.run.status, (statuses.get(row.run.status) ?? 0) + 1);
     for (const score of row.scores) {
       const key = JSON.stringify([score.scorer, score.name]);
       const group = scores.get(key) ?? { scorer: score.scorer, name: score.name, rows: [] };
@@ -109,12 +107,36 @@ export function summarize(rows: readonly CaseResult[]): EvalReport["summary"] {
       passRate: mean(passRates),
     };
   });
+  return aggregate;
+}
+
+export function summarize(rows: readonly CaseResult[]): EvalReport["summary"] {
+  const statuses = new Map<string, number>();
+  const turns = new Map<
+    number,
+    { id: string; status: CaseResult["status"]; scores: CaseResult["scores"] }[]
+  >();
+  for (const row of rows) {
+    for (const run of row.runs.filter((run) => run.role === "agent"))
+      statuses.set(run.status, (statuses.get(run.status) ?? 0) + 1);
+    for (const turn of row.turns) {
+      const group = turns.get(turn.index) ?? [];
+      group.push({ id: row.id, status: turn.status, scores: turn.scores });
+      turns.set(turn.index, group);
+    }
+  }
   return {
     ...counts(rows),
-    scores: aggregate,
+    scores: aggregateScores(rows),
+    turns: [...turns].map(([index, group]) => ({
+      index,
+      ...counts(group),
+      scores: aggregateScores(group),
+    })),
     runStatuses: Object.fromEntries(statuses),
     agentUsage: combineUsage(rows.map((row) => row.agentUsage)),
     judgeUsage: combineUsage(rows.map((row) => row.judgeUsage)),
+    userUsage: combineUsage(rows.map((row) => row.userUsage)),
   };
 }
 
@@ -202,10 +224,13 @@ export function formatReport(report: EvalReport, options: { baseline?: EvalRepor
     `${cell("Case", 30)} ${cell("Repeat", 6)} ${cell("Result", 10)} ${cell("Run", 10)} Tokens   Cost USD`,
   ];
   for (const row of report.cases) {
-    const usage = combineUsage([row.agentUsage, row.judgeUsage]);
+    const usage = combineUsage([row.agentUsage, row.judgeUsage, row.userUsage]);
     lines.push(
       `${cell(row.id, 30)} ${cell(String(row.repeat), 6)} ${cell(row.status, 10)} ${cell(row.run?.status ?? "not run", 10)} ${String(usage.usage.inputTokens + usage.usage.outputTokens).padEnd(8)} ${usage.costUsd === null ? "unknown" : usage.costUsd.toFixed(6)}`,
     );
+    for (const turn of row.turns)
+      lines.push(`  Turn ${turn.index}: ${turn.status}${turn.runId ? "" : " (not run)"}`);
+    if (row.simulation) lines.push(`  Simulation: ${row.simulation}`);
     for (const score of row.scores)
       lines.push(
         `  ${ascii(score.scorer)} / ${ascii(score.name)}: ${score.kind === "error" || score.kind === "skipped" ? score.kind : score.value === undefined ? score.kind : ascii(String(score.value))}${score.passed === undefined ? "" : score.passed ? " (pass)" : " (fail)"}`,
@@ -216,7 +241,7 @@ export function formatReport(report: EvalReport, options: { baseline?: EvalRepor
   lines.push(
     `${s.passed}/${s.total} passed; ${s.failed} failed; ${s.errors} errors; ${s.unscored} unscored; ${s.cancelled} cancelled; ${s.skipped} not run.`,
   );
-  const usage = combineUsage([s.agentUsage, s.judgeUsage]);
+  const usage = combineUsage([s.agentUsage, s.judgeUsage, s.userUsage]);
   lines.push(
     `${usage.unknownCharges} unknown charges; ${usage.unpricedCalls} unpriced calls. Available cost: USD ${usage.knownCostUsd.toFixed(6)}.`,
   );

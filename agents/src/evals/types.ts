@@ -1,8 +1,12 @@
-import type { ModelRate, TokenUsage } from "@providerkit/core";
+import type { ModelRate, Provider, TokenUsage } from "@providerkit/core";
 import type {
   Agent,
   AgentHost,
+  AgentConfig,
   AgentInput,
+  Decision,
+  ModelSettings,
+  UserContent,
   AgentRef,
   AskRecord,
   RunOptions,
@@ -11,14 +15,76 @@ import type {
   ToolResult,
 } from "../index.ts";
 
-export interface EvalCase<E = unknown> {
-  /** A public label, not a prompt or a person's identifier. Unique within the dataset. */
-  id: string;
-  input: AgentInput;
+export interface EvalTurn<E = unknown> {
+  input: UserContent;
   expected?: E;
   expectStatus?: RunOutcome["status"];
   trajectory?: TrajectoryExpectation;
   scorers?: readonly Scorer<E>[];
+}
+
+export interface SimulatedUser {
+  opening: UserContent;
+  plan: string;
+  persona?: string;
+  /** Target-agent turns, including opening. Default 10, maximum 100. */
+  maxTurns?: number;
+}
+
+export interface EvalCase<E = unknown> {
+  /** A public label, not a prompt or a person's identifier. Unique within the dataset. */
+  id: string;
+  /** Exactly one of input, turns and user. Turns share a fresh SDK memory session. */
+  input?: AgentInput;
+  turns?: readonly EvalTurn<E>[];
+  user?: SimulatedUser;
+  expected?: E;
+  expectStatus?: RunOutcome["status"];
+  trajectory?: TrajectoryExpectation;
+  scorers?: readonly Scorer<E>[];
+}
+
+/** Trusted test-driver data, never loaded by readCases. Each answer is consumed once.
+ * Match exact agent/tool identities and question keys, not model-written prose. */
+export type ScriptedAnswer = {
+  agentId: string;
+  tool: string;
+  /** Child keys from the root. Omitted means root-only, never any delegated child. */
+  path?: readonly string[];
+  arguments?: Record<string, unknown>;
+} & (
+  | {
+      ask: "approval";
+      decision: Extract<Decision, { type: "approve" | "deny" | "cancel" | "stop" }>;
+    }
+  | {
+      ask: "question";
+      key: string;
+      decision: Extract<Decision, { type: "answer" | "cancel" | "stop" }>;
+    }
+  | { ask: "client"; decision: Extract<Decision, { type: "result" | "cancel" | "stop" }> }
+);
+
+export interface ToolMock {
+  name: string;
+  arguments?: Record<string, unknown>;
+  result?: unknown;
+  error?: string;
+}
+
+export interface EvalDriver {
+  answers?: readonly ScriptedAnswer[];
+  /** Applied only by factory.stub(). Unmatched calls to a mocked tool fail closed.
+   * Replaces validation and execution: this does not test the real backend's checks. */
+  toolMocks?: readonly ToolMock[];
+}
+
+export type EvalTools = NonNullable<AgentConfig["tools"]>;
+export interface AgentFactoryContext<E = unknown> {
+  case: EvalCase<E>;
+  repeat: number;
+  signal: AbortSignal;
+  stub(tools: EvalTools): EvalTools;
 }
 
 export interface EvalDataset<E = unknown> {
@@ -99,6 +165,8 @@ export interface EvalRun extends EvalUsage {
   value?: unknown;
   text: string;
   snapshot: RunSnapshot;
+  /** The admitted handoff chain's owner, never an ordinary delegated specialist. */
+  activeAgent: AgentRef;
   trajectory: Trajectory;
   /** Stored journals have no completion timestamp. Never inferred from the current time. */
   durationMs?: number;
@@ -118,6 +186,9 @@ export type ScoreThreshold = number | { min?: number; max?: number };
 
 export interface ScoreContext<E = unknown> {
   case: EvalCase<E>;
+  /** One-based case turn. Absent for scoreRun on a stored journal. */
+  turn?: number;
+  runs: readonly EvalRun[];
   expected?: E;
   run: EvalRun;
   signal: AbortSignal;
@@ -134,6 +205,7 @@ export interface Scorer<E = unknown> {
 }
 
 export interface ScoreResult {
+  turn?: number;
   scorer: string;
   name: string;
   gate: boolean;
@@ -145,7 +217,7 @@ export interface ScoreResult {
   error?: "scorer_failed" | "invalid_score" | "cancelled";
 }
 
-/** New executions only. Human requests stay pending; no answer/resume/child binding is accepted. */
+/** New executions only. Only the separate trusted driver may answer; stored effects never resume. */
 export type EvalHost = Pick<
   AgentHost,
   | "checkpoint"
@@ -172,13 +244,17 @@ export interface ScoringOptions<E = unknown> {
 
 export interface EvalOptions<T = string, E = unknown>
   extends EvalDataset<E>, Omit<ScoringOptions<E>, "case"> {
-  agent:
-    | Agent<T>
-    | ((context: {
-        case: EvalCase<E>;
-        repeat: number;
-        signal: AbortSignal;
-      }) => Agent<T> | Promise<Agent<T>>);
+  agent: Agent<T> | ((context: AgentFactoryContext<E>) => Agent<T> | Promise<Agent<T>>);
+  /** Explicit routing after a handoff, by both id and version. Missing targets stop the case. */
+  resolveAgent?: (ref: AgentRef) => Agent<T> | Promise<Agent<T>>;
+  /** Trusted scripts keyed by case id. Dataset files cannot set these. */
+  drivers?: Readonly<Record<string, EvalDriver>>;
+  /** Separate paid-work consent from allowJudge. No default simulator provider. */
+  allowSimulation?: boolean;
+  user?: {
+    provider: Provider;
+    modelSettings?: Omit<ModelSettings, "toolChoice" | "hostedTools" | "maxAttempts">;
+  };
   repeat?: number;
   k?: readonly number[];
   /** Active case slots, default 1. External work that ignores abort may continue. */
@@ -193,24 +269,57 @@ export interface EvalOptions<T = string, E = unknown>
 
 export type EvalStatus = "passed" | "failed" | "error" | "unscored" | "cancelled" | "skipped";
 
+export interface EvalRunResult extends EvalUsage {
+  runId: string;
+  attemptId: string;
+  agent: AgentRef;
+  activeAgent: AgentRef;
+  role: "agent" | "judge" | "user";
+  turn?: number;
+  status: EvalRun["status"];
+  modelCalls: number;
+  toolCalls: number;
+  durationMs?: number;
+  /** Model attempts, including interrupted ones. No prompts or tool results. */
+  modelAttempts: {
+    operationId: string;
+    attemptId: string;
+    status: "running" | "completed" | "interrupted";
+    billing: "reported" | "unknown";
+    usage: TokenUsage;
+  }[];
+  toolAttempts: {
+    operationId: string;
+    attemptId: string;
+    status: "running" | "completed" | "interrupted";
+    ok?: boolean;
+  }[];
+  /** Present only after explicit consent to include private data. */
+  snapshot?: RunSnapshot;
+}
+
+export interface EvalTurnResult {
+  index: number;
+  status: EvalStatus;
+  runId?: string;
+  scores: ScoreResult[];
+  problems: string[];
+}
+
 export interface CaseResult {
   id: string;
   repeat: number;
   status: EvalStatus;
   problems: string[];
-  run?: {
-    runId: string;
-    agent: AgentRef;
-    status: EvalRun["status"];
-    modelCalls: number;
-    toolCalls: number;
-    durationMs?: number;
-    /** Present only after explicit consent to include private data. */
-    snapshot?: RunSnapshot;
-  };
+  /** Last target run, for the single-line report. runs retains all target and helper work. */
+  run?: EvalRunResult;
+  runs: EvalRunResult[];
+  turns: EvalTurnResult[];
+  simulation?: "finished" | "turn_limit" | "incomplete";
   scores: ScoreResult[];
   agentUsage: EvalUsage;
   judgeUsage: EvalUsage;
+  userUsage: EvalUsage;
   durationMs: number;
 }
 
@@ -258,6 +367,8 @@ export interface EvalReport {
     runStatuses: Record<string, number>;
     agentUsage: EvalUsage;
     judgeUsage: EvalUsage;
+    userUsage: EvalUsage;
+    turns: (EvalCounts & { index: number; scores: ScoreAggregate[] })[];
   };
   stopped?: { reason: "budget" | "unknown_cost" | "cancelled"; message: string };
 }

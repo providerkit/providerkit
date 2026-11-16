@@ -289,6 +289,15 @@ export function toolArguments(
   });
 }
 
+export function answeredBy(agentId: string): Scorer {
+  if (!isId(agentId)) throw new TypeError("answeredBy needs an agent id.");
+  return defineScorer("answeredBy", (ctx) =>
+    ctx.run.status !== "completed"
+      ? skip("The conversation has no completed answer.")
+      : ctx.run.activeAgent.id === agentId,
+  );
+}
+
 function maximum(
   name: string,
   limit: number,

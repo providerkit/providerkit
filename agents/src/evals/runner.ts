@@ -1,17 +1,36 @@
 import { messageOf } from "@providerkit/core";
-import type { Agent, AgentInput, RunOutcome, RunSnapshot } from "../index.ts";
-import { readInput } from "../input.ts";
-import { copyData, immutableCopy, isId } from "../snapshot.ts";
-import { combineUsage, emptyUsage, evalRun, readJournal, usageOf } from "./journal.ts";
+import {
+  createMemorySession,
+  type Agent,
+  type AgentInput,
+  type RunOutcome,
+  type RunSnapshot,
+  type UserContent,
+} from "../index.ts";
+import { copyData, immutableCopy, isId, isRecord } from "../snapshot.ts";
+import {
+  caseData,
+  combineUsage,
+  emptyUsage,
+  evalRun,
+  readCases,
+  readJournal,
+  runResult,
+  usageOf,
+} from "./journal.ts";
+import { checkDriver, createDriver } from "./driver.ts";
+import { simulationAgent, simulationPrompt } from "./simulation.ts";
 import { checkScorers, normalizeScores } from "./scorers.ts";
 import { reportGroups, summarize } from "./report.ts";
-import { checkExpectation, nonNegative } from "./trajectory.ts";
+import { nonNegative } from "./trajectory.ts";
 import type {
   CaseResult,
   EvalCase,
   EvalOptions,
   EvalReport,
   EvalRun,
+  EvalRunResult,
+  EvalTurnResult,
   EvalUsage,
   ScoreContext,
   ScoredRun,
@@ -40,15 +59,7 @@ function checkScoring(options: ScoringOptions): void {
 }
 
 function checkCase(item: EvalCase): void {
-  if (!item || !isId(item.id)) throw new TypeError("Each case needs a non-empty id.");
-  readInput(item.input, "caller");
-  copyData(item.expected);
-  if (
-    item.expectStatus !== undefined &&
-    !["completed", "failed", "limited", "suspended", "cancelled"].includes(item.expectStatus)
-  )
-    throw new TypeError("Invalid expected run status.");
-  if (item.trajectory !== undefined) checkExpectation(item.trajectory);
+  readCases([caseData(item)]);
 }
 
 function deadline(options: ScoringOptions, parent?: AbortSignal) {
@@ -85,8 +96,22 @@ async function waitFor<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 
 interface Accounting {
   agent: EvalUsage;
+  users: Map<string, EvalUsage>;
   judges: Map<number, EvalUsage>;
+  judgeCount: number;
+  records: Map<string, EvalRunResult>;
   settledUnknown: boolean;
+}
+
+function newAccount(): Accounting {
+  return {
+    agent: emptyUsage(),
+    users: new Map(),
+    judges: new Map(),
+    judgeCount: 0,
+    records: new Map(),
+    settledUnknown: false,
+  };
 }
 
 async function score<E>(
@@ -97,18 +122,20 @@ async function score<E>(
   signal: AbortSignal,
   accounting: Accounting,
   changed: () => void,
+  runs: readonly EvalRun[] = [run],
+  turn?: number,
 ): Promise<ScoreResult[]> {
   const results: ScoreResult[] = [];
   const helpers = new Set<Promise<unknown>>();
   const helperStop = new AbortController();
   const helperSignal = AbortSignal.any([signal, helperStop.signal]);
-  let helperCount = 0,
-    helperBusy = false,
+  let helperBusy = false,
     active = true;
-  const { scorers: _scorers, ...caseData } = item;
-  const frozenCase = immutableCopy(caseData);
+  const frozenCase = immutableCopy(caseData(item));
   const context: ScoreContext<E> = {
     case: frozenCase,
+    turn,
+    runs: immutableCopy(runs),
     expected: frozenCase.expected,
     run: immutableCopy(run),
     signal,
@@ -120,10 +147,11 @@ async function score<E>(
         throw new Error(
           "Model judging is off. Set allowJudge to true to send data to the supplied provider.",
         );
-      if (helperBusy || helperCount >= (options.maxJudgeRuns ?? 3))
+      if (helperBusy || accounting.judgeCount >= (options.maxJudgeRuns ?? 3))
         throw new Error("The helper-run limit was reached. Helpers must run one at a time.");
       helperBusy = true;
-      const index = helperCount++;
+      const index = accounting.judgeCount++;
+      const began = Date.now();
       let latest: RunSnapshot | undefined;
       const capture = (snapshot: RunSnapshot) => {
         if (!active) return;
@@ -136,6 +164,10 @@ async function score<E>(
           throw error;
         }
         accounting.judges.set(index, usage);
+        accounting.records.set(
+          snapshot.runId,
+          runResult(snapshot, usage, "judge", options.includePrivateData, turn, Date.now() - began),
+        );
         if (snapshot.state.status !== "running" && usage.unknownCharges)
           accounting.settledUnknown = true;
         changed();
@@ -158,6 +190,17 @@ async function score<E>(
               usage = usageOf(latest);
             }
             accounting.judges.set(index, usage);
+            accounting.records.set(
+              latest.runId,
+              runResult(
+                latest,
+                usage,
+                "judge",
+                options.includePrivateData,
+                turn,
+                Date.now() - began,
+              ),
+            );
             if (usage.unknownCharges) accounting.settledUnknown = true;
             changed();
           }
@@ -218,10 +261,13 @@ async function score<E>(
     await Promise.allSettled(helpers);
     active = false;
   }
-  return results;
+  return results.map((result) => ({ ...result, ...(turn === undefined ? {} : { turn }) }));
 }
 
-function verdict(row: CaseResult, item: EvalCase): void {
+function verdict(
+  row: Pick<CaseResult, "run" | "scores" | "status" | "problems">,
+  item: EvalCase,
+): void {
   if (!row.run) {
     row.status = "error";
     row.problems.push("The agent did not return a valid run journal.");
@@ -232,7 +278,7 @@ function verdict(row: CaseResult, item: EvalCase): void {
     row.status = "failed";
     row.problems.push(
       row.run.status === "suspended"
-        ? "The run is waiting for a human request. Evals do not answer or resume it."
+        ? "The run is waiting for a request with no valid scripted answer. Add an exact matching answer to this case's trusted driver, or expect suspended status."
         : `Expected run status ${expected}; received ${row.run.status}.`,
     );
   }
@@ -258,8 +304,8 @@ function verdict(row: CaseResult, item: EvalCase): void {
   }
 }
 
-/** Executes only explicitly supplied agents. Configure their SDK RunLimits/TreeLimits and
- * sandbox their tools. Nothing here grants approvals, resumes snapshots or retries cases. */
+/** Executes explicitly supplied agents through the SDK. Sandbox real tools. Only the separate
+ * trusted driver answers new requests; no stored effect is resumed and no case is retried. */
 export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalReport> {
   checkScoring(options);
   if (!isId(options.name) || !Array.isArray(options.cases) || !options.cases.length)
@@ -309,12 +355,30 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
     throw new TypeError(
       "An eval host cannot answer requests, resume effects or replace child execution.",
     );
+  if (options.allowSimulation !== undefined && typeof options.allowSimulation !== "boolean")
+    throw new TypeError("allowSimulation must be a boolean.");
+  if (options.resolveAgent !== undefined && typeof options.resolveAgent !== "function")
+    throw new TypeError("resolveAgent must be a function.");
+  const needsSimulation = options.cases.some((item) => item.user !== undefined);
+  if (needsSimulation && (!options.user || options.allowSimulation !== true))
+    throw new TypeError(
+      "Simulated-user cases need an explicit user provider and allowSimulation: true. Simulation sends conversation text to that provider and can cost money.",
+    );
+  const simulator = needsSimulation && options.user ? simulationAgent(options.user) : undefined;
   const ids = new Set<string>();
   for (const item of options.cases) {
     checkCase(item);
     if (ids.has(item.id)) throw new TypeError("Eval case ids must be unique.");
     ids.add(item.id);
-    checkScorers([...(options.scorers ?? []), ...(item.scorers ?? [])]);
+    const scorers = [...(options.scorers ?? []), ...(item.scorers ?? [])];
+    checkScorers(scorers);
+    for (const turn of item.turns ?? []) checkScorers([...scorers, ...(turn.scorers ?? [])]);
+  }
+  if (options.drivers !== undefined && !isRecord(options.drivers))
+    throw new TypeError("Drivers must be keyed by case id.");
+  for (const [id, driver] of Object.entries(options.drivers ?? {})) {
+    if (!ids.has(id)) throw new TypeError("A driver refers to an unknown case id.");
+    checkDriver(driver);
   }
   const startedAt = Date.now();
   const stop = new AbortController();
@@ -324,7 +388,11 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
   function inspect() {
     if (stopped || !budget) return;
     const usage = combineUsage(
-      accounts.flatMap((account) => [account.agent, ...account.judges.values()]),
+      accounts.flatMap((account) => [
+        account.agent,
+        ...account.judges.values(),
+        ...account.users.values(),
+      ]),
     );
     if (budget.usd !== undefined && accounts.some((account) => account.settledUnknown))
       stopped = {
@@ -351,7 +419,7 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
     if (stopped) stop.abort(new Error(stopped.message));
   }
   // Finite workers avoid one pending promise per case while retaining dataset/repeat order.
-  const jobs = options.cases.flatMap((item) =>
+  const jobs: { item: EvalCase<E>; repeat: number }[] = options.cases.flatMap((item) =>
     Array.from({ length: repeat }, (_, index) => ({ item, repeat: index + 1 })),
   );
   const rows: CaseResult[] = jobs.map(({ item, repeat }) => ({
@@ -360,8 +428,17 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
     status: "skipped",
     problems: [],
     scores: [],
+    runs: [],
+    turns: (item.turns ?? [item]).map((_turn, index) => ({
+      index: index + 1,
+      status: "skipped",
+      scores: [],
+      problems: [],
+    })),
+    ...(item.user ? { simulation: "incomplete" as const } : {}),
     agentUsage: emptyUsage(),
     judgeUsage: emptyUsage(),
+    userUsage: emptyUsage(),
     durationMs: 0,
   }));
   let next = 0;
@@ -371,115 +448,267 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
     while (!signal.aborted) {
       const index = next++,
         job = jobs[index],
-        row = rows[index];
-      if (!job || !row) return;
+        pendingRow = rows[index];
+      if (!job || !pendingRow) return;
+      const row: CaseResult = pendingRow;
       const began = Date.now(),
         timer = deadline(options, signal);
-      const account: Accounting = { agent: emptyUsage(), judges: new Map(), settledUnknown: false };
+      const account = newAccount();
       accounts.push(account);
-      let latest: RunSnapshot | undefined,
-        runDuration: number | undefined,
-        closed = false;
-      const capture = (snapshot: RunSnapshot) => {
-        if (closed) return;
-        latest = snapshot;
-        account.agent = usageOf(snapshot, options.price);
-        if (snapshot.state.status !== "running" && account.agent.unknownCharges)
-          account.settledUnknown = true;
-        inspect();
-      };
+      const driver = createDriver(job.item.id, options.drivers?.[job.item.id], options.host);
+      const session = job.item.turns || job.item.user ? createMemorySession() : undefined;
+      const runs: EvalRun[] = [];
+      let currentTurn: EvalTurnResult | undefined;
+      async function execute<R>(
+        target: Agent<R>,
+        input: AgentInput,
+        role: "agent" | "user",
+        turn: number,
+      ) {
+        timer.signal.throwIfAborted();
+        const start = Date.now();
+        let latest: RunSnapshot | undefined;
+        let closed = false;
+        const capture = (snapshot: RunSnapshot, fallback = false) => {
+          if (closed) return;
+          latest = snapshot;
+          let usage: EvalUsage;
+          try {
+            usage = usageOf(snapshot, options.price);
+          } catch (error) {
+            usage = usageOf(snapshot);
+            if (!fallback) throw error;
+          }
+          const record = runResult(
+            snapshot,
+            usage,
+            role,
+            options.includePrivateData,
+            turn,
+            Date.now() - start,
+          );
+          account.records.set(snapshot.runId, record);
+          if (role === "user") account.users.set(snapshot.runId, usage);
+          else {
+            account.agent = combineUsage(
+              [...account.records.values()].filter((entry) => entry.role === "agent"),
+            );
+            row.run = record;
+            if (currentTurn) currentTurn.runId = record.runId;
+          }
+          if (snapshot.state.status !== "running" && usage.unknownCharges)
+            account.settledUnknown = true;
+          inspect();
+        };
+        try {
+          const outcome = await waitFor(
+            target.run(input, {
+              ...(role === "agent" ? { ...options.run, session } : {}),
+              signal: timer.signal,
+              host: {
+                ...(role === "agent" ? { ...options.host, ...driver.host } : {}),
+                checkpoint: async (snapshot) => {
+                  capture(snapshot);
+                  if (role === "agent") await options.host?.checkpoint?.(snapshot);
+                },
+              },
+            }),
+            timer.signal,
+          );
+          capture(readJournal(outcome));
+          return { outcome, run: evalRun(outcome.snapshot, options.price, Date.now() - start) };
+        } finally {
+          // Preserve partial receipts on timeout or a host/pricing error, never overwrite earlier turns.
+          if (latest) capture(latest, true);
+          closed = true;
+        }
+      }
       try {
-        const agent =
+        let agent =
           typeof configuredAgent === "function"
             ? await waitFor(
                 Promise.resolve().then(() =>
-                  configuredAgent({ case: job.item, repeat: job.repeat, signal: timer.signal }),
+                  configuredAgent({
+                    case: job.item,
+                    repeat: job.repeat,
+                    signal: timer.signal,
+                    stub: driver.stub,
+                  }),
                 ),
                 timer.signal,
               )
             : configuredAgent;
-        timer.signal.throwIfAborted();
-        const runStarted = Date.now();
-        const outcome = await waitFor(
-          agent.run(job.item.input, {
-            ...options.run,
-            signal: timer.signal,
-            host: {
-              ...options.host,
-              prepareRequest:
-                options.host?.prepareRequest ??
-                (() => ({
-                  scope: {
-                    actorId: "eval",
-                    resource: { id: job.item.id, version: "1" },
-                    expiresAt: Date.now() + 900_000,
-                  },
-                })),
-              checkpoint: async (snapshot) => {
-                capture(snapshot);
-                await options.host?.checkpoint?.(snapshot);
-              },
-            },
-          }),
-          timer.signal,
-        );
-        runDuration = Date.now() - runStarted;
-        capture(readJournal(outcome));
-        if (!latest) throw new Error("The agent did not return a run journal.");
-        const run = evalRun(latest, options.price, runDuration);
-        row.scores = await score(
-          run,
-          job.item,
-          [...(options.scorers ?? []), ...(job.item.scorers ?? [])],
-          options,
-          timer.signal,
-          account,
-          inspect,
-        );
+        driver.assertApplied();
+        const user = job.item.user;
+        let input = user?.opening ?? job.item.turns?.[0]?.input ?? job.item.input;
+        if (input === undefined) throw new TypeError("The case has no input.");
+        const maxTurns = user?.maxTurns ?? (user ? 10 : (job.item.turns?.length ?? 1));
+        const transcript: { role: "user" | "assistant"; text: string }[] = [];
+        for (let turn = 1; turn <= maxTurns; turn++) {
+          timer.signal.throwIfAborted();
+          currentTurn = row.turns[turn - 1];
+          if (!currentTurn) {
+            currentTurn = { index: turn, status: "skipped", scores: [], problems: [] };
+            row.turns.push(currentTurn);
+          }
+          currentTurn.status = "unscored";
+          const spec = job.item.turns?.[turn - 1];
+          input = spec?.input ?? input;
+          const { outcome, run } = await execute(agent, input, "agent", turn);
+          runs.push(run);
+          const item = { ...job.item, ...(spec ?? {}) };
+          const scores = await score(
+            run,
+            item,
+            [...(options.scorers ?? []), ...(job.item.scorers ?? []), ...(spec?.scorers ?? [])],
+            options,
+            timer.signal,
+            account,
+            inspect,
+            runs,
+            turn,
+          );
+          row.scores.push(...scores);
+          currentTurn.scores = scores;
+          const result = {
+            run: row.run,
+            scores,
+            status: "unscored" as CaseResult["status"],
+            problems: currentTurn.problems,
+          };
+          verdict(result, item);
+          currentTurn.status = result.status;
+          row.status = result.status;
+          row.problems.push(...result.problems);
+          // A completed setup turn can lack scores without blocking the next turn.
+          if (
+            (result.status !== "passed" && result.status !== "unscored") ||
+            outcome.status !== "completed"
+          )
+            break;
+          if (session && outcome.session?.status !== "saved") {
+            row.problems.push(
+              "The session did not save this turn. Fix the session error before continuing.",
+            );
+            throw new Error("Session append failed.");
+          }
+          if (user && simulator) {
+            const content: UserContent = run.snapshot.input;
+            transcript.push({
+              role: "user",
+              text:
+                typeof content === "string"
+                  ? content
+                  : content
+                      .filter((part) => part.type === "text")
+                      .map((part) => part.text)
+                      .join("\n"),
+            });
+            // submit_result can finish without assistant text. Send the saved answer only.
+            transcript.push({
+              role: "assistant",
+              text: typeof run.value === "string" ? run.value : JSON.stringify(run.value),
+            });
+            const simulated = await execute(
+              simulator,
+              simulationPrompt(user, transcript),
+              "user",
+              turn,
+            );
+            if (
+              simulated.outcome.status !== "completed" ||
+              typeof simulated.run.value !== "string" ||
+              !simulated.run.value.trim()
+            ) {
+              row.problems.push(
+                "The simulated user did not return a non-empty message. Check its provider and settings.",
+              );
+              throw new Error("Invalid simulated-user reply.");
+            }
+            const nextInput = simulated.run.value.trim();
+            if (nextInput === "</finished>") {
+              row.simulation = "finished";
+              break;
+            }
+            if (turn === maxTurns) {
+              row.simulation = "turn_limit";
+              row.status = "unscored";
+              row.problems.push(
+                "The simulated conversation reached its turn limit before the user finished. Review the transcript or raise maxTurns.",
+              );
+              break;
+            }
+            input = nextInput;
+          }
+          if (
+            turn < maxTurns &&
+            (run.activeAgent.id !== agent.id || run.activeAgent.version !== agent.version)
+          ) {
+            const nextAgent = await waitFor(
+              Promise.resolve(options.resolveAgent?.(run.activeAgent)),
+              timer.signal,
+            );
+            if (
+              !nextAgent ||
+              nextAgent.id !== run.activeAgent.id ||
+              nextAgent.version !== run.activeAgent.version
+            ) {
+              row.problems.push(
+                "A handoff changed the conversation owner. Supply resolveAgent for that exact agent id and version.",
+              );
+              throw new Error("The active agent is not registered for the next turn.");
+            }
+            agent = nextAgent;
+          }
+        }
+        if (
+          row.status === "passed" &&
+          (row.turns.some((turn) => turn.status === "skipped") || row.simulation === "incomplete")
+        ) {
+          row.status = "unscored";
+          row.problems.push(
+            "The conversation stopped before all turns finished. Review its pending requests and expected statuses.",
+          );
+        }
+        // A later passing turn cannot erase an earlier missing score.
+        if (row.status === "passed" && row.turns.some((turn) => turn.status === "unscored"))
+          row.status = "unscored";
       } catch (error) {
         row.status = timer.signal.aborted ? "cancelled" : "error";
+        if (currentTurn?.status === "unscored") currentTurn.status = row.status;
         row.problems.push(
           timer.signal.aborted
             ? "The case was cancelled or reached its time limit. Work already sent may still finish."
-            : "The agent or its host failed. Check the supplied agent, tools and host callbacks.",
+            : "The agent, simulator or host failed. Check the supplied agents, tools and host callbacks.",
         );
         if (options.includePrivateData) row.problems.push(messageOf(error));
       } finally {
-        closed = true;
         timer.close();
         row.durationMs = Date.now() - began;
-        if (latest) {
-          // Keep the last known receipt even if pricing or a host callback failed.
-          try {
-            account.agent = usageOf(latest, options.price);
-          } catch {
-            account.agent = usageOf(latest);
-          }
-          const run = evalRun(latest, undefined, runDuration);
-          row.run = {
-            runId: latest.runId,
-            agent: { id: latest.agentId, version: latest.version },
-            status: latest.state.status,
-            modelCalls: run.trajectory.modelCalls,
-            toolCalls: run.trajectory.toolCalls,
-            durationMs: runDuration,
-            ...(options.includePrivateData ? { snapshot: latest } : {}),
-          };
-        }
+        row.runs = [...account.records.values()];
         row.agentUsage = account.agent;
         row.judgeUsage = combineUsage(account.judges.values());
+        row.userUsage = combineUsage(account.users.values());
       }
       if (timer.signal.aborted) {
         row.status = "cancelled";
+        if (currentTurn && currentTurn.status !== "passed") currentTurn.status = "cancelled";
         if (!row.problems.length)
           row.problems.push(
             "The case was cancelled before scoring finished. Work already sent may still finish.",
           );
-      } else if (row.status !== "error") verdict(row, job.item);
+      }
+      for (const turn of row.turns)
+        if (turn.status === "skipped")
+          turn.problems.push(
+            "This turn was not run because an earlier turn or the evaluation stopped.",
+          );
       // A settled unknown bill is not a zero. Under a money threshold stop before the next case.
       if (
         budget?.usd !== undefined &&
-        (account.agent.unknownCharges || row.judgeUsage.unknownCharges) &&
+        (account.agent.unknownCharges ||
+          row.judgeUsage.unknownCharges ||
+          row.userUsage.unknownCharges) &&
         !stopped
       ) {
         stopped = {
@@ -499,8 +728,11 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
       message: "Evaluation cancelled. Cases not started remain counted as skipped.",
     };
   for (const row of rows)
-    if (row.status === "skipped")
+    if (row.status === "skipped") {
       row.problems.push("The case was not started because evaluation stopped.");
+      for (const turn of row.turns)
+        turn.problems.push("The case was not started because evaluation stopped.");
+    }
   return {
     format: 1,
     name: options.name,
@@ -527,11 +759,8 @@ export async function scoreRun<E = unknown>(
   checkCase(item);
   checkScorers(scorers);
   const run = evalRun(snapshot, options.price);
-  const accounting: Accounting = {
-    agent: usageOf(snapshot, options.price),
-    judges: new Map(),
-    settledUnknown: false,
-  };
+  const accounting = newAccount();
+  accounting.agent = usageOf(snapshot, options.price);
   const timer = deadline(options);
   try {
     const scores = await score(run, item, scorers, options, timer.signal, accounting, () => {});

@@ -1,61 +1,79 @@
-import { defineTool, type Provider, type ProviderChunk } from "@providerkit/core";
-import { defineAgent } from "../src/index.ts";
-import { assertReport, contains, formatReport, runEvals, trajectory } from "../src/evals.ts";
+import { defineTool } from "@providerkit/core";
+import { defineAgent } from "@providerkit/agents";
+import {
+  answeredBy,
+  assertReport,
+  contains,
+  formatReport,
+  runEvals,
+  scriptedProvider,
+  trajectory,
+} from "@providerkit/agents/evals";
 
 const report = await evaluate("14 days");
 console.log(formatReport(report));
 assertReport(report);
 
-// This example runs offline. Every repeat gets a fresh provider and only a local read-only tool.
-// Real eval agents need sandboxed tools and SDK run/tree limits. The host stores any report.
+// All providers are offline. Real agents need sandboxed tools and SDK limits.
+// Stored cases contain expectations, not permission. Trusted drivers are separate.
 function evaluate(expected: string) {
   return runEvals({
-    name: "Refund window",
-    cases: [{ id: "refund-window", input: "How long is the refund window?", expected }],
+    name: "Refund conversation",
+    cases: [
+      {
+        id: "refund-window",
+        turns: [
+          {
+            input: "How long is the refund window?",
+            expected,
+            scorers: [trajectory({ calls: [{ name: "refund_window" }], match: "exact" })],
+          },
+          { input: "Is that from the purchase date?", expected: "purchase date" },
+        ],
+      },
+    ],
     repeat: 3,
     k: [1, 2],
-    scorers: [contains(), trajectory({ calls: [{ name: "refund_window" }], match: "exact" })],
-    agent: () => {
-      const provider: Provider = {
-        id: "offline",
-        model: "offline",
-        async *createStream(history): AsyncGenerator<ProviderChunk> {
-          yield {
-            type: "usage",
-            usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, reportedCostUsd: 0 },
-          };
-          if (history.at(-1)?.role === "tool") {
-            yield {
-              type: "finish",
-              content: "You can request a refund within 14 days.",
-              finishReason: "stop",
-            };
-          } else {
-            yield {
-              type: "finish",
-              finishReason: "tool_calls",
-              toolCalls: [{ index: 0, id: "refund", name: "refund_window", arguments: "{}" }],
-            };
-          }
-        },
-      };
-      return defineAgent({
+    scorers: [contains(), answeredBy("refund-help")],
+    drivers: {
+      "refund-window": {
+        toolMocks: [{ name: "refund_window", result: "14 days from the purchase date" }],
+        answers: [
+          {
+            agentId: "refund-help",
+            tool: "refund_window",
+            ask: "approval",
+            decision: { type: "approve" },
+          },
+        ],
+      },
+    },
+    agent: ({ stub }) =>
+      defineAgent({
         id: "refund-help",
         version: "1",
         instructions: "Read the refund window, then answer.",
-        provider,
+        provider: scriptedProvider([
+          { toolCalls: [{ name: "refund_window" }] },
+          "You can request a refund within 14 days.",
+          "Yes, 14 days from the purchase date.",
+        ]),
         limits: { turns: 2, toolCalls: 1 },
         treeLimits: { modelCalls: 2, maxChildren: 0 },
-        tools: [
+        tools: stub([
           defineTool({
             name: "refund_window",
-            description: "Read the example refund window.",
+            description: "Read the refund window.",
             inputSchema: { type: "object" },
             isReadOnly: true,
-            run: async () => "14 days",
+            needsApproval: true,
+            // The mock replaces call and invoke, including backend validation and execution.
+            // This example does not test those replaced checks.
+            run: async () => {
+              throw new Error("The offline example must use its tool mock.");
+            },
           }),
-        ],
-      });
-    },
+        ]),
+      }),
   });
 }

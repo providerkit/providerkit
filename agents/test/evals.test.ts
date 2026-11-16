@@ -1,14 +1,24 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
+  collectTurn,
   defineTool,
   type ChatMessage,
   type Provider,
   type ProviderChunk,
   type TokenUsage,
 } from "@providerkit/core";
-import { defineAgent, defineHandoff, RESULT_TOOL_NAME } from "../src/index.ts";
+import {
+  defineAgent,
+  defineClientTool,
+  defineHandoff,
+  questionTool,
+  RESULT_TOOL_NAME,
+} from "../src/index.ts";
 import {
   assertReport,
+  answeredBy,
+  grounded,
+  scriptedProvider,
   caseFromRun,
   compareReports,
   contains,
@@ -34,6 +44,8 @@ import {
   trajectory,
   trajectoryOf,
   type EvalCase,
+  type EvalDriver,
+  type ScriptedProvider,
   type Scorer,
 } from "../src/evals.ts";
 
@@ -66,26 +78,17 @@ function calls(...names: { name: string; arguments?: Record<string, unknown> }[]
   ];
 }
 function fake(turns: readonly ProviderChunk[][]) {
-  let count = 0;
-  const histories: ChatMessage[][] = [];
-  const provider: Provider = {
-    id: "fake",
-    model: "fake-model",
-    async *createStream(history, _tools, options): AsyncGenerator<ProviderChunk> {
-      histories.push(structuredClone(history));
-      const turn = turns[count++];
-      if (!turn) throw new Error("No offline response is left.");
-      for (const chunk of turn) {
-        options?.signal?.throwIfAborted();
-        yield chunk;
-      }
-    },
-  };
+  const provider = scriptedProvider(
+    turns.map((chunks) => ({ chunks })),
+    { id: "fake", model: "fake-model" },
+  );
   return {
     provider,
-    histories,
+    get histories() {
+      return provider.calls.map((call) => call.messages);
+    },
     get count() {
-      return count;
+      return provider.calls.length;
     },
   };
 }
@@ -666,6 +669,754 @@ describe("journal scorers and validation", () => {
     expect(() =>
       caseFromRun({ ...outcome.snapshot, state: { status: "cancelled" } }, { id: "bad" }),
     ).toThrow("completed");
+  });
+});
+
+describe("session cases and trusted offline drivers", () => {
+  it("publishes a scripted provider with frozen calls, raw chunks, responders and abort checks", async () => {
+    const provider = scriptedProvider([
+      "first",
+      (call) => ({
+        text: `call ${call.index}`,
+        reasoning: "thinking",
+        toolCalls: [{ name: "lookup", arguments: { x: 1 } }],
+      }),
+      { chunks: text("raw") },
+      { error: new Error("script failure") },
+    ]);
+    const messages: ChatMessage[] = [{ role: "user", content: "original" }];
+    expect((await collectTurn(provider.createStream(messages, []))).message.content).toBe("first");
+    messages[0] = { role: "user", content: "changed" };
+    expect(provider.calls[0]?.messages[0]?.content).toBe("original");
+    expect(Object.isFrozen(provider.calls[0]?.messages[0])).toBe(true);
+    expect(() => provider.assertComplete()).toThrow("unused");
+    const tools = await collectTurn(provider.createStream([], []));
+    expect(tools.message).toMatchObject({
+      content: "call 1",
+      reasoning: "thinking",
+      toolCalls: [{ id: "call_1_0", name: "lookup", arguments: '{"x":1}' }],
+    });
+    expect(tools.source).toEqual({ provider: "scripted", model: "offline" });
+    expect((await collectTurn(provider.createStream([], []))).message.content).toBe("raw");
+    await expect(collectTurn(provider.createStream([], []))).rejects.toThrow("script failure");
+    expect(() => provider.assertComplete()).not.toThrow();
+    await expect(collectTurn(provider.createStream([], []))).rejects.toThrow("call 5");
+    provider.enqueue("after");
+    const controller = new AbortController();
+    controller.abort();
+    expect(() => provider.createStream([], [], { signal: controller.signal })).toThrow();
+    expect(provider.remaining).toBe(1);
+    const mid = new AbortController();
+    const iterator = provider.createStream([], [], { signal: mid.signal })[Symbol.asyncIterator]();
+    await iterator.next();
+    mid.abort();
+    await expect(iterator.next()).rejects.toThrow();
+  });
+
+  it("shares a revisioned session, scores each turn and retains every turn's bill", async () => {
+    const providers: ScriptedProvider[] = [];
+    const report = await runEvals({
+      name: "conversation",
+      cases: [
+        {
+          id: "chat",
+          turns: [
+            { input: "secret first", expected: "one" },
+            {
+              input: "secret second",
+              expected: "two",
+              scorers: [defineScorer("history", (ctx) => ctx.turn === 2 && ctx.runs.length === 2)],
+            },
+          ],
+        },
+      ],
+      repeat: 2,
+      scorers: [exact()],
+      agent: () => {
+        const provider = scriptedProvider([
+          { text: "one", usage: { ...usage, reportedCostUsd: 0.1 } },
+          { text: "two", usage: { ...usage, reportedCostUsd: 0.2 } },
+        ]);
+        providers.push(provider);
+        return defineAgent({ ...base, provider });
+      },
+      host: {
+        checkpoint(snapshot) {
+          if (snapshot.input === "secret second") expect(snapshot.session?.revision).toBe("1");
+        },
+      },
+    });
+    expect(report.summary.passed).toBe(2);
+    expect(report.summary.agentUsage.costUsd).toBeCloseTo(0.6);
+    expect(report.cases[0]?.runs.map((run) => run.turn)).toEqual([1, 2]);
+    expect(report.cases[0]?.runs.every((run) => run.modelAttempts.length === 1)).toBe(true);
+    expect(report.cases[0]?.scores.map((score) => score.turn)).toEqual([1, 2, 2]);
+    expect(report.summary.turns.map((turn) => turn.passed)).toEqual([2, 2]);
+    for (const provider of providers) {
+      expect(provider.calls[1]?.messages).toContainEqual({ role: "user", content: "secret first" });
+      expect(
+        provider.calls[1]?.messages.some(
+          (message) => message.role === "assistant" && message.content === "one",
+        ),
+      ).toBe(true);
+      provider.assertComplete();
+    }
+    expect(reportJson(report)).not.toContain("secret");
+    expect(report.cases[0]?.runs.every((run) => run.snapshot === undefined)).toBe(true);
+  });
+
+  it.each([false, true])(
+    "continues after an unscored setup turn and keeps the case unscored (scorer: %s)",
+    async (scoreSetup) => {
+      const provider = scriptedProvider(["Hello Ana.", "Ana"]);
+      const report = await runEvals({
+        name: "memory",
+        agent: defineAgent({ ...base, provider }),
+        cases: [
+          {
+            id: "name",
+            turns: [
+              { input: "My name is Ana", scorers: scoreSetup ? [exact()] : [] },
+              { input: "What is my name?", expected: "Ana", scorers: [exact()] },
+            ],
+          },
+        ],
+      });
+      expect(report.cases[0]?.turns.map((turn) => turn.status)).toEqual(["unscored", "passed"]);
+      expect(report.cases[0]?.turns[1]?.scores).toMatchObject([
+        { scorer: "exact", turn: 2, passed: true },
+      ]);
+      expect(report.summary).toMatchObject({ total: 1, unscored: 1, passed: 0, decided: 0 });
+      expect(report.cases[0]?.problems).toContain(
+        "No complete set of required scores is available. Supply expectations or the missing measurements.",
+      );
+      expect(() => assertReport(report)).toThrow(EvalFailedError);
+      expect(provider.calls).toHaveLength(2);
+      expect(provider.calls[1]?.messages).toContainEqual({
+        role: "user",
+        content: "My name is Ana",
+      });
+      provider.assertComplete();
+    },
+  );
+
+  it("stops a failed turn, records later turns as not run and refuses authority in stored cases", async () => {
+    const provider = scriptedProvider(["wrong", "never"]);
+    const cases = readCases([
+      {
+        id: "chat",
+        turns: [
+          { input: "First", expected: "right" },
+          { input: "Next", expected: "never" },
+        ],
+      },
+    ]);
+    const report = await runEvals({
+      name: "stopped",
+      cases,
+      agent: defineAgent({ ...base, provider }),
+      scorers: [exact()],
+    });
+    expect(report.cases[0]?.turns.map((turn) => turn.status)).toEqual(["failed", "skipped"]);
+    expect(report.summary.turns[1]).toMatchObject({ total: 1, skipped: 1, passed: 0 });
+    expect(provider.remaining).toBe(1);
+    for (const raw of [
+      [{ id: "x", input: "Go", turns: [{ input: "Next" }] }],
+      [{ id: "x", turns: [] }],
+      [{ id: "x", turns: [{ input: "Go", scorers: [] }] }],
+      [{ id: "x", input: "Go", answers: [{ decision: { type: "approve" } }] }],
+      [{ id: "x", input: "Go", toolMocks: [{ name: "write", result: "ok" }] }],
+      [{ id: "x", input: "Go", driver: {} }],
+      [{ id: "x", user: { opening: "Go", plan: "Do it", maxTurns: 0 } }],
+    ])
+      expect(() => readCases(raw)).toThrow(TypeError);
+  });
+
+  it("answers only matching pending requests and records approval before execution", async () => {
+    let savedDecision = false;
+    const effect = vi.fn(async () => {
+      expect(savedDecision).toBe(true);
+      return "written";
+    });
+    const driver: EvalDriver = {
+      answers: [
+        {
+          agentId: base.id,
+          tool: "write",
+          ask: "approval",
+          arguments: { x: 1 },
+          decision: { type: "approve" },
+        },
+      ],
+    };
+    const write = defineTool({
+      name: "write",
+      description: "Write",
+      inputSchema: { type: "object" },
+      needsApproval: true,
+      run: effect,
+    });
+    const report = await runEvals({
+      name: "approval",
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      drivers: { x: driver },
+      scorers: [exact()],
+      includePrivateData: true,
+      agent: defineAgent({
+        ...base,
+        tools: [write],
+        provider: scriptedProvider([
+          { toolCalls: [{ name: "write", arguments: { x: 1 } }] },
+          "done",
+        ]),
+      }),
+      host: {
+        checkpoint(snapshot) {
+          const model = snapshot.models[0];
+          if (
+            model?.status === "completed" &&
+            model.tools[0]?.asks?.[0]?.decision?.type === "approve"
+          )
+            savedDecision = true;
+        },
+      },
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(effect).toHaveBeenCalledTimes(1);
+    const model = report.cases[0]?.run?.snapshot?.models[0];
+    expect(model?.status === "completed" && model.tools[0]?.asks?.[0]?.request.scope.actorId).toBe(
+      "eval",
+    );
+    for (const selector of [
+      { agentId: base.id, tool: "other" },
+      { agentId: "other", tool: "write" },
+    ]) {
+      const unmatched = await runEvals({
+        name: "unmatched",
+        cases: [{ id: "x", input: "Go" }],
+        drivers: {
+          x: { answers: [{ ...selector, ask: "approval", decision: { type: "approve" } }] },
+        },
+        agent: defineAgent({
+          ...base,
+          tools: [write],
+          provider: scriptedProvider([{ toolCalls: [{ name: "write" }] }]),
+        }),
+      });
+      expect(unmatched.cases[0]?.run?.status).toBe("suspended");
+    }
+    expect(effect).toHaveBeenCalledTimes(1);
+    const repeated = await runEvals({
+      name: "once",
+      cases: [{ id: "x", input: "Go" }],
+      drivers: { x: driver },
+      agent: defineAgent({
+        ...base,
+        tools: [write],
+        provider: scriptedProvider([
+          { toolCalls: [{ name: "write", arguments: { x: 1 } }] },
+          { toolCalls: [{ name: "write", arguments: { x: 1 } }] },
+        ]),
+      }),
+    });
+    expect(repeated.cases[0]?.run?.status).toBe("suspended");
+    expect(effect).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps denials, invalid answers and client results explicit without resuming", async () => {
+    const effect = vi.fn(async () => "effect");
+    const write = defineTool({
+      name: "write",
+      description: "Write",
+      inputSchema: { type: "object" },
+      needsApproval: true,
+      run: effect,
+    });
+    const client = defineClientTool({
+      name: "read_client",
+      description: "Client result",
+      inputSchema: { type: "object" },
+      validate: (raw) => raw,
+      result: {
+        schema: { type: "object" },
+        validate(raw) {
+          if (typeof raw !== "object" || !raw || !("value" in raw) || raw.value !== 2)
+            throw new Error("Invalid client value.");
+          return raw;
+        },
+      },
+    });
+    const report = await runEvals({
+      name: "requests",
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      scorers: [exact()],
+      includePrivateData: true,
+      drivers: {
+        x: {
+          answers: [
+            {
+              agentId: base.id,
+              tool: "write",
+              ask: "approval",
+              decision: { type: "deny", message: "No" },
+            },
+            {
+              agentId: base.id,
+              tool: "ask_question",
+              ask: "question",
+              key: "answer",
+              decision: { type: "answer", answer: { choices: ["yes"] } },
+            },
+            {
+              agentId: base.id,
+              tool: "read_client",
+              ask: "client",
+              decision: { type: "result", value: { value: 2 } },
+            },
+          ],
+        },
+      },
+      agent: defineAgent({
+        ...base,
+        tools: [write, questionTool(), client],
+        provider: scriptedProvider([
+          { toolCalls: [{ name: "write" }] },
+          {
+            toolCalls: [
+              {
+                name: "ask_question",
+                arguments: { message: "Continue?", choices: [{ id: "yes", label: "Yes" }] },
+              },
+            ],
+          },
+          { toolCalls: [{ name: "read_client" }] },
+          "done",
+        ]),
+      }),
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(effect).not.toHaveBeenCalled();
+    const decisions = report.cases[0]?.run?.snapshot?.models.flatMap((model) =>
+      model.status === "completed"
+        ? model.tools.flatMap((tool) => tool.asks?.map((ask) => ask.decision?.type) ?? [])
+        : [],
+    );
+    expect(decisions).toEqual(["deny", "answer", "result"]);
+    const invalid = await runEvals({
+      name: "bad answer",
+      cases: [{ id: "x", input: "Go" }],
+      includePrivateData: true,
+      drivers: {
+        x: {
+          answers: [
+            {
+              agentId: base.id,
+              tool: "ask_question",
+              ask: "question",
+              key: "answer",
+              decision: { type: "answer", answer: { choices: ["missing"] } },
+            },
+          ],
+        },
+      },
+      agent: defineAgent({
+        ...base,
+        tools: [questionTool()],
+        provider: scriptedProvider([
+          {
+            toolCalls: [
+              {
+                name: "ask_question",
+                arguments: { message: "Choose", choices: [{ id: "yes", label: "Yes" }] },
+              },
+            ],
+          },
+        ]),
+      }),
+    });
+    expect(invalid.cases[0]?.run?.status).toBe("suspended");
+    expect(reportJson(invalid)).toContain("invalid_answer");
+  });
+
+  it("does not approve a delegated child's matching tool with a root-only answer", async () => {
+    const effect = vi.fn(async () => "effect");
+    const child = defineAgent({
+      ...base,
+      tools: [
+        defineTool({
+          name: "write",
+          description: "Write",
+          inputSchema: { type: "object" },
+          needsApproval: true,
+          run: effect,
+        }),
+      ],
+      provider: scriptedProvider([{ toolCalls: [{ name: "write" }] }]),
+    });
+    const parent = defineAgent({
+      ...base,
+      id: "parent",
+      tools: [child.asTool({ name: "child", description: "Ask child" })],
+      provider: scriptedProvider([{ toolCalls: [{ name: "child", arguments: { input: "Go" } }] }]),
+    });
+    const report = await runEvals({
+      name: "scope",
+      agent: parent,
+      cases: [{ id: "x", input: "Go" }],
+      drivers: {
+        x: {
+          answers: [
+            { agentId: base.id, tool: "write", ask: "approval", decision: { type: "approve" } },
+          ],
+        },
+      },
+    });
+    expect(report.cases[0]?.run?.status).toBe("suspended");
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("stubs call and invoke without touching real validation, execution or summaries", async () => {
+    const validate = vi.fn((raw: unknown) => raw);
+    const effect = vi.fn(async () => "real");
+    const summarize = vi.fn(() => "real summary");
+    const original = defineTool({
+      name: "read",
+      description: "Read",
+      inputSchema: { type: "object" },
+      validate,
+      run: effect,
+      summarize,
+      isReadOnly: true,
+      needsApproval: true,
+      isConcurrencySafe: true,
+    });
+    const report = await runEvals({
+      name: "mocks",
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      scorers: [exact()],
+      drivers: {
+        x: {
+          toolMocks: [
+            { name: "read", arguments: { a: 1, b: 2 }, result: "direct" },
+            { name: "read", result: { n: 2 } },
+            { name: "read", error: "mock failure" },
+          ],
+        },
+      },
+      agent: async ({ stub }) => {
+        const replacement = stub([original])[0];
+        if (!replacement || "kind" in replacement) throw new Error("Expected ordinary mock.");
+        expect(replacement.definition()).toEqual(original.definition());
+        expect(replacement).toMatchObject({
+          isReadOnly: true,
+          needsApproval: true,
+          isConcurrencySafe: true,
+        });
+        expect(await replacement.call({ b: 2, a: 1 })).toBe("direct");
+        expect(await replacement.invoke({ different: true })).toMatchObject({
+          ok: true,
+          output: { n: 2 },
+          summary: '{"n":2}',
+        });
+        expect(await replacement.invoke({})).toMatchObject({ ok: false, error: "mock failure" });
+        await expect(replacement.call({})).rejects.toThrow("No mock");
+        expect(await replacement.invoke({})).toMatchObject({ ok: false });
+        return assistant("done");
+      },
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(validate).not.toHaveBeenCalled();
+    expect(effect).not.toHaveBeenCalled();
+    expect(summarize).not.toHaveBeenCalled();
+    const unused = scriptedProvider(["never"]);
+    const unapplied = await runEvals({
+      name: "missing stub",
+      cases: [{ id: "x", input: "Go" }],
+      drivers: { x: { toolMocks: [{ name: "read", result: "fake" }] } },
+      agent: defineAgent({ ...base, provider: unused, tools: [original] }),
+    });
+    expect(unapplied.summary.errors).toBe(1);
+    expect(unused.calls).toHaveLength(0);
+  });
+
+  it("runs mocked approvals through SDK checks and never falls back on a mismatch", async () => {
+    const effect = vi.fn(async () => "real");
+    const write = defineTool({
+      name: "write",
+      description: "Write",
+      inputSchema: { type: "object" },
+      needsApproval: true,
+      run: effect,
+    });
+    const report = await runEvals({
+      name: "mock approval",
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      scorers: [exact()],
+      includePrivateData: true,
+      drivers: {
+        x: {
+          toolMocks: [{ name: "write", arguments: { x: 1 }, result: "fake" }],
+          answers: [
+            { agentId: base.id, tool: "write", ask: "approval", decision: { type: "approve" } },
+          ],
+        },
+      },
+      agent: ({ stub }) =>
+        defineAgent({
+          ...base,
+          tools: stub([write]),
+          provider: scriptedProvider([
+            { toolCalls: [{ name: "write", arguments: { x: 2 } }] },
+            "done",
+          ]),
+        }),
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(trajectoryOf(report.cases[0]?.run?.snapshot).steps[0]?.result).toMatchObject({
+      ok: false,
+      content: expect.stringContaining("No mock"),
+    });
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("requires separate simulation consent, stops on the signal and tracks user costs", async () => {
+    const provider = scriptedProvider(["secret followup", "</finished>"]);
+    const target = scriptedProvider([
+      { toolCalls: [{ name: "private_tool", arguments: { key: "private arguments" } }] },
+      { text: "first answer", usage: { ...usage, reportedCostUsd: 0.1 } },
+      "second answer",
+    ]);
+    const cases: EvalCase[] = [
+      {
+        id: "sim",
+        user: { opening: "secret opening", plan: "Ask twice", maxTurns: 3 },
+        expectStatus: "completed",
+      },
+    ];
+    const options = {
+      name: "simulation",
+      cases,
+      agent: defineAgent({
+        ...base,
+        provider: target,
+        tools: [tool("private_tool", async () => "private tool result")],
+      }),
+      user: { provider },
+    };
+    await expect(runEvals({ ...options, allowJudge: true })).rejects.toThrow("allowSimulation");
+    expect(target.calls).toHaveLength(0);
+    const report = await runEvals({ ...options, allowSimulation: true });
+    expect(report.summary.passed).toBe(1);
+    expect(report.cases[0]?.simulation).toBe("finished");
+    expect(report.cases[0]?.runs.map((run) => run.role)).toEqual([
+      "agent",
+      "user",
+      "agent",
+      "user",
+    ]);
+    expect(report.cases[0]?.runs.filter((run) => run.role === "agent")).toHaveLength(2);
+    expect(report.summary.agentUsage.costUsd).toBeCloseTo(0.1);
+    const prompt = JSON.stringify(provider.calls[0]?.messages);
+    expect(prompt).toContain("secret opening");
+    expect(prompt).not.toContain("private_tool");
+    expect(prompt).not.toContain("private arguments");
+    expect(prompt).not.toContain("private tool result");
+    expect(provider.calls.every((call) => call.tools.length === 0)).toBe(true);
+    expect(reportJson(report)).not.toContain("secret");
+    provider.assertComplete();
+    target.assertComplete();
+  });
+
+  it.each(["", "Submitted."])(
+    "sends the saved structured answer to the simulator (assistant text: %j)",
+    async (text) => {
+      const candidate = { answer: "14 days" };
+      const provider = scriptedProvider(["</finished>"]);
+      const target = scriptedProvider([
+        { toolCalls: [{ name: "private_tool", arguments: { key: "private arguments" } }] },
+        { text, toolCalls: [{ name: RESULT_TOOL_NAME, arguments: candidate }] },
+      ]);
+      const report = await runEvals({
+        name: "structured simulation",
+        agent: defineAgent({
+          ...base,
+          provider: target,
+          tools: [tool("private_tool", async () => "private tool result")],
+          output: { schema: { type: "object" }, validate: () => "validated runtime value" },
+        }),
+        cases: [
+          {
+            id: "refund",
+            user: { opening: "What is the refund window?", plan: "Ask about refunds", maxTurns: 1 },
+            expected: candidate,
+          },
+        ],
+        scorers: [exact()],
+        user: { provider },
+        allowSimulation: true,
+      });
+      const prompt = provider.calls[0]?.messages.find(
+        (message) => message.role === "user",
+      )?.content;
+      expect(prompt).toContain(
+        JSON.stringify({ role: "assistant", text: JSON.stringify(candidate) }),
+      );
+      expect(prompt).not.toContain("validated runtime value");
+      expect(prompt).not.toContain("private_tool");
+      expect(prompt).not.toContain("private arguments");
+      expect(prompt).not.toContain("private tool result");
+      expect(prompt).not.toContain(RESULT_TOOL_NAME);
+      expect(report.cases[0]).toMatchObject({ status: "passed", simulation: "finished" });
+      expect(reportJson(report)).not.toContain("14 days");
+      provider.assertComplete();
+      target.assertComplete();
+    },
+  );
+
+  it("reports simulation exhaustion, empty replies and spend stops as incomplete", async () => {
+    for (const reply of ["more", "", { reasoning: "thinking only" }]) {
+      const report = await runEvals({
+        name: "bounded user",
+        agent: assistant("answer"),
+        cases: [
+          {
+            id: "x",
+            user: { opening: "Go", plan: "Continue", maxTurns: 1 },
+            expectStatus: "completed",
+          },
+        ],
+        user: { provider: scriptedProvider([reply]) },
+        allowSimulation: true,
+      });
+      expect(report.summary.passed).toBe(0);
+      expect(report.cases[0]?.simulation).toBe(reply === "more" ? "turn_limit" : "incomplete");
+      expect(report.cases[0]?.runs).toHaveLength(2);
+    }
+    const report = await runEvals({
+      name: "user spend",
+      agent: () => assistant("answer"),
+      cases: [
+        { id: "x", user: { opening: "Go", plan: "Continue" }, expectStatus: "completed" },
+        { id: "next", input: "Never" },
+      ],
+      user: {
+        provider: scriptedProvider([{ text: "more", usage: { ...usage, reportedCostUsd: 0.2 } }]),
+      },
+      allowSimulation: true,
+      budget: { usd: 0.1 },
+    });
+    expect(report.stopped?.reason).toBe("budget");
+    expect(report.summary.userUsage.knownCostUsd).toBe(0.2);
+    expect(report.summary.skipped).toBe(1);
+    expect(report.cases[0]?.simulation).toBe("incomplete");
+  });
+
+  it("cancels the whole conversation while preserving earlier turns and a partial user bill", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const user: Provider = {
+      id: "user",
+      model: "offline",
+      async *createStream(_messages, _tools, options) {
+        signal = options?.signal;
+        yield { type: "usage", usage: { ...usage, reportedCostUsd: 0.25 } };
+        await new Promise<void>(() => {});
+        yield { type: "finish", content: "late", finishReason: "stop" };
+      },
+    };
+    const pending = runEvals({
+      name: "cancel conversation",
+      agent: assistant("first"),
+      cases: [{ id: "x", user: { opening: "Go", plan: "Continue" }, expectStatus: "completed" }],
+      user: { provider: user },
+      allowSimulation: true,
+      timeoutMs: 20,
+    });
+    await vi.advanceTimersByTimeAsync(21);
+    const report = await pending;
+    expect(signal?.aborted).toBe(true);
+    expect(report.cases[0]?.status).toBe("cancelled");
+    expect(report.cases[0]?.turns[0]?.status).toBe("passed");
+    expect(report.cases[0]?.runs.map((run) => run.role)).toEqual(["agent", "user"]);
+    expect(report.summary.userUsage).toMatchObject({
+      knownCostUsd: 0.25,
+      costUsd: null,
+      unknownCharges: 1,
+    });
+  });
+
+  it("routes later turns to the active owner and ignores ordinary delegation ownership", async () => {
+    const childWire = scriptedProvider(["child first", "child second"]);
+    const child = defineAgent({ ...base, id: "child", provider: childWire });
+    const parent = defineAgent({
+      ...base,
+      provider: scriptedProvider([{ toolCalls: [{ name: "transfer" }] }]),
+      tools: [defineHandoff({ name: "transfer", description: "Transfer", to: child })],
+    });
+    const report = await runEvals({
+      name: "owner",
+      agent: parent,
+      resolveAgent: (ref) => {
+        expect(ref).toEqual({ id: "child", version: "1" });
+        return child;
+      },
+      cases: [
+        {
+          id: "x",
+          turns: [
+            { input: "First", expected: "child first" },
+            { input: "Second", expected: "child second" },
+          ],
+        },
+      ],
+      scorers: [exact(), answeredBy("child")],
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(report.cases[0]?.runs.map((run) => run.activeAgent.id)).toEqual(["child", "child"]);
+    expect(childWire.calls[1]?.messages.some((message) => message.content === "child first")).toBe(
+      true,
+    );
+    const specialist = defineAgent({
+      ...base,
+      id: "specialist",
+      provider: scriptedProvider(["advice"]),
+    });
+    const outcome = await defineAgent({
+      ...base,
+      provider: scriptedProvider([
+        { toolCalls: [{ name: "consult", arguments: { input: "Help" } }] },
+        "parent answer",
+      ]),
+      tools: [specialist.asTool({ name: "consult", description: "Consult" })],
+    }).run("Go");
+    expect(await check(answeredBy(base.id), outcome)).toMatchObject({ passed: true });
+    expect(await check(answeredBy("specialist"), outcome)).toMatchObject({ passed: false });
+  });
+
+  it("grounds only against available tool results with an explicit model opinion", async () => {
+    const judgeProvider = scriptedProvider([
+      {
+        toolCalls: [
+          {
+            name: RESULT_TOOL_NAME,
+            arguments: { pass: true, score: 1, reason: "Supported by recorded evidence" },
+          },
+        ],
+      },
+    ]);
+    const scorer = grounded({ provider: judgeProvider });
+    expect(await check(scorer, await assistant().run("Go"))).toMatchObject({ kind: "skipped" });
+    const outcome = await defineAgent({
+      ...base,
+      tools: [tool("lookup", async () => "14 days")],
+      provider: scriptedProvider([{ toolCalls: [{ name: "lookup" }] }, "14 days"]),
+    }).run("Go");
+    expect((await scoreRun(outcome, [scorer])).scores[0]?.kind).toBe("error");
+    expect(judgeProvider.calls).toHaveLength(0);
+    const result = await scoreRun(outcome, [scorer], { allowJudge: true });
+    expect(result.scores[0]).toMatchObject({ scorer: "grounded", passed: true });
+    expect(JSON.stringify(judgeProvider.calls[0]?.messages)).toContain("14 days");
+    expect(judgeProvider.calls[0]?.tools.map((tool) => tool.name)).toEqual([RESULT_TOOL_NAME]);
   });
 });
 
