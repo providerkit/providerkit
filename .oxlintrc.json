@@ -28,7 +28,30 @@
       }
     },
     {
-      "files": ["site/**/*.tsx"],
+      "files": ["react/src/**/*.ts", "react/src/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../**/core/**",
+                  "../**/agents/**",
+                  "@providerkit/core/src/**",
+                  "@providerkit/core/dist/**",
+                  "@providerkit/agents/src/**",
+                  "@providerkit/agents/dist/**"
+                ],
+                "message": "React uses the public exports of core and agents, never their private files."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["site/**/*.tsx", "react/**/*.ts", "react/**/*.tsx"],
       "rules": {
         "react/purity": "off",
         "react-hooks-js/purity": "error",

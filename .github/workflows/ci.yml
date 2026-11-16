@@ -61,8 +61,8 @@ jobs:
       # else in CI would catch it — the tests run in Bun, where it all works.
       - name: Portability guard (no Node built-ins in portable sources)
         run: |
-          if grep -rnE 'from "node:|require\(|\bprocess\.env|\bBuffer\b|__dirname' core/src agents/src; then
-            echo "::error::core/src and agents/src must stay free of Node built-ins. See AGENTS.md."
+          if grep -rnE 'from "node:|require\(|\bprocess\.env|\bBuffer\b|__dirname' core/src agents/src react/src; then
+            echo "::error::core/src, agents/src and react/src must stay free of Node built-ins. See AGENTS.md."
             exit 1
           fi
           echo "Portable sources are clean"
