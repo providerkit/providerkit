@@ -1,0 +1,397 @@
+/* The example is a host, not a theme shipped by the package. No font or network dependency. */
+:root {
+  color-scheme: light;
+  --page: #f2f5f4;
+  --surface: #ffffff;
+  --ink: #1c2925;
+  --muted: #4e625a;
+  --line: #94a69e;
+  --action: #205c47;
+  --wash: #e3eee8;
+  --pk-muted-color: var(--muted);
+  --pk-border-color: var(--line);
+  --pk-focus-color: var(--action);
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: var(--ink);
+  background: var(--page);
+  scrollbar-color: var(--line) var(--page);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #17211d;
+  --surface: #202e27;
+  --ink: #ecf4ef;
+  --muted: #b2c7bb;
+  --line: #7e9789;
+  --action: #9fe2bf;
+  --wash: #2d4438;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.5;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+button,
+select,
+summary,
+input[type="checkbox"] {
+  cursor: pointer;
+}
+button:disabled,
+select:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+a {
+  color: var(--action);
+}
+::selection {
+  background: var(--wash);
+  color: var(--ink);
+}
+:focus-visible {
+  outline: 2px solid var(--action);
+  outline-offset: 3px;
+}
+:where(button, select, summary) {
+  min-block-size: 44px;
+}
+:where(h1, h2, h3, p) {
+  overflow-wrap: anywhere;
+}
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  text-wrap: balance;
+}
+p {
+  text-wrap: pretty;
+}
+
+.demo {
+  max-inline-size: 1280px;
+  margin: auto;
+  padding: 32px 32px 64px;
+}
+.page-heading {
+  max-inline-size: 70ch;
+  margin-block-end: 28px;
+}
+.wordmark {
+  font-weight: 700;
+  font-size: 18px;
+  text-decoration: none;
+  color: var(--ink);
+}
+.wordmark span {
+  color: var(--muted);
+  font-weight: 400;
+}
+h1 {
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  letter-spacing: -0.025em;
+  margin-block: 24px 12px;
+}
+.page-heading p {
+  color: var(--muted);
+  margin: 0;
+}
+h2 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+h3 {
+  font-size: 1.1rem;
+}
+.boot {
+  margin: 32px;
+}
+.settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-block: 12px 20px;
+}
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.settings select {
+  padding: 8px 32px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--surface);
+  max-inline-size: 100%;
+  font-size: 1rem;
+  font-weight: 400;
+}
+.try-panel,
+.diagnostics {
+  border-block: 1px solid var(--line);
+}
+.try-panel > summary,
+.diagnostics > summary {
+  padding: 12px 0;
+  font-weight: 600;
+}
+.try-content {
+  padding-block-end: 20px;
+}
+.try-content > p {
+  max-inline-size: 75ch;
+}
+.hint,
+.privacy {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.demo-button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 14px;
+  color: var(--ink);
+  background: transparent;
+}
+.host-feedback {
+  min-block-size: 2.5rem;
+  padding-block: 8px;
+  color: var(--muted);
+}
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+.main-panel,
+.observer-panel {
+  min-inline-size: 0;
+}
+.main-panel {
+  max-inline-size: 860px;
+  inline-size: 100%;
+  margin-inline: auto;
+}
+.panel-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-block-end: 12px;
+}
+.pk-conversation {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: clip;
+}
+.pk-message-list {
+  block-size: clamp(18rem, 48svh, 32rem);
+  flex: none;
+}
+.pk-connection-status,
+.pk-run-status {
+  padding: 10px 16px;
+  font-size: 0.875rem;
+}
+.pk-connection-status {
+  border-block-end: 1px solid var(--line);
+}
+.pk-run-status {
+  border-block-start: 1px solid var(--line);
+}
+.pk-composer {
+  padding: 16px;
+}
+.privacy {
+  margin-block-start: 12px;
+  max-inline-size: 78ch;
+}
+.privacy p {
+  margin-block: 8px;
+}
+.remember {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-block-size: 44px;
+  color: var(--ink);
+}
+.remember input {
+  inline-size: 20px;
+  block-size: 20px;
+  accent-color: var(--action);
+  flex: none;
+}
+.source-detail {
+  padding-block: 12px;
+  border-block-end: 1px solid var(--line);
+}
+.source-detail h3 {
+  margin-block: 0 8px;
+}
+.sample-result {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.sample-result p {
+  margin-block: 4px 0;
+}
+.diagnostics {
+  margin-block-start: 32px;
+  color: var(--muted);
+}
+.diagnostics > p {
+  max-inline-size: 75ch;
+}
+.diagnostics dl {
+  max-inline-size: 28rem;
+}
+.diagnostics dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block: 4px;
+}
+.diagnostics dd {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* Unlayered host rules override the optional providerkit layer without !important. */
+.host-view .pk-message {
+  padding-block: 16px;
+  border-block-end: 1px solid var(--line);
+}
+.host-view .pk-message-heading {
+  font-size: 1rem;
+}
+.host-view .pk-message-author {
+  color: var(--action);
+}
+.host-view .pk-message-state {
+  font-size: 0.8rem;
+}
+.host-view .pk-composer {
+  background: var(--wash);
+}
+.host-view .pk-composer-textarea {
+  background: var(--surface);
+  border-radius: 0;
+}
+.host-view .pk-composer-send {
+  background: var(--action);
+  color: var(--surface);
+  border-color: var(--action);
+  border-radius: 4px;
+  font-weight: 700;
+}
+.host-view .pk-tool,
+.host-view .pk-specialist {
+  border-radius: 0;
+  border-inline: 0;
+}
+.host-view .pk-approval {
+  background: var(--wash);
+  border: 0;
+  padding: 16px;
+  border-radius: 0;
+}
+.host-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.host-approval-actions p {
+  flex-basis: 100%;
+  margin-block: 0 4px;
+}
+.host-approval-actions button {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 8px 12px;
+}
+.host-view .sample-result {
+  border: 0;
+  padding: 0;
+}
+
+@media (min-width: 1050px) {
+  .with-observer {
+    grid-template-columns: minmax(0, 1.45fr) minmax(320px, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .demo {
+    padding: 20px 16px calc(32px + env(safe-area-inset-bottom));
+  }
+  .settings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .settings label,
+  .settings select {
+    min-inline-size: 0;
+    inline-size: 100%;
+  }
+  .try-content .settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .panel-heading {
+    align-items: start;
+  }
+  .pk-message-list {
+    block-size: 24rem;
+  }
+  .pk-composer {
+    padding: 12px;
+  }
+}
+@media (hover: hover) and (pointer: fine) {
+  .demo-button:hover:not(:disabled),
+  .host-approval-actions button:hover:not(:disabled) {
+    background: var(--wash);
+  }
+  summary:hover {
+    color: var(--action);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  button:active:not(:disabled) {
+    transform: none;
+  }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto;
+  }
+}

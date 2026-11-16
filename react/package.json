@@ -55,8 +55,11 @@
   "scripts": {
     "build": "tsc && bun run build:css",
     "build:css": "mkdir -p dist && cat src/styles/base.css $(ls src/styles/*.css | grep -v '/base.css$') > dist/styles.css",
-    "typecheck": "tsc --noEmit && tsc -p test",
-    "lint": "oxlint -c ../.oxlintrc.json src test",
+    "typecheck": "tsc --noEmit && tsc -p test && bun run typecheck:example",
+    "typecheck:example": "tsc -p examples",
+    "lint": "oxlint -c ../.oxlintrc.json src test examples",
+    "dev:example": "bun --no-env-file examples/chat/server.ts",
+    "example:check": "bun --no-env-file examples/chat/check.ts",
     "test": "vitest run",
     "sync:docs": "cp ../LICENSE .",
     "prepublishOnly": "bun run lint && bun run build && bun run typecheck && bun run sync:docs",
@@ -78,6 +81,7 @@
   "devDependencies": {
     "@providerkit/agents": "workspace:*",
     "@providerkit/core": "workspace:*",
+    "@types/bun": "^1.4.4",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "happy-dom": "^20.14.5",

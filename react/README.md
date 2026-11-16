@@ -267,6 +267,68 @@ The host handles file upload, access, storage and retention. An attachment shown
 not mean the agent received its bytes. The send endpoint must resolve the uploaded reference into
 an input the selected model can read.
 
+## Run the local example
+
+From a fresh workspace, run `bun install` and `bun run build` once. The example imports the
+packages through their public exports, so their builds must exist. Then start it with the Bun
+version pinned in the root `packageManager` (currently 1.4.4):
+
+```sh
+bun --no-env-file run --filter @providerkit/react dev:example
+```
+
+Open `http://127.0.0.1:4317`. The terminal prints the exact URL and server PID. To choose another
+port, run `bun --no-env-file react/examples/chat/server.ts --port 4320` from the workspace root.
+The launch commands do not load `.env` files. The server listens only on loopback and calls no
+model provider or app service. Stop it with Ctrl+C in its terminal.
+
+The page uses the package's hooks, composer, message list, Markdown and activity components.
+Choose **Host styles** to see CSS overrides and host-owned result and approval slots. Choose
+**Message port** to wrap the same local HTTP host in a browser `MessageChannel`; this changes the
+transport, not the chat store. No Chrome APIs are used.
+
+Try these flows:
+
+- Send a message. A real `defineAgent` root calls a `defineDelegation` with two specialists, all
+  using scripted providers. The server projects their events with `createAgentProjector`.
+  Replies are fixed examples, not live intelligence. Source buttons open synthetic records.
+- While it runs, open the read-only view, close it, then reopen it after completion. Reload the
+  page or drop live updates and reconnect. These actions reuse the same run. **Stop** is separate.
+- Under **Try connection, send and upload states**, delay or refuse a send, or lose its
+  acknowledgement. Unknown delivery keeps the draft. **Check saved conversation** observes the
+  saved reply without sending again. Only an accepted send clears the submitted draft.
+- Attach a file without text. Try a slow upload, remove it to cancel, or fail each file once and
+  choose Retry. PNG, JPEG and text files are limited to 1 MB each, up to three per message. The
+  server discards contents and keeps only opaque references with synthetic labels. Local image
+  previews are temporary; the script never reads uploaded contents.
+- Opt into **Save drafts** before reloading. Drafts are scoped to both the demo profile and the
+  conversation. Text and confirmed references expire after 24 hours; pending local files need
+  reselection. Anyone using this browser can read saved drafts. Turning the option off deletes
+  that scope's saved draft. Expired records are removed on the next access.
+- Try a sample approval. The host uses the existing `respond` interface and publishes its own
+  authoritative display updates, deduplicated by request ID. This is a separate host simulation,
+  not SDK approval continuation. Connecting the SDK's new request journal is still pending.
+
+Conversations, uploads and work live only in server memory. Browser reloads do not restart them;
+restarting the server clears them. Demo profiles are not authentication. This is not a production
+server. Optional diagnostics show only synthetic counters, never raw SDK snapshots or tool args.
+
+Run the focused runtime check by hand:
+
+```sh
+bun --no-env-file run --filter @providerkit/react example:check
+```
+
+It starts its own Bun subprocess on a free loopback port and stops only that process. It checks
+cursor replay, reload, observer close versus Stop, duplicate sends and decisions, projection
+privacy, unknown delivery through the port transport, draft preservation and attachment-only
+uploads. It does not run in CI or in a general check script. Example types are checked by
+`typecheck:example`; package lint includes the example files.
+
+Browser acceptance remains separate: check desktop and phone layouts, both themes, reduced
+motion, keyboard focus, citation/code actions, draft scope changes, upload retry and cancellation,
+and scrolling up during a long reply without being pulled back to the bottom.
+
 ## Server responsibilities
 
 Keep authentication, tenant checks, tool permissions, approval claims, billing and retention on the
