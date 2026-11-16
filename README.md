@@ -164,6 +164,74 @@ settings, such as a domain filter, refuses unless you mark that tool `optional`.
 The [tools guide](https://providerkit.dev/guides/tools/#hosted-tools) says which adapter runs
 what, and how each call is billed.
 
+### Chat tracing
+
+```ts
+import { withProviderTracing } from "@providerkit/core/otel";
+
+const traced = withProviderTracing(provider);
+```
+
+Use `traced.createStream` just like `provider.createStream`. Install the optional
+`@opentelemetry/api` peer (`^1.10.0`) to use this entry. Normal imports load no tracing code and
+need no telemetry dependency. Your app supplies the tracing setup; with only the API installed,
+calls still work but no spans are exported. Core installs no exporter or context manager.
+
+Wrap the **final provider**, after the registry, fallback, key/token recovery, gate and watchdog
+layers. One CLIENT span named `chat {model}` covers one consumed stream, not each hidden attempt.
+It starts on the first read and ends when the iterator ends, fails or the caller's signal aborts.
+A finish chunk does not end it because usage can follow. Duration includes queueing, authentication,
+recovery and pauses between reads. Tracing adds no pulls, retries, timeout or abort controller.
+
+Options are `tracer` (default: `trace.getTracer("@providerkit/core")`), `parentContext` and
+`providerName` (a label, not a routing change). Without `parentContext`, the active context is
+saved separately for each `createStream` call. Set it explicitly to attach a call to a saved
+parent without a context manager. HTTP child spans still need your app's context manager.
+Re-wrapping a wrapper made by this adapter replaces its tracing options rather than adding a
+second provider span. It cannot find a traced provider hidden inside an unrelated decorator;
+do not trace both individual candidates and their completed chain.
+
+Recorded fields follow the OpenTelemetry GenAI **Development** conventions at
+[revision e6658f1](https://github.com/open-telemetry/semantic-conventions-genai/tree/e6658f14c9d9ea0760825f029cb82e7673f48fab):
+
+| Observation                                         | Span attribute                                                                                   |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Chat operation, requested provider/model, streaming | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.request.stream` |
+| Input and output tokens                             | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`                                        |
+| Cache reads and writes, already included in input   | `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_write.input_tokens`                  |
+| Reasoning tokens, already included in output        | `gen_ai.usage.reasoning.output_tokens`                                                           |
+| Reported cost, including zero                       | `providerkit.usage.reported_cost_usd`                                                            |
+| Finish reason                                       | `gen_ai.response.finish_reasons`                                                                 |
+| Selected source from `chunk.source`                 | `providerkit.response.provider`, `providerkit.response.model`                                    |
+| Time until this wrapper sees a chunk or activity    | `providerkit.stream.first_chunk_seconds`, `providerkit.stream.first_activity_seconds`            |
+| Iterator outcome                                    | `providerkit.stream.outcome`: `completed`, `closed`, `cancelled` or `error`                      |
+
+The last normalized usage record wins; cumulative records are not added. No record means unknown,
+not zero. Only finite, nonnegative counts are kept. These are observations, not audited bills:
+some adapters fill missing vendor counts with zero, and errors, early closure or cancellation can
+leave partial usage. Hidden failed attempts are not included. Selected model IDs can be configured
+aliases, so they are not labelled `gen_ai.response.model`. Direct Gemini is labelled `gcp.gemini`;
+gateways keep their own identity. The timing fields measure this wrapper, not standard TTFT or
+server inference time.
+
+Failures record core's low-cardinality `error.type` and an ERROR status, never the error's message,
+body, stack, cause or vendor code. Successful and cancelled calls leave status UNSET. Selected
+numeric hints use `http.response.status_code` and `providerkit.rate_limit.utilization`,
+`reset_at_ms` and `retry_after_ms`; `providerkit.rate_limit.window` accepts only `5h`, `weekly`
+or `monthly`. Existing activity and rate-limit callbacks still run. Broken instrumentation does
+not replace provider results or errors and cannot replay a call.
+
+No prompts, replies, reasoning, tool arguments/results, hosted payloads, credentials, session IDs,
+headers, URLs or app context are captured. Provider and model labels are recorded, so keep private
+data out of those labels. Aborting closes observation, not proof that the vendor stopped billing.
+A stream abandoned without `return` or abort has no observable end. An inner watchdog timeout
+may stay invisible until the next read; tracing does not read ahead to discover it.
+
+This covers **chat only**, including hosted tools as part of the provider call. It does not create
+agent tool spans or instrument speech, transcription, decisions, standalone auth, transport or
+other helpers. Agent run parenting and dispatch binding are not included; combining this with
+agent lifecycle tracing does not automatically attach provider spans to agent runs.
+
 ### Speech
 
 Text to one audio file, from its own entry point, so a chat-only app loads none of the speech code:
