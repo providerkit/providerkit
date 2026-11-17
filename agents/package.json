@@ -21,6 +21,10 @@
     "./evals": {
       "types": "./dist/evals.d.ts",
       "default": "./dist/evals.js"
+    },
+    "./code-mode/quickjs": {
+      "types": "./dist/quickjs.d.ts",
+      "default": "./dist/quickjs.js"
     }
   },
   "types": "./dist/index.d.ts",
