@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// Host build tools are used only by the import-boundary check, never by src.
+// Host APIs are used only by tests, never by src.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -376,6 +376,46 @@ describe("withProviderTracing", () => {
     expect(recorded(tracer).attributes["gen_ai.usage.input_tokens"]).toBe(10);
   });
 
+  it.each(["done", "yielded", "rejected"] as const)(
+    "matches yield* cleanup when throw is missing (%s)",
+    async (cleanup) => {
+      const injected = new Error("injected failure");
+      const cleanupFailure = new Error("cleanup failure");
+      for (const traced of [false, true]) {
+        const tracer = new RecordingTracer();
+        const source = {
+          next: vi.fn().mockResolvedValue({ done: false, value: delta }),
+          return: vi.fn(async () => {
+            await Promise.resolve();
+            if (cleanup === "rejected") throw cleanupFailure;
+            return { done: cleanup === "done", value: delta };
+          }),
+        };
+        const provider = fromIterator(source);
+        const selected = traced ? withProviderTracing(provider, { tracer }) : provider;
+        const stream = selected.createStream([], []);
+        async function* delegate() {
+          yield* stream;
+        }
+        const iterator = delegate();
+        if (traced) expect(provider.createStream).not.toHaveBeenCalled();
+        expect(source.next).not.toHaveBeenCalled();
+        expect(tracer.spans).toHaveLength(0);
+        expect((await iterator.next()).value).toBe(delta);
+        const failure = expect(iterator.throw(injected)).rejects;
+        if (cleanup === "rejected") await failure.toBe(cleanupFailure);
+        else await failure.toBeInstanceOf(TypeError);
+        expect(source.return.mock.calls).toEqual([[]]);
+        expect(source.return.mock.contexts).toEqual([source]);
+        expect(source.next).toHaveBeenCalledTimes(1);
+        expect(provider.createStream).toHaveBeenCalledTimes(1);
+        expect((await iterator.next()).done).toBe(true);
+        expect(source.return).toHaveBeenCalledTimes(1);
+        if (traced) expect(recorded(tracer).endCount).toBe(1);
+      }
+    },
+  );
+
   it.each(["return", "throw"] as const)(
     "ends on %s termination and keeps its exact rejection",
     async (method) => {
@@ -578,6 +618,46 @@ describe("withProviderTracing", () => {
       expect(source.next).toHaveBeenCalledTimes(2);
       expect(provider.createStream).toHaveBeenCalledTimes(1);
       expect(recorded(tracer).endCount).toBe(1);
+    },
+  );
+
+  it.each(["provider", "instrumentation"] as const)(
+    "handles a context manager's derived promise when %s rejects",
+    async (failureSource) => {
+      const tracer = new RecordingTracer();
+      const providerFailure = new Error("provider failure");
+      const instrumentationFailure = new Error("instrumentation failure");
+      const result: IteratorResult<ProviderChunk> = { done: false, value: delta };
+      const source = {
+        next: vi.fn(async () => {
+          if (failureSource === "provider") throw providerFailure;
+          return result;
+        }),
+      };
+      const cleanup = vi.fn(() => {
+        if (failureSource === "instrumentation") throw instrumentationFailure;
+      });
+      vi.spyOn(context, "with").mockImplementation((_scope, callback, thisArg, ...args) =>
+        Promise.resolve(callback.apply(thisArg, args)).finally(cleanup),
+      );
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        const provider = fromIterator(source);
+        const iterator = read(withProviderTracing(provider, { tracer }));
+        if (failureSource === "provider")
+          await expect(iterator.next()).rejects.toBe(providerFailure);
+        else expect(await iterator.next()).toBe(result);
+        // Let Node report any rejection on the manager's separate promise.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).not.toHaveBeenCalled();
+        expect(cleanup).toHaveBeenCalledTimes(1);
+        expect(source.next).toHaveBeenCalledTimes(1);
+        expect(provider.createStream).toHaveBeenCalledTimes(1);
+        expect(recorded(tracer).endCount).toBe(failureSource === "provider" ? 1 : 0);
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
     },
   );
 

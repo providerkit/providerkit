@@ -154,11 +154,16 @@ export function withProviderTracing(
       async function advance(method: "next" | "return" | "throw", args: [] | [unknown]) {
         if (method === "next") start();
         try {
-          const result = await inScope(scope, () => {
+          const result = await inScope(scope, async () => {
             const source = iterator();
             const operation = source[method];
             if (operation) return operation.apply(source, args);
-            if (method === "throw") throw args[0];
+            if (method === "throw") {
+              // Match yield* when throw is absent: close first, even if return yields again.
+              // A cleanup failure must escape instead of the missing-method TypeError.
+              await source.return?.();
+              throw new TypeError("The iterator does not provide a 'throw' method.");
+            }
             return { done: true as const, value: args[0] };
           });
           quietly(() => {
@@ -245,7 +250,9 @@ function once<T>(operation: () => T): () => T {
 function inScope<T>(scope: Context | undefined, operation: () => T): T {
   if (!scope) return operation();
   const invoke = once(operation);
-  quietly(() => context.with(scope, invoke));
+  // A manager can return a derived promise (for example, callback().finally(cleanup)).
+  // Handle its rejection too, but keep the provider's cached result as the only outcome.
+  quietly(() => Promise.resolve(context.with(scope, invoke)).catch(() => {}));
   return invoke();
 }
 
