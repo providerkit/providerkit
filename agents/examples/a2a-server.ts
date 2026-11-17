@@ -1,11 +1,15 @@
 // Run: bun agents/examples/a2a-server.ts
 // Offline. No socket, provider, model call or optional server package.
 import { defineWorkflow } from "../src/workflow.ts";
-import { createA2AClient } from "../src/a2a/client.ts";
-import { bearerToken } from "../src/a2a/auth.ts";
-import { createMemoryRuns } from "../src/a2a/memory-runs.ts";
-import { createA2AServer } from "../src/a2a/server.ts";
-import { a2aSegments, createMemoryTaskStore } from "../src/a2a/tasks.ts";
+import {
+  createA2AClient,
+  bearerToken,
+  createMemoryRuns,
+  createA2AServer,
+  a2aSegments,
+  createMemoryTaskStore,
+  A2ATaskRejected,
+} from "../src/a2a/index.ts";
 
 const principal = { owner: "demo", actorId: "reader" };
 const tasks = createMemoryTaskStore();
@@ -13,13 +17,19 @@ const workflow = defineWorkflow({
   id: "echo",
   version: "1",
   input: {
-    schema: { type: "object" },
+    schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
     validate(value: unknown) {
-      if (typeof value !== "string") throw new TypeError("Pass text to echo.");
-      return value;
+      if (
+        !value ||
+        typeof value !== "object" ||
+        !("text" in value) ||
+        typeof value.text !== "string"
+      )
+        throw new TypeError("Pass an object with text to echo.");
+      return { text: value.text };
     },
   },
-  run: (text, context) => context.step("echo", () => text),
+  run: ({ text }, context) => context.step("echo", () => text),
 });
 const runs = createMemoryRuns({
   workflow,
@@ -49,8 +59,15 @@ const server = createA2AServer({
   tasks,
   authenticate: bearerToken("offline-demo-only", principal),
   card: { url: "https://demo.test/", name: "Echo", description: "Returns the text you send." },
-  prepare: (message) =>
-    message.parts.map((part) => (part.kind === "text" ? part.text : "")).join("\n"),
+  prepare(message) {
+    const text = message.parts
+      .map((part) => {
+        if (part.kind !== "text") throw new A2ATaskRejected();
+        return part.text;
+      })
+      .join("\n");
+    return { text };
+  },
   // Only this selected result crosses the boundary, not workflow steps or snapshots.
   projectOutput: (outcome) =>
     typeof outcome.output === "string" ? [{ kind: "text", text: outcome.output }] : [],

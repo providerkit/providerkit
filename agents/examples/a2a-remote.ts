@@ -1,7 +1,11 @@
 /** Offline A2A specialist. Run with: bun agents/examples/a2a-remote.ts */
 import { strict as assert } from "node:assert";
-import { defineRemoteAgent } from "../src/a2a/remote.ts";
-import { decodeA2AAgentCard, decodeA2ARpcRequest, encodeA2AResult } from "../src/a2a/wire.ts";
+import {
+  defineRemoteAgent,
+  decodeA2AAgentCard,
+  decodeA2ARpcRequest,
+  encodeA2AResult,
+} from "../src/a2a/index.ts";
 import { checkChildProgress, equalData } from "../src/snapshot.ts";
 import type { AgentHost, TreeNode } from "../src/types.ts";
 

@@ -1010,6 +1010,76 @@ A child key becomes part of the child's run ID and of every operation ID under i
 carry those IDs, and a screen that shows the run may send them to a browser. So key children by
 position or by a fixed name, such as `topic-1`, and never by their input.
 
+## Serve tasks over A2A
+
+A2A lets another app send tasks to your agent or workflow. Pass each HTTP request to the handler:
+
+```ts
+const response = await server.fetch(request);
+```
+
+It returns a standard `Response`. The complete [offline server example](examples/a2a-server.ts)
+uses real workflow execution and an in-process client, with no socket or paid model:
+
+```sh
+bun agents/examples/a2a-server.ts
+```
+
+It prints `Hello`. The public functions live on `@providerkit/agents/a2a`:
+
+- `createA2AServer` serves A2A 1.0 and 0.3 through JSON-RPC or HTTP+JSON.
+- `createMemoryRuns` runs local agents or workflows in this process. Use your existing durable
+  run service for work that must survive a restart.
+- `createMemoryTaskStore` keeps owner-scoped task and message receipts. Full stores refuse new
+  data rather than discard receipts that prevent duplicate work. Supply a persistent task store
+  in production.
+
+Authentication runs before body parsing. `authenticate` returns the owner and caller as
+`{ owner, actorId }`; your server configuration selects the tenant. Every task, context, stream
+and callback stays in that partition. `authorize` can check current access on each operation.
+`bearerToken` is available for a host-owned shared secret. There is no automatic sign-in flow.
+
+By default, even the discovery card requires authentication. `publicCard: true` opens only that
+card. `allowAnonymous: true` is for development and puts callers in one shared anonymous
+partition. Failed authentication never falls back to anonymous access.
+
+Write the card's name, description and skills yourself. Prompts and private tools are not
+published as skills. Supply security declarations separately in `card.security["1.0"]` and
+`card.security["0.3"]`; the two formats are not interchangeable. A workflow with custom input
+needs `prepare` to validate and map the incoming message. Context IDs only group tasks unless
+`sessions: true` is set with an owner-checked session factory. An ID does not grant session access.
+
+### Choose what the peer can see
+
+No final result or transient model text leaves the process by default. `projectOutput` selects
+final parts; `projectText` selects root text. Neither exposes reasoning, tool data or child
+transcripts automatically. Current projection policy also applies when reading stored history.
+`exposeRequest` can narrow which requests a peer sees. Remote approvals and client actions need
+separate opt-ins and still use your authenticated request policy.
+
+`a2aPolicy` checks reserved A2A evidence, then delegates to your real claim and decision handlers.
+It does not turn peer text into permission. Install `a2aSegments` in workers to track continuations
+started outside the HTTP handler. Its `scope(owner, runId)` must recover the original authenticated
+partition from your storage. Use `server.refresh(principal, taskId)` after authoritative checkpoints
+to update the task and deliver permitted notifications.
+
+Cancellation returns `{ id, requested }`. Follow the returned physical segment; acceptance is
+not proof that the task stopped. Canceling a paused durable run needs the background binding's
+`createContinuation` capability. Closing an observer only detaches it. No browser timer or SDK
+scheduler resumes a task automatically.
+
+### Sign cards and send notifications
+
+`signAgentCard` and `verifyAgentCard` use host-selected keys with ES256, EdDSA or RS256. A2A 1.0
+signs normalized, known protobuf fields; unknown fields and removed empty values are not covered.
+Version 0.3 signs the raw public card without its signatures. A valid signature does not authorize
+an endpoint or an application action.
+
+Push delivery requires current authorization and a host egress policy. Attempts are recorded
+before sending; an uncertain delivery is never resent automatically. URL checks do not prove
+where DNS resolves: your egress layer must check and pin the destination. Timestamped HMAC helpers
+are an optional providerkit extension, not an A2A standard, and need host replay storage.
+
 ## Remote specialists over A2A
 
 Run the [offline remote example](examples/a2a-remote.ts):

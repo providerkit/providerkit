@@ -275,6 +275,11 @@ SOFTWARE.
 
 ## Microsoft Agent Framework
 
+- Serving sources: `dotnet/src/Microsoft.Agents.AI.Hosting.A2A/IsolationKeyScopedTaskStore.cs`
+  and `A2AAgentHandler.cs`. Used in `src/a2a/tasks.ts` and `server.ts`: caller-scoped task
+  storage and generic failure responses. Changed: owner, actor and tenant form the partition;
+  revision checks protect message receipts and physical-segment updates.
+
 - A2A source: `python/packages/a2a/agent_framework_a2a/_agent.py`, remote input occurrences.
   Used in `src/a2a/remote.ts`: remote questions become request-keyed local asks. Changed:
   the existing request journal owns decisions, current host authority checks every answer,
@@ -356,6 +361,12 @@ THE SOFTWARE.
 
 ## Google ADK
 
+- Serving sources: `google/adk-js/core/src/a2a/agent_to_a2a.ts` and
+  `core/src/agents/processors/request_confirmation_llm_request_processor.ts`.
+  Used in `src/a2a/server.ts`: authentication is required by default, input is JSON only,
+  and a peer cannot answer an operator approval without an explicit host opt-in. Changed:
+  current host claims remain authoritative and all private output needs explicit projection.
+
 - A2A sources: `google/adk-js`, `core/src/a2a/agent_card.ts` and `core/src/a2a/auth.ts`;
   `google/adk-python`, `src/google/adk/a2a/agent/_remote_a2a_agent.py`.
   Used in `src/a2a/policy.ts`, `client.ts`, `auth.ts` and the remote runtime: endpoint checks,
@@ -381,6 +392,13 @@ Copyright 2026 Google LLC. Licensed under Apache 2.0; the full license is includ
   requires explicit provider consent, and mocks never fall through to real tool execution.
 
 ## Mastra
+
+- Serving sources: `packages/server/src/server/handlers/a2a.ts`,
+  `packages/server/src/server/a2a/agent-card-v1.ts`, `agent-card-signing.ts` and
+  `push-notification-sender.ts`, plus `client-sdks/client-js/src/utils/verify-agent-card-signature.ts`.
+  Used in `src/a2a/server.ts`, `signing.ts` and `push.ts`: explicit version selection, cards,
+  detached signatures and callback checks. Changed: Web Crypto replaces signing dependencies;
+  host egress policy replaces Node-only networking, and uncertain pushes are not replayed.
 
 - A2A sources: `packages/core/src/a2a/compat/v1.ts` and `packages/core/src/a2a/a2a-agent.ts`.
   Used in `src/a2a/wire.ts` and `remote.ts`: version mapping, terminal/interrupted states,
@@ -411,6 +429,10 @@ as `LICENSE-APACHE-2.0`. No code from `ee/` is used.
 
 ## CrewAI
 
+- Push source: `lib/crewai/src/crewai/a2a/updates/push_notifications/signature.py`.
+  Used in `src/a2a/push.ts`: timestamped HMAC-SHA256 signatures. Changed: Web Crypto,
+  explicit host keys and a host replay check; this remains an optional providerkit extension.
+
 - Source: [crewAIInc/crewAI](https://github.com/crewAIInc/crewAI),
   `lib/crewai/src/crewai/a2a/wrapper.py` and `a2a/updates/polling/config.py`.
 - Used in `src/a2a/remote.ts`: bounded polling and parent-routed questions. Changed: handles
@@ -420,7 +442,7 @@ as `LICENSE-APACHE-2.0`. No code from `ee/` is used.
 ```text
 MIT License
 
-Copyright (c) crewAI, Inc.
+Copyright (c) 2025 crewAI, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -440,6 +462,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## A2A JavaScript SDK
+
+- Source: [a2aproject/a2a-js](https://github.com/a2aproject/a2a-js), version 1.3.0,
+  `src/signature.ts` and the A2A 1.0 card schema. Licensed under Apache 2.0;
+  the full license is included as `LICENSE-APACHE-2.0`.
+- Used in `src/a2a/signing.ts`: normalization of known protobuf card fields and removal of
+  default and empty values before canonical JSON signing. Changed: a portable, bounded reader
+  and Web Crypto, without a runtime dependency on the SDK. Tests use the official SDK separately
+  to check wire and signature interoperability.
 
 ## Vercel AI SDK
 

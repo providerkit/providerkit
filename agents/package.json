@@ -26,6 +26,10 @@
       "types": "./dist/workflow.d.ts",
       "default": "./dist/workflow.js"
     },
+    "./a2a": {
+      "types": "./dist/a2a/index.d.ts",
+      "default": "./dist/a2a/index.js"
+    },
     "./code-mode": {
       "types": "./dist/code-mode.d.ts",
       "default": "./dist/code-mode.js"
