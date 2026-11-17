@@ -57,50 +57,18 @@ export interface BackgroundWorker extends Pick<
   ): Promise<ChildResult<T>>;
 }
 
-export interface Continuation {
-  /** Unique authorization claim, distinct from both the logical run and the host row. */
-  id: string;
-  sourceId: string;
-  /** Empty-answer continuations must atomically claim this wake for this logical run. */
-  wakeAt?: number;
-  answers: Readonly<Record<string, unknown>>;
-}
-
-export interface BackgroundContext {
-  /** From the authenticated caller, or from Run.owner inside a worker. */
-  owner: string;
-  segmentId: string;
-  continuation?: Continuation;
-}
-
-export interface BackgroundPolicy
-  extends
-    Pick<RunOptions, "onEvent" | "onLifecycle" | "bindModelProvider">,
-    Required<
-      Pick<AgentHost, "authorizeResume" | "prepareRequest" | "resolveRequest" | "beforeTool">
-    >,
-    Pick<
-      AgentHost,
-      | "canRunConcurrently"
-      | "needsApproval"
-      | "answerNow"
-      | "inbox"
-      | "reconcileToolRetry"
-      | "beforeStep"
-      | "reconcileStep"
-    > {
-  /** Worker-only values for tools, such as the authenticated actor or a database handle.
-   * Never serialized. The SDK supplies reserved operation IDs and cancellation signals. */
-  context?: RunOptions["context"];
-  /** Reads media references for this owner's run. Check that the owner may read each id. */
-  loadMedia?: AgentHost["loadMedia"];
-  /** Called under the worker's lease, after its row exists. Authenticate every answer,
-   * recheck resource version/expiry and atomically reserve each exact request for continuation.id
-   * AND context.segmentId. Repeating that exact claim must succeed; any other claim or segment
-   * must fail. authorizeResume checks ownership on every attempt. resolveRequest may reuse a
-   * consumed answer only for this same claim/segment. These guarantees need durable host state. */
-  claimContinuation: (snapshot: TreeNode, continuation: Continuation) => void | Promise<void>;
-}
+import type {
+  BackgroundContext,
+  BackgroundPolicy,
+  Continuation,
+  SegmentHook,
+} from "./background-types.ts";
+export type {
+  BackgroundContext,
+  BackgroundPolicy,
+  Continuation,
+  SegmentHook,
+} from "./background-types.ts";
 
 export interface BackgroundOptions<T> extends BackgroundBase {
   agent: Agent<T>;
@@ -122,6 +90,9 @@ interface BackgroundBase {
    * The host must also run runs.sweep on boot and periodically, and drain on shutdown. */
   enqueue: (id: string) => Promise<void>;
   policy: (context: BackgroundContext) => BackgroundPolicy | Promise<BackgroundPolicy>;
+  /** Awaited before execution and after the SDK journal settles. May repeat after worker loss;
+   * the host must deduplicate/reconcile external effects. This is not host-row commit proof. */
+  onSegment?: SegmentHook;
   /** Trusted. Return the session `id` names, after checking that `owner` may use it: an id
    * from a request is not authorization. `start` reads its history inside the authenticated
    * request; the worker gets it again, with the stored owner, to append the turn. */
@@ -229,6 +200,8 @@ function bindBackground<I, R extends NodeOutcome>(
     throw new TypeError(
       "Provide a run kind, a durable enqueue callback and a trusted policy factory.",
     );
+  if (options.onSegment !== undefined && typeof options.onSegment !== "function")
+    throw new TypeError("onSegment must be a function.");
   if (options.session !== undefined && typeof options.session !== "function")
     throw new TypeError("The session option must be a factory: (owner, id) => Session.");
   checkOptions({ historyLimit, prepareHistory });
@@ -366,6 +339,7 @@ function bindBackground<I, R extends NodeOutcome>(
     const trusted = await untilAbort(
       policy({
         owner: run.owner,
+        runId: snapshot.runId,
         segmentId: run.id,
         continuation: initial.continuation,
       }),
@@ -458,6 +432,31 @@ function bindBackground<I, R extends NodeOutcome>(
     const answers = Object.fromEntries(
       Object.entries(initial.continuation?.answers ?? {}).filter(([id]) => pending.has(id)),
     );
+    async function notifySegment(phase: "start" | "end", saved: TreeNode): Promise<void> {
+      if (!options.onSegment) return;
+      signal.throwIfAborted();
+      const journal = immutableCopy(saved);
+      await untilAbort(Promise.resolve(host.authorizeResume(journal)), signal);
+      signal.throwIfAborted();
+      await untilAbort(
+        Promise.resolve(
+          options.onSegment(
+            Object.freeze({
+              phase,
+              owner: run.owner,
+              id: run.id,
+              runId: journal.runId,
+              signal,
+              state: journal.state,
+              snapshot: journal,
+            }),
+          ),
+        ),
+        signal,
+      );
+      signal.throwIfAborted();
+    }
+    await notifySegment("start", snapshot);
     const result = await runtime.resume(snapshot, {
       signal,
       context: trusted.context,
@@ -472,6 +471,7 @@ function bindBackground<I, R extends NodeOutcome>(
     // The portable loop reports cancellation as data. The run service needs its control
     // exception back, or a cancelled/lost/draining worker could record a successful job.
     run.signal.throwIfAborted();
+    await notifySegment("end", result.snapshot);
     return {
       format: 1,
       snapshot: result.snapshot,
@@ -490,7 +490,7 @@ function bindBackground<I, R extends NodeOutcome>(
     async start(
       owner: string,
       input: I,
-      start: Pick<RunOptions, "signal" | "context" | "enabledTools"> & {
+      start: Pick<RunOptions, "runId" | "signal" | "context" | "enabledTools"> & {
         sessionId?: string;
         modelSettings?: RecordedModelSettings;
       } = {},
@@ -498,10 +498,11 @@ function bindBackground<I, R extends NodeOutcome>(
       if (!isId(owner)) throw new TypeError("Provide an authenticated owner.");
       if (
         !isRecord(start) ||
+        (start.runId !== undefined && !isId(start.runId)) ||
         (start.sessionId !== undefined && !isId(start.sessionId)) ||
         (start.signal !== undefined && !(start.signal instanceof AbortSignal))
       )
-        throw new TypeError("Start options take a sessionId and a signal.");
+        throw new TypeError("Use non-empty run/session ids and an AbortSignal when supplied.");
       checkOptions(start);
       const modelSettings = readModelSettings(start.modelSettings);
       if (modelSettings.onActivity || modelSettings.onRateLimit)
@@ -518,7 +519,7 @@ function bindBackground<I, R extends NodeOutcome>(
       const snapshot = await runtime.open(
         input,
         { ...start, memory, session, historyLimit, prepareHistory, signal },
-        crypto.randomUUID(),
+        start.runId ?? crypto.randomUUID(),
       );
       signal.throwIfAborted();
       return create(owner, { format: 1, snapshot: runtime.restore(snapshot) });
