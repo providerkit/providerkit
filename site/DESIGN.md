@@ -434,7 +434,7 @@ page title is `2rem`, second-level headings `1.5rem` and third-level headings `1
 ornamental heading rules or figures. The page title identifies reference routes for these styles.
 
 Authored package reference indexes sit beside the generated directories. TypeDoc owns only
-`reference/core/` and `reference/agents/`; regenerating them cannot erase the authored indexes.
+`reference/core/`, `reference/agents/` and `reference/react/`; regenerating them cannot erase the authored indexes.
 
 ## Do's and Don'ts
 
@@ -482,26 +482,29 @@ failure and turns it into a remedy, then shows where provider calls, agent tasks
 belong. Guides and references keep the same visual world in a quieter reading style.
 
 Spine: purpose, one real working example, full-width package rows, then boundaries and reference.
-Driver: the reader chooses an error kind; Core computes the result locally and the choice stays in the URL.
-Motion: results change immediately in place; the full classifier redraws its ray on the demo route, never on a timer.
+Driver: the reader chooses a task. Core computes error remedies locally, an Agents example runs a real tool with a scripted provider, and React renders its released chat components. Task and scenario choices stay in the URL.
+Motion: results change in place; sample streaming shows the behavior being demonstrated. The classifier redraws its ray only after a new result, never on a timer.
 
 The approved shared work area won over three equal package cards because readers need a job
 before an import path. A diagram-first landing hid the purpose; a feature inventory hid the
-starting point; separate package landings split the choice too early; a chat-first demo would
-promise an unreleased package. These were alternatives, not extra designs to build.
+starting point; separate package landings split the choice too early. A chat-first landing was
+held back while React was unpublished; now the released chat is one task choice, not a replacement
+for the package overview. These were alternatives, not extra designs to build.
 
 First screen: what providerkit does, who it is for and links to Start and Examples. Code is above
 output on phones. Controls are underlined and unfilled. The earlier suggestion of a filled
 neutral primary action was not approved and is not part of this direction.
 
 The Core example runs `isTransient`, not a copied classifier. The full demo reuses OpticalBench.
-The package rows explain the next action with accurate release state: Core 0.33, Agents 0.1 and
-React in development. No invented installs, no pretend chat run, no unmaintained test counts.
+The package rows explain the next action with accurate release state: Core 0.33.1, Agents 0.2.0
+and React 0.1.0. No invented installs, live model answers or unmaintained test counts.
 
-Finished Agent and React demos and their expanded guides/reference belong in a later integration
-after publication. That is sequenced work, not a decision to omit them. The site must use the
-published React components rather than build another reducer, composer or Markdown renderer.
-No new runtime library is needed for this foundation.
+Agents and React guides/reference now cover the released public entries. Their browser examples
+use explicit sample responses, no credentials or paid providers. The site uses the published React
+components rather than building another reducer, composer or Markdown renderer. Optional demo
+code loads only when selected. Demo data stays in the tab with visible retention and clear actions;
+this is not advertised as a durable backend. The package's scoped styles receive the site's square,
+unfilled controls and inherited typography, not a second visual system.
 
 ## Decisions behind the site
 

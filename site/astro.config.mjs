@@ -7,9 +7,10 @@ import { defineConfig, passthroughImageService } from "astro/config";
 
 const REPO = "https://github.com/providerkit/providerkit";
 const DESCRIPTION =
-  "Call models, run agents and build chat screens in TypeScript. Start with Core or Agents, and follow React as it develops.";
+  "Call models, run agents and build chat screens in TypeScript. Choose the package for the part your app needs.";
 const [coreTypeDoc, coreSidebar] = createStarlightTypeDocPlugin();
 const [agentsTypeDoc, agentsSidebar] = createStarlightTypeDocPlugin();
+const [reactTypeDoc, reactSidebar] = createStarlightTypeDocPlugin();
 /** @satisfies {import("starlight-typedoc").StarlightTypeDocOptions["typeDoc"]} */
 const typeDoc = { excludeInternal: true, useCodeBlocks: true, parametersFormat: "table" };
 
@@ -41,9 +42,9 @@ export default defineConfig({
           projectName: "providerkit",
           description: DESCRIPTION,
           details: [
-            "- Core 0.33 calls providers and handles their failures. Its main entry is fetch-only with no runtime dependencies.",
-            "- Agents 0.1 runs a model/tool loop using Core. The host owns authorization, storage and retention.",
-            "- React is in development, not a published installation or browser demo in these docs.",
+            "- Core 0.33.1 calls providers and handles their failures. Its main entry is fetch-only with no runtime dependencies.",
+            "- Agents 0.2.0 runs agents and workflows using Core. The host owns authorization, storage and retention.",
+            "- React 0.1.0 provides chat hooks and optional components. Its portable protocol works with an app's own state owner.",
             "- Start at https://providerkit.dev/start/ to choose a package.",
             "- Error remedies and flags are data at https://providerkit.dev/kinds.json.",
             "- Every page serves Markdown: /guides/errors.md matches /guides/errors/.",
@@ -63,7 +64,7 @@ export default defineConfig({
             {
               label: "API reference",
               paths: ["reference/**"],
-              description: "Released Core and Agents exports",
+              description: "Released Core, Agents and React exports",
             },
             {
               label: "Core",
@@ -73,12 +74,12 @@ export default defineConfig({
             {
               label: "Agents",
               paths: ["agents", "agents/**", "reference/agents", "reference/agents/**"],
-              description: "The released 0.1 agent loop and host-run binding",
+              description: "Agent execution, workflows and host-run binding",
             },
             {
               label: "React",
-              paths: ["react"],
-              description: "Development overview and public implementation work",
+              paths: ["react", "react/**", "reference/react", "reference/react/**"],
+              description: "Chat hooks, display data and optional components",
             },
             {
               label: "Concepts",
@@ -104,10 +105,35 @@ export default defineConfig({
           typeDoc,
         }),
         agentsTypeDoc({
-          entryPoints: ["../agents/src/index.ts", "../agents/src/runs.ts"],
+          entryPoints: [
+            "../agents/src/index.ts",
+            "../agents/src/runs.ts",
+            "../agents/src/mcp.ts",
+            "../agents/src/evals.ts",
+            "../agents/src/workflow.ts",
+            "../agents/src/a2a/index.ts",
+            "../agents/src/code-mode.ts",
+            "../agents/src/quickjs.ts",
+            "../agents/src/otel.ts",
+          ],
           tsconfig: "../agents/tsconfig.json",
           output: "reference/agents",
           sidebar: { label: "Agents API", collapsed: true },
+          typeDoc,
+        }),
+        reactTypeDoc({
+          entryPoints: [
+            "../react/src/index.ts",
+            "../react/src/protocol.ts",
+            "../react/src/sse.ts",
+            "../react/src/agents.ts",
+            "../react/src/ui/index.ts",
+            "../react/src/markdown.tsx",
+            "../react/src/ag-ui.ts",
+          ],
+          tsconfig: "../react/tsconfig.json",
+          output: "reference/react",
+          sidebar: { label: "React API", collapsed: true },
           typeDoc,
         }),
       ],
@@ -154,9 +180,35 @@ export default defineConfig({
           items: [
             { label: "Overview", slug: "agents" },
             { label: "Quickstart", slug: "agents/getting-started" },
+            { label: "Conversations and media", slug: "agents/conversations" },
+            { label: "Tools and guards", slug: "agents/tools" },
+            { label: "Questions and approvals", slug: "agents/requests" },
+            { label: "Recovery and retries", slug: "agents/recovery" },
+            { label: "Specialists and helpers", slug: "agents/specialists" },
+            { label: "Workflows", slug: "agents/workflows" },
+            { label: "Memory", slug: "agents/memory" },
+            { label: "Code mode", slug: "agents/code-mode" },
+            { label: "Remote agents and A2A", slug: "agents/a2a" },
+            { label: "MCP tools", slug: "agents/mcp" },
+            { label: "Evals", slug: "agents/evals" },
+            { label: "Tracing", slug: "agents/tracing" },
+            { label: "Background runs", slug: "agents/background-runs" },
           ],
         },
-        { label: "React", slug: "react" },
+        {
+          label: "React",
+          collapsed: true,
+          items: [
+            { label: "Overview", slug: "react" },
+            { label: "Quickstart", slug: "react/getting-started" },
+            { label: "Transport and display data", slug: "react/transport" },
+            { label: "Requests and client actions", slug: "react/requests" },
+            { label: "Components and content", slug: "react/components" },
+            { label: "Styling", slug: "react/styles" },
+            { label: "Recovery and drafts", slug: "react/recovery" },
+            { label: "AG-UI", slug: "react/ag-ui" },
+          ],
+        },
         {
           label: "Concepts",
           collapsed: true,
@@ -170,9 +222,12 @@ export default defineConfig({
         { label: "Examples", slug: "examples" },
         { label: "Demos", slug: "demos" },
         { label: "Error classifier", slug: "demos/errors" },
+        { label: "Run a task", slug: "demos/agent" },
+        { label: "Chat components", slug: "demos/chat" },
         { label: "API reference", slug: "reference" },
         coreSidebar,
         agentsSidebar,
+        reactSidebar,
       ],
     }),
   ],

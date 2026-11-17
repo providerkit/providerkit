@@ -1,6 +1,6 @@
 ---
 title: providerkit
-description: Call models, run agents and build chat screens in TypeScript. Start with Core or Agents, and follow React as it develops.
+description: Call models, run agents and build chat screens in TypeScript. Choose the package for the part your app needs.
 template: splash
 ---
 
@@ -9,7 +9,7 @@ import TaskExample from "../../components/TaskExample.tsx";
 <div class="foundation-home">
 <header class="masthead">
   <h1>Call models. Run agents.<br />Build chat screens.</h1>
-  <p>TypeScript packages for the parts between your app and an AI model. Use Core for provider calls, Agents for tools and tasks, and follow the React chat package as it develops.</p>
+  <p>Call a provider with Core. Add Agents for tools and workflows, or React for a chat screen. Your app checks permissions and stores the data.</p>
   <p class="masthead-actions">
     <a href="/start/">Choose where to start</a>
     <a href="/examples/">Find an example</a>
@@ -29,7 +29,7 @@ import TaskExample from "../../components/TaskExample.tsx";
         Call a model, stream its answer and handle failures. Keep your own agent loop, or use ours.
       </p>
       <p class="package-detail">
-        0.33.0. Chat, hosted tools, speech, transcription and opt-in tracing. The main entry has no
+        0.33.1. Chat, hosted tools, speech, transcription and opt-in tracing. The main entry has no
         runtime dependencies.
       </p>
       <p class="masthead-actions">
@@ -49,7 +49,8 @@ import TaskExample from "../../components/TaskExample.tsx";
         can check.
       </p>
       <p class="package-detail">
-        0.1.0, experimental. Built on Core, with specialist calls and checkpoints your app can save.
+        0.2.0, experimental. Requests and saved steps share the same execution limits. Your host
+        owns storage.
       </p>
       <p class="masthead-actions">
         <a href="/agents/getting-started/">Run an agent offline</a>
@@ -65,11 +66,12 @@ import TaskExample from "../../components/TaskExample.tsx";
     <div>
       <p>Chat state, hooks and optional components for an app's conversation screen.</p>
       <p class="package-detail">
-        In development. Follow the public implementation and local chat example before the first
-        release.
+        0.1.0, experimental. Use hooks or plain-data components with your app's transport and
+        styles.
       </p>
       <p class="masthead-actions">
-        <a href="/react/">See the React work</a>
+        <a href="/react/getting-started/">Add a chat screen</a>
+        <a href="/demos/chat/">Try the components</a>
       </p>
     </div>
   </div>

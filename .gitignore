@@ -14,6 +14,7 @@ react/LICENSE
 site/.astro/
 site/src/content/docs/reference/core/
 site/src/content/docs/reference/agents/
+site/src/content/docs/reference/react/
 
 # Internal: the product/brand brief and the migration roadmap both name private
 # codebases. This repo is public — they stay on disk and out of it.

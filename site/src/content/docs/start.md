@@ -25,12 +25,19 @@ await assistant.run("List the tasks.");
 ```
 
 The [offline quickstart](/agents/getting-started/) supplies `assistant` and returns two example
-tasks without an API key. Agents 0.1.0 is experimental; check the result status before using its output.
+tasks without an API key. Agents 0.2.0 is experimental; check the result status before using its output.
+For steps your code chooses, use [a workflow](/agents/workflows/).
 
-## Follow the React chat package
+## Build a chat screen with React
 
-React is being built for browser state, hooks and optional chat components. It is not published
-yet. [Read the development overview](/react/) and follow the public chat example work.
+Send through your app's transport:
+
+```ts
+await chat.send("Summarize this page.");
+```
+
+React 0.1.0 supplies chat state and optional components. [Set up the hook](/react/getting-started/)
+or [try the component demo](/demos/chat/). Keep your existing server and styles.
 
 ## Choose only what you need
 

@@ -20,6 +20,7 @@ on:
       - "site/**"
       - "core/**"
       - "agents/**"
+      - "react/**"
       - "brand/**"
       - "package.json"
       - "bun.lock"
