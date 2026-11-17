@@ -39,9 +39,8 @@ function healValue(value: unknown): unknown {
 }
 
 function healArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) out[key] = healValue(value);
-  return out;
+  // JSON keys are data; assignment would invoke the inherited "__proto__" setter.
+  return Object.fromEntries(Object.entries(args).map(([key, value]) => [key, healValue(value)]));
 }
 
 /** The cut can land inside an escape (`…aten\u00`, or a lone `\`). That
@@ -66,7 +65,7 @@ function unescapeJson(text: string): string {
  * half-value is worse than none.
  */
 function salvageStringFields(raw: string): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const entries: [string, string][] = [];
   const text = raw.replace(DANGLING_ESCAPE, "");
 
   // A completed `"key": "value",` or `"key": "value"}` pair.
@@ -74,7 +73,7 @@ function salvageStringFields(raw: string): Record<string, unknown> {
   let match: RegExpExecArray | null;
   let lastCompleteEnd = 0;
   while ((match = COMPLETE_FIELD.exec(text)) !== null) {
-    out[unescapeJson(match[1]!)] = unescapeJson(match[2]!);
+    entries.push([unescapeJson(match[1]!), unescapeJson(match[2]!)]);
     lastCompleteEnd = COMPLETE_FIELD.lastIndex;
   }
 
@@ -82,9 +81,9 @@ function salvageStringFields(raw: string): Record<string, unknown> {
   // never closed, keep its content up to the cut.
   const OPEN_FIELD = /"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)$/s;
   const open = OPEN_FIELD.exec(text.slice(lastCompleteEnd));
-  if (open?.[2]) out[unescapeJson(open[1]!)] = unescapeJson(open[2]!);
+  if (open?.[2]) entries.push([unescapeJson(open[1]!), unescapeJson(open[2]!)]);
 
-  return out;
+  return Object.fromEntries(entries);
 }
 
 /**
