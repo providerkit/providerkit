@@ -48,7 +48,9 @@ export function RunStatusDisplay({
       ? labels.stopping
       : state === "sending"
         ? labels.message.sending
-        : labels.run[state];
+        : state === "waiting" && run.waitingFor === "continuation"
+          ? labels.waitingContinuation
+          : labels.run[state];
   const help =
     state !== run.status
       ? undefined
@@ -75,6 +77,11 @@ export function RunStatusDisplay({
       >
         {title}
       </span>
+      {state === "waiting" && run.wakeAt !== undefined && Math.abs(run.wakeAt) <= 8.64e15 && (
+        <p className="pk-status-help" data-part="scheduled-wait">
+          {labels.waitingUntil(run.wakeAt)}
+        </p>
+      )}
       {run.owner && (
         <p className="pk-status-text" data-part="conversation-owner">
           {labels.conversationOwner(run.owner.label)}

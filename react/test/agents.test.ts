@@ -18,7 +18,7 @@ import {
   type Agent,
   type AgentEvent,
   type AgentHost,
-  type RunSnapshot,
+  type TreeNode,
   type PendingRequest,
 } from "@providerkit/agents";
 import {
@@ -126,15 +126,17 @@ function approvals(
 }
 
 /** Evidence stays keyed by the request, never a browser-supplied child route. */
-function evidenceFor(snapshot: RunSnapshot, evidence: unknown): Record<string, unknown> {
-  for (const model of snapshot.models) {
-    if (model.status !== "completed") continue;
-    for (const tool of model.tools)
-      for (const record of tool.asks ?? [])
-        if (tool.status !== "completed" && !record.closed && !record.decision)
-          return { [record.request.id]: evidence };
-  }
-  for (const delegation of snapshot.delegations)
+function evidenceFor(snapshot: TreeNode, evidence: unknown): Record<string, unknown> {
+  const executions =
+    snapshot.kind === "workflow"
+      ? snapshot.steps
+      : snapshot.models.flatMap((model) => (model.status === "completed" ? model.tools : []));
+  for (const execution of executions)
+    for (const record of execution.asks ?? [])
+      if (execution.status !== "completed" && !record.closed && !record.decision)
+        return { [record.request.id]: evidence };
+  const journals = snapshot.kind === "workflow" ? snapshot.steps : snapshot.delegations;
+  for (const delegation of journals)
     for (const child of delegation.children) {
       const found = evidenceFor(child.snapshot, evidence);
       if (Object.keys(found).length) return found;
@@ -169,7 +171,7 @@ function play(events: readonly ChatEvent[], view: ChatView = emptyChatView()): C
   return events.reduce(reduceChat, view);
 }
 
-function opening(projector: AgentProjector, saved: RunSnapshot): ChatEvent[] {
+function opening(projector: AgentProjector, saved: TreeNode): ChatEvent[] {
   return overWire([
     { v: 1, type: "snapshot", messages: [projector.snapshot(saved)], run: projector.run(saved) },
   ]);
@@ -179,7 +181,7 @@ function opening(projector: AgentProjector, saved: RunSnapshot): ChatEvent[] {
  * been sent when it was written: what a host sees when it reads its log head, then its save. */
 async function withSaves(agent: Agent<string>, input: string, host: AgentHost = {}) {
   const seen = record();
-  const saves: { snapshot: RunSnapshot; after: number }[] = [];
+  const saves: { snapshot: TreeNode; after: number }[] = [];
   const outcome = await agent.run(input, {
     onEvent: seen.onEvent,
     host: {
@@ -299,7 +301,7 @@ function expectForward(before: ChatView, after: ChatView): void {
 function openAt(
   options: AgentProjectorOptions,
   events: readonly AgentEvent[],
-  at: { snapshot: RunSnapshot; after: number },
+  at: { snapshot: TreeNode; after: number },
 ): ChatView {
   const host = createAgentProjector(options);
   const sent = [
@@ -413,6 +415,7 @@ describe("loop extension projection", () => {
     async (status) => {
       const { events, outcome, saves } = await retried();
       const saved = saves.find(({ snapshot }) => {
+        if (snapshot.kind !== "agent") return false;
         const model = snapshot.models[0];
         return (
           model?.status === "completed" &&
@@ -803,8 +806,8 @@ describe("request journals and attempts", () => {
     });
     if (waiting.status !== "suspended") throw new Error(waiting.status);
     expect(waiting.requests[0]?.ask.type).toBe("client");
-    expect(waiting.requests[0]?.call.arguments).toEqual({ text: "approved-input" });
-    expect(waiting.requests[0]?.call.call.arguments).toContain("private-original");
+    expect(waiting.requests[0]?.call?.arguments).toEqual({ text: "approved-input" });
+    expect(waiting.requests[0]?.call?.call.arguments).toContain("private-original");
     const exposed = createAgentProjector({
       messageId: "reply",
       runId: waiting.runId,
@@ -1067,7 +1070,7 @@ describe("handoff and input projection", () => {
       tools: [defineHandoff({ name: "transfer", description: "Transfer", to: target })],
     });
     const events: AgentEvent[] = [];
-    const saves: RunSnapshot[] = [];
+    const saves: TreeNode[] = [];
     const outcome = await root.run("Private original", {
       runId: "input-root",
       host: {
@@ -1379,6 +1382,7 @@ describe("createAgentProjector", () => {
       expect(view.run).toEqual({
         id: outcome.runId,
         status: "waiting",
+        waitingFor: "response",
         messageId: "answer",
         owner: { runId: outcome.runId, agentId: "lead", label: "lead" },
       });
@@ -1515,7 +1519,7 @@ describe("createAgentProjector", () => {
     ]);
     expect(failedView.run(failed.snapshot).error).toEqual({
       code: "execution_failed",
-      message: "The agent stopped because of an error.",
+      message: "The run could not finish. Check its saved result before trying again.",
     });
     expect(sketch(clerkView.snapshot(pending.snapshot))).toEqual(["approval file pending"]);
     // The checked result is a tool call too, and it is never a row.
@@ -1736,10 +1740,12 @@ describe("createAgentProjector", () => {
       };
       const waiting = play(project(createAgentProjector(options), first.events, "s1"));
       const request = pending.requests[0]!;
+      if (!request.call) throw new Error("Expected a tool-origin request");
       const { operationId } = request.call;
       expect(waiting.run).toEqual({
         id: pending.runId,
         status: "waiting",
+        waitingFor: "response",
         messageId: "answer",
         owner: { runId: pending.runId, agentId: "assistant", label: "assistant" },
       });
@@ -1805,6 +1811,7 @@ describe("createAgentProjector", () => {
       request: () => ({ title: "Send the update?" }),
     });
     const waiting = play(project(projector, first.events, "s1"));
+    if (!pending.requests[0]?.call) throw new Error("Expected a tool-origin request");
     expect(waiting.messages[0]?.parts).toEqual([
       {
         type: "approval",
@@ -2231,8 +2238,14 @@ describe("createAgentProjector", () => {
       ]);
       expect(view.messages[0]?.state).toBe(ending === "failed" ? "failed" : "stopped");
       const errors = {
-        failed: { code: "execution_failed", message: "The agent stopped because of an error." },
-        limited: { code: "modelCalls", message: "The agent stopped because it reached a limit." },
+        failed: {
+          code: "execution_failed",
+          message: "The run could not finish. Check its saved result before trying again.",
+        },
+        limited: {
+          code: "modelCalls",
+          message: "The run reached a limit. Review the result before starting more work.",
+        },
         stopped: undefined,
       };
       expect(view.run.error).toEqual(errors[ending]);

@@ -43,7 +43,7 @@ export function createAgUiReader(options: AgUiReaderOptions): AgUiReader {
   let view = emptyChatView();
   let texts = new Map<string, TextFrame>();
   let tools = new Map<string, ToolFrame>();
-  let steps = new Map<string, boolean>();
+  let steps = new Map<string, ToolPart>();
   let children = new Map<
     string,
     { messageId: string; part: Extract<DisplayPart, { type: "agent" }> }
@@ -533,20 +533,27 @@ export function createAgUiReader(options: AgUiReaderOptions): AgUiReader {
           case "STEP_STARTED":
           case "STEP_FINISHED": {
             const done = event.type === "STEP_FINISHED";
-            if (
-              (!done && steps.has(event.stepName)) ||
-              (done && steps.get(event.stepName) !== false)
-            ) {
+            const key = wireId("step", event.subagentRunId ?? "", event.stepName);
+            if ((!done && steps.has(key)) || (done && steps.get(key)?.state !== "running")) {
               problem("The step is duplicated or ended before it started.");
               break;
             }
-            steps.set(event.stepName, done);
-            put(wireId("steps", binding.agUiRunId), {
-              type: "data",
-              id: wireId("step", event.stepName),
-              kind: "ag-ui.step",
-              data: { name: event.stepName, state: done ? "finished" : "started" },
-            });
+            const part: ToolPart = {
+              type: "tool",
+              kind: "step",
+              id: key,
+              label: options.label?.(event.stepName) ?? event.stepName,
+              state: done ? "done" : "running",
+              ...(event.subagentRunId && { agentId: event.subagentRunId }),
+            };
+            steps.set(key, part);
+            put(wireId("steps", binding.agUiRunId), part);
+            issues.push(
+              issue(
+                "unsupported",
+                "Native steps do not identify workflow operations or attempts. Use a display extension to preserve them.",
+              ),
+            );
             break;
           }
           case "SUBAGENT_STARTED": {
@@ -694,7 +701,8 @@ export function createAgUiReader(options: AgUiReaderOptions): AgUiReader {
                   part.type === "approval" ||
                   part.type === "question" ||
                   part.type === "client-tool" ||
-                  part.type === "agent",
+                  part.type === "agent" ||
+                  (part.type === "tool" && part.kind === "step"),
               );
               if (!keep.length) continue;
               const existing = messages.find((item) => item.id === held.id);
@@ -757,10 +765,11 @@ export function createAgUiReader(options: AgUiReaderOptions): AgUiReader {
           }
           case "RUN_FINISHED":
           case "RUN_ERROR": {
+            const suspended = event.type === "RUN_FINISHED" && event.outcome?.type === "interrupt";
             if (
               [...texts.values()].some((frame) => !frame.ended) ||
               [...tools.values()].some((frame) => !frame.ended) ||
-              [...steps.values()].some((done) => !done)
+              (!suspended && [...steps.values()].some((part) => part.state === "running"))
             ) {
               issues.push(
                 issue("incomplete", "The run ended with open frames. Reload its saved snapshot."),
@@ -776,7 +785,17 @@ export function createAgUiReader(options: AgUiReaderOptions): AgUiReader {
               for (const [toolId, frame] of tools) tools.set(toolId, { ...frame, ended: true });
               chunks.clear();
             }
+            for (const [key, part] of steps) {
+              if (part.state !== "running") continue;
+              const next = {
+                ...part,
+                state: suspended ? ("waiting" as const) : ("failed" as const),
+              };
+              steps.set(key, next);
+              put(wireId("steps", binding.agUiRunId), next);
+            }
             let status: RunInfo["status"] = "completed";
+            let waitingFor: RunInfo["waitingFor"];
             let error: RunInfo["error"];
             if (event.type === "RUN_ERROR") {
               status = "failed";
@@ -787,6 +806,7 @@ export function createAgUiReader(options: AgUiReaderOptions): AgUiReader {
             } else if (event.outcome?.type === "cancelled") status = "stopped";
             else if (event.outcome?.type === "interrupt") {
               status = "waiting";
+              waitingFor = event.outcome.interrupts.length ? "response" : "continuation";
               for (const interrupt of event.outcome.interrupts) {
                 const call = interrupt.toolCallId ? tools.get(interrupt.toolCallId) : undefined;
                 const metadata = interrupt.metadata;
@@ -862,7 +882,7 @@ export function createAgUiReader(options: AgUiReaderOptions): AgUiReader {
                       parts: [],
                     },
                   });
-            run({ status, ...(error && { error }) });
+            run({ status, ...(error && { error }), ...(waitingFor && { waitingFor }) });
             finished = true;
             break;
           }

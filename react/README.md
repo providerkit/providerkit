@@ -159,6 +159,45 @@ result supplied through that callback can become text or a host-rendered data ca
 The host's conversation store remains the source of the person's messages. A run input can hold
 private context and must not become a user message on screen.
 
+## Show workflow steps
+
+```ts
+const message = projector.snapshot(savedWorkflow);
+```
+
+The same projector accepts agent and workflow snapshots (`TreeNode`). A workflow has steps and
+children, not model history. It can sit under an agent or start the tree itself. For a workflow
+root, pass `workflowId` instead of `agentId` when creating the projector. There is no workflow-start
+event to supply that identity. `run(saved)` works without calling `snapshot(saved)` first.
+
+Steps use the existing activity row: `ToolPart` with `kind: "step"`. They are not model tool calls.
+The row ID is the SDK operation ID. `attempt` follows saved effect attempts; continuing a question
+or sleep does not count as a new attempt. Retried children have separate child rows. A workflow
+child is an `AgentPart` with `kind: "workflow"` and `workflowId`, never a fake `agentId`. It does
+not take over the conversation. Agent handoffs still determine `RunInfo.owner` and visible text.
+
+Default step labels are "Step" or "Waiting to continue". Use `labels.step`, `labels.workflow`
+or the `step(activity)` callback for approved labels and details. Step keys can contain app data,
+so they are not copied into labels. Keep keys safe for display IDs too: the SDK embeds keys in
+operation IDs. Never put personal data in those keys.
+
+The callback receives private server data. Saved steps can include input, result and error;
+live progress can include a private payload. None crosses by default. Live result events contain
+status, not the saved result value. Read a checkpoint before projecting result details. Do not
+spread an activity into a display part.
+
+Step-origin questions and approvals use the same request cards and `respond` command. Their
+`toolId` links to the step row; it does not turn the request into a model call. The SDK request
+has `step` instead of `call`. Client-tool projection accepts only actual tool-origin requests;
+a step request cannot select a browser handler.
+
+A suspended run has `waitingFor: "response"` when an open request needs an answer, otherwise
+`"continuation"`. `run(saved)` includes the earliest saved `wakeAt` for a scheduled pause or retry.
+Live state events do not carry that time, so the host must send the saved snapshot. The UI says
+"Waiting to continue" rather than asking for approval. `waitingUntil` and `waitingContinuation`
+labels customize that copy. No client timer resumes work. A wake time is not permission: the host
+must claim the continuation and recheck access before resuming, even with an empty answer map.
+
 ## Answer requests
 
 Requests have their own IDs. A tool can ask more than once, so never use its operation ID as the
@@ -574,6 +613,16 @@ those extensions when you need a full display round trip. Native-only snapshots 
 and attempt flags, so imported saved text is sealed and an issue explains the loss. Unknown or
 unsupported events also return issues; do not treat them as successful conversion.
 
+Workflow step rows emit native `STEP_STARTED` / `STEP_FINISHED`, never `TOOL_CALL_*` events.
+Native steps have only a name, so the writer uses an opaque name per operation and attempt.
+Their readable labels, failure/waiting states and operation identity stay in the display extension.
+Native readers draw steps with the same activity component and report the missing attempt framing.
+Workflow children have no native agent equivalent; their kind and nesting use the extension only.
+A native-only child beneath a workflow loses that parent link. Step-origin requests have no native
+tool-call route. Scheduled pauses use an interrupt outcome with no requests; `wakeAt` also requires
+the extension. These losses are reported as `unsupported` issues even when the extension preserves
+the full view.
+
 Arguments, raw results, reasoning, private messages, vendor errors and opaque app state are
 hidden by default. Explicit projection callbacks choose what may be shown. Shared-state patches
 need a state projection; only safe `add`, `replace`, `remove` and `test` operations are supported.
@@ -650,6 +699,11 @@ Try these flows:
   reply** lets a reload or another tab recover that result without creating another card. No
   claim is granted again just because its result is unknown. This one-process example is not
   production authentication, durable storage or an exactly-once external-effect guarantee.
+- Choose **Try workflow and pause**. A real agent calls a workflow, which calls a scripted agent.
+  Answer its question, edit and approve the label, then observe the five-second pause with no open
+  request. **Check scheduled work** asks the local host to continue once due. An early check is
+  refused with a retry instruction. Reloading never starts a timer or repeats the checked step.
+  This uses the same request journal and in-memory continuation claim, not a durable scheduler.
 - Watch the visit helper take over. Send a message while it prepares; `InputStatusList` shows
   queued, accepted and consumed separately. Recall succeeds only before the host's poll reservation,
   even if a stale view still says queued. Late unused input stays visible and starts no new run.

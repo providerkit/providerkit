@@ -66,7 +66,7 @@ export function sseTransport(scope: DraftScope, mode: SendMode, gap = false): Ch
 
 export async function command(
   scope: DraftScope,
-  action: "connect" | "disconnect" | "approval" | "history" | "fixtures",
+  action: "connect" | "disconnect" | "approval" | "workflow" | "continue" | "history" | "fixtures",
   query?: Record<string, string>,
 ): Promise<void> {
   const response = await demoFetch(

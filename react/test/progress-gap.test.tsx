@@ -39,6 +39,7 @@ async function record() {
     },
     host: {
       checkpoint: (snapshot) => {
+        if (snapshot.kind !== "agent") throw new Error("Expected the agent fixture's checkpoint");
         saves.push(snapshot);
       },
     },
@@ -155,6 +156,7 @@ it("settles a tool-only turn after a gap while its question waits", async () => 
     },
     host: {
       checkpoint: (snapshot) => {
+        if (snapshot.kind !== "agent") throw new Error("Expected the agent fixture's checkpoint");
         view = reduceChat(view, opening(p, snapshot));
         if (snapshot.models.length === 2 && snapshot.models[1]?.status === "running")
           sawPlaceholder = texts(view).some(

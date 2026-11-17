@@ -10,7 +10,7 @@ import type {
   Resolution,
   RunOptions,
   RunOutcome,
-  RunSnapshot,
+  TreeNode,
 } from "@providerkit/agents";
 import { createAgentProjector } from "@providerkit/react/agents";
 import {
@@ -52,7 +52,7 @@ export class DemoRun {
   private readonly evidence = new Map<string, Evidence>();
   private readonly delivered = new Map<string, string>();
   private continuation?: string;
-  private saved?: RunSnapshot;
+  private saved?: TreeNode;
   private outcome?: RunOutcome;
   private expiryScheduled = false;
   private expiredOnce = false;
@@ -81,15 +81,47 @@ export class DemoRun {
           format: "Plan checker",
           "request-guide": "Sample guide",
           "visit-helper": "Visit helper",
+          "workflow-guide": "Workflow guide",
+          "workflow-checker": "Plan checker",
+        },
+        workflow: { "visit-workflow": "Visit plan" },
+        step: {
+          check: "Check the plan",
+          time: "Choose a time",
+          label: "Check the label",
+          pause: "Wait five seconds",
         },
       },
       tool: ({ call, result }) => ({
-        label: call.name === "make_sample_card" ? "Create a sample card" : call.name,
+        label:
+          call.name === "make_sample_card"
+            ? "Create a sample card"
+            : call.name === "check_visit_plan"
+              ? "Check a visit plan"
+              : call.name,
         summary: result ? "The fixed sample step finished." : "Working with fictional records.",
       }),
-      request: ({ request, problem }) => {
+      request: ({ request, problem, decision }) => {
         this.binding(request);
         const ask = request.ask;
+        const original = request.call?.arguments ?? request.step?.input;
+        const effective =
+          decision?.type === "approve" ? (decision.arguments ?? original) : original;
+        if (request.step)
+          return {
+            title:
+              ask.type === "question"
+                ? "When would you like to visit?"
+                : "Use this label for the plan?",
+            summary:
+              ask.type === "approval"
+                ? "Edit the label before checking it. This does not create a card or book a visit."
+                : "Choose a time for this fictional plan.",
+            ...(ask.type === "question" && { choices: ask.choices }),
+            ...(ask.type === "approval" && {
+              edit: { schema: cardSchema, value: cardInput(effective) },
+            }),
+          };
         return {
           ...(ask.type === "question"
             ? {
@@ -109,7 +141,7 @@ export class DemoRun {
                 ? "This action creates one fictional card. Reloading or another tab cannot grant a second execution in this server process."
                 : "Answer either question first. For a text answer, use 3 to 80 characters. Try one letter to see a correction.",
           ...(ask.type === "approval" && {
-            edit: { schema: cardSchema, value: cardInput(request.call.arguments) },
+            edit: { schema: cardSchema, value: cardInput(effective) },
           }),
           ...(problem && {
             problem: {
@@ -132,23 +164,30 @@ export class DemoRun {
     });
   }
 
-  get snapshot(): RunSnapshot | undefined {
+  get snapshot(): TreeNode | undefined {
     return this.saved;
   }
   get waiting(): boolean {
     return this.outcome?.status === "suspended" && !this.continuation;
   }
 
-  private records(snapshot = this.saved): AskRecord[] {
+  private nodes(snapshot = this.saved): TreeNode[] {
     if (!snapshot) return [];
+    const journals = snapshot.kind === "workflow" ? snapshot.steps : snapshot.delegations;
     return [
-      ...snapshot.models.flatMap((model) =>
-        model.status === "completed" ? model.tools.flatMap((tool) => tool.asks ?? []) : [],
-      ),
-      ...snapshot.delegations.flatMap((entry) =>
-        entry.children.flatMap((child) => this.records(child.snapshot)),
-      ),
+      snapshot,
+      ...journals.flatMap((entry) => entry.children.flatMap((child) => this.nodes(child.snapshot))),
     ];
+  }
+
+  private records(): AskRecord[] {
+    return this.nodes().flatMap((node) =>
+      node.kind === "workflow"
+        ? node.steps.flatMap((step) => step.asks ?? [])
+        : node.models.flatMap((model) =>
+            model.status === "completed" ? model.tools.flatMap((tool) => tool.asks ?? []) : [],
+          ),
+    );
   }
 
   private binding(request: PendingRequest): void {
@@ -156,7 +195,7 @@ export class DemoRun {
       request.scope.actorId !== this.principalId ||
       request.scope.resource.id !== this.resourceId ||
       request.scope.resource.version !== "1" ||
-      (request.call.runId !== this.id &&
+      ((request.call ?? request.step).runId !== this.id &&
         !this.records().some((record) => record.request.id === request.id))
     )
       throw new Refusal(
@@ -205,8 +244,10 @@ export class DemoRun {
     authorizeResume: (snapshot) => {
       if (
         !this.continuation ||
-        snapshot.runId !== this.id ||
-        JSON.stringify(snapshot) !== JSON.stringify(this.saved)
+        !this.nodes().some(
+          (node) =>
+            node.runId === snapshot.runId && JSON.stringify(node) === JSON.stringify(snapshot),
+        )
       )
         throw new Refusal(
           409,
@@ -234,17 +275,25 @@ export class DemoRun {
         throw new Refusal(403, "evidence", "This response was not authorized for this request.");
       return evidence.decision;
     },
-    beforeTool: (call, decided) => {
-      if (decided) {
-        this.binding(decided.request);
-        const trusted = [...this.evidence.values()].find(
-          (item) =>
-            item.request.id === decided.request.id &&
-            JSON.stringify(item.decision) === JSON.stringify(decided.decision),
+    beforeStep: (step, decided) => {
+      if (
+        !this.nodes().some(
+          (node) =>
+            node.kind === "workflow" &&
+            node.runId === step.runId &&
+            node.workflowId === step.workflowId,
+        )
+      )
+        throw new Refusal(
+          403,
+          "step_owner",
+          "This step does not belong to the current demo reply.",
         );
-        if (!trusted)
-          throw new Refusal(403, "decision", "The saved choice is not authorized here.");
-      }
+      if (decided) this.checkDecision(decided.request, decided.decision);
+      if (step.kind === "step") cardInput(step.input);
+    },
+    beforeTool: (call, decided) => {
+      if (decided) this.checkDecision(decided.request, decided.decision);
       if (call.call.name === "make_sample_card") cardInput(call.arguments);
     },
     canRunConcurrently: () => true,
@@ -266,6 +315,16 @@ export class DemoRun {
       },
     },
   };
+
+  private checkDecision(request: PendingRequest, decision: Decision): void {
+    this.binding(request);
+    const trusted = [...this.evidence.values()].some(
+      (item) =>
+        item.request.id === request.id &&
+        JSON.stringify(item.decision) === JSON.stringify(decision),
+    );
+    if (!trusted) throw new Refusal(403, "decision", "The saved choice is not authorized here.");
+  }
 
   private poll(scope: Parameters<InputInbox["poll"]>[0]): QueuedInput[] {
     scope.signal.throwIfAborted();
@@ -509,7 +568,9 @@ export class DemoRun {
       if (response.type === "approve")
         return {
           type: "approve",
-          arguments: cardInput(response.arguments ?? request.call.arguments),
+          arguments: cardInput(
+            response.arguments ?? request.call?.arguments ?? request.step?.input,
+          ),
         };
     }
     if (request.ask.type === "client" && response.type === "result") {
@@ -538,6 +599,7 @@ export class DemoRun {
     const request = this.pending(raw.requestId);
     if (
       request.ask.type !== "client" ||
+      !request.call ||
       JSON.stringify(cardInput(raw.input)) !== JSON.stringify(cardInput(request.call.arguments))
     )
       throw new Refusal(
@@ -602,6 +664,29 @@ export class DemoRun {
         "The action reply was lost. Check action result; do not run it again.",
       );
     return claim.value;
+  }
+
+  async continueScheduled(): Promise<void> {
+    const outcome = this.outcome;
+    if (
+      !this.waiting ||
+      outcome?.status !== "suspended" ||
+      outcome.requests.length ||
+      outcome.wakeAt === undefined
+    )
+      throw new Refusal(
+        409,
+        "not_scheduled",
+        "No scheduled pause is ready here. Check the conversation.",
+      );
+    if (outcome.wakeAt > Date.now())
+      throw new Refusal(
+        409,
+        "too_early",
+        "The five-second pause has not ended. Wait a moment, then check again.",
+      );
+    // This host claims the continuation synchronously. The browser's clock grants nothing.
+    await this.resume({});
   }
 
   async stop(): Promise<void> {

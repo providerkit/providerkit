@@ -20,7 +20,10 @@ import type {
   InputReceipt,
   RunInput,
   RESULT_TOOL_NAME,
-  RunSnapshot,
+  TreeNode,
+  StepExecution,
+  StepKind,
+  StepError,
   RunState,
   ToolResult,
 } from "@providerkit/agents";
@@ -77,6 +80,21 @@ export interface ToolDisplay {
   data?: unknown;
 }
 
+/** Server-only step data. Inputs, results, errors and progress require explicit projection. */
+export interface StepActivity {
+  runId: string;
+  workflowId?: string;
+  operationId: string;
+  key: string;
+  kind: StepKind;
+  status: StepExecution["status"];
+  attemptId?: string;
+  input?: unknown;
+  result?: unknown;
+  error?: StepError;
+  progress?: unknown;
+}
+
 /** Server-only journal data. Never spread this into a display part. */
 export type RequestActivity = AskRecord;
 
@@ -108,16 +126,23 @@ export interface AgentProjectorOptions {
   runId: string;
   /** Registered root agent, when known before a snapshot or handoff event. */
   agentId?: string;
-  /** Words for rows, keyed by tool name and by agent id. A missing key shows the name itself. */
+  /** Registered workflow root, instead of agentId. Workflows have no conversation owner. */
+  workflowId?: string;
+  /** Words for rows, keyed by tool name and by registered definition id. */
   labels?: {
     tool?: Readonly<Record<string, string>>;
     agent?: Readonly<Record<string, string>>;
+    workflow?: Readonly<Record<string, string>>;
+    /** Explicit safe labels keyed by step key. Unmapped steps have a generic label. */
+    step?: Readonly<Record<string, string>>;
     /** Optional overrides for a particular run, before the registered-agent label. */
     run?: Readonly<Record<string, string>>;
   };
   /** Return `null` to hide a call. That is decided from the call before it has a result, so a
    * call is shown for its whole life or never. Called again with the result for the final row. */
   tool?: (activity: ToolActivity) => ToolDisplay | null | undefined;
+  /** Viewer-safe step details only. Raw step data stays on the server without this callback. */
+  step?: (activity: StepActivity) => Omit<ToolDisplay, "name"> | null | undefined;
   /** Opts viewer-safe question fields, edited inputs and decision data into display. Without
    * it, questions and client actions show a generic, non-actionable waiting row. */
   request?: (activity: RequestActivity) => RequestDisplay | null | undefined;
@@ -163,11 +188,11 @@ export interface AgentProjector {
    * Text remains checkpoint-only for this projector after a gap. Never invent an attempt. */
   gap(meta?: Pick<ChatEnvelope, "seq" | "segment">): ChatEvent[];
   /** The message as the saved run has it, with the same row ids the live events use. */
-  snapshot(snapshot: RunSnapshot): DisplayMessage;
+  snapshot(snapshot: TreeNode): DisplayMessage;
   /** The run as the saved run has it. */
-  run(snapshot: RunSnapshot): RunInfo;
+  run(snapshot: TreeNode): RunInfo;
   /** Accepted/consumed receipts only. The host adds still-queued inbox entries to snapshots. */
-  inputs(snapshot: RunSnapshot): readonly DisplayInput[];
+  inputs(snapshot: TreeNode): readonly DisplayInput[];
 }
 
 /** Copy only delivery identities; never input content or execution authority. */
@@ -208,8 +233,20 @@ const MESSAGE = {
  * keeps only the code, which the SDK writes itself, and says nothing more. */
 function defaultError(state: Extract<RunState, { status: "failed" | "limited" }>): DisplayError {
   return state.status === "failed"
-    ? { code: state.error.code, message: "The agent stopped because of an error." }
-    : { code: state.limit, message: "The agent stopped because it reached a limit." };
+    ? {
+        code: state.error.code,
+        message: "The run could not finish. Check its saved result before trying again.",
+      }
+    : {
+        code: state.limit,
+        message: "The run reached a limit. Review the result before starting more work.",
+      };
+}
+
+function stepState(status: StepExecution["status"], ended: boolean): ToolState {
+  if (status === "completed") return "done";
+  if (status === "failed" || ended) return "failed";
+  return status === "running" ? "running" : "waiting";
 }
 
 function isOver(state: RunState): boolean {
@@ -240,6 +277,47 @@ function activityOf(request: {
   return { operationId, runId, agentId, call };
 }
 
+function requestOrigin(request: PendingRequest) {
+  return request.call ?? request.step;
+}
+
+/** The two journals share children, not model history or execution inputs. */
+function childrenOf(node: TreeNode): TreeNode[] {
+  const journals = node.kind === "workflow" ? node.steps : node.delegations;
+  return journals.flatMap((entry) => entry.children.map((child) => child.snapshot));
+}
+
+function savedWaiting(node: TreeNode): Pick<RunInfo, "waitingFor" | "wakeAt"> {
+  if (isOver(node.state)) return {};
+  const executions =
+    node.kind === "workflow"
+      ? node.steps
+      : node.models.flatMap((model) => (model.status === "completed" ? model.tools : []));
+  let response = executions.some(
+    (entry) =>
+      entry.status !== "completed" &&
+      entry.status !== "failed" &&
+      entry.asks?.some((record) => !record.decision && !record.closed),
+  );
+  const wakes =
+    node.kind === "workflow"
+      ? node.steps.flatMap((step) =>
+          (step.status === "waiting" || step.status === "retrying") && step.wakeAt !== undefined
+            ? [step.wakeAt]
+            : [],
+        )
+      : [];
+  for (const child of childrenOf(node)) {
+    const waiting = savedWaiting(child);
+    response ||= waiting.waitingFor === "response";
+    if (waiting.wakeAt !== undefined) wakes.push(waiting.wakeAt);
+  }
+  return {
+    waitingFor: response ? "response" : "continuation",
+    ...(wakes.length && { wakeAt: Math.min(...wakes) }),
+  };
+}
+
 /** The run an event speaks for. A child event is its parent speaking. */
 function speakerOf(event: AgentEvent): string | undefined {
   switch (event.type) {
@@ -247,11 +325,14 @@ function speakerOf(event: AgentEvent): string | undefined {
     case "operation_restart":
     case "handoff":
     case "state":
+    case "step_start":
+    case "step_progress":
+    case "step_result":
       return event.runId;
     case "input":
       return event.receipt.runId;
     case "request":
-      return event.request.call.runId;
+      return requestOrigin(event.request).runId;
     case "tool_start":
     case "tool_result":
       return event.request.runId;
@@ -290,11 +371,15 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
   const conversationRuns = new Set([root]);
   const handoffs = new Map<string, string>();
   let rootAgentId = options.agentId;
+  let rootWorkflowId = options.workflowId;
+  if (rootAgentId && rootWorkflowId)
+    throw new TypeError("Choose an agent or workflow root, not both.");
 
-  function agentLabel(runId: string, agentId: string): string {
+  function agentLabel(runId: string, definitionId: string, workflow = false): string {
+    const labels = workflow ? options.labels?.workflow : options.labels?.agent;
     return options.labels?.run && Object.hasOwn(options.labels.run, runId)
-      ? (options.labels.run[runId] ?? lookup(options.labels.agent, agentId))
-      : lookup(options.labels?.agent, agentId);
+      ? (options.labels.run[runId] ?? lookup(labels, definitionId))
+      : lookup(labels, definitionId);
   }
 
   function owner(): ConversationOwner | undefined {
@@ -304,7 +389,9 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       visited.add(runId);
       runId = handoffs.get(runId)!;
     }
-    const agentId = runId === root ? rootAgentId : specialists.get(runId)?.agentId;
+    const specialist = specialists.get(runId);
+    if (specialist?.kind === "workflow") return undefined;
+    const agentId = runId === root ? rootAgentId : specialist?.definitionId;
     return agentId ? { runId, agentId, label: agentLabel(runId, agentId) } : undefined;
   }
 
@@ -357,6 +444,28 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     return part;
   }
 
+  function stepPart(activity: StepActivity, state: ToolState, attempt?: number): ToolPart | null {
+    const display = options.step?.(activity);
+    if (display === null) return null;
+    const label =
+      options.labels?.step && Object.hasOwn(options.labels.step, activity.key)
+        ? options.labels.step[activity.key]
+        : undefined;
+    return {
+      type: "tool",
+      kind: "step",
+      id: activity.operationId,
+      label:
+        display?.label ?? label ?? (activity.kind === "sleep" ? "Waiting to continue" : "Step"),
+      state,
+      ...(attempt !== undefined && { attempt }),
+      ...(activity.runId !== root && { agentId: activity.runId }),
+      ...(display?.summary !== undefined && { summary: display.summary }),
+      ...(display?.detail !== undefined && { detail: display.detail }),
+      ...(display?.data !== undefined && { data: display.data }),
+    };
+  }
+
   function requestPart(record: AskRecord, ended = false): RequestPart {
     const { request, decision, closed } = record;
     const display = options.request?.(record);
@@ -368,15 +477,17 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
             message: "The answer was not accepted. Review this request and try again.",
           }
         : undefined);
+    const origin = requestOrigin(request);
+    const approvalTitle = request.call
+      ? lookup(options.labels?.tool, request.call.call.name)
+      : "Approval needed";
     const base = {
       id: request.id,
-      toolId: request.call.operationId,
-      ...(request.call.runId !== root && { agentId: request.call.runId }),
+      toolId: origin.operationId,
+      ...(origin.runId !== root && { agentId: origin.runId }),
       title:
         display?.title ??
-        (request.ask.type === "approval"
-          ? lookup(options.labels?.tool, request.call.call.name)
-          : "Waiting for a response"),
+        (request.ask.type === "approval" ? approvalTitle : "Waiting for a response"),
       expiresAt: request.scope.expiresAt,
       ...(display?.summary !== undefined && { summary: display.summary }),
       ...(problem !== undefined && { problem }),
@@ -410,9 +521,9 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     }
     const state = ending ?? (decision ? "answered" : ended ? "stopped" : "pending");
     if (request.ask.type === "client") {
-      const name = request.call.call.name;
+      const name = request.call?.call.name;
       const project =
-        options.clientTools && Object.hasOwn(options.clientTools, name)
+        name && options.clientTools && Object.hasOwn(options.clientTools, name)
           ? options.clientTools[name]
           : undefined;
       return {
@@ -420,7 +531,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         type: "client-tool",
         state,
         canAnswer: Boolean(project) && display?.canAnswer !== false && display !== null,
-        ...(project && { name, input: project(request.call.arguments, request) }),
+        ...(project && request.call && { name, input: project(request.call.arguments, request) }),
       };
     }
     return {
@@ -441,11 +552,12 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     parentId: string | undefined,
     state: AgentState,
   ): AgentPart {
+    const workflow = specialists.get(runId)?.kind === "workflow";
     const part: AgentPart = {
       type: "agent",
       id: runId,
-      agentId,
-      label: agentLabel(runId, agentId),
+      ...(workflow ? { workflowId: agentId } : { agentId }),
+      label: agentLabel(runId, agentId, workflow),
       state,
       ...(specialists.get(runId)?.kind && { kind: specialists.get(runId)?.kind }),
       ...(specialists.get(runId)?.toolId && { toolId: specialists.get(runId)?.toolId }),
@@ -458,6 +570,11 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     const info: RunInfo = { id: runId, status: STATUS[state.status], messageId, owner: owner() };
     if (state.status === "failed" || state.status === "limited")
       info.error = (options.error ?? defaultError)(state);
+    if (state.status === "suspended") {
+      info.waitingFor = [...requests.values()].some((record) => !record.decision && !record.closed)
+        ? "response"
+        : "continuation";
+    }
     return info;
   }
 
@@ -469,10 +586,10 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
   const specialists = new Map<
     string,
     {
-      agentId: string;
+      definitionId: string;
       parentId: string | undefined;
       over: boolean;
-      kind?: "delegation" | "handoff";
+      kind?: "delegation" | "handoff" | "workflow";
       toolId?: string;
     }
   >();
@@ -494,6 +611,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     return out;
   }
   const running = new Map<string, { runId: string; part: ToolPart }>();
+  const stepActivities = new Map<string, StepActivity>();
   const requests = new Map<string, AskRecord>();
   const operations = new Map<
     string,
@@ -502,22 +620,32 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
   const endedRuns = new Set<string>();
   const runAttempts = new Map<string, { current: string; old: Set<string> }>();
 
-  function attemptOf(id: string, attemptId: string, previous?: string): number | undefined {
+  function attemptOf(
+    id: string,
+    attemptId: string,
+    previous?: string,
+    number?: number,
+  ): number | undefined {
     let held = operations.get(id);
     if (!held) {
       held = {
         attemptId,
-        attempt: previous ? 2 : 1,
+        attempt: number ?? (previous ? 2 : 1),
         old: new Set(previous ? [previous] : []),
         completed: false,
       };
       operations.set(id, held);
-    } else if (held.old.has(attemptId) || held.completed) return undefined;
+    } else if (
+      held.old.has(attemptId) ||
+      held.completed ||
+      (number !== undefined && number < held.attempt)
+    )
+      return undefined;
     else if (held.attemptId !== attemptId) {
       held.old.add(held.attemptId);
       if (previous) held.old.add(previous);
       held.attemptId = attemptId;
-      held.attempt += 1;
+      held.attempt = number ?? held.attempt + 1;
     }
     return held.attempt;
   }
@@ -526,12 +654,14 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     let shown = textShown.get(runId);
     if (shown === undefined) {
       const specialist = specialists.get(runId);
+      if (specialist?.kind === "workflow" || (runId === root && rootWorkflowId !== undefined))
+        return false;
       shown = showsText(
         specialist
           ? {
               root: false,
               runId,
-              agentId: specialist.agentId,
+              agentId: specialist.definitionId,
               handoff: conversationRuns.has(runId),
             }
           : { root: true, runId },
@@ -559,7 +689,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
   function endUnder(part: (value: DisplayPart) => void, ended: string): void {
     endedRuns.add(ended);
     for (const [id, record] of requests) {
-      if (record.decision || record.closed || !within(record.request.call.runId, ended)) continue;
+      if (record.decision || record.closed || !within(requestOrigin(record.request).runId, ended))
+        continue;
       const closed: AskRecord = { ...record, closed: "stopped" };
       requests.set(id, closed);
       part(requestPart(closed));
@@ -573,7 +704,17 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       if (runId === ended || specialist.over || !within(runId, ended)) continue;
       specialist.over = true;
       endedRuns.add(runId);
-      part(agentPart(runId, specialist.agentId, specialist.parentId, "stopped"));
+      part(agentPart(runId, specialist.definitionId, specialist.parentId, "stopped"));
+    }
+  }
+
+  function pauseUnder(part: (value: DisplayPart) => void, paused: string): void {
+    for (const entry of running.values()) {
+      if (entry.part.kind !== "step" || !within(entry.runId, paused)) continue;
+      entry.part = { ...entry.part, state: "waiting" };
+      const activity = stepActivities.get(entry.part.id);
+      if (activity?.status === "running") activity.status = "waiting";
+      part(entry.part);
     }
   }
 
@@ -591,9 +732,11 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       if (agentEvent.receipt.rootRunId !== root) return [];
       return [{ v, type: "input", input: projectInputReceipt(agentEvent.receipt), ...meta }];
     }
+    const decidedRequest =
+      agentEvent.type === "decision" ? requests.get(agentEvent.requestId)?.request : undefined;
     const speaker =
       agentEvent.type === "decision"
-        ? requests.get(agentEvent.requestId)?.request.call.runId
+        ? decidedRequest && requestOrigin(decidedRequest).runId
         : speakerOf(agentEvent);
     // A run no child event named here (a log read from the middle, or a child event that was
     // lost) has no row to file under, and it is never taken for the root. The next snapshot
@@ -637,6 +780,27 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       const operation = operations.get(agentEvent.request.operationId);
       if (operation?.completed || operation?.old.has(agentEvent.request.attemptId)) return [];
     }
+    if (
+      agentEvent.type === "step_start" ||
+      agentEvent.type === "step_progress" ||
+      agentEvent.type === "step_result"
+    ) {
+      const held = operations.get(agentEvent.operationId);
+      if (held?.completed || held?.old.has(agentEvent.attemptId)) return [];
+      if (agentEvent.type === "step_start") {
+        if (held && agentEvent.kind === "step" && agentEvent.attempt < held.attempt) return [];
+        if (
+          held?.attemptId === agentEvent.attemptId &&
+          stepActivities.get(agentEvent.operationId)?.status !== "running"
+        )
+          return [];
+      } else if (held && held.attemptId !== agentEvent.attemptId) return [];
+      if (
+        agentEvent.type === "step_progress" &&
+        (!held || stepActivities.get(agentEvent.operationId)?.status !== "running")
+      )
+        return [];
+    }
     const out: ChatEvent[] = [];
     const part = (value: DisplayPart) => out.push({ v, type: "part", messageId, part: value });
     if (!announced) {
@@ -671,6 +835,44 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     }
 
     switch (agentEvent.type) {
+      case "step_start":
+      case "step_progress":
+      case "step_result": {
+        const { operationId, attemptId, runId, key } = agentEvent;
+        const previous = stepActivities.get(operationId);
+        if (agentEvent.type === "step_progress" && !previous) break;
+        const kind = agentEvent.type === "step_progress" ? previous!.kind : agentEvent.kind;
+        let stepStatus: StepExecution["status"] = "running";
+        if (agentEvent.type === "step_result") stepStatus = agentEvent.status;
+        const activity: StepActivity = {
+          runId,
+          operationId,
+          attemptId,
+          key,
+          kind,
+          status: stepStatus,
+          workflowId: runId === root ? rootWorkflowId : specialists.get(runId)?.definitionId,
+          ...(agentEvent.type === "step_progress" && { progress: agentEvent.data }),
+          ...(agentEvent.type === "step_result" && agentEvent.error && { error: agentEvent.error }),
+        };
+        const attempt = attemptOf(
+          operationId,
+          attemptId,
+          undefined,
+          agentEvent.type === "step_start" ? (kind === "step" ? agentEvent.attempt : 1) : undefined,
+        );
+        if (attempt === undefined) break;
+        stepActivities.set(operationId, activity);
+        const state = stepState(stepStatus, false);
+        const row = stepPart(activity, state, attempt);
+        if (state === "done" || state === "failed") {
+          const operation = operations.get(operationId);
+          if (operation) operation.completed = true;
+          running.delete(operationId);
+        } else if (row) running.set(operationId, { runId, part: row });
+        if (row) part(row);
+        break;
+      }
       case "operation_restart":
       case "model_chunk": {
         if (agentEvent.type === "operation_restart" && agentEvent.kind !== "model") break;
@@ -717,7 +919,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
             id === request.id ||
             record.decision ||
             record.closed ||
-            record.request.call.operationId !== request.call.operationId ||
+            requestOrigin(record.request).operationId !== requestOrigin(request).operationId ||
             record.request.ask.type !== request.ask.type ||
             (record.request.ask.type === "question" &&
               request.ask.type === "question" &&
@@ -728,10 +930,23 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           requests.set(id, closed);
           part(requestPart(closed));
         }
-        const active = running.get(request.call.operationId);
+        const active = running.get(requestOrigin(request).operationId);
         if (active) {
           active.part = { ...active.part, state: "waiting" };
           part(active.part);
+        } else if (request.step) {
+          const activity: StepActivity = { ...request.step, status: "waiting" };
+          if (speaker === root) rootWorkflowId = request.step.workflowId;
+          stepActivities.set(activity.operationId, activity);
+          const row = stepPart(
+            activity,
+            "waiting",
+            operations.get(activity.operationId)?.attempt ?? 1,
+          );
+          if (row) {
+            running.set(row.id, { runId: speaker, part: row });
+            part(row);
+          }
         }
         const record = { request };
         requests.set(request.id, record);
@@ -777,7 +992,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         handoffs.set(speaker, childRunId);
         if (conversationRuns.has(speaker)) conversationRuns.add(childRunId);
         specialists.set(childRunId, {
-          agentId: to.id,
+          definitionId: to.id,
           parentId: ownerOf(speaker),
           over: false,
           kind: "handoff",
@@ -789,30 +1004,35 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         break;
       }
       case "child": {
-        const { runId, agentId } = agentEvent;
+        const { runId } = agentEvent;
+        const definitionId =
+          agentEvent.kind === "workflow" ? agentEvent.workflowId : agentEvent.agentId;
         // A run is never filed under itself or under one of its own specialists, so the walk
         // in `within` always ends.
         if (runId === root || within(speaker, runId) || endedRuns.has(runId)) break;
-        // Sent again when the child resumes, with the same identity: one row, updated.
         const parentId = ownerOf(speaker);
+        let kind: AgentPart["kind"] = specialists.get(runId)?.kind ?? "delegation";
+        if (agentEvent.kind === "workflow") kind = "workflow";
         specialists.set(runId, {
-          kind: "delegation",
+          kind,
           toolId: agentEvent.operationId,
-          ...specialists.get(runId),
-          agentId,
+          definitionId,
           parentId,
           over: false,
         });
-        part(agentPart(runId, agentId, parentId, "running"));
+        part(agentPart(runId, definitionId, parentId, "running"));
         break;
       }
       case "state": {
         const { state } = agentEvent;
         const specialist = specialists.get(speaker);
+        if (state.status === "suspended") pauseUnder(part, speaker);
         if (specialist) {
           specialist.over = isOver(state);
           if (specialist.over) endUnder(part, speaker);
-          part(agentPart(speaker, specialist.agentId, specialist.parentId, STATUS[state.status]));
+          part(
+            agentPart(speaker, specialist.definitionId, specialist.parentId, STATUS[state.status]),
+          );
           break;
         }
         for (const text of streaming.values()) {
@@ -852,9 +1072,10 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
    * specialists right after the call that started them, each followed by its own rows. Live
    * rows arrive in the order things happened, so two specialists that ran at once interleave
    * there and not here. The rows and each agent's own order are the same. */
-  function snapshot(saved: RunSnapshot): DisplayMessage {
+  function snapshot(saved: TreeNode): DisplayMessage {
     if (saved.runId !== root) throw new TypeError("The snapshot belongs to another run.");
-    rootAgentId = saved.agentId;
+    rootAgentId = saved.kind === "agent" ? saved.agentId : undefined;
+    rootWorkflowId = saved.kind === "workflow" ? saved.workflowId : undefined;
     handoffs.clear();
     conversationRuns.clear();
     conversationRuns.add(root);
@@ -863,8 +1084,105 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     status = STATUS[saved.state.status];
     announced = true;
 
-    function visit(node: RunSnapshot, owner: string | undefined, over: boolean): void {
+    function visitChild(
+      child: TreeNode,
+      parentRunId: string,
+      owner: string | undefined,
+      ended: boolean,
+      operationId: string,
+      kind: "delegation" | "handoff" = "delegation",
+    ): void {
+      const { runId, state } = child;
+      const definitionId = child.kind === "agent" ? child.agentId : child.workflowId;
+      if (kind === "handoff" && child.kind === "agent") {
+        handoffs.set(parentRunId, runId);
+        if (conversationRuns.has(parentRunId)) conversationRuns.add(runId);
+      }
+      specialists.set(runId, {
+        definitionId,
+        parentId: owner,
+        over: ended || isOver(state),
+        kind: child.kind === "workflow" ? "workflow" : kind,
+        toolId: operationId,
+      });
+      const shownState = ended && !isOver(state) ? "stopped" : STATUS[state.status];
+      parts.push(agentPart(runId, definitionId, owner, shownState));
+      visit(child, runId, ended);
+    }
+
+    function visit(node: TreeNode, owner: string | undefined, over: boolean): void {
       const ended = over || isOver(node.state);
+      if (node.kind === "workflow") {
+        const held = runAttempts.get(node.runId);
+        const old = new Set(held?.old);
+        if (!held?.old.has(node.attemptId)) {
+          if (held && held.current !== node.attemptId) old.add(held.current);
+          runAttempts.set(node.runId, { current: node.attemptId, old });
+        }
+        if (ended) endedRuns.add(node.runId);
+        for (const step of node.steps) {
+          const latest = step.attempts.at(-1);
+          const attemptId = latest?.attemptId ?? node.attemptId;
+          const held = stepActivities.get(step.id);
+          const current = operations.get(step.id);
+          // Child retries have distinct child rows. Only effect attempts are journaled here;
+          // resuming an ask or sleep does not create another operation attempt.
+          const savedAttempt = Math.max(1, step.attempts.length);
+          const retain =
+            current &&
+            (current.attempt > savedAttempt ||
+              current.old.has(attemptId) ||
+              (current.completed && step.status !== "completed" && step.status !== "failed"));
+          const attempt = retain ? current.attempt : savedAttempt;
+          const activity: StepActivity =
+            retain && held
+              ? held
+              : {
+                  runId: node.runId,
+                  workflowId: node.workflowId,
+                  operationId: step.id,
+                  key: step.key,
+                  kind: step.kind,
+                  status: step.status,
+                  attemptId,
+                  input: step.definition.input,
+                  result: step.result,
+                  error: step.error,
+                };
+          stepActivities.set(step.id, activity);
+          const oldAttempts = new Set([
+            ...(current?.old ?? []),
+            ...step.attempts.slice(0, -1).map((item) => item.attemptId),
+          ]);
+          if (current && current.attemptId !== attemptId) oldAttempts.add(current.attemptId);
+          // A denial can end a step before its first effect. The workflow epoch is not an
+          // effect attempt, so it must not reject a result emitted by the next continuation.
+          if (!retain && latest)
+            operations.set(step.id, {
+              attemptId,
+              attempt,
+              old: oldAttempts,
+              completed: ended || activity.status === "completed" || activity.status === "failed",
+            });
+          let state = stepState(activity.status, ended);
+          if (!retain && !ended && node.state.status === "suspended" && state === "running")
+            state = "waiting";
+          const row = stepPart(activity, state, attempt);
+          if (row) parts.push(row);
+          if (row && (state === "running" || state === "waiting")) {
+            running.set(step.id, { runId: node.runId, part: row });
+          } else running.delete(step.id);
+          for (const record of step.asks ?? []) {
+            requests.set(record.request.id, record);
+            parts.push(
+              requestPart(record, ended || step.status === "completed" || step.status === "failed"),
+            );
+          }
+          for (const child of step.children)
+            visitChild(child.snapshot, node.runId, owner, ended, step.id);
+        }
+        return;
+      }
       const old = new Set(runAttempts.get(node.runId)?.old);
       for (const model of node.models) {
         for (const item of model.interrupted) old.add(item.attemptId);
@@ -973,25 +1291,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           for (const record of questions)
             parts.push(requestPart(record, ended || tool.status === "completed"));
           const journal = node.delegations.find((entry) => entry.operationId === tool.id);
-          for (const child of journal?.children ?? []) {
-            const { runId, state } = child.snapshot;
-            const agentId =
-              journal?.kind === "handoff" ? journal.target.id : child.snapshot.agentId;
-            if (journal?.kind === "handoff") {
-              handoffs.set(node.runId, runId);
-              if (conversationRuns.has(node.runId)) conversationRuns.add(runId);
-            }
-            const shownState = ended && !isOver(state) ? "stopped" : STATUS[state.status];
-            specialists.set(runId, {
-              agentId,
-              parentId: owner,
-              over: ended || isOver(state),
-              kind: journal?.kind,
-              toolId: journal?.operationId,
-            });
-            parts.push(agentPart(runId, agentId, owner, shownState));
-            visit(child.snapshot, runId, ended);
-          }
+          for (const child of journal?.children ?? [])
+            visitChild(child.snapshot, node.runId, owner, ended, tool.id, journal?.kind);
         }
       }
     }
@@ -1002,38 +1303,42 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     return { id: messageId, role: "assistant", parts, state: MESSAGE[saved.state.status] };
   }
 
-  function savedOwner(saved: RunSnapshot): ConversationOwner {
+  function savedOwner(saved: TreeNode): ConversationOwner | undefined {
     if (saved.runId !== root) throw new TypeError("The snapshot belongs to another run.");
     let node = saved;
-    let agentId = node.agentId;
-    for (;;) {
+    while (node.kind === "agent") {
       const journal = node.delegations.find(
         (entry) => entry.kind === "handoff" && entry.children.length > 0,
       );
       const child = journal?.children[0]?.snapshot;
-      if (journal?.kind !== "handoff" || !child) break;
+      if (!child)
+        return {
+          runId: node.runId,
+          agentId: node.agentId,
+          label: agentLabel(node.runId, node.agentId),
+        };
       node = child;
-      agentId = journal.target.id;
     }
-    return { runId: node.runId, agentId, label: agentLabel(node.runId, agentId) };
+    return undefined;
   }
 
-  function inputs(saved: RunSnapshot): DisplayInput[] {
+  function inputs(saved: TreeNode): DisplayInput[] {
     if (saved.runId !== root) throw new TypeError("The snapshot belongs to another run.");
     const result: DisplayInput[] = [];
-    function visit(node: RunSnapshot): void {
-      for (const input of node.inputs) {
-        const display = options.input?.(input, { rootRunId: root, runId: node.runId });
-        result.push({
-          id: input.id,
-          rootRunId: root,
-          runId: node.runId,
-          status: node.models[input.beforeModel]?.status === "completed" ? "consumed" : "accepted",
-          ...(display?.text !== undefined && { text: display.text }),
-        });
-      }
-      for (const entry of node.delegations)
-        for (const child of entry.children) visit(child.snapshot);
+    function visit(node: TreeNode): void {
+      if (node.kind === "agent")
+        for (const input of node.inputs) {
+          const display = options.input?.(input, { rootRunId: root, runId: node.runId });
+          result.push({
+            id: input.id,
+            rootRunId: root,
+            runId: node.runId,
+            status:
+              node.models[input.beforeModel]?.status === "completed" ? "consumed" : "accepted",
+            ...(display?.text !== undefined && { text: display.text }),
+          });
+        }
+      for (const child of childrenOf(node)) visit(child);
     }
     visit(saved);
     return result;
@@ -1044,9 +1349,10 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     gap,
     snapshot,
     inputs,
-    run: (saved: RunSnapshot) => ({
+    run: (saved: TreeNode) => ({
       ...runInfo(saved.runId, saved.state),
       owner: savedOwner(saved),
+      ...(saved.state.status === "suspended" && savedWaiting(saved)),
     }),
   });
 }

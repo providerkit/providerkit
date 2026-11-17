@@ -18,6 +18,7 @@ import {
 } from "./shared.ts";
 import { DemoRun } from "./runtime.ts";
 import { requestAgent } from "./flow.ts";
+import { workflowAgent } from "./workflow.ts";
 import { earlierMessages, fixtureMessageId, historyPageSize, sampleFixtures } from "./samples.ts";
 import { scriptedAgent, sources } from "./scripted.ts";
 
@@ -224,8 +225,18 @@ function parseInput(value: unknown, chat: Conversation): SendInput {
   return { clientId: value.clientId, text: value.text, attachments };
 }
 
-function startRun(chat: Conversation, input: SendInput, flow?: ApprovalMode, gap = false): void {
-  const agent = flow ? requestAgent(chat.stats, tickMs) : scriptedAgent(chat.stats, tickMs);
+function startRun(
+  chat: Conversation,
+  input: SendInput,
+  flow?: ApprovalMode,
+  gap = false,
+  workflow = false,
+): void {
+  const agent = workflow
+    ? workflowAgent(chat.stats, tickMs)
+    : flow
+      ? requestAgent(chat.stats, tickMs)
+      : scriptedAgent(chat.stats, tickMs);
   const work = new DemoRun(
     chat.principalId,
     chat.resourceId,
@@ -245,9 +256,11 @@ function startRun(chat: Conversation, input: SendInput, flow?: ApprovalMode, gap
           kind: "sample-summary",
           data: {
             title: "Sample finished",
-            text: flow
-              ? "The request journal and handoff finished. No external service was called."
-              : "Both fictional records agree. No booking was made.",
+            text: workflow
+              ? "The workflow ended. No external service was called."
+              : flow
+                ? "The request journal and handoff finished. No external service was called."
+                : "Both fictional records agree. No booking was made.",
           },
         });
       publish(chat, {
@@ -384,15 +397,26 @@ function approvalMode(url: URL): ApprovalMode {
   throw new Refusal(400, "request_mode", "Choose a listed request mode.");
 }
 
-function requestApproval(chat: Conversation, mode: ApprovalMode, gap: boolean): void {
+function requestApproval(
+  chat: Conversation,
+  mode: ApprovalMode,
+  gap: boolean,
+  workflow = false,
+): void {
   if (busy(chat)) throw new Refusal(409, "busy", "Finish or stop the current reply first.");
   if (chat.stats.runs >= 20)
     throw new Refusal(409, "run_limit", "Restart the local server to clear its 20 sample replies.");
   startRun(
     chat,
-    { clientId: crypto.randomUUID(), text: "Try questions, an approved card and a handoff." },
+    {
+      clientId: crypto.randomUUID(),
+      text: workflow
+        ? "Try a workflow with a question, label check and pause."
+        : "Try questions, an approved card and a handoff.",
+    },
     mode,
     gap,
+    workflow,
   );
 }
 
@@ -498,7 +522,7 @@ const server = Bun.serve({
         if (request.headers.get("X-Demo-Request") !== "1")
           throw new Refusal(403, "local_only", "Use the local demo page to make this request.");
         const match =
-          /^\/api\/(alex|sam)\/(visit|notes)\/(events|state|stats|send|respond|stop|upload|approval|claim|execute|complete|enqueue|recall|disconnect|connect|history|fixtures|sample-image)$/.exec(
+          /^\/api\/(alex|sam)\/(visit|notes)\/(events|state|stats|send|respond|stop|upload|approval|workflow|continue|claim|execute|complete|enqueue|recall|disconnect|connect|history|fixtures|sample-image)$/.exec(
             url.pathname,
           );
         if (!match)
@@ -571,7 +595,11 @@ const server = Bun.serve({
           if (action === "stop") await stop(chat);
           else if (action === "approval")
             requestApproval(chat, approvalMode(url), url.searchParams.get("gap") === "1");
-          else if (action === "history") await loadHistory(chat, url);
+          else if (action === "workflow") requestApproval(chat, "pending", false, true);
+          else if (action === "continue") {
+            if (!chat.work) throw new Refusal(409, "run", "Start a workflow example first.");
+            await chat.work.continueScheduled();
+          } else if (action === "history") await loadHistory(chat, url);
           else if (action === "fixtures") {
             if (!chat.view.messages.some((message) => message.id === fixtureMessageId))
               publish(chat, { v: 1, type: "message", message: sampleFixtures(server.url.origin) });

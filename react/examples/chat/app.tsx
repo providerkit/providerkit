@@ -60,7 +60,7 @@ const labels: ConversationLabelOverrides = {
     lost: "Live updates disconnected",
   },
   reconnect: "Reconnect",
-  approve: "Approve card",
+  approve: "Approve",
   deny: "Skip",
 };
 const toolLabels = {
@@ -78,11 +78,16 @@ function HostApproval({
   value,
   onValueChange,
 }: ApprovalActions) {
+  const workflow = request.part.title === "Use this label for the plan?";
   const edit = request.part.type === "approval" ? request.part.edit : undefined;
   const arguments_ = isRecord(value.data) ? value.data : edit?.value;
   return (
     <div className="host-approval-actions">
-      <p>Approve the label first. The card is created only when you choose Run action afterward.</p>
+      <p>
+        {workflow
+          ? "Approve the label to check it. No card is created."
+          : "Approve the label first. The card is created only when you choose Run action afterward."}
+      </p>
       {edit && (
         <SchemaForm
           schema={edit.schema}
@@ -103,7 +108,7 @@ function HostApproval({
         {state === "submitting" ? "Saving choice..." : "Approve this label"}
       </button>
       <button type="button" disabled={disabled} onClick={() => void onRespond?.({ type: "deny" })}>
-        Skip card
+        {workflow ? "Skip check" : "Skip card"}
       </button>
     </div>
   );
@@ -606,6 +611,22 @@ function App() {
             >
               Try questions, card and handoff
             </button>
+            <button
+              className="demo-button"
+              type="button"
+              disabled={
+                Boolean(pending) || chat.run.status === "running" || chat.run.status === "waiting"
+              }
+              onClick={() =>
+                void action(
+                  "Starting workflow example",
+                  () => command(scope, "workflow"),
+                  "The workflow will check a plan, ask for a time and pause for five seconds.",
+                )
+              }
+            >
+              Try workflow and pause
+            </button>
           </div>
           <p className="hint">
             These are real SDK requests with offline scripts. Answer one question at a time, edit or
@@ -710,6 +731,28 @@ function App() {
             />
             <InputStatusList />
             <RunStatusDisplay />
+            {chat.run.status === "waiting" && chat.run.waitingFor === "continuation" && (
+              <div className="actions">
+                <button
+                  className="demo-button"
+                  type="button"
+                  disabled={Boolean(pending)}
+                  onClick={() =>
+                    void action(
+                      "Checking scheduled work",
+                      () => command(scope, "continue"),
+                      "The host checked the pause and continued the workflow.",
+                    )
+                  }
+                >
+                  Check scheduled work
+                </button>
+                <p className="hint">
+                  This demo waits for you to check after five seconds. The page never resumes work
+                  on its own.
+                </p>
+              </div>
+            )}
             <Composer
               key={draftScopeKey(scope)}
               text={composer.text}

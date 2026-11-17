@@ -41,6 +41,7 @@ export function ToolCall({
       {...props}
       className={uiClass("pk-tool", className)}
       data-part="tool"
+      data-kind={tool.kind}
       data-state={tool.state}
       data-tool-id={tool.id}
       data-agent-id={tool.agentId}
@@ -50,7 +51,9 @@ export function ToolCall({
           {title}
         </span>
         <span className="pk-activity-state" data-part="activity-state">
-          {labels.tool[tool.state]}
+          {tool.kind === "step" && tool.state === "waiting"
+            ? labels.activityWaiting
+            : labels.tool[tool.state]}
         </span>
       </div>
       {tool.summary && (
@@ -113,9 +116,10 @@ export function SpecialistActivity({
 }: SpecialistActivityProps) {
   const labels = useConversationLabels(overrides);
   const headingId = useId();
+  const definitionId = agent.kind === "workflow" ? agent.workflowId : agent.agentId;
   const definitionLabel =
-    specialistLabels && agent.agentId && Object.hasOwn(specialistLabels, agent.agentId)
-      ? specialistLabels[agent.agentId]
+    specialistLabels && definitionId && Object.hasOwn(specialistLabels, definitionId)
+      ? specialistLabels[definitionId]
       : undefined;
   const namedLabel =
     specialistLabels && Object.hasOwn(specialistLabels, agent.id)
@@ -137,7 +141,7 @@ export function SpecialistActivity({
           {label ?? namedLabel ?? agent.label}
         </span>
         <span className="pk-activity-state" data-part="activity-state">
-          {labels.run[agent.state]}
+          {agent.state === "waiting" ? labels.activityWaiting : labels.run[agent.state]}
         </span>
       </div>
       {agent.kind === "handoff" && (

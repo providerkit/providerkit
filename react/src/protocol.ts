@@ -32,8 +32,8 @@ export type ApprovalState =
   | "stopped";
 export type RequestState = ApprovalState | "answered";
 
-/** `waiting` means the run needs the person (an approval). `limited` means a turn, tool, time or
- * output limit ended it. */
+/** `waiting` means execution is paused for a response or a scheduled continuation. `limited`
+ * means a turn, tool, step, time or output limit ended it. */
 export type RunStatus =
   | "idle"
   | "running"
@@ -94,6 +94,10 @@ export interface SourcePart {
 export interface ToolPart {
   type: "tool";
   id: string;
+  /** A workflow step uses the same activity row, but is not a model tool call. */
+  kind?: "step";
+  /** Monotone operation attempt, independent of the run's model attempt. */
+  attempt?: number;
   /** The tool's own name, when the host chooses to show it. Two calls of one tool still differ
    * by `id`. */
   name?: string;
@@ -121,7 +125,9 @@ export interface AgentPart {
   parentId?: string;
   label: string;
   state: AgentState;
-  kind?: "delegation" | "handoff";
+  kind?: "delegation" | "handoff" | "workflow";
+  /** Present for a workflow specialist instead of a registered agentId. */
+  workflowId?: string;
   toolId?: string;
 }
 
@@ -248,6 +254,10 @@ export interface RunInfo {
   /** The message this run is writing. */
   messageId?: string;
   owner?: ConversationOwner;
+  /** A paused run may need no human answer. No client timer starts or resumes execution. */
+  waitingFor?: "response" | "continuation";
+  /** Earliest saved wake time, when the host supplies an authoritative snapshot. */
+  wakeAt?: number;
   error?: DisplayError;
 }
 
@@ -444,7 +454,9 @@ function readTool(id: string, fields: Fields): ToolPart | null {
   const part: ToolPart = { type: "tool", id, label: fields.label, state: fields.state };
   // The one field with no shape of its own: whatever JSON the host wrote, `null` included.
   if (fields.data !== undefined) part.data = fields.data;
-  return optional(part, "name", fields.name, isText) &&
+  return optional(part, "kind", fields.kind, oneOf({ step: true })) &&
+    optional(part, "attempt", fields.attempt, isAttempt) &&
+    optional(part, "name", fields.name, isText) &&
     optional(part, "summary", fields.summary, isText) &&
     optional(part, "detail", fields.detail, isText) &&
     optional(part, "agentId", fields.agentId, isId)
@@ -455,10 +467,14 @@ function readTool(id: string, fields: Fields): ToolPart | null {
 function readAgent(id: string, fields: Fields): AgentPart | null {
   if (!isText(fields.label) || !isAgentState(fields.state)) return null;
   const part: AgentPart = { type: "agent", id, label: fields.label, state: fields.state };
+  if (fields.kind === "workflow" && (fields.agentId != null || !isId(fields.workflowId)))
+    return null;
+  if (fields.workflowId != null && fields.kind !== "workflow") return null;
   return optional(part, "parentId", fields.parentId, isId) &&
     optional(part, "agentId", fields.agentId, isId) &&
+    optional(part, "workflowId", fields.workflowId, isId) &&
     optional(part, "toolId", fields.toolId, isId) &&
-    optional(part, "kind", fields.kind, oneOf({ delegation: true, handoff: true }))
+    optional(part, "kind", fields.kind, oneOf({ delegation: true, handoff: true, workflow: true }))
     ? part
     : null;
 }
@@ -644,7 +660,12 @@ function readInput(value: unknown): DisplayInput | null {
 function readRun(value: unknown): RunInfo | null {
   if (!isRecord(value) || !isRunStatus(value.status)) return null;
   const run: RunInfo = { status: value.status };
-  if (!optional(run, "id", value.id, isId) || !optional(run, "messageId", value.messageId, isId))
+  if (
+    !optional(run, "id", value.id, isId) ||
+    !optional(run, "messageId", value.messageId, isId) ||
+    !optional(run, "waitingFor", value.waitingFor, oneOf({ response: true, continuation: true })) ||
+    !optional(run, "wakeAt", value.wakeAt, isTime)
+  )
     return null;
   if (value.owner != null) {
     const owner = value.owner;

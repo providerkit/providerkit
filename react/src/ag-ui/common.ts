@@ -41,7 +41,7 @@ export function jsonSafe(value: unknown, maxChars = DEFAULT_CHARS, privateFields
     if (
       privateFields &&
       Object.hasOwn(item, "format") &&
-      ["turns", "context", "delegations"].some((key) => Object.hasOwn(item, key))
+      ["turns", "models", "context", "delegations", "steps"].some((key) => Object.hasOwn(item, key))
     )
       return false;
     ancestors.add(item);
@@ -91,22 +91,6 @@ export function sameBinding(value: unknown, binding: AgUiBinding): boolean {
     value.segment === binding.segment &&
     value.agUiRunId === binding.agUiRunId
   );
-}
-
-export function step(
-  part: DisplayPart,
-): { name: string; state: "started" | "finished" } | undefined {
-  if (
-    part.type !== "data" ||
-    part.kind !== "ag-ui.step" ||
-    !isRecord(part.data) ||
-    typeof part.data.name !== "string" ||
-    !part.data.name ||
-    (part.data.state !== "started" && part.data.state !== "finished") ||
-    Object.keys(part.data).some((key) => key !== "name" && key !== "state")
-  )
-    return undefined;
-  return { name: part.data.name, state: part.data.state };
 }
 
 function opaque(part: DisplayPart): unknown[] {
@@ -184,7 +168,7 @@ export function displayEvent(
     let result = incoming;
     const fields = opaque(incoming);
     if (fields.some((field) => field !== undefined)) {
-      const selected = projected || step(incoming) ? incoming : options.projectPart?.(incoming);
+      const selected = projected ? incoming : options.projectPart?.(incoming);
       if (selected) {
         const parsed = parseChatEvent({
           v: 1,

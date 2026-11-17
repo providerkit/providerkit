@@ -57,6 +57,9 @@ export interface ConversationLabels {
   role: Record<MessageRole, string>;
   message: Record<MessageState, string>;
   run: Record<RunStatus, string>;
+  activityWaiting: string;
+  waitingContinuation: string;
+  waitingUntil: (time: number) => string;
   tool: Record<ToolState, string>;
   connection: Record<ConnectionStatus, string>;
   approval: Record<RequestDisplayState, string>;
@@ -133,6 +136,9 @@ export const defaultConversationLabels: ConversationLabels = {
     limited: "Stopped at a limit",
     failed: "Failed",
   },
+  activityWaiting: "Paused",
+  waitingContinuation: "Waiting to continue",
+  waitingUntil: (time) => `Scheduled to continue after ${new Date(time).toLocaleString()}.`,
   tool: {
     running: "Working",
     waiting: "Waiting for a response",

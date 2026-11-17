@@ -120,16 +120,64 @@ it("shows six different specialist states and no child Stop control", async () =
   );
   expect(
     [...container.querySelectorAll("[data-part='activity-state']")].map((node) => node.textContent),
-  ).toEqual([
-    "Working",
-    "Waiting for your answer",
-    "Completed",
-    "Stopped",
-    "Stopped at a limit",
-    "Failed",
-  ]);
+  ).toEqual(["Working", "Paused", "Completed", "Stopped", "Stopped at a limit", "Failed"]);
   expect(container.querySelector("button")).toBeNull();
   expect(container.querySelectorAll("[data-parent-id='parent']")).toHaveLength(6);
+});
+
+it("draws workflow steps and scheduled waiting without asking for an answer or starting a timer", async () => {
+  vi.useFakeTimers();
+  const stop = vi.fn();
+  await draw(
+    <>
+      <SpecialistActivity
+        agent={{
+          type: "agent",
+          kind: "workflow",
+          id: "child",
+          workflowId: "review",
+          label: "Fallback",
+          state: "waiting",
+        }}
+        specialistLabels={{ review: "Review the plan" }}
+      >
+        <ToolCall
+          tool={{
+            type: "tool",
+            kind: "step",
+            id: "pause",
+            agentId: "child",
+            label: "Pause",
+            state: "waiting",
+            attempt: 2,
+          }}
+        />
+      </SpecialistActivity>
+      <RunStatusDisplay
+        run={{
+          id: "root",
+          status: "waiting",
+          waitingFor: "continuation",
+          wakeAt: Date.now() + 1000,
+        }}
+        onStop={stop}
+        labels={{ waitingUntil: () => "Scheduled for later." }}
+      />
+    </>,
+  );
+  expect(container.textContent).toContain("Review the plan");
+  expect(container.textContent).toContain("Waiting to continue");
+  expect(container.textContent).toContain("Scheduled for later.");
+  expect(container.textContent).not.toMatch(/your answer|response|Approve/);
+  expect(container.querySelector('[data-kind="step"]')?.getAttribute("data-state")).toBe("waiting");
+  const timers = vi.getTimerCount();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+  expect(vi.getTimerCount()).toBe(timers);
+  expect(stop).not.toHaveBeenCalled();
+  await act(async () => button("stop").click());
+  expect(stop).toHaveBeenCalledOnce();
 });
 
 it("uses the server fallback when a name is absent from the host's own label map", async () => {

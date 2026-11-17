@@ -131,6 +131,15 @@ function upsertPart(parts: readonly DisplayPart[], part: DisplayPart): readonly 
     if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
     if (held.incomplete && !part.incomplete) return parts;
   }
+  if (
+    held.type === "tool" &&
+    part.type === "tool" &&
+    held.kind === "step" &&
+    part.kind === "step"
+  ) {
+    if ((part.attempt ?? 1) < (held.attempt ?? 1)) return parts;
+    if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
+  }
   if (isSettled(held) && !isSettled(part)) return parts;
   return sameData(held, part) ? parts : replaceAt(parts, index, part);
 }
@@ -141,6 +150,18 @@ function upsertPart(parts: readonly DisplayPart[], part: DisplayPart): readonly 
  * needs no check of its own: a text that starts with another is at least as long, and at the
  * same length the two are the same text. */
 function isAhead(held: DisplayPart, incoming: DisplayPart): boolean {
+  if (
+    held.type === "tool" &&
+    incoming.type === "tool" &&
+    held.kind === "step" &&
+    incoming.kind === "step"
+  )
+    return (
+      (held.attempt ?? 1) > (incoming.attempt ?? 1) ||
+      ((held.attempt ?? 1) === (incoming.attempt ?? 1) && isSettled(held) && !isSettled(incoming))
+    );
+  if (held.type === "agent" && incoming.type === "agent")
+    return isSettled(held) && !isSettled(incoming);
   return (
     held.type === "text" &&
     incoming.type === "text" &&

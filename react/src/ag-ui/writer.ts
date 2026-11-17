@@ -14,7 +14,6 @@ import {
   displayEvent,
   issue,
   NAMESPACE,
-  step,
   wireId,
   withinView,
 } from "./common.ts";
@@ -32,6 +31,11 @@ const toolId = (messageId: string, partId: string) => wireId("tool", messageId, 
 const anchorId = (messageId: string) => wireId("message", messageId);
 const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 
+function nativeToolId(message: DisplayMessage, id: string | undefined): string | undefined {
+  const part = message.parts.find((part) => part.id === id);
+  return part?.type === "tool" && part.kind !== "step" ? toolId(message.id, part.id) : undefined;
+}
+
 /** Snapshots contain public text and tool labels/summaries only, never call arguments. */
 function messages(view: ChatView): AgUiMessage[] {
   const output: AgUiMessage[] = [];
@@ -46,7 +50,7 @@ function messages(view: ChatView): AgUiMessage[] {
           ...(part.agentId && { subagentRunId: part.agentId }),
         };
         output.push(parent);
-      } else if (part.type === "tool") {
+      } else if (part.type === "tool" && part.kind !== "step") {
         if (!parent || parent.role !== "assistant") {
           parent = { id: anchorId(message.id), role: "assistant", content: "" };
           output.push(parent);
@@ -80,10 +84,11 @@ function interrupts(view: ChatView): AgUiInterrupt[] {
   for (const message of view.messages)
     for (const part of message.parts) {
       if (!isRequestPart(part) || part.state !== "pending") continue;
+      const toolCallId = nativeToolId(message, part.toolId);
       const request: AgUiInterrupt = {
         id: part.id,
         reason:
-          part.type === "approval"
+          part.type === "approval" && toolCallId
             ? "tool_call"
             : part.type === "client-tool"
               ? "client_tool"
@@ -91,8 +96,10 @@ function interrupts(view: ChatView): AgUiInterrupt[] {
         message: part.title,
         metadata: { kind: part.type },
       };
-      if (part.toolId) request.toolCallId = toolId(message.id, part.toolId);
-      if (part.agentId) request.subagentRunId = part.agentId;
+      if (toolCallId) request.toolCallId = toolCallId;
+      const parent = message.parts.find((item) => item.id === part.agentId);
+      if (part.agentId && !(parent?.type === "agent" && parent.kind === "workflow"))
+        request.subagentRunId = part.agentId;
       if (part.expiresAt !== undefined && Math.abs(part.expiresAt) <= 8.64e15)
         request.expiresAt = new Date(part.expiresAt).toISOString();
       if (part.type === "question" && part.schema) request.responseSchema = { ...part.schema };
@@ -255,6 +262,34 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
             if (delta) output.push({ type: "TEXT_MESSAGE_CONTENT", messageId, delta, ...scope });
             if ((part.settled || message.state !== "live") && opened.delete(messageId))
               output.push({ type: "TEXT_MESSAGE_END", messageId, ...scope });
+          } else if (part.type === "tool" && part.kind === "step") {
+            // Native steps have one name and no operation id or attempt. Use a unique opaque
+            // name, and keep the readable label and full identity in the display commit.
+            const stepName = wireId("step", message.id, part.id, String(part.attempt ?? 1));
+            const fresh = prior?.type !== "tool" || prior.attempt !== part.attempt;
+            if (
+              fresh &&
+              prior?.type === "tool" &&
+              (prior.state === "running" || prior.state === "waiting")
+            )
+              output.push({
+                type: "STEP_FINISHED",
+                stepName: wireId("step", message.id, part.id, String(prior.attempt ?? 1)),
+              });
+            if (fresh) output.push({ type: "STEP_STARTED", stepName });
+            if (
+              (part.state === "done" || part.state === "failed") &&
+              (fresh ||
+                (prior?.type === "tool" &&
+                  (prior.state === "running" || prior.state === "waiting")))
+            )
+              output.push({ type: "STEP_FINISHED", stepName });
+            issues.push(
+              issue(
+                "unsupported",
+                "Native steps lack operation ids, attempts, labels and failure states. The display extension preserves them.",
+              ),
+            );
           } else if (part.type === "tool" && !replace) {
             const callId = toolId(message.id, part.id);
             if (!prior) {
@@ -281,6 +316,17 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                 }),
               });
           } else if (part.type === "agent") {
+            if (part.kind === "workflow") {
+              issues.push(
+                issue(
+                  "unsupported",
+                  "Native child events describe agents, not workflows. Workflow rows use the display extension.",
+                ),
+              );
+              continue;
+            }
+            const parent = message.parts.find((item) => item.id === part.parentId);
+            const parentToolCallId = nativeToolId(message, part.toolId);
             const child = { subagentRunId: part.id };
             if (!prior)
               output.push({
@@ -288,8 +334,11 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                 ...child,
                 name: part.label,
                 parentMessageId: replace ? undefined : ensureAnchor(message),
-                ...(part.parentId && { parentSubagentRunId: part.parentId }),
-                ...(part.toolId && { parentToolCallId: toolId(message.id, part.toolId) }),
+                ...(part.parentId &&
+                  !(parent?.type === "agent" && parent.kind === "workflow") && {
+                    parentSubagentRunId: part.parentId,
+                  }),
+                ...(parentToolCallId && { parentToolCallId }),
               });
             if (part.state === "failed" || part.state === "limited")
               output.push({
@@ -314,19 +363,13 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                 },
               });
           } else if (part.type === "data") {
-            const info = step(part);
-            if (info) {
-              if (!prior) output.push({ type: "STEP_STARTED", stepName: info.name });
-              if (info.state === "finished")
-                output.push({ type: "STEP_FINISHED", stepName: info.name });
-            } else
-              output.push({
-                type: "ACTIVITY_SNAPSHOT",
-                messageId: wireId("data", message.id, part.id),
-                activityType: part.kind,
-                content: part.data,
-                replace: true,
-              });
+            output.push({
+              type: "ACTIVITY_SNAPSHOT",
+              messageId: wireId("data", message.id, part.id),
+              activityType: part.kind,
+              content: part.data,
+              replace: true,
+            });
           }
         }
         if (message.state !== "live" && message.state !== "sending")
@@ -344,6 +387,13 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
       ) {
         close();
         const run = next.run;
+        if (run.wakeAt !== undefined)
+          issues.push(
+            issue(
+              "unsupported",
+              "Native run outcomes have no saved wake time. The display extension preserves it.",
+            ),
+          );
         if (run.status === "failed" || run.status === "limited")
           output.push({
             type: "RUN_ERROR",

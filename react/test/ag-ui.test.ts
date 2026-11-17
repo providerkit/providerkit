@@ -76,14 +76,15 @@ function native(options: Omit<AgUiReaderOptions, "binding"> = {}) {
   return { reader, read, view: () => view };
 }
 
-function roundTrip(events: ChatEvent[]) {
+function roundTrip(events: ChatEvent[], expectedIssues: string[] = []) {
+  const issues: string[] = [];
   const writer = createAgUiWriter({ binding });
   const reader = createAgUiReader({ binding });
   const wire: AgUiEvent[] = [];
   let view = emptyChatView();
   for (const event of events) {
     const written = writer.write(event);
-    expect(written.issues).toEqual([]);
+    issues.push(...written.issues.map((item) => item.code));
     wire.push(...written.events);
     for (const value of written.events) {
       const read = reader.read(value);
@@ -91,10 +92,154 @@ function roundTrip(events: ChatEvent[]) {
       view = read.events.reduce(reduceChat, view);
     }
   }
+  expect(issues).toEqual(expectedIssues);
   return { writer, reader, wire, view };
 }
 
 describe("AG-UI mapping", () => {
+  it("round-trips workflow rows, retry attempts and wake times without native tool or fake agent calls", () => {
+    const row: DisplayPart = {
+      type: "tool",
+      kind: "step",
+      id: "operation",
+      attempt: 1,
+      label: "Check plan",
+      state: "running",
+      agentId: "workflow",
+    };
+    const workflow: DisplayPart = {
+      type: "agent",
+      kind: "workflow",
+      workflowId: "review",
+      id: "workflow",
+      label: "Review",
+      state: "running",
+    };
+    const events = numbered([
+      run,
+      message,
+      part(workflow),
+      part(row),
+      part({ ...row, attempt: 2 }),
+      part({ ...row, attempt: 2, state: "waiting" }),
+      part({ ...workflow, state: "waiting" }),
+      {
+        v: 1,
+        type: "run",
+        run: { id: binding.runId, status: "waiting", waitingFor: "continuation", wakeAt: 2000 },
+      },
+    ]);
+    const result = roundTrip(events, [
+      "unsupported",
+      "unsupported",
+      "unsupported",
+      "unsupported",
+      "unsupported",
+      "unsupported",
+    ]);
+    expect(result.view).toEqual(events.reduce(reduceChat, emptyChatView()));
+    expect(
+      result.wire.filter(
+        (event) => event.type.startsWith("TOOL_CALL") || event.type.startsWith("SUBAGENT"),
+      ),
+    ).toEqual([]);
+    expect(result.wire.filter((event) => event.type === "STEP_STARTED")).toHaveLength(2);
+    expect(result.wire.filter((event) => event.type === "STEP_FINISHED")).toHaveLength(1);
+    expect(result.wire.find((event) => event.type === "RUN_FINISHED")).toMatchObject({
+      outcome: { type: "interrupt", interrupts: [] },
+    });
+    const nativeOnly = createAgUiReader({ binding });
+    let view = emptyChatView();
+    for (const event of result.wire) {
+      if (event.type === "CUSTOM") continue;
+      const { metadata: _metadata, ...plain } = event;
+      const mapped = nativeOnly.read(plain);
+      expect(mapped.issues.filter((issue) => issue.code !== "unsupported")).toEqual([]);
+      view = mapped.events.reduce(reduceChat, view);
+    }
+    expect(view.run).toMatchObject({ status: "waiting", waitingFor: "continuation" });
+    expect(view.run.wakeAt).toBeUndefined();
+    expect(
+      view.messages
+        .flatMap((message) => message.parts)
+        .filter((part) => part.type === "tool")
+        .map((part) => part.state),
+    ).toEqual(["done", "waiting"]);
+    expect(nativeOnly.end().issues).toEqual([]);
+  });
+
+  it("keeps step-origin approvals out of native tool-call routing", () => {
+    const writer = createAgUiWriter({ binding });
+    const mapped = writer.write({
+      v: 1,
+      type: "snapshot",
+      messages: [
+        {
+          id: "reply",
+          role: "assistant",
+          state: "live",
+          parts: [
+            {
+              type: "tool",
+              kind: "step",
+              id: "operation",
+              label: "Check",
+              state: "waiting",
+              attempt: 1,
+            },
+            {
+              type: "approval",
+              id: "request",
+              toolId: "operation",
+              title: "Check one item?",
+              state: "pending",
+            },
+          ],
+        },
+      ],
+      run: { id: binding.runId, status: "waiting", waitingFor: "response" },
+    });
+    expect(mapped.events.filter((event) => event.type.startsWith("TOOL_CALL"))).toEqual([]);
+    const native = mapped.events.find((event) => event.type === "RUN_FINISHED");
+    expect(native).toMatchObject({
+      outcome: {
+        type: "interrupt",
+        interrupts: [{ id: "request", reason: "input", message: "Check one item?" }],
+      },
+    });
+    expect(JSON.stringify(native)).not.toContain("toolCallId");
+  });
+  it("keeps native approval and child links when their model tool row exists", () => {
+    const events = numbered([
+      run,
+      message,
+      part({ type: "tool", id: "tool", name: "lookup", label: "Find a page", state: "waiting" }),
+      part(approval),
+      part({
+        type: "agent",
+        id: "child",
+        agentId: "reader",
+        toolId: "tool",
+        label: "Reader",
+        state: "running",
+      }),
+      { v: 1, type: "run", run: { id: binding.runId, status: "waiting" } },
+    ]);
+    const result = roundTrip(events);
+    const tool = result.wire.find((event) => event.type === "TOOL_CALL_START");
+    if (tool?.type !== "TOOL_CALL_START") throw new Error("Expected a native model tool call");
+    expect(result.wire.find((event) => event.type === "SUBAGENT_STARTED")).toMatchObject({
+      parentToolCallId: tool.toolCallId,
+    });
+    expect(result.wire.find((event) => event.type === "RUN_FINISHED")).toMatchObject({
+      outcome: {
+        type: "interrupt",
+        interrupts: [{ id: approval.id, reason: "tool_call", toolCallId: tool.toolCallId }],
+      },
+    });
+    expect(result.view).toEqual(events.reduce(reduceChat, emptyChatView()));
+  });
+
   it("emits native text/tool/run events and exactly round-trips display ids and cursors", () => {
     const events = numbered([
       run,
@@ -416,10 +561,11 @@ describe("AG-UI mapping", () => {
     const stepPart = fixture
       .view()
       .messages.flatMap((message) => message.parts)
-      .find((part) => part.type === "data");
+      .find((part) => part.type === "tool" && part.kind === "step");
     expect(stepPart).toMatchObject({
-      kind: "ag-ui.step",
-      data: { name: "Lookup", state: "finished" },
+      kind: "step",
+      label: "Lookup",
+      state: "done",
     });
     const writer = createAgUiWriter({ binding });
     const mapped = writer.write({
@@ -431,9 +577,10 @@ describe("AG-UI mapping", () => {
     expect(mapped.events.map((event) => event.type)).toContain("STEP_STARTED");
     expect(mapped.events.map((event) => event.type)).toContain("STEP_FINISHED");
     expect(
-      roundTrip([
-        { v: 1, type: "snapshot", messages: fixture.view().messages, run: fixture.view().run },
-      ]).view.messages,
+      roundTrip(
+        [{ v: 1, type: "snapshot", messages: fixture.view().messages, run: fixture.view().run }],
+        ["unsupported"],
+      ).view.messages,
     ).toEqual(fixture.view().messages);
     const unfinished = native();
     unfinished.read({ type: "TEXT_MESSAGE_START", messageId: "open" });
