@@ -51,6 +51,19 @@ const pages = [
 const targets = new Set<string>();
 for (const page of pages) {
   const html = readFileSync(`${dist}${page ? `${page}/` : ""}index.html`, "utf8");
+  // Splash pages supply their own menu; guides use Starlight's. A second target breaks the button.
+  if (page === "" || page === "agents/getting-started") {
+    assert.equal(
+      html.match(/ id="starlight__sidebar"/g)?.length,
+      1,
+      `${page || "/"} needs one menu panel`,
+    );
+    assert.equal(
+      html.match(/ popovertarget="starlight__sidebar"/g)?.length,
+      1,
+      `${page || "/"} needs one menu button`,
+    );
+  }
   if (["", "guides/getting-started", "demos/errors"].includes(page))
     assert.doesNotMatch(
       html,

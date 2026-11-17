@@ -268,8 +268,7 @@ export default function OpticalBench() {
               );
             })}
 
-            {/* The element. The brand mark's own geometry, opened to the full
-                aperture — a collimator is drawn spanning the beam it collimates. */}
+            {/* The lens spans the incoming rays so the selected exit is easy to trace. */}
             <path
               className="lens"
               d={`M${LENS_X} 24 Q${LENS_X + LENS_W} ${AXIS_Y} ${LENS_X} 456 Q${LENS_X - LENS_W} ${AXIS_Y} ${LENS_X} 24 Z`}

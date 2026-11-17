@@ -1,6 +1,6 @@
 ---
 name: providerkit
-description: TypeScript provider calls, agent execution and chat screens, with the optical bench's type, palettes and mark.
+description: TypeScript provider calls, agent execution and chat screens, with an ultramarine p on graphite or cool paper.
 colors:
   paper: "#16191d"
   paper-2: "#1c2026"
@@ -10,7 +10,7 @@ colors:
   ink-3: "#7f8a96"
   rule: "#2a3038"
   rule-strong: "#3b434d"
-  beam: "#35c0b1"
+  beam: "#a8b1ff"
   ray-retry: "#e4a040"
   ray-account: "#ec6a5e"
   ray-context: "#6fa9ee"
@@ -121,9 +121,9 @@ components:
 
 **The world: the optical bench**
 
-The collimator mark, Archivo, Commit Mono and the two existing palettes remain the site's
-visual identity. The site now covers Core, Agents and React, rather than describing the whole
-project as a provider layer with no agent loop.
+The three packages share an ultramarine p. Its open bowl and cut stem remain distinct at favicon size.
+The name is lowercase Archivo in ink; it is not a second patch of accent color. Commit Mono stays
+with code. The optical bench belongs to the Core classifier, not the logo.
 
 Purpose and useful actions come before the drawing. The landing has one shared example area
 followed by full-width package rows. The full classifier lives at `/demos/errors/`. It still runs
@@ -140,7 +140,7 @@ bounded reading width and both themes remain comfortable for long documentation 
 
 - Drafting line work only: centrelines, dimension lines with witness ticks, leader lines.
 - Zero radius everywhere; no cards, no boxes, no dividers, no shadows.
-- Colour is a remedy code, never decoration or emphasis.
+- Ultramarine identifies the brand and current location. Error colors identify remedies.
 - Every state legible without hue — line style and words carry it too.
 - The whole set is always shown unlit; the selected one is struck forward.
 - Tabular lining figures throughout. Numbers on a drafting sheet line up.
@@ -154,10 +154,9 @@ the light ground specifically so it clears 4.5:1 as text on paper.
 
 ### Primary
 
-- **Collimated Teal** (`#35c0b1` dark / `#0b6a62` light): the beam that leaves the lens —
-  what the package produces. It marks the seam itself and the four places where the reader is
-  _on_ the normalized path: the link underline, the focused field's rule, the current-page
-  tick in the sidebar, and the active table-of-contents entry. It never marks a failure.
+- **Ultramarine** (`#a8b1ff` on dark, `#414cac` on light): the link underline, keyboard focus,
+  current section and active table-of-contents entry. It also marks the normalized output in the
+  Core diagrams. The transparent logo uses `#666ed7` on both grounds.
 
 ### Secondary — the wavelengths
 
@@ -191,13 +190,11 @@ Each is a remedy band in the error taxonomy, and the coding is load-bearing prod
 
 ### Named Rules
 
-**The Wavelength Rule.** A hue in this system always names a remedy. It is never used for
-emphasis, never for hierarchy, never for delight. If a new element needs to stand out and it
-is not a classified failure, it gets more ink or more line frequency — not a colour.
+**Remedy colors.** Each failure color names the kind of fix it needs. Keep these colors out of
+package branding. Use type weight or spacing to make an unrelated element stand out.
 
-**The Beam Rule.** Teal is what _leaves_ the seam normalized. It never appears on a failure,
-a warning, or an error state. Reaching for teal to mean "success" is the same mistake as
-reaching for red to mean "important".
+**The beam rule.** The brand accent identifies the current location or a normalized result in a
+figure. It does not mean success or failure. Keep each remedy's own color and label.
 
 **The Two-Ground Rule.** Every colour ships a light and a dark value and the roles never
 swap. A token that looks right on one ground and is invented on the other is not finished.
@@ -257,10 +254,10 @@ The full classifier is the only wide optical drawing. Its `77.5rem` minimum widt
 page. A caption tells narrow-screen readers how to see the rest. Its input and verdict stack
 on phones; provider labels have 44px hit targets.
 
-Desktop header navigation names Core, Agents, React, Examples, Demos and API reference. The
-existing Starlight mobile drawer contains the same destinations on documentation pages. Splash
-pages have no drawer, so their package links and theme selector remain visible in the header.
-Package sidebar groups start collapsed; Starlight expands the current page's ancestors.
+The header is one row. Its height comes from Starlight (4rem on desktop, 3.5rem on phones),
+not from the logo. Below 50rem the section links move into one menu. The docs keep their existing
+sidebar drawer and the landing page gets a short menu with the same destinations. See
+[site navigation](STRUCTURE.md) for the order and keyboard behavior.
 
 Spacing is role-named rather than a numeric ramp: `0.4rem` at a tick, `0.6rem` between a label
 and its rule, **`1.1rem` as the standing leader indent** (the distance from a witness tick or
@@ -298,11 +295,9 @@ their inline-start edge and nothing resembling a lifted card.
 
 ## Shapes
 
-**Every corner in this system is square.** `border-radius: 0` on code frames, asides,
-dialogs, search, pagination, inputs and buttons — Starlight's rounded defaults are all
-overridden. The only curve in the entire world is the lens: a symmetric two-arc biconvex
-element (`M x 24 Q x+56 240 x 456 Q x−56 240 x 24 Z`), which is the brand mark's own geometry
-opened to the full aperture. That curve is meaningful, so it is the only one.
+**Controls and surfaces have square corners.** Code frames, asides, dialogs, search, pagination,
+inputs and buttons all use `border-radius: 0`. The curved lens in the error classifier is part of
+that diagram. The site's mark is a letter with flat cuts.
 
 The recurring form is not a container but a **mark**: a short hairline that witnesses
 something. It appears as the 2.5rem witness mark over a section heading, the 0.65rem tick
@@ -327,9 +322,8 @@ decoration and comes out.
 
 ### Action links (the button equivalent)
 
-There are no filled buttons. An action is a **labelled leader**: ink-coloured text at label
-weight, a 1px teal rule beneath it, and a `→` in teal after it. Hover thickens the rule from
-1px to 2px in 90ms — the rule points the way the arrow does.
+There are no filled buttons. An action link uses ink text, a 1px accent underline and a `→`.
+Hover thickens the underline to 2px in 90ms.
 
 - **Shape:** square, no radius, no fill, no border box.
 - **Padding:** `0 0 0.2rem` — the rule sits just under the baseline, not around a box.
@@ -337,9 +331,8 @@ weight, a 1px teal rule beneath it, and a `→` in teal after it. Hover thickens
 
 ### Links in prose
 
-Ink-coloured text with a **teal underline** at 1px and `0.22em` offset. Hover moves the text
-to teal and thickens the underline to 2px. A link is never a coloured word on its own — the
-underline is the leader that marks it.
+Links use ink text with a 1px ultramarine underline and `0.22em` offset. On hover the text turns
+ultramarine and the underline thickens to 2px. The underline distinguishes a link without color.
 
 ### Inputs / Fields
 
@@ -347,7 +340,7 @@ underline is the leader that marks it.
   every value typed here is a status code or a response body.
 - **Label:** above the field, label role, `ink-3`, sentence case, and phrased as guidance
   rather than a noun — "HTTP status — leave blank if it never got one".
-- **Focus:** the underline goes teal and thickens to 2px, with bottom padding reduced by 1px
+- **Focus:** the underline goes ultramarine and thickens to 2px, with bottom padding reduced by 1px
   so the text does not shift. No ring, no glow, no background change.
 
 ### Code specimens
@@ -372,16 +365,16 @@ inline-start padding, so the first column sits flush to the measure.
 ### Navigation
 
 Sidebar entries are plain text at `ink-3`. The current page is **witnessed, not filled**: a
-2px teal tick in the margin at `-0.75rem`, with the label going to `ink` at weight 600. There
+2px ultramarine tick in the margin at `-0.75rem`, with the label going to `ink` at weight 600. There
 is no pill, no highlight, no background. Hover adds a `rule-strong` underline. The table of
-contents uses the same grammar with a 1px inline-start rule that turns teal on the active
+contents uses the same grammar with a 1px inline-start rule that turns ultramarine on the active
 entry. Search is an underlined input, not a capsule.
 
 ### Copy page as Markdown
 
 Sits inline with the page title, right-aligned, as a label-role underlined control. It fetches
 the page's own `.md` source and writes it to the clipboard; on success it reads "Copied" in
-teal for 2.4s. **Its failure path never dead-ends:** if the clipboard is unavailable it opens
+ultramarine for 2.4s. **Its failure path never dead-ends:** if the clipboard is unavailable it opens
 the markdown in a new tab and says "Opened the .md instead" in retry amber, so the control
 always lands somewhere useful.
 
@@ -464,7 +457,7 @@ Authored package reference indexes sit beside the generated directories. TypeDoc
 - **Don't** write a tracked ALL-CAPS eyebrow above a heading. Use a leader with a rule.
 - **Don't** join small labels with middle dots (`A · B · C`). That meta string is retired.
 - **Don't** spend a wavelength on emphasis. Amber, red, blue and violet mean retry, account,
-  context and ours; teal means normalized output. Emphasis is ink weight and line frequency.
+  context and ours; ultramarine means normalized output. Emphasis is ink weight and line frequency.
 - **Don't** introduce a border radius. The lens arc is the only curve in the system.
 - **Don't** reach for Inter or JetBrains Mono. Both are retired from this project as category
   defaults.
@@ -508,10 +501,10 @@ unfilled controls and inherited typography, not a second visual system.
 
 ## Decisions behind the site
 
-The user explicitly expanded the site from Core alone to Core, Agents and React. Package-specific
-boundaries replace the umbrella claim that providerkit has no agent loop. The mark, fonts,
-palettes, guide URLs and machine-readable channels stay. Core's zero-runtime-dependency claim
-never becomes a claim about the whole toolkit.
+Core, Agents and React share the same site. The new p replaces the old lens logo because a
+single silhouette reads at tab size and identifies all three packages. Keep the existing fonts,
+reading backgrounds, error remedy colors, guide URLs and machine-readable channels. Core's
+zero-runtime-dependency claim never becomes a claim about the whole toolkit.
 
 The shared example precedes full-width package rows. No three-card package grid, no statistics
 strip and no diagram before the purpose. Reference headings now use the quiet reading style.
