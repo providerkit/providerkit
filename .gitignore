@@ -7,6 +7,7 @@ dist
 core/README.md
 core/LICENSE
 agents/LICENSE
+react/LICENSE
 
 # Astro's generated types, and the TypeDoc reference — both rebuilt by
 # `bun run build:site`, so committing them would just add noise to every diff.

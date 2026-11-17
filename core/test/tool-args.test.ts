@@ -11,6 +11,58 @@ describe("parseToolArgs — the intact case", () => {
     expect(parseToolArgs('{"query":"hello","limit":5}')).toEqual({ query: "hello", limit: 5 });
   });
 
+  it.each(["__proto__", "\\u005f_proto__"])(
+    "keeps %s as an own data property in complete JSON",
+    (key) => {
+      const prototype = Object.getOwnPropertyDescriptors(Object.prototype);
+      const parsed = parseToolArgs(
+        `{"${key}":{"inherited":true},"constructor":"ctor","toString":"label","text":"ok"}`,
+      );
+      expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+      expect(Object.getOwnPropertyDescriptor(parsed, "__proto__")).toEqual({
+        value: { inherited: true },
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+      expect(parsed.inherited).toBeUndefined();
+      expect(Object.hasOwn(parsed, "constructor")).toBe(true);
+      expect(Object.hasOwn(parsed, "toString")).toBe(true);
+      expect(JSON.stringify(parsed)).toBe(
+        '{"__proto__":{"inherited":true},"constructor":"ctor","toString":"label","text":"ok"}',
+      );
+      expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype);
+    },
+  );
+
+  it("keeps special keys in nested objects and arrays", () => {
+    const prototype = Object.getOwnPropertyDescriptors(Object.prototype);
+    const parsed = parseToolArgs(
+      '{"nested":{"__proto__":null},"items":[{"__proto__":["caf\\\\u00e9"]}]}',
+    );
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(parsed.nested)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(parsed.nested, "__proto__")).toEqual({
+      value: null,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    expect(Array.isArray(parsed.items)).toBe(true);
+    if (!Array.isArray(parsed.items)) throw new Error("Expected items to be an array");
+    expect(Object.getPrototypeOf(parsed.items[0])).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(parsed.items[0], "__proto__")).toEqual({
+      value: ["café"],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    expect(JSON.stringify(parsed)).toBe(
+      '{"nested":{"__proto__":null},"items":[{"__proto__":["café"]}]}',
+    );
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype);
+  });
+
   it("returns {} for empty or whitespace input", () => {
     expect(parseToolArgs("")).toEqual({});
     expect(parseToolArgs("   ")).toEqual({});
@@ -83,6 +135,31 @@ describe("parseToolArgs — truncation salvage", () => {
   it("unescapes quotes inside a salvaged value", () => {
     const raw = '{"quote":"she said \\"yes\\" and left';
     expect(parseToolArgs(raw).quote).toBe('she said "yes" and left');
+  });
+
+  it.each([
+    ["__proto__", '","count":'],
+    ["\\u005f_proto__", '","count":'],
+    ["__proto__", "\\u00"],
+    ["\\u005f_proto__", "\\u00"],
+  ])("keeps salvaged %s fields before %s", (key, tail) => {
+    const prototype = Object.getOwnPropertyDescriptors(Object.prototype);
+    const parsed = parseToolArgs(
+      `{"constructor":"ctor","toString":"label","${key}":"caf\\\\u00e9${tail}`,
+    );
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(parsed, "__proto__")).toEqual({
+      value: "café",
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    expect(Object.hasOwn(parsed, "constructor")).toBe(true);
+    expect(Object.hasOwn(parsed, "toString")).toBe(true);
+    expect(JSON.stringify(parsed)).toBe(
+      '{"constructor":"ctor","toString":"label","__proto__":"café"}',
+    );
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype);
   });
 
   it("returns {} when there is nothing recoverable", () => {

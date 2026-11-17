@@ -1,0 +1,270 @@
+@layer providerkit {
+  :where(
+    .pk-tool,
+    .pk-specialist,
+    .pk-approval,
+    .pk-sources,
+    .pk-run-status,
+    .pk-inputs,
+    .pk-input,
+    .pk-connection-status
+  ) {
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+    color: var(--pk-color, inherit);
+    font: inherit;
+    line-height: var(--pk-line-height, 1.6);
+  }
+
+  :where(.pk-tool, .pk-specialist, .pk-approval, .pk-input) {
+    padding-block: 0.75em;
+  }
+
+  :where(.pk-request-fields, .pk-request-field) {
+    display: grid;
+    gap: 0.5em;
+    min-inline-size: 0;
+    margin-block: 0.75em;
+  }
+
+  :where(.pk-request-fields fieldset) {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    min-inline-size: 0;
+  }
+
+  :where(.pk-request-field input, .pk-request-field textarea, .pk-request-field select) {
+    box-sizing: border-box;
+    inline-size: 100%;
+    min-block-size: 44px;
+    padding: 0.5em;
+    border: 1px solid var(--pk-border-color, currentColor);
+    border-radius: var(--pk-radius, 0.375em);
+    background: var(--pk-background, transparent);
+    color: inherit;
+    font: inherit;
+    font-size: max(1em, 16px);
+  }
+
+  :where(
+    .pk-request-fields input,
+    .pk-request-fields textarea,
+    .pk-request-fields select
+  ):focus-visible {
+    outline: 2px solid var(--pk-focus-color, currentColor);
+    outline-offset: 2px;
+  }
+
+  :where(.pk-request-choice) {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5em;
+    padding-block: 0.5em;
+    min-block-size: 44px;
+    box-sizing: border-box;
+    cursor: pointer;
+  }
+
+  :where(.pk-request-choice-help) {
+    display: block;
+  }
+  :where(.pk-request-fields :disabled) {
+    cursor: default;
+    opacity: 0.65;
+  }
+
+  :where(.pk-activity-heading) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25em 1em;
+  }
+
+  :where(.pk-activity-label, .pk-approval-title) {
+    font-weight: 600;
+  }
+
+  :where(.pk-activity-state, .pk-status-text) {
+    font-size: 0.875em;
+    color: var(--pk-muted-color, inherit);
+  }
+
+  :where(
+    .pk-tool[data-state="failed"] > .pk-activity-heading > .pk-activity-state,
+    .pk-specialist[data-state="failed"] > .pk-activity-heading > .pk-activity-state
+  ) {
+    font-weight: 600;
+    color: var(--pk-error-color, inherit);
+  }
+
+  :where(
+    .pk-activity-summary,
+    .pk-approval-summary,
+    .pk-approval-title,
+    .pk-approval-status,
+    .pk-approval-error,
+    .pk-approval-help,
+    .pk-status-help,
+    .pk-status-error,
+    .pk-source-snippet
+  ) {
+    margin-block: 0.4em 0;
+    white-space: pre-wrap;
+  }
+
+  :where(.pk-approval-title) {
+    margin-block-start: 0;
+  }
+
+  :where(.pk-activity-details) {
+    margin-block-start: 0.5em;
+  }
+
+  :where(.pk-activity-trigger) {
+    inline-size: fit-content;
+    min-block-size: 24px;
+    padding: 0.2em 0.4em;
+    border-radius: var(--pk-radius, 0.375em);
+    cursor: pointer;
+  }
+
+  :where(.pk-activity-detail) {
+    padding-block: 0.5em;
+    white-space: pre-wrap;
+  }
+
+  :where(.pk-specialist-children, .pk-activity-children) {
+    padding-inline-start: 1em;
+    border-inline-start: 1px solid
+      var(--pk-border-color, color-mix(in srgb, currentColor 45%, transparent));
+    margin-block-start: 0.5em;
+  }
+
+  :where(.pk-activity-actions, .pk-approval-actions) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    margin-block-start: 0.5em;
+  }
+
+  :where(.pk-approval-action, .pk-status-action, button.pk-source-link) {
+    min-block-size: 2em;
+    max-inline-size: 100%;
+    padding: 0.3em 0.75em;
+    border: 1px solid var(--pk-border-color, color-mix(in srgb, currentColor 45%, transparent));
+    border-radius: var(--pk-radius, 0.375em);
+    background: var(--pk-action-background, transparent);
+    color: var(--pk-action-color, inherit);
+    font: inherit;
+    text-align: start;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+  }
+
+  :where(.pk-status-action) {
+    margin-inline-start: 0.5em;
+  }
+
+  :where(.pk-approval-action:disabled, .pk-status-action[aria-disabled="true"]) {
+    cursor: default;
+    opacity: 0.6;
+  }
+
+  :where(
+    .pk-approval-action:active,
+    .pk-status-action:active,
+    .pk-source-link:active,
+    .pk-activity-trigger:active
+  ) {
+    background: color-mix(in srgb, currentColor 16%, transparent);
+  }
+
+  :where(
+    .pk-approval:focus-visible,
+    .pk-approval-action:focus-visible,
+    .pk-status-action:focus-visible,
+    .pk-source-link:focus-visible,
+    .pk-activity-trigger:focus-visible
+  ) {
+    outline: 2px solid var(--pk-focus-color, currentColor);
+    outline-offset: 2px;
+  }
+
+  :where(.pk-sources) {
+    list-style: none;
+    padding: 0;
+    margin-block: 0.5em 0;
+  }
+
+  :where(.pk-source + .pk-source) {
+    margin-block-start: 0.5em;
+  }
+
+  :where(.pk-source-link, .pk-source-label) {
+    color: inherit;
+  }
+
+  :where(a.pk-source-link) {
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+
+  :where(.pk-source-marker) {
+    margin-inline-end: 0.5em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  :where(.pk-source-snippet) {
+    font-size: 0.875em;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    :where(
+      .pk-approval-action:not(:disabled):hover,
+      .pk-status-action:not([aria-disabled="true"]):hover,
+      .pk-source-link:hover,
+      .pk-activity-trigger:hover
+    ) {
+      background: color-mix(in srgb, currentColor 8%, transparent);
+    }
+  }
+
+  @media (pointer: coarse) {
+    :where(.pk-approval-action, .pk-status-action, .pk-source-link, .pk-activity-trigger) {
+      min-block-size: 44px;
+    }
+    :where(a.pk-source-link) {
+      display: inline-flex;
+      align-items: center;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :where(.pk-approval-action, .pk-status-action, .pk-source-link, .pk-activity-trigger) {
+      transition: none;
+      animation: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    :where(
+      .pk-approval-action,
+      .pk-status-action,
+      button.pk-source-link,
+      .pk-specialist-children,
+      .pk-activity-children
+    ) {
+      border-color: ButtonText;
+    }
+    :where(
+      .pk-approval:focus-visible,
+      .pk-approval-action:focus-visible,
+      .pk-status-action:focus-visible,
+      .pk-source-link:focus-visible,
+      .pk-activity-trigger:focus-visible
+    ) {
+      outline-color: Highlight;
+    }
+  }
+}

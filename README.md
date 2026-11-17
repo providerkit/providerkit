@@ -37,9 +37,13 @@ providerkit is that knowledge, as a library.
 **Core is not an agent framework.** `@providerkit/core` handles provider calls, not the agent loop,
 prompts, memory or workflow graphs.
 
-For a shared loop, specialists and background runs, use the separate
+For agents and workflows, use the separate
 [`@providerkit/agents` package](https://github.com/providerkit/providerkit/tree/main/agents).
 It uses core's public API and leaves application prompts, authorization and storage policy with you.
+
+The experimental [`@providerkit/react` package](https://github.com/providerkit/providerkit/tree/main/react) provides chat hooks,
+streamed messages and agent activity. Its components and stylesheet are optional; Tailwind is not
+required.
 
 ## Use
 
@@ -330,6 +334,7 @@ vendor SDKs for this package (−5,033 more) and ships with the release that car
 ```
 core/     the npm package `@providerkit/core`
 agents/   the separate `@providerkit/agents` SDK
+react/    `@providerkit/react`, experimental chat hooks and components
 site/     providerkit.dev (Astro + Starlight), also open source
 brand/    the mark, the OG card, and the generator for both
 ```

@@ -1,10 +1,24 @@
+import { evidenceFor, firstRequest } from "./fixtures/requests.ts";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
+import { openRequests } from "../src/tree.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createRuns } from "@gusnips/server/runs";
-import { defineTool, type Provider, type ProviderChunk } from "@providerkit/core";
-import { defineAgent, defineDelegation, type Agent } from "../src/index.ts";
+import { defineTool, type ChatMessage, type Provider, type ProviderChunk } from "@providerkit/core";
+import {
+  createMemoryInbox,
+  createMemorySession,
+  defineAgent,
+  defineDelegation,
+  type Agent,
+  type AgentMessage,
+  type InputPart,
+  type RunContext,
+  type RunSnapshot,
+  type Session,
+} from "../src/index.ts";
 import { AGENT_RUNTIME } from "../src/delegation.ts";
 import {
   BackgroundEnqueueError,
@@ -71,7 +85,7 @@ beforeAll(async () => {
     CREATE TABLE ${schema}.invocations (task text NOT NULL, kind text NOT NULL);
     CREATE TABLE ${schema}.resources (id text PRIMARY KEY, owner text NOT NULL, version text NOT NULL);
     CREATE TABLE ${schema}.claims (
-      operation text PRIMARY KEY, continuation text UNIQUE NOT NULL, source text NOT NULL,
+      operation text PRIMARY KEY, continuation text NOT NULL, source text NOT NULL,
       owner text NOT NULL, decision json NOT NULL, segment text, consumed boolean NOT NULL DEFAULT false
     );`);
 });
@@ -127,44 +141,61 @@ async function approvalFixture(resource = crypto.randomUUID()) {
         WHERE continuation=$2 AND source=$3 AND owner=$4 AND segment=$1`,
         [context.segmentId, claim.id, claim.sourceId, context.owner],
       );
-      if (rowCount !== 1) throw new Error("The continuation belongs to another host segment.");
+      if (rowCount !== Object.keys(claim.answers).length)
+        throw new Error("The continuation belongs to another host segment.");
     },
-    async approvalContext() {
+    async prepareRequest() {
       await access(context, "1");
-      return { actorId: context.owner, resource: { id: resource, version: "1" }, expiresAt };
+      return {
+        scope: { actorId: context.owner, resource: { id: resource, version: "1" }, expiresAt },
+      };
     },
     async claimContinuation(snapshot, continuation) {
       if (snapshot.state.status !== "suspended") throw new Error("Not suspended.");
-      decision(continuation.decision);
-      const approval = snapshot.state.approval;
-      if (
-        approval.scope.actorId !== context.owner ||
-        approval.scope.resource.id !== resource ||
-        approval.scope.expiresAt <= Date.now()
-      )
-        throw new Error("Approval scope expired or changed.");
-      // Check the authoritative resource and claim in one statement, not read-then-write.
-      const { rowCount } = await pool.query(
-        `INSERT INTO ${schema}.claims AS claimed (operation, continuation, source, owner, decision, segment)
-        SELECT $1,$2,$3,$4,$5::json,$8 FROM ${schema}.resources WHERE id=$6 AND owner=$4 AND version=$7
-        ON CONFLICT (operation) DO UPDATE SET continuation=EXCLUDED.continuation
-        WHERE claimed.continuation=EXCLUDED.continuation AND claimed.source=EXCLUDED.source
-          AND claimed.owner=EXCLUDED.owner AND claimed.segment=EXCLUDED.segment
-          AND claimed.decision::text=EXCLUDED.decision::text`,
-        [
-          approval.request.operationId,
-          continuation.id,
-          continuation.sourceId,
-          context.owner,
-          JSON.stringify(continuation.decision),
-          resource,
-          approval.scope.resource.version,
-          context.segmentId,
-        ],
-      );
-      if (rowCount !== 1) throw new Error("The decision is stale or was already claimed.");
+      const requests = new Map(openRequests(snapshot).map((request) => [request.id, request]));
+      const connection = await pool.connect();
+      try {
+        await connection.query("BEGIN");
+        for (const [id, evidence] of Object.entries(continuation.answers)) {
+          decision(evidence);
+          const request = requests.get(id);
+          if (
+            !request ||
+            request.scope.actorId !== context.owner ||
+            request.scope.resource.id !== resource ||
+            request.scope.expiresAt <= Date.now()
+          )
+            throw new Error("Request scope expired or changed.");
+          // Claim the entire submitted batch atomically, including the resource version check.
+          const { rowCount } = await connection.query(
+            `INSERT INTO ${schema}.claims AS claimed (operation, continuation, source, owner, decision, segment)
+            SELECT $1,$2,$3,$4,$5::json,$8 FROM ${schema}.resources WHERE id=$6 AND owner=$4 AND version=$7
+            ON CONFLICT (operation) DO UPDATE SET continuation=EXCLUDED.continuation
+            WHERE claimed.continuation=EXCLUDED.continuation AND claimed.source=EXCLUDED.source
+              AND claimed.owner=EXCLUDED.owner AND claimed.segment=EXCLUDED.segment
+              AND claimed.decision::text=EXCLUDED.decision::text`,
+            [
+              id,
+              continuation.id,
+              continuation.sourceId,
+              context.owner,
+              JSON.stringify(evidence),
+              resource,
+              request.scope.resource.version,
+              context.segmentId,
+            ],
+          );
+          if (rowCount !== 1) throw new Error("The decision is stale or was already claimed.");
+        }
+        await connection.query("COMMIT");
+      } catch (error) {
+        await connection.query("ROLLBACK");
+        throw error;
+      } finally {
+        connection.release();
+      }
     },
-    async resolveApproval(approval, raw): Promise<"approved"> {
+    async resolveRequest(approval, raw) {
       decision(raw);
       await access(context, approval.scope.resource.version);
       if (approval.scope.expiresAt <= Date.now()) throw new Error("Approval expired.");
@@ -172,7 +203,7 @@ async function approvalFixture(resource = crypto.randomUUID()) {
         `UPDATE ${schema}.claims SET consumed=true
         WHERE operation=$1 AND continuation=$2 AND owner=$3 AND segment=$4 AND decision::text=$5`,
         [
-          approval.request.operationId,
+          approval.id,
           context.continuation?.id,
           context.owner,
           context.segmentId,
@@ -180,18 +211,27 @@ async function approvalFixture(resource = crypto.randomUUID()) {
         ],
       );
       if (rowCount !== 1) throw new Error("This segment has no matching decision claim.");
-      return "approved";
+      return { type: "approve" };
     },
     async beforeTool(_request, approval) {
-      await access(context, approval?.scope.resource.version);
+      await access(context, approval?.request.scope.resource.version);
       if (
         approval &&
-        (approval.scope.actorId !== context.owner || approval.scope.expiresAt <= Date.now())
+        (approval.request.scope.actorId !== context.owner ||
+          approval.request.scope.expiresAt <= Date.now())
       )
         throw new Error("Approval access expired.");
     },
   });
   return { policy, evidence, resource, expiresAt };
+}
+
+async function submittedAnswers(
+  background: { read(owner: string, id: string): Promise<{ snapshot: RunSnapshot }> },
+  id: string,
+  evidence: unknown,
+) {
+  return evidenceFor((await background.read("alice", id)).snapshot, evidence);
 }
 
 function approvalAgent() {
@@ -244,10 +284,22 @@ async function pauseUntilStopped(signal: AbortSignal): Promise<never> {
 }
 
 const workers = new Set<ChildProcess>();
-function worker(task: string, id: string, mode: "checkpoint" | "effect" | "recover") {
+function worker(
+  task: string,
+  id: string,
+  mode: "checkpoint" | "effect" | "model" | "recover",
+  profile: "off" | "inference" | "read" | "hosted" = "off",
+) {
   const child = spawn(
     "bun",
-    [fileURLToPath(new URL("./fixtures/runs-worker.ts", import.meta.url)), schema, task, id, mode],
+    [
+      fileURLToPath(new URL("./fixtures/runs-worker.ts", import.meta.url)),
+      schema,
+      task,
+      id,
+      mode,
+      profile,
+    ],
     {
       env: { ...process.env, AGENTS_TEST_DATABASE_URL: url },
       stdio: ["ignore", "pipe", "pipe"],
@@ -279,6 +331,378 @@ async function counts(task: string) {
 }
 
 describe("background binding on local Postgres", () => {
+  it("progress: stores coalesced child turns before checkpoints and final events before end", async () => {
+    const leaf = defineAgent({
+      ...base,
+      id: "streaming-child",
+      provider: {
+        id: "fake",
+        model: "fake",
+        async *createStream() {
+          yield { type: "delta", content: "child " };
+          yield { type: "delta", content: "answer" };
+          yield answer("");
+        },
+      },
+    });
+    const root = parent("streaming-root", leaf);
+    const background = createBackgroundAgent({
+      agent: root.agent,
+      kind: "progress",
+      runs,
+      enqueue,
+      policy: closedPolicy,
+      events: "awaited",
+    });
+    const { id } = await background.start("alice", "Delegate");
+    const handler = background.handlers.progress;
+    if (!handler) throw new Error("Missing handler");
+    let checked = 0;
+    expect(
+      await runs.drive(id, {
+        progress: (run) =>
+          handler({
+            ...run,
+            async save(raw) {
+              const saved = root.agent[AGENT_RUNTIME].restore(raw);
+              const nodes = [
+                saved,
+                ...saved.delegations.flatMap((entry) =>
+                  entry.children.map(({ snapshot }) => {
+                    assertAgent(snapshot);
+                    return snapshot;
+                  }),
+                ),
+              ];
+              const { rows } = await pool.query<{ data: unknown }>(
+                `SELECT data FROM ${schema}.run_events WHERE run_id=$1 AND type='agent' ORDER BY seq`,
+                [id],
+              );
+              for (const node of nodes)
+                for (const model of node.models) {
+                  if (model.status !== "completed") continue;
+                  const chunks = rows
+                    .map((row) => row.data)
+                    .filter(
+                      (event) =>
+                        isRecord(event) &&
+                        event.type === "model_chunk" &&
+                        event.operationId === model.id,
+                    );
+                  expect(chunks.length).toBeGreaterThan(0);
+                  checked++;
+                }
+              await run.save(raw);
+            },
+          }),
+      }),
+    ).toBe("succeeded");
+    expect(checked).toBeGreaterThan(0);
+    const events = [];
+    for await (const event of background.observe("alice", id)) events.push(event);
+    expect(events.at(-1)?.type).toBe("end");
+    expect(events.at(-2)?.data).toMatchObject({ type: "state", state: { status: "completed" } });
+    const child = (await background.read("alice", id)).snapshot.delegations[0]?.children[0]
+      ?.snapshot;
+    expect(
+      events
+        .filter(
+          (event) =>
+            isRecord(event.data) &&
+            event.data.type === "model_chunk" &&
+            event.data.runId === child?.runId,
+        )
+        .map((event) => event.data),
+    ).toContainEqual(
+      expect.objectContaining({ chunk: { type: "delta", content: "child answer" } }),
+    );
+    const cursor = events[1]?.seq;
+    if (cursor === undefined) throw new Error("Missing cursor");
+    const replay = [];
+    for await (const event of background.observe("alice", id, cursor)) replay.push(event);
+    expect(replay).toEqual(events.filter((event) => event.seq > cursor));
+  });
+
+  it.each(["lost-reply", "unavailable"] as const)(
+    "progress: surfaces %s without replaying writes or effects",
+    async (fault) => {
+      let effects = 0;
+      const wire = fake((count) => (count === 0 ? call("write") : answer("done")));
+      const agent = defineAgent({
+        ...base,
+        provider: wire.provider,
+        tools: [
+          defineTool({
+            name: "write",
+            description: "Write",
+            inputSchema: { type: "object" },
+            async run() {
+              effects++;
+              return "written";
+            },
+          }),
+        ],
+      });
+      const background = createBackgroundAgent({
+        agent,
+        kind: "progress-failure",
+        runs,
+        enqueue,
+        policy: closedPolicy,
+        events: "awaited",
+      });
+      const { id } = await background.start("alice", "Write once");
+      const handler = background.handlers["progress-failure"];
+      if (!handler) throw new Error("Missing handler");
+      let writes = 0;
+      const outcome = await runs.drive(id, {
+        "progress-failure": (run) =>
+          handler({
+            ...run,
+            async append(events) {
+              writes++;
+              if (fault === "unavailable") throw new Error("Progress storage unavailable");
+              await run.append(events);
+              if (writes === 1) throw new Error("Commit acknowledgement lost");
+            },
+          }),
+      });
+      const saved = await background.read("alice", id);
+      const { rows } = await pool.query<{ type: string; data: unknown }>(
+        `SELECT type, data FROM ${schema}.run_events WHERE run_id=$1 ORDER BY seq`,
+        [id],
+      );
+      if (fault === "unavailable") {
+        expect(outcome).toBe("failed");
+        expect(saved.error?.message).toContain("could not be saved or marked incomplete");
+        expect(saved.snapshot.models.at(-1)?.status).toBe("running");
+        expect(effects).toBe(0);
+        expect(writes).toBe(2);
+        expect(rows.filter((row) => row.type === "agent.gap")).toEqual([]);
+      } else {
+        expect(outcome).toBe("succeeded");
+        expect(saved.outcome?.status).toBe("completed");
+        expect(effects).toBe(1);
+        expect(wire.calls()).toBe(2);
+        expect(rows.filter((row) => row.type === "agent.gap")).toEqual([
+          { type: "agent.gap", data: { dropped: 0, unconfirmed: 1 } },
+        ]);
+        const first = rows.find((row) => row.type === "agent");
+        expect(rows.filter((row) => JSON.stringify(row) === JSON.stringify(first))).toHaveLength(1);
+      }
+    },
+  );
+
+  it.each(["lost", "cancelled"] as const)(
+    "progress: fences an append after %s and never finishes successfully",
+    async (control) => {
+      const store = service();
+      const wire = fake(() => answer("answer"));
+      const background = createBackgroundAgent({
+        agent: defineAgent({ ...base, provider: wire.provider }),
+        kind: "progress-control",
+        runs: store,
+        enqueue,
+        policy: closedPolicy,
+        events: "awaited",
+      });
+      const { id } = await background.start("alice", "Wait");
+      const handler = background.handlers["progress-control"];
+      if (!handler) throw new Error("Missing handler");
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const stopped = Promise.withResolvers<void>();
+      const driving = store.drive(id, {
+        "progress-control": (run) =>
+          handler({
+            ...run,
+            async append(events) {
+              run.signal.addEventListener("abort", () => stopped.resolve(), { once: true });
+              entered.resolve();
+              await release.promise;
+              await run.append(events);
+            },
+          }),
+      });
+      try {
+        await entered.promise;
+        if (control === "lost")
+          await pool.query(`UPDATE ${schema}.runs SET lease_token=$2 WHERE id=$1`, [
+            id,
+            crypto.randomUUID(),
+          ]);
+        else await background.cancel("alice", id);
+        await stopped.promise;
+        release.resolve();
+        expect(await driving).toBe(control);
+        const saved = await background.read("alice", id);
+        expect(saved.status).not.toBe("succeeded");
+        expect(saved.snapshot.models.at(-1)?.status).toBe("running");
+      } finally {
+        release.resolve();
+        await driving;
+        if (control === "lost") await background.cancel("alice", id);
+      }
+    },
+  );
+
+  it("progress: awaits injected transaction commit before enqueue and preserves the id on uncertain enqueue", async () => {
+    const wire = fake(() => answer("done"));
+    const agent = defineAgent({ ...base, provider: wire.provider });
+    let rollback = true;
+    let createdId = "";
+    let inTransaction = false;
+    const enqueue = vi.fn(async (id: string) => {
+      expect(inTransaction).toBe(false);
+      expect(await runs.read(id, "alice")).not.toBeNull();
+      expect(
+        (await pool.query(`SELECT id FROM ${schema}.resources WHERE id=$1`, [id])).rowCount,
+      ).toBe(1);
+      throw new Error("Queue acknowledgement lost");
+    });
+    const background = createBackgroundAgent({
+      agent,
+      kind: "progress-create",
+      enqueue,
+      policy: closedPolicy,
+      events: "awaited",
+      runs: {
+        ...runs,
+        async create(spec) {
+          const client = await pool.connect();
+          try {
+            inTransaction = true;
+            await client.query("BEGIN");
+            const created = await runs.create(spec, client);
+            createdId = created.id;
+            await client.query(`INSERT INTO ${schema}.resources VALUES ($1, 'alice', '1')`, [
+              created.id,
+            ]);
+            expect(await runs.read(created.id, "alice")).toBeNull();
+            expect(enqueue).not.toHaveBeenCalled();
+            if (rollback) throw new Error("Host transaction rolled back");
+            await client.query("COMMIT");
+            return created;
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          } finally {
+            inTransaction = false;
+            client.release();
+          }
+        },
+      },
+    });
+    await expect(background.start("alice", "Write")).rejects.toThrow("rolled back");
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(await runs.read(createdId, "alice")).toBeNull();
+    expect(
+      (await pool.query(`SELECT id FROM ${schema}.resources WHERE id=$1`, [createdId])).rowCount,
+    ).toBe(0);
+    rollback = false;
+    const result = background.start("alice", "Write");
+    await expect(result).rejects.toMatchObject({
+      name: "BackgroundEnqueueError",
+      id: expect.any(String),
+    });
+    await expect(result).rejects.toMatchObject({ id: createdId });
+    expect(enqueue).toHaveBeenCalledExactlyOnceWith(createdId);
+    expect(wire.calls()).toBe(0);
+    expect(await runs.drive(createdId, background.handlers)).toBe("succeeded");
+    expect(wire.calls()).toBe(1);
+  });
+
+  it("passes the authenticated host inbox through and saves inputs before acknowledgement", async () => {
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const histories: ChatMessage[][] = [];
+    const agent = defineAgent({
+      ...base,
+      tools: [
+        defineTool({
+          name: "read",
+          description: "Read",
+          inputSchema: { type: "object" },
+          run: async () => "read",
+        }),
+      ],
+      provider: {
+        id: "inbox",
+        model: "fake",
+        async *createStream(history) {
+          histories.push(structuredClone(history));
+          if (histories.length === 1) {
+            started.resolve();
+            await release.promise;
+            yield call("read");
+          } else yield answer("done");
+        },
+      },
+    });
+    const acknowledgements: string[] = [];
+    const enqueue = vi.fn(async (_id: string) => {});
+    const background = createBackgroundAgent({
+      agent,
+      kind: "inbox",
+      events: "awaited",
+      runs,
+      enqueue,
+      policy(context) {
+        expect(context.owner).toBe("alice");
+        return {
+          ...closedPolicy(context),
+          inbox: {
+            poll(request) {
+              return inbox.poll(request);
+            },
+            async acknowledge(receipts, options) {
+              const row = await runs.read(context.segmentId, context.owner);
+              const checkpoint = agent[AGENT_RUNTIME].restore(row?.checkpoint);
+              expect(checkpoint.inputs).toEqual([
+                { id: "steer", content: "Use short sentences", beforeModel: 1 },
+              ]);
+              expect(checkpoint.runId).toBe(receipts[0]?.rootRunId);
+              if (receipts[0]?.status === "consumed")
+                expect(checkpoint.models[1]?.status).toBe("completed");
+              acknowledgements.push(receipts[0]?.status ?? "missing");
+              inbox.acknowledge(receipts, options);
+            },
+          },
+        };
+      },
+    });
+    const { id } = await background.start("alice", "First");
+    const logical = (await background.read("alice", id)).snapshot.runId;
+    const inbox = createMemoryInbox(logical);
+    const driving = runs.drive(id, background.handlers);
+    try {
+      await Promise.race([
+        started.promise,
+        driving.then((status) => {
+          throw new Error(`Worker ended early: ${status}`);
+        }),
+      ]);
+      inbox.enqueue({ id: "steer", content: "Use short sentences" });
+      release.resolve();
+      expect(await driving).toBe("succeeded");
+      const result = await background.read("alice", id);
+      expect(result.outcome).toMatchObject({
+        status: "completed",
+        inputs: [{ id: "steer", status: "consumed", runId: logical }],
+      });
+      expect(acknowledgements).toEqual(["accepted", "consumed"]);
+      expect(histories[1]?.at(-1)).toEqual({ role: "user", content: "Use short sentences" });
+      inbox.enqueue({ id: "late", content: "Keep for the next run" });
+      expect(inbox.list()[1]?.status).toBe("queued");
+      expect(enqueue).toHaveBeenCalledExactlyOnceWith(id);
+      expect(await runs.drive(id, background.handlers)).toBe("skipped");
+      expect(histories).toHaveLength(2);
+    } finally {
+      release.resolve();
+      await driving;
+    }
+  });
+
   it("refuses remote database URLs and URL overrides", () => {
     expect(() => localDatabase("postgresql://postgres@example.com/providerkit_agents")).toThrow(
       /loopback/,
@@ -316,7 +740,7 @@ describe("background binding on local Postgres", () => {
           checkpoint: null,
           input: {
             format: 1,
-            snapshot: { format: 2, agentId: "test", version: "1", state: { status: "running" } },
+            snapshot: { format: 3, agentId: "test", version: "1", state: { status: "running" } },
           },
         });
         await enqueue(id);
@@ -345,6 +769,272 @@ describe("background binding on local Postgres", () => {
     expect(wire.calls()).toBe(1);
     expect(await runs.drive(id, background.handlers)).toBe("skipped");
   });
+
+  it.each(["before preparation", "after preparation"] as const)(
+    "does not save or enqueue a start cancelled %s",
+    async (stage) => {
+      const controller = new AbortController();
+      const reason = new Error("Creation cancelled");
+      const create = vi.fn(runs.create);
+      const enqueue = vi.fn(async (_id: string) => {});
+      const wire = fake(() => answer("must not run"));
+      const instructions = vi.fn(() => {
+        controller.abort(reason);
+        return base.instructions;
+      });
+      const background = createBackgroundAgent({
+        agent: defineAgent({
+          ...base,
+          instructions: stage === "before preparation" ? base.instructions : instructions,
+          provider: wire.provider,
+        }),
+        kind: "cancelled-start",
+        runs: { ...runs, create },
+        enqueue,
+        policy: closedPolicy,
+      });
+      if (stage === "before preparation") controller.abort(reason);
+      await expect(background.start("alice", "Work", { signal: controller.signal })).rejects.toBe(
+        reason,
+      );
+      expect(create).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(wire.calls()).toBe(0);
+      expect(instructions).toHaveBeenCalledTimes(stage === "before preparation" ? 0 : 1);
+    },
+  );
+
+  it("returns and queues the saved id when creation is cancelled after the row exists", async () => {
+    const controller = new AbortController();
+    const wire = fake(() => answer("done"));
+    const enqueue = vi.fn(async (_id: string) => {});
+    const background = createBackgroundAgent({
+      agent: defineAgent({ ...base, provider: wire.provider }),
+      kind: "saved-before-cancellation",
+      runs: {
+        ...runs,
+        async create(spec) {
+          const saved = await runs.create(spec);
+          controller.abort(new Error("Request disconnected after save"));
+          return saved;
+        },
+      },
+      enqueue,
+      policy: closedPolicy,
+    });
+    const { id } = await background.start("alice", "Work", { signal: controller.signal });
+    expect(controller.signal.aborted).toBe(true);
+    expect(enqueue).toHaveBeenCalledExactlyOnceWith(id);
+    expect((await background.read("alice", id)).status).toBe("queued");
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    expect((await background.read("alice", id)).outcome?.status).toBe("completed");
+  });
+
+  it("keeps media-loader credentials out of saved failures and state events", async () => {
+    const credential = "Bearer synthetic-private-upload-key";
+    const wire = fake(() => answer("must not run"));
+    const background = bind(
+      defineAgent({ ...base, provider: wire.provider }),
+      (context) => ({
+        ...closedPolicy(context),
+        loadMedia() {
+          // Header validation errors can quote the credential before any request is sent.
+          throw new TypeError(`Invalid Authorization header: ${credential}`);
+        },
+      }),
+      "media-loader-failure",
+    );
+    const { id } = await background.start("alice", [
+      { type: "media", id: "photo", mimeType: "image/png" },
+    ]);
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    const result = await background.read("alice", id);
+    expect(result.outcome).toMatchObject({
+      status: "failed",
+      error: {
+        code: "media_unavailable",
+        message: "The media could not be loaded. Check file access before trying again.",
+      },
+    });
+    const row = await runs.read(id, "alice");
+    expect(row?.checkpoint).toMatchObject({ state: { status: "failed" } });
+    expect(JSON.stringify(row)).not.toContain(credential);
+    const events = [];
+    for await (const event of background.observe("alice", id)) events.push(event);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "agent", data: expect.objectContaining({ type: "state" }) }),
+    );
+    expect(JSON.stringify(events)).not.toContain(credential);
+    expect(wire.calls()).toBe(0);
+    expect(result.snapshot.models).toEqual([]);
+  });
+
+  it("starts in a session inside the request and appends the turn from the worker", async () => {
+    const png = "iVBORw0KGgoAAAAN";
+    const before: AgentMessage[] = [
+      { role: "user", content: "My name is Ana." },
+      { role: "assistant", content: "Hello, Ana." },
+    ];
+    const thread = createMemorySession({ id: "thread-1", messages: before });
+    const asked: string[] = [];
+    function session(owner: string, id: string): Session {
+      asked.push(`${owner}:${id}`);
+      if (owner !== "alice" || id !== thread.id) throw new Error("This conversation is not yours.");
+      return thread;
+    }
+    const requests: ChatMessage[][] = [];
+    const agent = defineAgent({
+      ...base,
+      provider: {
+        id: "fake",
+        model: "fake",
+        async *createStream(history) {
+          requests.push(structuredClone(history));
+          yield answer("A photo of Ana.");
+        },
+      },
+    });
+    const background = createBackgroundAgent({
+      agent,
+      kind: "session",
+      runs,
+      enqueue,
+      session,
+      policy: (context) => ({
+        ...closedPolicy(context),
+        async loadMedia(ref) {
+          if (context.owner !== "alice" || ref.id !== "photo") throw new Error("No such photo.");
+          return png;
+        },
+      }),
+    });
+    const turn: InputPart[] = [
+      { type: "text", text: "Who is in this photo?" },
+      { type: "media", id: "photo", mimeType: "image/png" },
+    ];
+    await expect(background.start("bob", turn, { sessionId: "thread-1" })).rejects.toThrow(
+      /not yours/,
+    );
+    const { id } = await background.start("alice", turn, { sessionId: "thread-1" });
+    expect((await runs.read(id, "alice"))?.input).toMatchObject({
+      snapshot: { history: before, input: turn, session: { id: "thread-1", revision: "1" } },
+    });
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    expect(requests[0]?.slice(1)).toEqual([
+      ...before,
+      {
+        role: "user",
+        content: [turn[0], { type: "image", mimeType: "image/png", data: png }],
+      },
+    ]);
+    const saved = await background.read("alice", id);
+    expect(saved.outcome).toMatchObject({
+      status: "completed",
+      session: { id: "thread-1", status: "saved", revision: "2" },
+    });
+    expect((await thread.load({ signal: new AbortController().signal })).messages).toEqual([
+      ...before,
+      ...(saved.outcome?.newMessages ?? []),
+    ]);
+    // The worker asked again with the stored owner, never the request's.
+    expect(asked).toEqual(["bob:thread-1", "alice:thread-1", "alice:thread-1"]);
+    expect(JSON.stringify(await runs.read(id, "alice"))).not.toContain(png);
+    await expect(bind(agent).start("alice", "Hi", { sessionId: "thread-1" })).rejects.toThrow(
+      /session factory/,
+    );
+  });
+
+  it("freezes the definition in start with request context and per-run settings", async () => {
+    const instructions = vi.fn((run: RunContext) => `Reply in ${run.context.locale}.`);
+    const enabledTools = vi.fn(() => ["read"]);
+    const requests: ChatMessage[][] = [];
+    const agent = defineAgent({
+      ...base,
+      instructions,
+      enabledTools,
+      modelSettings: { maxTokens: 100 },
+      tools: [
+        defineTool({
+          name: "read",
+          description: "Read",
+          inputSchema: { type: "object" },
+          run: async () => "read",
+        }),
+      ],
+      provider: {
+        id: "definition",
+        model: "fake",
+        async *createStream(history, tools, options) {
+          requests.push(structuredClone(history));
+          expect(options?.maxTokens).toBe(27);
+          expect(tools.map((tool) => tool.name)).toEqual(["read"]);
+          yield answer("done");
+        },
+      },
+    });
+    const background = bind(
+      agent,
+      (context) => ({ ...closedPolicy(context), context: { locale: "es" } }),
+      "definition",
+    );
+    const transientSettings = { maxTokens: 50, onActivity: () => {} };
+    await expect(
+      background.start("alice", "Answer", { modelSettings: transientSettings }),
+    ).rejects.toThrow("cannot keep observers");
+    const { id } = await background.start("alice", "Answer", {
+      context: { locale: "en", db: pool },
+      modelSettings: { maxTokens: 27 },
+      enabledTools: ["read"],
+    });
+    expect((await background.read("alice", id)).snapshot.definition).toMatchObject({
+      instructions: "Reply in en.",
+      modelSettings: { maxTokens: 27 },
+      enabledTools: ["read"],
+    });
+    expect(instructions).toHaveBeenCalledOnce();
+    expect(enabledTools).toHaveBeenCalledOnce();
+    expect(await runs.drive(id, background.handlers)).toBe("succeeded");
+    expect((await background.read("alice", id)).outcome?.status).toBe("completed");
+    expect(requests[0]?.[0]).toEqual({ role: "system", content: "Reply in en." });
+    expect(instructions).toHaveBeenCalledOnce();
+    expect(enabledTools).toHaveBeenCalledOnce();
+    expect(JSON.stringify(await runs.read(id, "alice"))).not.toContain('"db"');
+  });
+
+  it.each(["instructions", "modelSettings", "enabledTools"] as const)(
+    "refuses a checkpoint whose resolved %s differ from its saved input",
+    async (field) => {
+      const wire = fake(() => answer("must not run"));
+      const background = bind(
+        defineAgent({
+          ...base,
+          provider: wire.provider,
+          tools: [
+            defineTool({
+              name: "read",
+              description: "Read",
+              inputSchema: { type: "object" },
+              run: async () => "read",
+            }),
+          ],
+        }),
+        closedPolicy,
+        `changed-${field}`,
+      );
+      const { id } = await background.start("alice", "Answer");
+      const changed = (await background.read("alice", id)).snapshot;
+      if (field === "instructions") changed.definition.instructions = "Different text.";
+      else if (field === "modelSettings") changed.definition.modelSettings.maxTokens = 5;
+      else changed.definition.enabledTools = [];
+      await pool.query(`UPDATE ${schema}.runs SET checkpoint=$2::json WHERE id=$1`, [
+        id,
+        JSON.stringify(changed),
+      ]);
+      await expect(background.read("alice", id)).rejects.toThrow("another logical run");
+      expect(await runs.drive(id, background.handlers)).toBe("failed");
+      expect(wire.calls()).toBe(0);
+    },
+  );
 
   it("reports the saved id when enqueue fails and lets the sweep recover it", async () => {
     const wire = fake(() => answer("done"));
@@ -391,14 +1081,22 @@ describe("background binding on local Postgres", () => {
         },
       },
     });
-    await expect(failing.resume("alice", original.id, authority.evidence)).rejects.toThrow(
-      "Create unavailable",
-    );
+    await expect(
+      failing.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(failing, original.id, authority.evidence),
+      ),
+    ).rejects.toThrow("Create unavailable");
     const claimed = await pool.query(`SELECT * FROM ${schema}.claims WHERE source=$1`, [
       original.id,
     ]);
     expect(claimed.rows).toEqual([]);
-    const next = await background.resume("alice", original.id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      original.id,
+      await submittedAnswers(background, original.id, authority.evidence),
+    );
     expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
     expect((await background.read("alice", next.id)).outcome?.status).toBe("completed");
     expect(synthetic.effects()).toBe(1);
@@ -430,7 +1128,11 @@ describe("background binding on local Postgres", () => {
           throw new Error("Queue unavailable");
         },
       });
-      const submitted = failing.resume("alice", original.id, authority.evidence);
+      const submitted = failing.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(failing, original.id, authority.evidence),
+      );
       if (failure === "create-reply") await expect(submitted).rejects.toThrow("Create reply lost");
       else await expect(submitted).rejects.toBeInstanceOf(BackgroundEnqueueError);
       if (!savedId) throw new Error("Missing created row.");
@@ -644,7 +1346,10 @@ describe("background binding on local Postgres", () => {
     const cancelling = await root.start("alice", "Wait with child");
     const active = runs.drive(cancelling.id, root.handlers);
     await childStarted.promise;
-    expect(await root.cancel("alice", cancelling.id)).toBe(true);
+    expect(await root.cancel("alice", cancelling.id)).toEqual({
+      id: cancelling.id,
+      requested: true,
+    });
     expect(await active).toBe("cancelled");
     expect(childSignal?.aborted).toBe(true);
     const rows = await pool.query<{ status: string }>(
@@ -732,17 +1437,29 @@ describe("background binding on local Postgres", () => {
     const suspended = await background.read("alice", original.id);
     expect(suspended.outcome?.status).toBe("suspended");
     expect(synthetic.effects()).toBe(0);
-    const unauthorized = await background.resume("alice", original.id, {
-      ...authority.evidence,
-      actor: "bob",
-    });
+    const unauthorized = await background.resume(
+      "alice",
+      original.id,
+      evidenceFor(suspended.snapshot, {
+        ...authority.evidence,
+        actor: "bob",
+      }),
+    );
     expect(await runs.drive(unauthorized.id, background.handlers)).toBe("failed");
     expect((await background.read("alice", unauthorized.id)).error?.message).toMatch(
       /authentication/,
     );
     const attempts = await Promise.all([
-      background.resume("alice", original.id, authority.evidence),
-      background.resume("alice", original.id, authority.evidence),
+      background.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(background, original.id, authority.evidence),
+      ),
+      background.resume(
+        "alice",
+        original.id,
+        await submittedAnswers(background, original.id, authority.evidence),
+      ),
     ]);
     expect(synthetic.calls()).toBe(1);
     expect(synthetic.effects()).toBe(0);
@@ -763,7 +1480,11 @@ describe("background binding on local Postgres", () => {
     expect(completed.outcome?.treeUsage).toMatchObject({ inputTokens: 6, outputTokens: 4 });
     expect(synthetic.effects()).toBe(1);
     expect(synthetic.calls()).toBe(2);
-    const duplicateClaim = await background.resume("alice", original.id, authority.evidence);
+    const duplicateClaim = await background.resume(
+      "alice",
+      original.id,
+      await submittedAnswers(background, original.id, authority.evidence),
+    );
     expect(await runs.drive(duplicateClaim.id, background.handlers)).toBe("failed");
     expect((await background.read("alice", duplicateClaim.id)).error?.message).toMatch(
       /already claimed/,
@@ -781,6 +1502,137 @@ describe("background binding on local Postgres", () => {
     expect(synthetic.calls()).toBe(2);
   });
 
+  it("recovers a partially consumed answer batch under the same lease claim", async () => {
+    const authority = await approvalFixture();
+    const effects: string[] = [];
+    const wire = fake((count) =>
+      count === 0
+        ? {
+            ...call("write"),
+            toolCalls: [0, 1, 2].map((index) => ({
+              index,
+              id: `call-${index}`,
+              name: "write",
+              arguments: "{}",
+            })),
+          }
+        : answer("done"),
+    );
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [
+        defineTool({
+          name: "write",
+          description: "Write one record.",
+          inputSchema: { type: "object" },
+          needsApproval: true,
+          async run(_input, context) {
+            effects.push(context.callId ?? "missing");
+            return "written";
+          },
+        }),
+      ],
+    });
+    const thread = createMemorySession();
+    const background = createBackgroundAgent({
+      agent,
+      kind: "batch",
+      runs,
+      enqueue,
+      policy: authority.policy,
+      session: () => thread,
+    });
+    const initial = await background.start("alice", "Write three records", {
+      sessionId: thread.id,
+    });
+    expect(await runs.drive(initial.id, background.handlers)).toBe("succeeded");
+    const waiting = await background.read("alice", initial.id);
+    const requests = openRequests(waiting.snapshot);
+    expect(requests).toHaveLength(3);
+    expect(waiting.outcome?.session?.status).toBe("pending");
+    const answers = Object.fromEntries(
+      requests.slice(0, 2).map((request) => [request.id, authority.evidence]),
+    );
+    const next = await background.resume("alice", initial.id, answers);
+    const store = service();
+    const parked = Promise.withResolvers<void>();
+    let signal: AbortSignal | undefined;
+    let consumed = 0;
+    const interrupted = createBackgroundAgent({
+      agent,
+      kind: "batch",
+      runs: store,
+      enqueue,
+      session: () => thread,
+      policy(context) {
+        const trusted = authority.policy(context);
+        return {
+          ...trusted,
+          async resolveRequest(request, evidence) {
+            const decision = await trusted.resolveRequest(request, evidence);
+            if (++consumed === 2) {
+              parked.resolve();
+              if (!signal) throw new Error("Missing worker signal");
+              await pauseUntilStopped(signal);
+            }
+            return decision;
+          },
+        };
+      },
+    });
+    const handler = interrupted.handlers.batch;
+    if (!handler) throw new Error("Missing batch handler");
+    const driving = store.drive(next.id, {
+      batch(run) {
+        signal = run.signal;
+        return handler(run);
+      },
+    });
+    try {
+      await Promise.race([
+        parked.promise,
+        driving.then((status) => {
+          throw new Error(`Worker ended before checkpoint: ${status}`);
+        }),
+      ]);
+      await store.drain(0);
+      expect(await driving).toBe("requeued");
+      expect(effects).toEqual([]);
+      expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
+      const partial = await background.read("alice", next.id);
+      expect(partial.outcome?.status).toBe("suspended");
+      expect(partial.outcome?.session?.status).toBe("pending");
+      expect(openRequests(partial.snapshot).map((request) => request.id)).toEqual([
+        requests[2]?.id,
+      ]);
+      expect(effects).toEqual(["call-0", "call-1"]);
+      expect(wire.calls()).toBe(1);
+      const claimed = await pool.query(
+        `SELECT * FROM ${schema}.claims WHERE continuation=(SELECT continuation FROM ${schema}.claims WHERE source=$1 LIMIT 1)`,
+        [initial.id],
+      );
+      expect(claimed.rows).toHaveLength(2);
+      const last = await background.resume(
+        "alice",
+        next.id,
+        evidenceFor(partial.snapshot, authority.evidence),
+      );
+      expect(await runs.drive(last.id, background.handlers)).toBe("succeeded");
+      const done = await background.read("alice", last.id);
+      expect(done.outcome).toMatchObject({
+        status: "completed",
+        session: { status: "saved" },
+        treeUsage: { inputTokens: 6, outputTokens: 4 },
+      });
+      expect(effects).toEqual(["call-0", "call-1", "call-2"]);
+      expect(wire.calls()).toBe(2);
+    } finally {
+      await store.drain(0);
+      await driving;
+    }
+  });
+
   it("rejects expired submissions and checks resource access again in the worker", async () => {
     const authority = await approvalFixture();
     const synthetic = approvalAgent();
@@ -790,14 +1642,20 @@ describe("background binding on local Postgres", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       vi.setSystemTime(authority.expiresAt + 1);
-      await expect(background.resume("alice", id, authority.evidence)).rejects.toThrow(/expired/);
+      await expect(
+        background.resume("alice", id, await submittedAnswers(background, id, authority.evidence)),
+      ).rejects.toThrow(/expired/);
     } finally {
       vi.useRealTimers();
     }
     await pool.query(`UPDATE ${schema}.resources SET version='2' WHERE id=$1`, [
       authority.resource,
     ]);
-    const stale = await background.resume("alice", id, authority.evidence);
+    const stale = await background.resume(
+      "alice",
+      id,
+      await submittedAnswers(background, id, authority.evidence),
+    );
     expect(await runs.drive(stale.id, background.handlers)).toBe("failed");
     expect((await background.read("alice", stale.id)).error?.message).toMatch(/stale/);
     expect(synthetic.effects()).toBe(0);
@@ -805,7 +1663,11 @@ describe("background binding on local Postgres", () => {
     await pool.query(`UPDATE ${schema}.resources SET version='1' WHERE id=$1`, [
       authority.resource,
     ]);
-    const next = await background.resume("alice", id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      id,
+      await submittedAnswers(background, id, authority.evidence),
+    );
     await pool.query(`UPDATE ${schema}.resources SET version='2' WHERE id=$1`, [
       authority.resource,
     ]);
@@ -826,9 +1688,13 @@ describe("background binding on local Postgres", () => {
     const saved = await background.read("alice", initial.id);
     expect(saved.outcome).toMatchObject({
       status: "suspended",
-      path: [{ key: "result" }, { key: "result" }],
+      requests: [{ path: [{ key: "result" }, { key: "result" }] }],
     });
-    const next = await background.resume("alice", initial.id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      initial.id,
+      await submittedAnswers(background, initial.id, authority.evidence),
+    );
     expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
     const result = await background.read("alice", next.id);
     expect(result.outcome).toMatchObject({
@@ -887,8 +1753,12 @@ describe("background binding on local Postgres", () => {
       const saved = await background.read("alice", initial.id);
       expect(saved).toMatchObject({ snapshot: { state: { status: "suspended" } } });
       if (saved.snapshot.state.status !== "suspended") throw new Error("Missing approval.");
-      const originalApproval = saved.snapshot.state.approval;
-      const next = await background.resume("alice", initial.id, authority.evidence);
+      const originalApproval = firstRequest(saved.snapshot);
+      const next = await background.resume(
+        "alice",
+        initial.id,
+        await submittedAnswers(background, initial.id, authority.evidence),
+      );
       const store = service();
       const parked = Promise.withResolvers<void>();
       let pause = true;
@@ -911,8 +1781,8 @@ describe("background binding on local Postgres", () => {
                 await pauseUntilStopped(signal);
               }
             },
-            async resolveApproval(approval, decision) {
-              const result = await trusted.resolveApproval(approval, decision);
+            async resolveRequest(approval, decision) {
+              const result = await trusted.resolveRequest(approval, decision);
               if (point === "consumed" && pause) {
                 pause = false;
                 parked.resolve();
@@ -935,6 +1805,7 @@ describe("background binding on local Postgres", () => {
               await run.save(value);
               const current = root.agent[AGENT_RUNTIME].restore(value);
               const mid = current.delegations[0]?.children[0]?.snapshot;
+              if (mid) assertAgent(mid);
               const child = mid?.delegations[0]?.children[0]?.snapshot;
               if (
                 !pause ||
@@ -943,6 +1814,7 @@ describe("background binding on local Postgres", () => {
                 !child
               )
                 return;
+              assertAgent(child);
               const shouldPause =
                 (point === "route" && child.state.status === "suspended") ||
                 (point === "effect" &&
@@ -950,8 +1822,10 @@ describe("background binding on local Postgres", () => {
                   child.models.at(-1)?.status === "completed") ||
                 (point === "later-approval" &&
                   child.state.status === "suspended" &&
-                  child.state.approval.request.operationId !==
-                    originalApproval.request.operationId);
+                  openRequests(child).some((request) => {
+                    assertCall(request);
+                    return request.call.operationId !== originalApproval.call.operationId;
+                  }));
               if (shouldPause) {
                 pause = false;
                 parked.resolve();
@@ -972,7 +1846,7 @@ describe("background binding on local Postgres", () => {
         expect(await driving).toBe("requeued");
         const interruptedState = await background.read("alice", next.id);
         expect(interruptedState.snapshot.state.status).toBe(
-          point === "claim" ? "suspended" : "running",
+          point === "claim" || point === "consumed" ? "suspended" : "running",
         );
         const claimed = await pool.query<{ segment: string; consumed: boolean }>(
           `SELECT segment, consumed FROM ${schema}.claims WHERE source=$1`,
@@ -981,7 +1855,7 @@ describe("background binding on local Postgres", () => {
         expect(claimed.rows).toEqual([
           {
             segment: next.id,
-            consumed: point !== "claim" && point !== "route",
+            consumed: point !== "claim",
           },
         ]);
         expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
@@ -1001,10 +1875,14 @@ describe("background binding on local Postgres", () => {
           expect(leafWire.calls()).toBe(2);
           if (result.snapshot.state.status !== "suspended")
             throw new Error("Missing new approval.");
-          expect(result.snapshot.state.approval.request.operationId).not.toBe(
-            originalApproval.request.operationId,
+          expect(firstRequest(result.snapshot).call.operationId).not.toBe(
+            originalApproval.call.operationId,
           );
-          const last = await background.resume("alice", next.id, authority.evidence);
+          const last = await background.resume(
+            "alice",
+            next.id,
+            await submittedAnswers(background, next.id, authority.evidence),
+          );
           expect(await runs.drive(last.id, background.handlers)).toBe("succeeded");
           result = await background.read("alice", last.id);
         }
@@ -1097,7 +1975,11 @@ describe("background binding on local Postgres", () => {
       [id],
     );
     expect(children.rows[0]?.count).toBe(2);
-    const next = await background.resume("alice", id, authority.evidence);
+    const next = await background.resume(
+      "alice",
+      id,
+      await submittedAnswers(background, id, authority.evidence),
+    );
     expect(await runs.drive(next.id, background.handlers)).toBe("succeeded");
     expect((await background.read("alice", next.id)).outcome).toMatchObject({
       status: "completed",
@@ -1148,6 +2030,117 @@ describe("background binding on local Postgres", () => {
         first.child.kill("SIGKILL");
     }
   });
+
+  it.each(["inference", "read", "hosted"] as const)(
+    "recovers only the configured %s profile after real worker loss",
+    async (profile) => {
+      const task = crypto.randomUUID();
+      const agent = recoveryAgent(pool, schema, task, undefined, profile);
+      const background = bind(agent, closedPolicy, "recovery");
+      const { id } = await background.start("alice", "Recover interrupted work");
+      const mode = profile === "read" ? "effect" : "model";
+      let kept: unknown;
+      const attempts: string[] = [];
+      for (let crash = 0; crash < (profile === "inference" ? 2 : 1); crash++) {
+        const running = worker(task, id, mode, profile);
+        try {
+          await vi.waitFor(() => expect(running.stdout(), running.stderr()).toContain(`${mode}\n`));
+          const before = await background.read("alice", id);
+          const children = before.snapshot.delegations[0]?.children;
+          const child = children?.find((entry) => entry.key === "one")?.snapshot;
+          if (!child) throw new Error("Missing running child");
+          assertAgent(child);
+          const operation = child.models.at(-1);
+          if (!operation) throw new Error("Missing operation");
+          attempts.push(
+            profile === "read" &&
+              operation.status === "completed" &&
+              operation.tools[0]?.status === "running"
+              ? operation.tools[0].attemptId
+              : operation.attemptId,
+          );
+          if (profile === "inference") {
+            kept ??= children?.find((entry) => entry.key === "kept");
+            expect(children?.find((entry) => entry.key === "kept")).toEqual(kept);
+            expect(operation.usage.inputTokens).toBe(3);
+          }
+          // Attaching twice cannot buy another execution attempt or cancel the producer.
+          const observed = new AbortController();
+          const stream = background.observe("alice", id, 0, observed.signal);
+          expect((await stream.next()).done).toBe(false);
+          observed.abort();
+          expect((await stream.next()).done).toBe(true);
+          expect((await background.read("alice", id)).status).toBe("running");
+          expect(running.child.kill("SIGKILL")).toBe(true);
+          expect((await running.done).signal).toBe("SIGKILL");
+          const nudged: string[] = [];
+          await vi.waitFor(async () => {
+            await runs.sweep({ olderThanSecs: 0, nudge: (runId) => nudged.push(runId) });
+            expect(nudged).toContain(id);
+          });
+        } finally {
+          if (running.child.exitCode === null && running.child.signalCode === null)
+            running.child.kill("SIGKILL");
+        }
+      }
+      const replacement = worker(task, id, "recover", profile);
+      expect(await replacement.done, replacement.stderr()).toEqual({ code: 0, signal: null });
+      const result = await background.read("alice", id);
+      expect(result.outcome?.status).toBe(profile === "hosted" ? "failed" : "completed");
+      const child = result.snapshot.delegations[0]?.children.find(
+        (entry) => entry.key === "one",
+      )?.snapshot;
+      if (!child) throw new Error("Missing saved child");
+      assertAgent(child);
+      if (profile === "hosted") {
+        expect(child.state).toMatchObject({
+          status: "failed",
+          error: { code: "interrupted_operation" },
+        });
+        expect(await counts(task)).toEqual({
+          root_model: 1,
+          child_model: 2,
+          tool: 1,
+          hosted_effect: 1,
+        });
+      } else if (profile === "inference") {
+        expect(await counts(task)).toEqual({
+          root_model: 2,
+          kept_model: 1,
+          child_model: 4,
+          tool: 1,
+        });
+        expect(
+          result.snapshot.delegations[0]?.children.find((entry) => entry.key === "kept"),
+        ).toEqual(kept);
+        expect(child.models[1]?.interrupted.map((attempt) => attempt.attemptId)).toEqual(attempts);
+        expect(result.outcome?.treeUsage).toMatchObject({ inputTokens: 21, outputTokens: 14 });
+      } else {
+        expect(await counts(task)).toEqual({ root_model: 2, child_model: 2, tool: 2 });
+        const model = child.models[0];
+        expect(
+          model?.status === "completed"
+            ? model.tools[0]?.interrupted.map((attempt) => attempt.attemptId)
+            : [],
+        ).toEqual(attempts);
+        expect(result.outcome?.treeUsage).toMatchObject({ inputTokens: 12, outputTokens: 8 });
+      }
+      const events = [];
+      for await (const event of background.observe("alice", id)) events.push(event);
+      const restarts = events.filter(
+        (event) =>
+          event.type === "agent" && isRecord(event.data) && event.data.type === "operation_restart",
+      );
+      // A killed process may lose best-effort events. The surviving attempt's marker must
+      // arrive, but this test does not promise durable progress from killed attempts.
+      expect(restarts.length).toBeLessThanOrEqual(attempts.length);
+      if (profile === "hosted") expect(restarts).toHaveLength(0);
+      else expect(restarts.at(-1)?.data).toMatchObject({ previousAttemptId: attempts.at(-1) });
+      const usageBeforeRead = result.outcome?.treeUsage;
+      expect((await background.read("alice", id)).outcome?.treeUsage).toEqual(usageBeforeRead);
+      expect(await runs.drive(id, background.handlers)).toBe("skipped");
+    },
+  );
 
   it("refuses an external effect interrupted by SIGKILL rather than invoking it again", async () => {
     const task = crypto.randomUUID();
