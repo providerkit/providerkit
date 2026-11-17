@@ -20,8 +20,33 @@ describe("defineTool", () => {
       run: async ({ q }) => ({ hits: q.length }),
       summarize: (out) => `${out.hits} hits`,
     });
+    expect(tool.outputSchema).toBeUndefined();
     const outcome = await tool.invoke({ q: "cats" });
     expect(outcome).toMatchObject({ ok: true, summary: "4 hits" });
+  });
+
+  it("keeps output schemas as metadata, not validation or wire fields", async () => {
+    const outputSchema = { type: "number" };
+    const tool = defineTool<{ q: string }, string>({
+      name: "search",
+      description: "search",
+      inputSchema: schema,
+      outputSchema,
+      // A mismatched result must still pass through unchanged.
+      run: async ({ q }) => q,
+    });
+    expect(tool.outputSchema).toBe(outputSchema);
+    expect(await tool.invoke({ q: "cats" })).toMatchObject({
+      ok: true,
+      output: "cats",
+      summary: '"cats"',
+    });
+    expect(await tool.call({ q: "dogs" })).toBe("dogs");
+    expect(tool.definition()).toStrictEqual({
+      name: "search",
+      description: "search",
+      inputSchema: schema,
+    });
   });
 
   it("reports a failure instead of throwing — a broken tool is data for the model", async () => {

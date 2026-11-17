@@ -41,6 +41,8 @@ export interface ToolSpec<I, O> {
   description: string;
   /** Advertised to the model verbatim. */
   inputSchema: JsonObjectSchema;
+  /** JSON Schema for generated result types. Not validated or sent to providers. */
+  outputSchema?: Record<string, unknown>;
   /**
    * Turn raw arguments into `I`, or throw with a message the MODEL can act on.
    * Omit to accept whatever arrived (the schema is then only a hint).
@@ -70,6 +72,8 @@ export interface Tool<I = unknown, O = unknown> {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: JsonObjectSchema;
+  /** JSON Schema for generated result types. Not validated or sent to providers. */
+  readonly outputSchema?: Record<string, unknown>;
   readonly timeoutMs: number;
   readonly isReadOnly: boolean;
   readonly needsApproval: boolean;
@@ -149,6 +153,7 @@ export function defineTool<I = unknown, O = unknown>(spec: ToolSpec<I, O>): Tool
     name: spec.name,
     description: spec.description,
     inputSchema: spec.inputSchema,
+    outputSchema: spec.outputSchema,
     timeoutMs,
     isReadOnly: spec.isReadOnly ?? false,
     needsApproval: spec.needsApproval ?? false,
