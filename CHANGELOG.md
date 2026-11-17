@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.33.1] - 2026-11-17
+
+### Fixed
+
+- `parseToolArgs` now keeps `__proto__` fields instead of changing the returned object's prototype or dropping the field. This also applies to nested values and string fields recovered from truncated JSON. Unicode repair is unchanged.
+
 ## [0.33.0] - 2026-11-16
 
 ### Added
