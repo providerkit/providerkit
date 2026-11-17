@@ -67,7 +67,7 @@
   },
   "peerDependencies": {
     "@providerkit/agents": "^0.2.0",
-    "@providerkit/core": "^0.31.0",
+    "@providerkit/core": "^0.33.0",
     "react": "^19"
   },
   "peerDependenciesMeta": {

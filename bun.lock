@@ -32,7 +32,7 @@
         "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
         "@modelcontextprotocol/sdk": "^1.32.2",
         "@opentelemetry/api": "^1.10.0",
-        "@providerkit/core": "^0.31.0",
+        "@providerkit/core": "^0.33.0",
         "quickjs-emscripten-core": "^0.32.0",
       },
       "optionalPeers": [
@@ -84,7 +84,7 @@
       },
       "peerDependencies": {
         "@providerkit/agents": "^0.2.0",
-        "@providerkit/core": "^0.31.0",
+        "@providerkit/core": "^0.33.0",
         "react": "^19",
       },
       "optionalPeers": [
