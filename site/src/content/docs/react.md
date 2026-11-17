@@ -1,28 +1,47 @@
 ---
 title: React
-description: Follow the chat state, hooks and optional components being built for @providerkit/react.
+description: Add chat state and optional components without replacing your app's transport or styles.
 ---
 
-The React package is in development. It brings browser state, React hooks and optional chat
-components together so an app can show a conversation without building each part again.
+Send a message through your app's transport:
 
-There is no published installation or working site demo yet. You can
-[follow the public implementation](https://github.com/providerkit/providerkit/pull/72) and
-[read the local chat example](https://github.com/providerkit/providerkit/tree/worktree-react-chat-ui/react/examples/chat).
-Those files are development work, not a released API contract.
+```ts
+await chat.send("Summarize this page.");
+```
 
-## How it fits
+**React 0.1.0** is the experimental chat package. It keeps messages and connection state, handles
+requests and provides optional components. You can use its hooks, keep your own state owner, or
+use both. [Set up your first chat](/react/getting-started/).
 
-Core calls providers. Agents runs tasks. React is the browser-facing part: it shows data the
-server allows the person to see and sends their actions back to the app.
+## Choose what you need
 
-The app keeps sign-in, permissions, uploads and retention. A browser view is not permission to
-resume an agent or run a tool. [Package boundaries](/concepts/package-boundaries/) explains the split.
+| Import               | What it provides                                               |
+| -------------------- | -------------------------------------------------------------- |
+| `@providerkit/react` | Chat and composer state, `useChat` and `useAgentRun`           |
+| `/protocol`          | Portable display data, validation and one reducer              |
+| `/sse`               | A fetch transport for event streams                            |
+| `/agents`            | Server-side projection of SDK execution into safe display data |
+| `/ui`                | Conversation, composer, messages and activity controls         |
+| `/markdown`          | Markdown, code blocks and citations                            |
+| `/ag-ui`             | Conversion between display events and AG-UI                    |
+| `/styles.css`        | Optional default styles                                        |
 
-## Build today
+Hook imports load no UI, Markdown parser or styles. `/protocol` has no React dependency. Components
+receive plain data and callbacks, so an app can keep its existing store. Tailwind is not required.
 
-Start a server-side task with the [released Agents quickstart](/agents/getting-started/), or
-[call a provider with Core](/guides/getting-started/) under your existing chat screen.
+## Keep authority on the server
 
-The published React package will be the source for the site's chat demo, guides and API reference.
-The public work above is where you can review that integration now.
+Your app owns sign-in, permissions, uploads and retention. It authorizes every read, send, stop
+and response. A request ID or a browser view does not grant permission to run a tool.
+
+The server projector hides private execution state by default. Tool details and structured
+results need a host-selected projection. Never send a raw agent snapshot to a browser.
+[Transport and display data](/react/transport/) explains where projection belongs.
+
+## Pick a starting point
+
+- [Build a chat](/react/getting-started/) or [try the component demo](/demos/chat/).
+- [Handle questions and client actions](/react/requests/) without treating the browser as an authority.
+- [Use the components](/react/components/) and [your own styles](/react/styles/).
+- [Recover a conversation](/react/recovery/) without replaying a command.
+- [Connect an AG-UI host](/react/ag-ui/) or [look up an export](/reference/react/).
