@@ -1,5 +1,6 @@
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
 import { RequestJournal } from "./request.ts";
+import { checkMemoryBinding } from "./memory.ts";
 import { isSubagentTool, type SubagentCreation, type SubagentRecord } from "./subagents.ts";
 import { successfulToolResult } from "./extensions.ts";
 import { handoffRef, type Handoff } from "./handoff.ts";
@@ -54,6 +55,8 @@ export interface AgentRuntime<T> {
   readonly limits: RunLimits;
   /** JSON identity of host configuration. Callbacks need an agent version change. */
   configuration(): Record<string, unknown>;
+  /** Recheck current selection without resolving or replacing recorded instructions. */
+  checkTools(snapshot: RunSnapshot, options: RunOptions): Promise<void>;
   /** A new root run's snapshot: the input normalized, the session read once and the history
    * prepared, repaired and frozen, before anything is saved. */
   open(input: AgentInput, options: RunOptions, runId: string): Promise<RunSnapshot>;
@@ -104,6 +107,7 @@ export interface DelegationContext {
     scope: ExecutionScope;
     request: ToolRequest;
     signal: AbortSignal;
+    recheck(agent: Agent<unknown>, snapshot: RunSnapshot): Promise<void>;
     child<T>(
       key: string,
       agent: Agent<T>,
@@ -298,6 +302,37 @@ export async function executeDelegation(
     ...inherited
   } = options;
 
+  async function recheck(agent: Agent<unknown>, snapshot: RunSnapshot): Promise<void> {
+    if (!options.host?.beforeTool)
+      fail(
+        "subagent_authority_missing",
+        "Supply host.beforeTool to authorize helper forks and follow-ups.",
+      );
+    await agent[AGENT_RUNTIME].checkTools(snapshot, { ...inherited, signal });
+    checkMemoryBinding(snapshot, inherited.memory);
+    if (inherited.memory) {
+      const { store, scope, shared = [] } = inherited.memory;
+      try {
+        for (const access of [...(scope ? [scope] : []), ...shared]) {
+          const current = await untilAbort(
+            store.access(immutableCopy(access.scope), { signal }),
+            signal,
+          );
+          if (!equalData(current, access)) throw new Error("Changed memory access");
+        }
+      } catch {
+        signal.throwIfAborted();
+        fail(
+          "subagent_memory_changed",
+          "The helper's memory access changed or could not be checked. Obtain fresh host authorization before starting new work.",
+        );
+      }
+    }
+    await requests.recheck({ ...requests.call, arguments: raw });
+    await requests.assertFresh();
+    active();
+  }
+
   function child<T>(
     key: string,
     agent: Agent<T>,
@@ -406,6 +441,8 @@ export async function executeDelegation(
           if (!hookOpen || execution)
             throw new Error("A host child may execute once, before its hook returns.");
           execution = (async () => {
+            if (saved.snapshot.subagent?.fork || saved.snapshot.subagent?.previousRunId)
+              await recheck(agent, saved.snapshot);
             if (resume) saved.snapshot.attemptId = crypto.randomUUID();
             // Sent here, not where the child is admitted, so it always comes with a run: the
             // child's own state event follows it. A settled child that is reused, or one the host
@@ -599,6 +636,7 @@ export async function executeDelegation(
                   scope,
                   request: { ...requests.call, arguments: raw },
                   signal,
+                  recheck,
                   child,
                 },
               }
@@ -625,10 +663,14 @@ export async function executeDelegation(
         // Already started children still settle below, as for every delegation.
         if (failure && entry.snapshot.subagent) continue;
         if (entry.snapshot.subagent) {
-          const { base: _base, ...record } = entry.snapshot.subagent;
+          const { base, ...record } = entry.snapshot.subagent;
           child(entry.key, agent, inputOf(entry.snapshot), {
             record,
-            ...(record.policy.self ? { source: parent.definition } : {}),
+            ...(record.previousRunId
+              ? { source: base }
+              : record.policy.self
+                ? { source: parent.definition }
+                : {}),
           });
         } else child(entry.key, agent, inputOf(entry.snapshot));
       }

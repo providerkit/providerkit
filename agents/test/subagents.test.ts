@@ -11,6 +11,7 @@ import {
 } from "@providerkit/core";
 import {
   createMemorySession,
+  createMemoryStore,
   defineAgent,
   defineHandoff,
   subagentTool,
@@ -42,7 +43,7 @@ function text(content = "Done"): ProviderChunk[] {
     { type: "finish", finishReason: "stop" },
   ];
 }
-function wire(...turns: ProviderChunk[][]) {
+function wire(...turns: (ProviderChunk[] | ((messages: ChatMessage[]) => ProviderChunk[]))[]) {
   const calls: { messages: ChatMessage[]; tools: ToolDefinition[]; options?: StreamOptions }[] = [];
   const provider: Provider = {
     id: "offline",
@@ -55,7 +56,7 @@ function wire(...turns: ProviderChunk[][]) {
         options,
       });
       if (!turn) throw new Error("Unexpected model call");
-      yield* turn;
+      yield* typeof turn === "function" ? turn(messages) : turn;
     },
   };
   return { provider, calls };
@@ -79,8 +80,8 @@ function lead(
   args: Record<string, unknown>,
   spec: Partial<SubagentToolSpec> = {},
   tools: NonNullable<Parameters<typeof defineAgent>[0]["tools"]> = [],
+  source = wire(call("create_helpers", args), text("Combined")),
 ) {
-  const source = wire(call("create_helpers", args), text("Combined"));
   const agent = defineAgent({
     ...base,
     id: "lead",
@@ -935,3 +936,645 @@ describe("model-created helpers", () => {
 function firstOrUndefined(snapshot: RunSnapshot) {
   return children(snapshot)[0];
 }
+
+function followup(messages: ChatMessage[]) {
+  const last = [...messages].reverse().find((message) => message.role === "tool");
+  const output: unknown = last && JSON.parse(last.content);
+  const helper: unknown = Array.isArray(output) ? output[0] : undefined;
+  if (!isRecord(helper) || typeof helper.helperId !== "string" || typeof helper.name !== "string")
+    throw new Error("Expected a saved helper identity");
+  return { name: helper.name, continues: helper.helperId, task: "Explain that in more detail" };
+}
+
+const forkPolicy = {
+  identity: "approved-history-1",
+  maxMessages: 4,
+  maxBytes: 4_000,
+  select: () => [0, 1],
+};
+
+describe("helper forks and follow-ups", () => {
+  it("forks only host-selected plain conversation and records it before dispatch", async () => {
+    const target = wire(text("Fork answer"));
+    const worker = defineAgent({
+      ...base,
+      instructions: "Worker instructions.",
+      id: "worker",
+      provider: target.provider,
+    });
+    const select = vi.fn(() => [0, 1]);
+    const { agent } = lead(
+      worker,
+      { agents: [{ ...draft, fork: true }] },
+      { fork: { ...forkPolicy, select } },
+    );
+    const session = createMemorySession({
+      messages: [
+        { role: "user", content: "Approved question" },
+        {
+          role: "assistant",
+          content: "Approved answer",
+          reasoning: "Private reasoning",
+          toolCalls: [{ id: "old", name: "write", arguments: '{"private":"arguments"}' }],
+        },
+        { role: "tool", toolCallId: "old", name: "write", content: "Private tool result" },
+        { role: "user", content: "Unapproved data" },
+      ],
+    });
+    let admitted: RunSnapshot | undefined;
+    const outcome = await agent.run("Fork", {
+      session,
+      host: {
+        ...host(),
+        checkpoint(saved) {
+          if (firstOrUndefined(saved)?.models.length === 0) admitted = saved;
+        },
+      },
+    });
+    expect(outcome.status).toBe("completed");
+    const node = first(outcome.snapshot);
+    expect(node.history).toEqual([
+      { role: "user", content: "Approved question" },
+      { role: "assistant", content: "Approved answer" },
+    ]);
+    expect(first(admitted!).history).toEqual(node.history);
+    expect(node.session).toBeUndefined();
+    const sent = JSON.stringify(target.calls[0]);
+    for (const secret of [
+      base.instructions,
+      "Private reasoning",
+      "Private tool result",
+      "Unapproved data",
+      'private":"arguments',
+    ])
+      expect(sent).not.toContain(secret);
+    expect(select).toHaveBeenCalledTimes(1);
+    await agent.resume(outcome.snapshot, { host: host(), session });
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(target.calls).toHaveLength(1);
+    const changed = structuredClone(outcome.snapshot);
+    first(changed).history[0] = { role: "user", content: "Changed fork" };
+    await expect(agent.resume(changed, { host: host() })).rejects.toThrow();
+  });
+
+  it.each(["disabled", "bytes", "count", "reordered", "authority"] as const)(
+    "refuses an unsafe fork: %s",
+    async (mode) => {
+      const target = wire();
+      const worker = defineAgent({ ...base, id: "worker", provider: target.provider });
+      const { agent } = lead(
+        worker,
+        { agents: [{ ...draft, fork: true }] },
+        {
+          fork:
+            mode === "disabled"
+              ? undefined
+              : {
+                  ...forkPolicy,
+                  maxBytes: mode === "bytes" ? 1 : 4_000,
+                  maxMessages: mode === "count" ? 1 : 4,
+                  select: () => (mode === "reordered" ? [1, 0] : [0, 1]),
+                },
+        },
+      );
+      const outcome = await agent.run(
+        {
+          messages: [
+            { role: "user", content: "Earlier" },
+            { role: "user", content: "Fork" },
+          ],
+        },
+        { host: mode === "authority" ? {} : host() },
+      );
+      expect(target.calls).toHaveLength(0);
+      expect(children(outcome.snapshot)).toHaveLength(0);
+      if (mode === "disabled") expect(result(outcome.snapshot).ok).toBe(false);
+      else expect(outcome.status).toBe("failed");
+    },
+  );
+
+  it("continues the latest helper by opaque id, keeps exact prefixes and never repeats effects", async () => {
+    const read = tool();
+    const target = wire(
+      call("read"),
+      text("Original answer"),
+      text("Follow-up answer"),
+      text("Third answer"),
+    );
+    const instructions = vi.fn(() => "Frozen template instructions");
+    const worker = defineAgent({
+      ...base,
+      id: "worker",
+      instructions,
+      provider: target.provider,
+      tools: [read],
+    });
+    const source = wire(
+      call("create_helpers", { agents: [{ ...draft, tools: ["read"] }] }),
+      (messages) => call("create_helpers", { agents: [followup(messages)] }),
+      (messages) => call("create_helpers", { agents: [followup(messages)] }),
+      text(),
+    );
+    const { agent } = lead(worker, {}, { followUp: true }, [read], source);
+    const events: AgentEvent[] = [];
+    const session = createMemorySession();
+    let checkpoint: RunSnapshot | undefined;
+    const done = await agent.run("Create", {
+      session,
+      host: {
+        ...host(),
+        checkpoint(saved) {
+          if (
+            children(saved).length === 3 &&
+            children(saved)[2]?.state.status === "completed" &&
+            saved.models[2]?.status === "completed" &&
+            saved.models[2].tools[0]?.status === "delegating"
+          )
+            checkpoint = saved;
+        },
+      },
+      onEvent: (event) => {
+        events.push(event);
+      },
+    });
+    expect(done.status).toBe("completed");
+    const [original, next, third] = children(done.snapshot);
+    expect(next?.subagent?.identity).toEqual(original?.subagent?.identity);
+    expect(next?.subagent?.previousRunId).toBe(original?.runId);
+    expect(third?.subagent?.previousRunId).toBe(next?.runId);
+    expect(next?.definition).toEqual(original?.definition);
+    expect(third?.history.slice(0, next?.history.length)).toEqual(next?.history);
+    expect(
+      JSON.stringify(target.calls[2]?.messages.slice(0, target.calls[1]?.messages.length)),
+    ).toBe(JSON.stringify(target.calls[1]?.messages));
+    expect(target.calls.every((call) => call.options?.sessionId === original?.runId)).toBe(true);
+    expect(children(done.snapshot).every((node) => node.session === undefined)).toBe(true);
+    expect(read.performed).toHaveBeenCalledTimes(1);
+    expect(instructions).toHaveBeenCalledTimes(1);
+    expect(done.treeUsage.inputTokens).toBe(32);
+    expect(JSON.stringify(events.filter((event) => event.type === "child"))).not.toContain(
+      draft.name,
+    );
+    expect(JSON.stringify(events.filter((event) => event.type === "child"))).not.toContain(
+      original?.subagent?.identity.id,
+    );
+    expect(checkpoint).toBeDefined();
+    const resumedSource = wire(text("Recovered"));
+    const rebuilt = lead(worker, {}, { followUp: true }, [read], resumedSource).agent;
+    const restored = await rebuilt.resume(JSON.parse(JSON.stringify(checkpoint)), {
+      host: host(),
+      session,
+    });
+    expect(restored.status).toBe("completed");
+    expect(target.calls).toHaveLength(4);
+    expect(read.performed).toHaveBeenCalledTimes(1);
+    expect(instructions).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["completed", "delegating"] as const)(
+    "resumes a %s follow-up checkpoint with repeated tool-call ids without replaying work",
+    async (status) => {
+      const read = tool();
+      const target = wire(
+        call("read"),
+        call("read"),
+        text("Original answer"),
+        text("Follow-up answer"),
+      );
+      const worker = defineAgent({
+        ...base,
+        id: "worker",
+        provider: target.provider,
+        tools: [read],
+      });
+      const source = wire(
+        call("create_helpers", { agents: [{ ...draft, tools: ["read"] }] }),
+        (messages) => call("create_helpers", { agents: [followup(messages)] }),
+        text("Combined"),
+      );
+      const { agent } = lead(worker, {}, { followUp: true }, [read], source);
+      let checkpoint: RunSnapshot | undefined;
+      const done = await agent.run("Create", {
+        host: {
+          ...host(),
+          checkpoint(saved) {
+            if (
+              children(saved)[1]?.state.status === "completed" &&
+              saved.models[1]?.status === "completed" &&
+              saved.models[1].tools[0]?.status === "delegating"
+            )
+              checkpoint = saved;
+          },
+        },
+      });
+      expect(done.status).toBe("completed");
+      const [original, next] = children(done.snapshot);
+      if (!original || !next) throw new Error("Expected the original helper and its follow-up");
+      expect(
+        original.models.flatMap((model) =>
+          model.status === "completed"
+            ? (model.turn.message.toolCalls ?? []).map((call) => call.id)
+            : [],
+        ),
+      ).toEqual(["read", "read"]);
+      expect(
+        next.history.flatMap((message) =>
+          message.role === "assistant" ? (message.toolCalls ?? []).map((call) => call.id) : [],
+        ),
+      ).toEqual(["read", "read_2"]);
+      expect(
+        next.history.flatMap((message) => (message.role === "tool" ? [message.toolCallId] : [])),
+      ).toEqual(["read", "read_2"]);
+      expect(read.performed).toHaveBeenCalledTimes(2);
+      expect(checkpoint).toBeDefined();
+      const resumedSource = wire(text("Combined"));
+      const rebuilt = lead(worker, {}, { followUp: true }, [read], resumedSource).agent;
+      const restored = await rebuilt.resume(
+        JSON.parse(JSON.stringify(status === "completed" ? done.snapshot : checkpoint)),
+        { host: host() },
+      );
+      expect(restored).toMatchObject({ status: "completed", output: "Combined" });
+      expect(children(restored.snapshot)).toEqual(children(done.snapshot));
+      expect(restored.treeUsage).toEqual(done.treeUsage);
+      expect(target.calls).toHaveLength(4);
+      expect(read.performed).toHaveBeenCalledTimes(2);
+      expect(resumedSource.calls).toHaveLength(status === "completed" ? 0 : 1);
+    },
+  );
+
+  it.each(["name", "run-id", "other-root", "tools", "duplicate", "limit", "disabled"] as const)(
+    "refuses invalid follow-up ownership or admission: %s",
+    async (mode) => {
+      const target = wire(text());
+      const worker = defineAgent({ ...base, id: "worker", provider: target.provider });
+      const source = wire(
+        call("create_helpers", { agents: [draft] }),
+        (messages) => {
+          const next: Record<string, unknown> = followup(messages);
+          if (mode === "name") next.name = "guessed_name";
+          if (mode === "run-id") next.continues = "root/model/1/tool/1/child/helper-1";
+          if (mode === "other-root") next.continues = crypto.randomUUID();
+          if (mode === "tools") next.tools = [];
+          return call("create_helpers", { agents: mode === "duplicate" ? [next, next] : [next] });
+        },
+        text(),
+      );
+      const { agent } = lead(
+        worker,
+        {},
+        { followUp: mode !== "disabled", maxPerRun: mode === "limit" ? 1 : 8 },
+        [],
+        source,
+      );
+      const done = await agent.run("Create", { host: host() });
+      expect(done.status).toBe("completed");
+      expect(children(done.snapshot)).toHaveLength(1);
+      expect(target.calls).toHaveLength(1);
+      const model = done.snapshot.models[1];
+      expect(
+        model?.status === "completed" &&
+          model.tools[0]?.status === "completed" &&
+          model.tools[0].result.ok,
+      ).toBe(false);
+    },
+  );
+
+  it.each(["creator", "template", "host", "memory"] as const)(
+    "rechecks live grants before a new follow-up: %s",
+    async (mode) => {
+      let revoked = false;
+      const read = tool();
+      const store = createMemoryStore();
+      const scope = await store.access(
+        { tenantId: "tenant", userId: "person" },
+        { signal: new AbortController().signal },
+      );
+      const target = wire(text());
+      const worker = defineAgent({
+        ...base,
+        id: "worker",
+        provider: target.provider,
+        tools: [read],
+        enabledTools: () => (mode === "template" && revoked ? [] : ["read"]),
+      });
+      const source = wire(
+        call("create_helpers", { agents: [{ ...draft, tools: ["read"] }] }),
+        (messages) => {
+          revoked = true;
+          return call("create_helpers", { agents: [followup(messages)] });
+        },
+      );
+      const agent = defineAgent({
+        ...base,
+        id: "lead",
+        provider: source.provider,
+        enabledTools: () =>
+          mode === "creator" && revoked ? ["create_helpers"] : ["read", "create_helpers"],
+        tools: [
+          read,
+          subagentTool({
+            name: "create_helpers",
+            description: "Create.",
+            agent: worker,
+            followUp: true,
+          }),
+        ],
+      });
+      const policy = host();
+      policy.beforeTool = async () => {
+        if (revoked && mode === "host") throw new Error("Host access revoked");
+        if (revoked && mode === "memory")
+          await store.erase(
+            { tenantId: "tenant", userId: "person" },
+            { signal: new AbortController().signal },
+          );
+      };
+      const done = await agent.run("Create", { host: policy, memory: { store, scope } });
+      expect(done.status).toBe("failed");
+      expect(target.calls).toHaveLength(1);
+      expect(children(done.snapshot)).toHaveLength(1);
+    },
+  );
+
+  it("keeps a follow-up's approvals separate and refuses changed replay inputs", async () => {
+    const read = tool("read", { approval: true });
+    const target = wire(text(), call("read"), text("Approved follow-up"));
+    const worker = defineAgent({ ...base, id: "worker", provider: target.provider, tools: [read] });
+    const source = wire(
+      call("create_helpers", { agents: [{ ...draft, tools: ["read"] }] }),
+      (messages) => call("create_helpers", { agents: [followup(messages)] }),
+      text(),
+    );
+    const { agent } = lead(worker, {}, { followUp: true }, [read], source);
+    const policy = host();
+    const waiting = await agent.run("Create", { host: policy });
+    if (waiting.status !== "suspended" || !waiting.requests[0])
+      throw new Error("Expected follow-up approval");
+    expect(read.performed).not.toHaveBeenCalled();
+    expect(waiting.requests[0].call.runId).toBe(children(waiting.snapshot)[1]?.runId);
+    const altered = structuredClone(waiting.snapshot);
+    const next = children(altered)[1];
+    if (!next) throw new Error("Missing follow-up");
+    next.history[0] = { role: "user", content: "Replaced prior conversation" };
+    await expect(agent.resume(altered, { host: policy })).rejects.toThrow();
+    const completed = await agent.resume(waiting.snapshot, {
+      host: policy,
+      answers: { [waiting.requests[0].id]: "approved" },
+    });
+    expect(completed.status).toBe("completed");
+    expect(read.performed).toHaveBeenCalledTimes(1);
+    expect(target.calls).toHaveLength(3);
+  });
+
+  it("cancels an executing follow-up without restarting its earlier conversation", async () => {
+    const entered = Promise.withResolvers<void>();
+    let calls = 0;
+    const worker = defineAgent({
+      ...base,
+      id: "worker",
+      provider: {
+        id: "offline",
+        model: "default",
+        async *createStream(_messages, _tools, options) {
+          if (++calls === 2) {
+            entered.resolve();
+            await new Promise<void>((resolve) =>
+              options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+            );
+          }
+          yield* text();
+        },
+      },
+    });
+    const source = wire(call("create_helpers", { agents: [draft] }), (messages) =>
+      call("create_helpers", { agents: [followup(messages)] }),
+    );
+    const { agent } = lead(worker, {}, { followUp: true }, [], source);
+    const controller = new AbortController();
+    const pending = agent.run("Create", { host: host(), signal: controller.signal });
+    await entered.promise;
+    controller.abort();
+    const done = await pending;
+    expect(done.status).toBe("cancelled");
+    expect(children(done.snapshot)[0]?.state.status).toBe("completed");
+    expect(calls).toBe(2);
+  });
+
+  it("refuses a real identity from another root and from a sibling creator", async () => {
+    const worker = defineAgent({ ...base, id: "worker", provider: wire(text()).provider });
+    const original = await lead(worker, { agents: [draft] }, { followUp: true }).agent.run(
+      "Original",
+    );
+    const foreignId = first(original.snapshot).subagent?.identity.id;
+    expect(foreignId).toBeDefined();
+    const other = lead(
+      worker,
+      { agents: [{ name: draft.name, continues: foreignId, task: "Stolen" }] },
+      { followUp: true },
+    );
+    const refused = await other.agent.run("Other root", { host: host() });
+    expect(children(refused.snapshot)).toHaveLength(0);
+    expect(result(refused.snapshot).ok).toBe(false);
+
+    let siblingId: string | undefined;
+    const provider: Provider = {
+      id: "offline",
+      model: "default",
+      async *createStream(messages) {
+        const task = messages.find((message) => message.role === "user")?.content;
+        if (messages.some((message) => message.role === "tool")) {
+          yield* text();
+          return;
+        }
+        if (task === "Root")
+          yield* call("create_helpers", {
+            agents: [
+              { name: "first", task: "First" },
+              { name: "second", task: "Second", tools: ["create_helpers"] },
+            ],
+          });
+        else if (task === "Second") {
+          expect(siblingId).toBeDefined();
+          yield* call("create_helpers", {
+            agents: [{ name: "first", continues: siblingId, task: "Stolen sibling" }],
+          });
+        } else yield* text();
+      },
+    };
+    const creator = defineAgent({
+      ...base,
+      id: "creator",
+      provider,
+      tools: [
+        subagentTool({
+          name: "create_helpers",
+          description: "Create.",
+          agent: "self",
+          maxLevels: 2,
+          followUp: true,
+        }),
+      ],
+    });
+    const done = await creator.run("Root", {
+      host: {
+        ...host(),
+        checkpoint(snapshot) {
+          siblingId ??= firstOrUndefined(snapshot)?.subagent?.identity.id;
+        },
+      },
+    });
+    expect(done.status).toBe("completed");
+    const second = children(done.snapshot)[1];
+    if (!second) throw new Error("Missing sibling");
+    expect(result(second).ok).toBe(false);
+    expect(children(second)).toHaveLength(0);
+  });
+
+  it("refuses a changed provider before starting a new follow-up", async () => {
+    let changed = false;
+    const target = wire(text());
+    const worker = defineAgent({
+      ...base,
+      id: "worker",
+      provider: {
+        ...target.provider,
+        get model() {
+          return changed ? "changed" : "default";
+        },
+      },
+    });
+    const source = wire(
+      call("create_helpers", { agents: [draft] }),
+      (messages) => {
+        changed = true;
+        return call("create_helpers", { agents: [followup(messages)] });
+      },
+      text(),
+    );
+    const done = await lead(worker, {}, { followUp: true }, [], source).agent.run("Create", {
+      host: host(),
+    });
+    expect(done.status).toBe("completed");
+    expect(children(done.snapshot)).toHaveLength(1);
+    expect(target.calls).toHaveLength(1);
+  });
+
+  it.each(["model", "children", "tool", "time"] as const)(
+    "charges a follow-up against the existing %s budget",
+    async (limit) => {
+      const target = wire(text());
+      const worker = defineAgent({ ...base, id: "worker", provider: target.provider });
+      const source = wire(
+        call("create_helpers", { agents: [draft] }),
+        (messages) => call("create_helpers", { agents: [followup(messages)] }),
+        text(),
+      );
+      const agent = defineAgent({
+        ...base,
+        id: "lead",
+        provider: source.provider,
+        treeLimits:
+          limit === "model"
+            ? { modelCalls: 3 }
+            : limit === "children"
+              ? { maxChildren: 1 }
+              : limit === "time"
+                ? { elapsedMs: 1_000 }
+                : undefined,
+        limits: limit === "tool" ? { toolCalls: 1 } : undefined,
+        tools: [
+          subagentTool({
+            name: "create_helpers",
+            description: "Create.",
+            agent: worker,
+            followUp: true,
+          }),
+        ],
+      });
+      const policy = host();
+      let requests = 0;
+      if (limit === "time") vi.useFakeTimers();
+      try {
+        policy.beforeTool = async () => {
+          if (++requests === 2 && limit === "time") await vi.advanceTimersByTimeAsync(1_001);
+        };
+        const done = await agent.run("Create", { host: policy });
+        expect(target.calls).toHaveLength(1);
+        if (limit === "children") expect(done.status).toBe("completed");
+        else expect(done.status).toBe("limited");
+        expect(first(done.snapshot).state.status).toBe("completed");
+      } finally {
+        if (limit === "time") vi.useRealTimers();
+      }
+    },
+  );
+
+  it("bounds the complete inherited definition before a follow-up starts", async () => {
+    const target = wire(text());
+    const worker = defineAgent({ ...base, id: "worker", provider: target.provider });
+    const source = wire(
+      call("create_helpers", { agents: [{ ...draft, instructions: "i".repeat(40_000) }] }),
+      (messages) =>
+        call("create_helpers", { agents: [{ ...followup(messages), task: "t".repeat(40_000) }] }),
+    );
+    const done = await lead(worker, {}, { followUp: true }, [], source).agent.run("Create", {
+      host: host(),
+    });
+    expect(done).toMatchObject({ status: "failed", error: { code: "subagent_spec_limit" } });
+    expect(children(done.snapshot)).toHaveLength(1);
+    expect(target.calls).toHaveLength(1);
+  });
+
+  it("does not let follow-up admission replace its earlier definition", async () => {
+    const target = wire(text());
+    const worker = defineAgent({ ...base, id: "worker", provider: target.provider });
+    const source = wire(call("create_helpers", { agents: [draft] }), (messages) =>
+      call("create_helpers", { agents: [followup(messages)] }),
+    );
+    const { agent } = lead(
+      worker,
+      {},
+      {
+        followUp: true,
+        prepare: (value) =>
+          value.continues ? { ...value, instructions: "New instructions" } : value,
+      },
+      [],
+      source,
+    );
+    const done = await agent.run("Create", { host: host() });
+    expect(done).toMatchObject({ status: "failed", error: { code: "subagent_policy_failed" } });
+    expect(children(done.snapshot)).toHaveLength(1);
+    expect(target.calls).toHaveLength(1);
+  });
+
+  it("refuses unsafe replay of an interrupted follow-up with hosted tools", async () => {
+    const target = wire(text(), text());
+    const worker = defineAgent({
+      ...base,
+      id: "worker",
+      provider: target.provider,
+      modelSettings: { hostedTools: [{ type: "web_search" }] },
+      recovery: { identity: "hosted", maxAttempts: 2, inferenceOnly: true },
+    });
+    const source = wire(
+      call("create_helpers", { agents: [draft] }),
+      (messages) => call("create_helpers", { agents: [followup(messages)] }),
+      text(),
+    );
+    const { agent } = lead(worker, {}, { followUp: true }, [], source);
+    let checkpoint: RunSnapshot | undefined;
+    await agent.run("Create", {
+      host: {
+        ...host(),
+        checkpoint(saved) {
+          if (children(saved)[1]?.models[0]?.status === "running") checkpoint = saved;
+        },
+      },
+    });
+    expect(checkpoint).toBeDefined();
+    const resumed = await agent.resume(checkpoint, { host: host() });
+    expect(resumed).toMatchObject({ status: "failed", error: { code: "interrupted_operation" } });
+    expect(target.calls).toHaveLength(2);
+  });
+});

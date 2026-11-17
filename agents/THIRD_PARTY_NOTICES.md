@@ -12,7 +12,7 @@ block has a short comment that names its source. Their copyright notices and lic
   `packages/ai-harness/src/session/turn-parts.ts` (`steering` and `joinSteers`) and
   `packages/ai/src/interrupt-serialization.ts`, `packages/ai/src/utilities/tool-result.ts`
   and `packages/ai-compaction/src/index.ts` (`evictOldest`, `summarizeOldest` and checkpoint reuse),
-  plus `packages/ai-harness/src/first-party/agents.ts` (`allowedTools`),
+  plus `packages/ai-harness/src/first-party/agents.ts` (`allowedTools` and child continuation),
   `packages/ai-memory/src/internal/store.ts` (`sameScope`, `lexicalOverlap`, `defaultRenderMemory`)
   and `packages/ai-memory/src/testkit/contract.ts`.
 - Used in: `src/memory.ts`, `src/memory-store.ts` and `test/memory.test.ts`, exact scope matching,
@@ -23,6 +23,9 @@ block has a short comment that names its source. Their copyright notices and lic
 - Used in: `src/subagents.ts`, limiting helper tools to the creator's available tools.
   Changed: exact tool object identity replaces glob matching. Grants and host configuration
   live in child snapshots instead of an in-memory tool map; hidden tools cannot be invoked.
+  Follow-ups keep an admitted helper's history and provider session identity. Changed: an opaque
+  stored id is scoped to one creator and root. Each turn is a journaled child; unfinished work,
+  changed grants and concurrent follow-ups to one helper are refused.
 - Used in: `src/compaction.ts` and `src/run.ts`, a saved model-only view separate from the full
   transcript, usage plus new-message estimates and checkpoint-before-apply.
   Changed: core owns the cut and tool pairing; unread steers stay verbatim. Summary calls use
@@ -342,7 +345,12 @@ Copyright (c) 2025 Kepler Software, Inc. Licensed under Apache 2.0; the full lic
 as `LICENSE-APACHE-2.0`. No code from `ee/` is used.
 
 - Source: [mastra-ai/mastra](https://github.com/mastra-ai/mastra),
-  `packages/core/src/evals/not-scorable.ts` and `packages/core/src/evals/hooks.ts`.
+  `packages/core/src/evals/not-scorable.ts`, `packages/core/src/evals/hooks.ts`
+  and `packages/core/src/agent-controller/tools.ts` (forked helper history).
+- Used in: `src/subagents.ts` and `test/subagents.test.ts`, a fork starts a child from earlier
+  conversation. Changed: task-only is the default. A bounded host filter selects sanitized
+  messages, and the journal saves their exact bytes before execution. Source system prompts,
+  tool rounds and private reasoning do not cross this boundary; approvals are never disabled.
 - Used in: `src/evals/types.ts` and `runner.ts`, cross-copy skip branding and deterministic
   six-byte SHA-256 sampling. Changed: skips require a reason, the brand is providerkit's, hashing
   uses Web Crypto, and scoring has no automatic hook wiring or telemetry.

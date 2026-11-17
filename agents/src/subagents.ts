@@ -1,6 +1,7 @@
 // Adapted from PydanticAI Harness / Vstorm (MIT), sub_agents/_toolset.py and
-// _control.py, and TanStack AI (MIT), first-party/agents.ts. See THIRD_PARTY_NOTICES.md.
-// Changed: versioned host templates, journaled grants, identity-based attenuation and
+// _control.py, and TanStack AI (MIT), first-party/agents.ts. Fork behavior follows Mastra's
+// agent-controller/tools.ts (Apache-2.0). See THIRD_PARTY_NOTICES.md.
+// Changed: versioned host templates, journaled grants, bounded host-selected history and
 // opaque child keys. No detached work, dynamic credentials or second execution loop.
 import { parseToolArgs, type ToolDefinition } from "@providerkit/core";
 import {
@@ -11,9 +12,11 @@ import {
   type DelegationContext,
 } from "./delegation.ts";
 import { jsonBytes } from "./extensions.ts";
-import { isHandoff } from "./handoff.ts";
+import { conversationOnly, isHandoff } from "./handoff.ts";
+import { conversationOf, readInput } from "./input.ts";
 import {
   copyData,
+  childRunId,
   equalData,
   immutableCopy,
   isId,
@@ -26,6 +29,7 @@ import { fail, Halt, isLocalStop, untilAbort } from "./tree.ts";
 import type {
   Agent,
   AgentConfig,
+  AgentMessage,
   DelegationExecution,
   RecordedModelSettings,
   RunDefinition,
@@ -49,7 +53,22 @@ export interface SubagentDraft {
   instructions?: string;
   tools: string[];
   model?: string;
+  fork?: true;
+  /** Opaque helperId from a previous result, not a name or run id. */
+  continues?: string;
   limits?: Partial<RunLimits>;
+}
+
+/** Only selected, already-sanitized messages can cross the fork boundary. */
+export interface SubagentForkPolicy {
+  identity: string;
+  maxMessages: number;
+  maxBytes: number;
+  /** Pure host policy. Return increasing message indices, never model-selected indices. */
+  select: (
+    messages: readonly AgentMessage[],
+    context: SubagentContext,
+  ) => readonly number[] | Promise<readonly number[]>;
 }
 
 export interface SubagentContext {
@@ -61,8 +80,8 @@ export interface SubagentContext {
 }
 
 export type SubagentResult<T = unknown> = { name: string } & (
-  | { status: "completed"; runId: string; output: T }
-  | { status: "failed"; runId: string; error: string }
+  | { status: "completed"; runId: string; helperId: string; output: T }
+  | { status: "failed"; runId: string; helperId: string; error: string }
   | { status: "refused"; error: string }
 );
 
@@ -73,6 +92,10 @@ export interface SubagentToolSpec {
   agent: Agent<unknown> | "self";
   models?: Readonly<Record<string, ModelChoice>>;
   defaultTools?: "none" | "all";
+  /** Omitted means task-only. Forks require host.beforeTool as a live authority check. */
+  fork?: SubagentForkPolicy;
+  /** Continue completed helpers owned by this creator/tool. Requires host.beforeTool. */
+  followUp?: boolean;
   /** Explicit recursive spawning permission. Default 1; tree depth still applies. */
   maxLevels?: number;
   maxPerCall?: number;
@@ -97,10 +120,17 @@ interface SubagentPolicy {
   needsApproval: boolean;
   prepare: boolean;
   self: boolean;
+  fork: Omit<SubagentForkPolicy, "select"> | null;
+  followUp: boolean;
 }
 
 /** Private admission record in the ordinary child snapshot. No functions or credentials. */
 export interface SubagentRecord {
+  /** SDK-issued identity. It grants nothing outside its recorded creator and root. */
+  identity: { id: string; rootRunId: string; creatorRunId: string; originRunId: string };
+  previousRunId?: string;
+  /** Indices into conversationOnly of the creator's settled prefix at admission. */
+  fork?: { indices: number[] };
   tool: string;
   requested: SubagentDraft;
   spec: SubagentDraft;
@@ -169,11 +199,24 @@ function readDraft(raw: unknown, host = false): SubagentDraft {
     (raw.instructions !== undefined && !isId(raw.instructions)) ||
     (raw.tools !== undefined && !isNames(raw.tools)) ||
     (raw.model !== undefined && (!isId(raw.model) || !NAME.test(raw.model))) ||
+    (raw.fork !== undefined && typeof raw.fork !== "boolean") ||
+    (raw.continues !== undefined && !isId(raw.continues)) ||
+    (raw.continues !== undefined &&
+      (raw.fork !== undefined ||
+        (!host &&
+          [raw.instructions, raw.tools, raw.model].some((value) => value !== undefined)))) ||
     Object.keys(raw).some(
       (key) =>
-        !["name", "task", "instructions", "tools", "model", ...(host ? ["limits"] : [])].includes(
-          key,
-        ),
+        ![
+          "name",
+          "task",
+          "instructions",
+          "tools",
+          "model",
+          "fork",
+          "continues",
+          ...(host ? ["limits"] : []),
+        ].includes(key),
     ) ||
     (raw.limits !== undefined && !isRecord(raw.limits))
   )
@@ -205,6 +248,8 @@ function readDraft(raw: unknown, host = false): SubagentDraft {
     tools: raw.tools === undefined ? [] : [...raw.tools],
     ...(raw.instructions !== undefined ? { instructions: raw.instructions } : {}),
     ...(raw.model !== undefined ? { model: raw.model } : {}),
+    ...(raw.fork === true ? { fork: true } : {}),
+    ...(raw.continues !== undefined ? { continues: raw.continues } : {}),
     ...(raw.limits !== undefined ? { limits } : {}),
   };
 }
@@ -213,6 +258,16 @@ function readDraft(raw: unknown, host = false): SubagentDraft {
 export function isSubagentRecord(value: unknown): value is SubagentRecord {
   if (
     !isRecord(value) ||
+    !isRecord(value.identity) ||
+    !isId(value.identity.id) ||
+    !isId(value.identity.rootRunId) ||
+    !isId(value.identity.creatorRunId) ||
+    !isId(value.identity.originRunId) ||
+    (value.previousRunId !== undefined && !isId(value.previousRunId)) ||
+    (value.fork !== undefined &&
+      (!isRecord(value.fork) ||
+        !Array.isArray(value.fork.indices) ||
+        !value.fork.indices.every((index) => Number.isSafeInteger(index) && index >= 0))) ||
     !isId(value.tool) ||
     !isRecord(value.policy) ||
     !isRecord(value.template) ||
@@ -226,12 +281,14 @@ export function isSubagentRecord(value: unknown): value is SubagentRecord {
     !isRecord(value.policy.models) ||
     typeof value.policy.prepare !== "boolean" ||
     typeof value.policy.self !== "boolean" ||
-    typeof value.policy.needsApproval !== "boolean"
+    typeof value.policy.needsApproval !== "boolean" ||
+    typeof value.policy.followUp !== "boolean" ||
+    (value.policy.fork !== null && !isForkPolicy(value.policy.fork))
   )
     return false;
   try {
     return (
-      equalData(value.requested, readDraft(value.requested)) &&
+      equalData(value.requested, readDraft(value.requested, true)) &&
       equalData(value.spec, readDraft(value.spec, true)) &&
       jsonBytes([value.requested, value.spec]) <= SUBAGENT_SPEC_BYTES * 2 &&
       isRecord(value.base)
@@ -241,11 +298,31 @@ export function isSubagentRecord(value: unknown): value is SubagentRecord {
   }
 }
 
+function isForkPolicy(value: unknown): value is Omit<SubagentForkPolicy, "select"> {
+  return (
+    isRecord(value) &&
+    isId(value.identity) &&
+    typeof value.maxMessages === "number" &&
+    count(value.maxMessages) &&
+    typeof value.maxBytes === "number" &&
+    Number.isSafeInteger(value.maxBytes) &&
+    value.maxBytes > 0 &&
+    value.maxBytes <= 1_000_000
+  );
+}
+
 function failure(content: string): ToolResult {
   return { ok: false, kind: "invalid_input", content };
 }
 
 export function subagentTool(spec: SubagentToolSpec): Delegation {
+  if (
+    spec.fork !== undefined &&
+    (!isForkPolicy(spec.fork) || typeof spec.fork.select !== "function")
+  )
+    throw new TypeError(
+      "A fork needs a policy identity, a select function, maxMessages from 1 to 1024 and maxBytes from 1 to 1000000.",
+    );
   if (
     !isId(spec.name) ||
     !isId(spec.description) ||
@@ -254,6 +331,7 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
     (spec.prepare !== undefined && typeof spec.prepare !== "function") ||
     (spec.summarize !== undefined && typeof spec.summarize !== "function") ||
     (spec.needsApproval !== undefined && typeof spec.needsApproval !== "boolean") ||
+    (spec.followUp !== undefined && typeof spec.followUp !== "boolean") ||
     (spec.models !== undefined && !isRecord(spec.models))
   )
     throw new TypeError("A subagent tool needs a name, description and a host agent or self.");
@@ -280,10 +358,19 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
     needsApproval: spec.needsApproval ?? false,
     prepare: !!spec.prepare,
     self: spec.agent === "self",
+    fork: spec.fork
+      ? {
+          identity: spec.fork.identity,
+          maxMessages: spec.fork.maxMessages,
+          maxBytes: spec.fork.maxBytes,
+        }
+      : null,
+    followUp: spec.followUp ?? false,
   });
   if (!count(policy.maxLevels) || !count(policy.maxPerCall) || !count(policy.maxPerRun, true))
     throw new TypeError("Helper counts must be whole numbers up to 1024; only maxPerRun may be 0.");
   const { name, description, prepare, summarize } = spec;
+  const selectFork = spec.fork?.select;
   const target = spec.agent;
   const descriptor: SubagentTool = Object.freeze({
     [MARK]: true as const,
@@ -334,7 +421,16 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
         const available = allowed(parent);
         const result = raw.agents.map((raw) => {
           const draft = readDraft(raw);
-          if (isRecord(raw) && raw.tools === undefined && policy.defaultTools === "all")
+          if (draft.fork && !policy.fork)
+            throw new TypeError("The host has not allowed history forks. Send only a task.");
+          if (draft.continues && !policy.followUp)
+            throw new TypeError("The host has not allowed follow-ups. Start a new helper.");
+          if (
+            !draft.continues &&
+            isRecord(raw) &&
+            raw.tools === undefined &&
+            policy.defaultTools === "all"
+          )
             draft.tools = [...available];
           if (draft.tools.some((tool) => !available.includes(tool)))
             throw new TypeError(
@@ -347,14 +443,107 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
         });
         if (new Set(result.map((draft) => draft.name)).size !== result.length)
           throw new TypeError("Use a different name for each helper in this call.");
+        const targets = result.flatMap((draft) => (draft.continues ? [draft.continues] : []));
+        if (new Set(targets).size !== targets.length)
+          throw new TypeError(
+            "Send only one follow-up per helper in a call. Wait for it to finish before sending another.",
+          );
         return result;
       }
-      function records(parent: RunSnapshot) {
-        return parent.delegations.flatMap((entry) =>
+      function nodes(parent: RunSnapshot, before?: DelegationExecution): RunSnapshot[] {
+        const ordered = parent.models.flatMap((model) =>
+          model.status === "completed"
+            ? model.tools.flatMap((tool) => {
+                const entry = parent.delegations.find((entry) => entry.operationId === tool.id);
+                return entry ? [entry] : [];
+              })
+            : [],
+        );
+        const entries = before ? ordered.slice(0, ordered.indexOf(before)) : ordered;
+        return entries.flatMap((entry) =>
           entry.children.flatMap((child) =>
-            child.snapshot.subagent?.tool === name ? [child.snapshot.subagent] : [],
+            child.snapshot.subagent?.tool === name ? [child.snapshot] : [],
           ),
         );
+      }
+      function records(parent: RunSnapshot) {
+        return nodes(parent).flatMap((node) => (node.subagent ? [node.subagent] : []));
+      }
+      function previous(
+        parent: RunSnapshot,
+        journal: DelegationExecution,
+        requested: SubagentDraft,
+      ): RunSnapshot {
+        const node = nodes(parent, journal)
+          .reverse()
+          .find((node) => node.subagent?.identity.id === requested.continues);
+        if (
+          !node?.subagent ||
+          node.subagent.spec.name !== requested.name ||
+          node.subagent.identity.creatorRunId !== parent.runId ||
+          node.subagent.identity.rootRunId !== parent.tree.runId
+        )
+          throw new TypeError(
+            "Use the helperId and name returned by this tool in this run. Other helpers cannot be continued here.",
+          );
+        if (
+          !equalData(node.subagent.policy, policy) ||
+          !equalData(node.subagent.template, template()[AGENT_RUNTIME].configuration())
+        )
+          throw new TypeError(
+            "The helper's host template changed. Restore its admitted configuration before continuing.",
+          );
+        if (
+          node.state.status !== "completed" ||
+          node.models.some(
+            (model) =>
+              model.status !== "completed" ||
+              model.tools.some((tool) => tool.status !== "completed"),
+          )
+        )
+          throw new TypeError(
+            "This helper has unfinished or uncertain work. Resolve its requests or reconcile it on the host before continuing.",
+          );
+        return node;
+      }
+      function followupSpec(prior: SubagentRecord, task: string, helperId: string): SubagentDraft {
+        const { fork: _fork, ...original } = prior.spec;
+        return { ...original, task, continues: helperId };
+      }
+      function forkHistory(
+        parent: RunSnapshot,
+        journal: DelegationExecution,
+        indices: readonly number[],
+      ): AgentMessage[] {
+        const bound = policy.fork;
+        const position = parent.models.findIndex(
+          (model) =>
+            model.status === "completed" &&
+            model.tools.some((tool) => tool.id === journal.operationId),
+        );
+        const source = conversationOnly(conversationOf(parent, position));
+        if (
+          !bound ||
+          position < 0 ||
+          !Array.isArray(indices) ||
+          indices.length > bound.maxMessages ||
+          indices.some(
+            (index, i) =>
+              !Number.isSafeInteger(index) ||
+              index < 0 ||
+              index >= source.length ||
+              index <= (indices[i - 1] ?? -1),
+          )
+        )
+          throw new TypeError(
+            "The fork must select an ordered subset within the host's message limit.",
+          );
+        const history = indices.flatMap((index) => (source[index] ? [source[index]] : []));
+        if (jsonBytes(history) > bound.maxBytes)
+          throw new TypeError(
+            "The selected fork history exceeds the host's byte limit. Select fewer messages.",
+          );
+        return history;
       }
       function check(parent: RunSnapshot, journal: DelegationExecution): void {
         const runtime = template()[AGENT_RUNTIME];
@@ -406,7 +595,59 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
             throw new TypeError(
               "The saved helper definition or capabilities changed. Restore its host configuration before resuming.",
             );
-          checkPrepared(record.requested, record.spec, parent);
+          const prior = record.requested.continues
+            ? previous(parent, journal, record.requested)
+            : undefined;
+          if (
+            record.identity.rootRunId !== parent.tree.runId ||
+            record.identity.creatorRunId !== parent.runId ||
+            (prior
+              ? !equalData(record.identity, prior.subagent?.identity) ||
+                record.previousRunId !== prior.runId
+              : record.previousRunId !== undefined ||
+                record.identity.originRunId !== child.snapshot.runId)
+          )
+            throw new TypeError(
+              "The helper identity does not belong to this creator or conversation.",
+            );
+          let history: AgentMessage[] = [];
+          if (prior?.subagent) {
+            if (
+              !policy.followUp ||
+              jsonBytes(record.spec) > SUBAGENT_SPEC_BYTES ||
+              record.fork ||
+              !equalData(
+                record.spec,
+                followupSpec(prior.subagent, record.spec.task, prior.subagent.identity.id),
+              ) ||
+              !equalData(record.base, prior.subagent.base)
+            )
+              throw new TypeError("A follow-up must keep its helper's admitted definition.");
+            // Only the new task may be rewritten by host admission policy.
+            checkPrepared(
+              record.requested,
+              { ...record.requested, task: record.spec.task },
+              parent,
+            );
+            history = conversationOf(prior);
+          } else {
+            checkPrepared(record.requested, record.spec, parent);
+            if (record.spec.fork) {
+              if (!record.fork) throw new TypeError("Missing admitted fork history.");
+              history = forkHistory(parent, journal, record.fork.indices);
+            } else if (record.fork)
+              throw new TypeError("A task-only helper cannot carry fork history.");
+          }
+          // Child creation repairs reused tool-call ids. Compare the same canonical input,
+          // not the predecessor's unchanged journal.
+          const start = runtime.freeze(
+            readInput(
+              { messages: [...history, { role: "user", content: record.spec.task }] },
+              "trusted",
+            ),
+          );
+          if (record.spec.tools.some((name) => !allowed(parent).includes(name)))
+            throw new TypeError("The helper's tools are no longer granted by its creator.");
           const expectedNames = runtime.tools
             .map((tool) => tool.name)
             .filter((name) => record.spec.tools.includes(name));
@@ -425,8 +666,8 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
             child.snapshot.agentId !== template().id ||
             child.snapshot.version !== template().version ||
             child.snapshot.session !== undefined ||
-            child.snapshot.history.length !== 0 ||
-            child.snapshot.input !== record.spec.task ||
+            !equalData(child.snapshot.history, start.history) ||
+            child.snapshot.input !== start.input ||
             !equalData(child.snapshot.limits, subagentLimits(runtime.limits, record.spec.limits)) ||
             !equalData(record.base.enabledTools, expectedNames) ||
             !equalData(record.base.modelSettings, expectedSettings) ||
@@ -445,9 +686,11 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
             );
         }
         const admitted = records(parent);
+        const origins = admitted.filter((record) => !record.previousRunId);
         if (
           admitted.length > policy.maxPerRun ||
-          new Set(admitted.map((record) => record.spec.name)).size !== admitted.length
+          new Set(origins.map((record) => record.spec.name)).size !== origins.length ||
+          new Set(origins.map((record) => record.identity.id)).size !== origins.length
         )
           throw new TypeError(
             "The saved helpers exceed this tool's per-run limit or reuse a name.",
@@ -463,6 +706,10 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
           jsonBytes(prepared) > SUBAGENT_SPEC_BYTES ||
           prepared.name !== requested.name ||
           prepared.model !== requested.model ||
+          prepared.fork !== requested.fork ||
+          prepared.continues !== requested.continues ||
+          (requested.continues !== undefined &&
+            !equalData({ ...prepared, task: requested.task }, requested)) ||
           prepared.tools.some(
             (name) => !requested.tools.includes(name) || !allowed(parent).includes(name),
           )
@@ -532,6 +779,23 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
                       },
                       task: { type: "string" },
                       instructions: { type: "string" },
+                      ...(policy.fork
+                        ? {
+                            fork: {
+                              type: "boolean",
+                              description: "Ask the host to share approved earlier messages.",
+                            },
+                          }
+                        : {}),
+                      ...(policy.followUp
+                        ? {
+                            continues: {
+                              type: "string",
+                              description:
+                                "The helperId returned by this tool. Pass only name, task and continues for a follow-up.",
+                            },
+                          }
+                        : {}),
                       tools: {
                         type: "array",
                         items: { type: "string", ...(grants.length ? { enum: grants } : {}) },
@@ -617,9 +881,19 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
             return failure(
               `There is room for ${Math.max(0, remaining)} more helpers. Request fewer helpers or do the work here.`,
             );
+          const continuations = new Map<string, RunSnapshot>();
+          try {
+            for (const item of items)
+              if (item.continues)
+                continuations.set(item.continues, previous(parent, journal, item));
+          } catch (error) {
+            if (journal.children.length) throw error;
+            return failure(error instanceof Error ? error.message : "Invalid helper follow-up.");
+          }
           if (
             items.some(
               (item, index) =>
+                !item.continues &&
                 !journal.children.some((child) => child.key === `helper-${index + 1}`) &&
                 existing.some((record) => record.spec.name === item.name),
             )
@@ -628,37 +902,98 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
           const handles = [];
           const results: SubagentResult[] = [];
           for (const [index, requested] of items.entries()) {
-            const saved = journal.children.find((child) => child.key === `helper-${index + 1}`);
+            const key = `helper-${index + 1}`;
+            const saved = journal.children.find((child) => child.key === key);
+            const prior = requested.continues ? continuations.get(requested.continues) : undefined;
+            const admissionContext: SubagentContext = {
+              call: immutableCopy(request),
+              depth: scope.depth + 1,
+              level,
+              grantable: Object.freeze(allowed(parent)),
+              signal,
+            };
             let admitted = saved?.snapshot.subagent?.spec;
             if (!admitted) {
-              const prepared = await prepareDraft(requested, parent, {
-                call: immutableCopy(request),
-                depth: scope.depth + 1,
-                level,
-                grantable: Object.freeze(allowed(parent)),
-                signal,
-              });
+              const prepared = await prepareDraft(requested, parent, admissionContext);
               if ("refuse" in prepared) {
                 results.push({ name: requested.name, status: "refused", error: prepared.refuse });
                 continue;
               }
-              admitted = prepared;
+              admitted = prior?.subagent
+                ? followupSpec(prior.subagent, prepared.task, prior.subagent.identity.id)
+                : prepared;
             }
-            const key = `helper-${index + 1}`;
+            if (jsonBytes(admitted) > SUBAGENT_SPEC_BYTES)
+              fail(
+                "subagent_spec_limit",
+                `The helper's saved definition and new task exceed ${SUBAGENT_SPEC_BYTES} UTF-8 JSON bytes. Send a shorter task.`,
+              );
+            let fork = saved?.snapshot.subagent?.fork;
+            let history = prior ? conversationOf(prior) : [];
+            if (admitted.fork) {
+              if (!fork) {
+                if (!selectFork) throw new TypeError("Missing host fork policy.");
+                try {
+                  const selected = await untilAbort(
+                    Promise.resolve(
+                      selectFork(
+                        immutableCopy(conversationOnly(context.conversation)),
+                        Object.freeze(admissionContext),
+                      ),
+                    ),
+                    signal,
+                  );
+                  history = forkHistory(parent, journal, selected);
+                  fork = { indices: [...selected] };
+                } catch {
+                  signal.throwIfAborted();
+                  fail(
+                    "subagent_policy_failed",
+                    "The fork policy failed or exceeded its limits. Check the host's history filter before trying again.",
+                  );
+                }
+              } else history = forkHistory(parent, journal, fork.indices);
+            }
+            // New history use is an authority boundary, not permission inferred from prose.
+            // Also recheck on replay before an unfinished child can continue.
+            if (admitted.fork || prior) {
+              await internal.recheck(holder(), parent);
+              if (prior) await internal.recheck(template(), prior);
+            }
+            const identity = saved?.snapshot.subagent?.identity ??
+              prior?.subagent?.identity ?? {
+                id: crypto.randomUUID(),
+                rootRunId: parent.tree.runId,
+                creatorRunId: parent.runId,
+                originRunId: childRunId(journal.operationId, key),
+              };
             const creation: SubagentCreation = {
               record: {
+                identity,
+                ...(prior ? { previousRunId: prior.runId } : {}),
+                ...(fork ? { fork } : {}),
                 tool: name,
                 requested,
                 spec: admitted,
                 policy,
                 template: template()[AGENT_RUNTIME].configuration(),
               },
-              ...(policy.self ? { source: parent.definition } : {}),
+              ...(prior?.subagent
+                ? { source: prior.subagent.base }
+                : policy.self
+                  ? { source: parent.definition }
+                  : {}),
             };
-            const child = internal.child(key, template(), admitted.task, creation);
+            const child = internal.child(
+              key,
+              template(),
+              { messages: [...history, { role: "user", content: admitted.task }] },
+              creation,
+            );
             handles.push({ index: results.length, child });
             results.push({
               name: requested.name,
+              helperId: identity.id,
               runId: child.runId,
               status: "failed",
               error: "The helper has not finished.",
@@ -669,13 +1004,15 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
             const slot = handles[index]?.index;
             if (slot === undefined) throw new Error("Missing helper result position.");
             const previous = results[slot];
-            if (!previous) throw new Error("Missing helper result.");
+            if (!previous || previous.status === "refused")
+              throw new Error("Missing helper result.");
             if (outcome.status === "completed") {
               // Each template's runtime has already checked its own output contract.
               if (outcome.snapshot.state.status !== "completed")
                 throw new Error("Invalid helper outcome.");
               results[slot] = {
                 name: previous.name,
+                helperId: previous.helperId,
                 runId: outcome.runId,
                 status: "completed",
                 output: outcome.snapshot.state.candidate,
@@ -689,6 +1026,7 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
               }
               results[slot] = {
                 name: previous.name,
+                helperId: previous.helperId,
                 runId: outcome.runId,
                 status: "failed",
                 error:

@@ -33,6 +33,7 @@ export type {
   SubagentToolSpec,
   SubagentDraft,
   SubagentContext,
+  SubagentForkPolicy,
   SubagentResult,
   SubagentRecord,
 } from "./subagents.ts";

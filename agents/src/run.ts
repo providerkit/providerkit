@@ -1836,7 +1836,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             ? { onRateLimit: options.modelSettings.onRateLimit }
             : {}),
           signal,
-          sessionId: summary ? operationId : snapshot.runId,
+          sessionId: summary
+            ? operationId
+            : (snapshot.subagent?.identity.originRunId ?? snapshot.runId),
         });
         for await (const chunk of stream) {
           active();
@@ -2102,6 +2104,10 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     const record = subagent
       ? { ...copyData(subagent.record), base: copyData(resolved) }
       : undefined;
+    if (subagent?.record.previousRunId && !equalData(resolved, subagent.source))
+      throw new TypeError(
+        "The helper's admitted definition changed. Restore its original configuration before continuing.",
+      );
     if (spec)
       resolved.instructions = subagentInstructions(resolved.instructions, spec.instructions);
     const childLimits = spec ? subagentLimits(limits, spec.limits) : limits;
@@ -2144,6 +2150,37 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     tools: Object.freeze(registeredTools),
     enabledTools: Array.isArray(enabledTools) ? Object.freeze([...enabledTools]) : undefined,
     limits: immutableCopy(limits),
+    async checkTools(snapshot, options) {
+      const signal = options.signal ?? new AbortController().signal;
+      const current = checkNames(
+        typeof enabledTools === "function"
+          ? await untilAbort(
+              Promise.resolve(
+                enabledTools(
+                  Object.freeze({
+                    agentId: id,
+                    version,
+                    runId: snapshot.runId,
+                    ...immutableCopy({ history: snapshot.history, input: snapshot.input }),
+                    context: Object.freeze({ ...options.context }),
+                    signal,
+                  }),
+                ),
+              ),
+              signal,
+            )
+          : (enabledTools ?? names),
+      );
+      if (
+        snapshot.definition.enabledTools.some(
+          (name) => name !== RESULT_TOOL_NAME && !current.includes(name),
+        )
+      )
+        fail(
+          "subagent_grant_changed",
+          "The host revoked a helper capability. Obtain fresh authorization before starting different work.",
+        );
+    },
     configuration() {
       const { onActivity: _activity, onRateLimit: _rateLimit, ...modelSettings } = settings;
       return immutableCopy({

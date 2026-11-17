@@ -901,8 +901,9 @@ const explainer = defineAgent({
 ```
 
 A model call to `create_helpers` takes `{ agents: [{ name, task, instructions?, tools?, model? }] }`.
-`name` is private text: 1 to 64 letters, digits, `_` or `-`, unique among helpers admitted by this
-creation tool in this run. A new helper needs a new name. `tools` contains registered tool names. Omitted tools means
+`name` is private text: 1 to 64 letters, digits, `_` or `-`, unique among newly created helpers
+admitted by this creation tool in this run. A new helper needs a new name. A follow-up uses its
+helper's existing name and returned `helperId`, as described below. `tools` contains registered tool names. Omitted tools means
 none; `defaultTools: "all"` grants the currently available set. A tool must be the **same object**
 on both the creator and the template, and enabled on the creator. Two tools with the same name
 are not interchangeable. The template's own tool-selection policy still applies.
@@ -914,10 +915,77 @@ in one turn still run one after another, like other delegations.
 
 Use `agent: "self"` to reuse the creator's recorded instructions and model settings. Its
 instruction callbacks do not run again. Explicit templates resolve their own callbacks once.
-The helper gets no parent history, session or inbox. Its host instructions come first, followed
-by the model-written instructions. These instructions are not permission to use a tool.
-Forking a conversation and continuing a helper by name are not exposed by this tool. Use a
-host-defined delegation when you need to choose or forward history.
+The helper gets no parent history by default, and never gets the parent's session or inbox.
+Its host instructions come first, followed by the model-written instructions. These instructions
+are not permission to use a tool.
+
+### Share approved history with a helper
+
+A model may request `fork: true` only when the host configures `fork`:
+
+```ts
+subagentTool({
+  name: "create_helpers",
+  description: "Start helpers for separate parts of the question.",
+  agent: helper,
+  fork: {
+    identity: "public-history-1",
+    maxMessages: 4,
+    maxBytes: 8_000,
+    select: (messages) =>
+      messages.flatMap((message, index) => (isApprovedForHelpers(message) ? [index] : [])),
+  },
+});
+```
+
+`isApprovedForHelpers` is your host's data policy, not a model judgment. `select` receives a frozen
+copy of `conversationOnly` from before the creation call. System instructions, tool calls,
+tool results, private reasoning and provider-owned fields have already been removed. User text,
+attachments and assistant text can still be private; select only messages this helper may read.
+Return their indices in increasing order. The model cannot supply indices or a filter.
+
+Both bounds are required: up to 1,024 messages and 1,000,000 UTF-8 JSON bytes of selected history.
+Too much data fails closed; it is not silently cut. The SDK saves the selected indices and exact
+history before the helper runs. Replay uses that record without calling `select` again and
+refuses changed source messages or history. Change `identity` when your filter changes.
+The template supplies the system instructions, just as for a task-only helper. A fork never
+adds tools, copies an approval or changes memory scope. References still use `host.loadMedia`.
+
+### Send a follow-up to the same helper
+
+Set `followUp: true` on the creation tool. A completed result includes an opaque `helperId`.
+The model can then call the same tool with:
+
+```ts
+{
+  agents: [{ name: "reads", continues: helperId, task: "Give one search example." }];
+}
+```
+
+`helperId` comes from the earlier result. A guessed name, a run id or an id from another root,
+creator or creation tool is refused. Only a completed helper with settled operations can receive
+a follow-up. A suspended helper needs its explicit request answers through `resume`; a failed,
+cancelled or interrupted helper cannot be restarted through `continues`.
+
+Pass only `name`, `task` and `continues`. Instructions, tools, model settings and limits stay as
+admitted. `prepare` may rewrite the new task or refuse it, not change that definition. The new
+child reads the latest completed conversation, including settled tool rounds, without invoking
+those tools again. Its provider session id stays the original helper's run id. It never loads
+or appends an application session, and does not carry prior approvals into new operations.
+Each follow-up has its own run and operation ids, so accounting does not count earlier work twice.
+
+Forks and follow-ups require `host.beforeTool`. Check the authenticated owner, current access
+and the root's execution lease there. The SDK rechecks current tool-selection policy and memory
+access revisions before using earlier history. A revoked grant, changed template or inaccessible
+memory fails closed. Model-written prose cannot approve these checks or choose another scope.
+For stored runs, keep the existing `authorizeResume` check and exclude concurrent root attempts.
+A stored helper id is a reference, not permission to run arbitrary saved work.
+
+Two follow-ups to one helper in a batch are refused before admission. Separate calls execute
+serially and use the latest settled turn. There is no second conversation store or background
+scheduler. Each new follow-up consumes another child slot and `maxPerRun` admission, uses the
+same local limits, and shares the root's model-call, tool serialization and time boundaries.
+Neither a new turn nor an approval wait resets the root deadline.
 
 ### Bound helper creation
 
@@ -963,20 +1031,24 @@ resume. A saved allowlist is not current permission.
 
 A helper's own model/result failure or local limit becomes a `failed` result for the parent.
 Suspension, cancellation, tree-wide limits, guard failures and host/journal failures keep their
-existing stopping behavior. Results are `{ name, runId, status: "completed", output }`,
-`{ name, runId, status: "failed", error }` or `{ name, status: "refused", error }`.
+existing stopping behavior. Results are `{ name, helperId, runId, status: "completed", output }`,
+`{ name, helperId, runId, status: "failed", error }` or `{ name, status: "refused", error }`.
 `output` is the template's checked, JSON-serializable candidate, not a validator's transformed
 application object. `summarize(results)` is an optional pure callback; by default, the parent
 gets JSON in declaration order. The tool succeeds when at least one helper completes.
 
-The private record lives at `delegations[].children[].snapshot.subagent`. The existing `child`
+The private record lives at `delegations[].children[].snapshot.subagent`. Its `identity` binds the
+opaque id to the root, creator and original helper run. A follow-up records `previousRunId`;
+a fork records its selected indices. Earlier helper records without these identity and policy
+fields are refused, not converted. The existing `child`
 event adds only `subagent: true`; its key is positional (`helper-1`, for example), and its agent
 id belongs to the host template. It carries no model-written name, instructions or task. Display
 helpers under a host-written label. Only expose a model-written name or output after your own
 explicit display check. Raw tool events, snapshots and request records still contain private
 prompts and must stay on the server.
 
-See [the offline helper example](examples/subagents.ts). It creates two helpers without an API key.
+See [the offline helper example](examples/subagents.ts). It creates two helpers, shares approved
+history with one and sends it a follow-up. It needs no API key.
 
 ## Hand off a conversation
 
