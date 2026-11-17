@@ -6,10 +6,10 @@ Entry point for AI agents working on this repo.
 not agent orchestration, prompts, memory or graphs.
 
 `agents/` is the separate, experimental `@providerkit/agents` package. It uses core's public exports
-for a shared agent loop and specialist execution. Application prompts, authorization and retention
-stay with the app; durable execution uses the host's existing run service, not a new scheduler.
+for agent execution and workflows. Application prompts, authorization and retention stay with
+the app; durable execution uses the host's existing run service, not a new scheduler.
 
-`react/` is the separate, experimental `@providerkit/react` package, still in development. It
+`react/` is the separate, experimental `@providerkit/react` package. It
 provides browser state, React hooks and optional chat components. The display protocol is
 React-free; the server projector exposes only allowlisted display data. Components receive plain
 data and callbacks, so an app can keep its existing state owner. Tailwind is not required.

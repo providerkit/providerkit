@@ -2266,6 +2266,16 @@ unknown billing. Remote requests are not counted as local model or tool calls, a
 charges are not treated as free. Peer endpoints, callbacks and task/context handles stay out of
 these report records. An accepted cancellation request is not proof that the peer stopped.
 
+## Upgrade from 0.1
+
+Version 0.2 requires `@providerkit/core` 0.33.1 or newer within 0.33. Finish outstanding 0.1 runs
+before upgrading: stored format-2 snapshots are not accepted by the format-3 runtime.
+
+The request API replaces the single approval decision with request-keyed answers and host
+claims. Update your authorization and continuation handlers using [the request contract](#asking-the-person);
+model or browser data cannot supply those grants. Execution trees now contain `agent`, `workflow`
+and `remote` nodes. Check `kind` before reading model journals or workflow steps.
+
 ## Development
 
 From the repository root, run `bun install` and `bun run build`. Then, from `agents/`:
