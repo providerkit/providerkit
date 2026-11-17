@@ -62,7 +62,7 @@
     "release": "bun publish --access public"
   },
   "peerDependencies": {
-    "@providerkit/core": "^0.33.0",
+    "@providerkit/core": "^0.33.1",
     "@gusnips/server": "^0.19.0 || ^0.20.0 || ^0.21.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@opentelemetry/api": "^1.10.0",
