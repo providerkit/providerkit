@@ -2174,8 +2174,9 @@ next turn. The [offline example](examples/evals.ts) shows multiple turns, tool m
 approval answers. From this repository, run it with `bun run agents/examples/evals.ts`.
 
 Keep scripted answers and tool mocks in `drivers`, separate from stored case data. Answers
-match the request actually issued, including its agent, tool, question and child path. They do
-not turn model-written text into permission. `stub` replaces both tool execution paths and
+match the actual request. Select its agent/tool or workflow/step; question keys, original input
+and child paths can narrow the match. They do not turn model-written text into permission.
+`stub` replaces both tool execution paths and
 backend validation; it does not prove that the replaced backend checks work.
 
 Simulated users need an explicit provider and `allowSimulation: true`. Model judges, including
@@ -2192,6 +2193,11 @@ supported completed runs without executing them, and refuses input timing it can
 The resulting golden case contains private run data and needs review before sharing. `createLiveScorer` scores only runs
 the host explicitly submits; it adds no queue or telemetry. The host owns sampling deduplication,
 storage and retention.
+
+`remoteAttempts` contains only remote operation identities, send/cancel actions, status and
+unknown billing. Remote requests are not counted as local model or tool calls, and unknown
+charges are not treated as free. Peer endpoints, callbacks and task/context handles stay out of
+these report records. An accepted cancellation request is not proof that the peer stopped.
 
 ## Development
 
