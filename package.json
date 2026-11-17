@@ -9,13 +9,14 @@
   "workspaces": [
     "core",
     "agents",
+    "react",
     "site"
   ],
   "scripts": {
-    "build": "bun run --filter @providerkit/core build && bun run --filter @providerkit/agents build",
-    "test": "bun run --filter @providerkit/core test && bun run --filter @providerkit/agents test",
+    "build": "bun run --filter @providerkit/core build && bun run --filter @providerkit/agents build && bun run --filter @providerkit/react build",
+    "test": "bun run --filter @providerkit/core test && bun run --filter @providerkit/agents test && bun run --filter @providerkit/react test",
     "typecheck": "bun run build && bun run --filter '*' typecheck",
-    "lint": "oxlint core/src core/test core/scripts agents/src agents/test agents/examples site/src brand",
+    "lint": "oxlint core/src core/test core/scripts agents/src agents/test agents/examples react/src react/test site/src brand",
     "format": "oxfmt",
     "dev:site": "bun run build && bun run --filter providerkit-site dev",
     "build:site": "bun run build && bun run --filter providerkit-site build",
@@ -23,6 +24,7 @@
     "format:check": "oxfmt --check",
     "release": "bun run --filter @providerkit/core release",
     "release:agents": "bun run --filter @providerkit/agents release",
+    "release:react": "bun run --filter @providerkit/react release",
     "release:patch": "bun run --filter @providerkit/core release:patch",
     "release:minor": "bun run --filter @providerkit/core release:minor",
     "release:major": "bun run --filter @providerkit/core release:major",

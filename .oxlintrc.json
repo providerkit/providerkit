@@ -13,6 +13,35 @@
   "overrides": [
     {
       "files": ["agents/src/**/*.ts"],
+      "excludeFiles": ["agents/src/quickjs.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["../**/core/**", "@providerkit/core/src/**", "@providerkit/core/dist/**"],
+                "message": "Agents use core's public exports, never its private files."
+              },
+              {
+                "group": [
+                  "quickjs-emscripten*",
+                  "quickjs-emscripten*/**",
+                  "@jitl/**",
+                  "**/quickjs",
+                  "**/quickjs.ts",
+                  "**/quickjs.js",
+                  "@providerkit/agents/code-mode/quickjs"
+                ],
+                "message": "Only the optional QuickJS driver imports its engine. Use CodeDriver from code-driver.ts."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["agents/src/quickjs.ts"],
       "rules": {
         "no-restricted-imports": [
           "error",
@@ -28,7 +57,30 @@
       }
     },
     {
-      "files": ["site/**/*.tsx"],
+      "files": ["react/src/**/*.ts", "react/src/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../**/core/**",
+                  "../**/agents/**",
+                  "@providerkit/core/src/**",
+                  "@providerkit/core/dist/**",
+                  "@providerkit/agents/src/**",
+                  "@providerkit/agents/dist/**"
+                ],
+                "message": "React uses the public exports of core and agents, never their private files."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["site/**/*.tsx", "react/**/*.ts", "react/**/*.tsx"],
       "rules": {
         "react/purity": "off",
         "react-hooks-js/purity": "error",

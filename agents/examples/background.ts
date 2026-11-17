@@ -4,10 +4,13 @@ import { createBackgroundAgent, type BackgroundOptions } from "@providerkit/agen
 
 // The fake provider needs no model account. Supply your existing run service, durable queue
 // and trusted policy. The policy authenticates approvals; this example does not grant them.
+// The optional session factory returns a conversation after checking that the owner may use
+// it: an id from a request is not authorization.
 export function backgroundExample(
   runs: ReturnType<typeof createRuns>,
   enqueue: BackgroundOptions<string>["enqueue"],
   policy: BackgroundOptions<string>["policy"],
+  session?: BackgroundOptions<string>["session"],
 ) {
   const agent = defineAgent({
     id: "background-example",
@@ -21,7 +24,14 @@ export function backgroundExample(
       },
     },
   });
-  return createBackgroundAgent({ agent, kind: "background-example-v1", runs, enqueue, policy });
+  return createBackgroundAgent({
+    agent,
+    kind: "background-example-v1",
+    runs,
+    enqueue,
+    policy,
+    ...(session ? { session } : {}),
+  });
 }
 
 // After authentication:
@@ -29,11 +39,15 @@ export function backgroundExample(
 // const { id } = await jobs.start(authenticatedOwner, "Run the example");
 // const saved = await jobs.wait(authenticatedOwner, id, observerSignal);
 // saved.status is the host segment status. Read saved.outcome.status for the agent result.
+// In a conversation, pass its id. start reads the history in this request; the worker appends
+// the turn when the run settles, and saved.outcome.session says whether that worked:
+// const { id } = await jobs.start(authenticatedOwner, "Continue the plan.", { sessionId });
+// saved.snapshot holds the whole conversation. Keep it, and every raw event, on the server.
 // Aborting observerSignal stops waiting, not the worker. To stop the whole tree:
 // await jobs.cancel(authenticatedOwner, id);
-// For a suspended outcome, send authenticated decision evidence, never a client snapshot:
-// const next = await jobs.resume(authenticatedOwner, id, decisionEvidence);
-// The worker claims that decision under its lease. Check next.id for acceptance or failure.
+// For a suspended outcome, send authenticated answer evidence, never a client snapshot:
+// const next = await jobs.resume(authenticatedOwner, id, { [requestId]: evidence });
+// The worker claims those answers under its lease. Check next.id for acceptance or failure.
 // Observe next.id: continuation creates a new host row but keeps the logical agent run id.
 
 // The host's queue worker awaits runs.drive(job.runId, jobs.handlers).

@@ -1,3 +1,5 @@
+import { evidenceFor, firstRequest } from "./fixtures/requests.ts";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   defineTool,
@@ -108,6 +110,7 @@ describe("portable agent lifecycle", () => {
       },
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           expect(Object.isFrozen(snapshot.models)).toBe(true);
           checkpoints.push(structuredClone(snapshot));
         },
@@ -121,10 +124,11 @@ describe("portable agent lifecycle", () => {
     expect(events).toEqual(["model_chunk", "model_chunk", "model_chunk", "state"]);
     expect(result.usage).toMatchObject(usage);
     expect(result.treeUsage).toEqual(result.usage);
-    expect(result.snapshot.format).toBe(2);
-    await expect(
-      agent.resume({ ...result.snapshot, format: 1 }, { host: { authorizeResume } }),
-    ).rejects.toThrow("Invalid agent snapshot");
+    expect(result.snapshot.format).toBe(3);
+    for (const format of [1, 2])
+      await expect(
+        agent.resume({ ...result.snapshot, format }, { host: { authorizeResume } }),
+      ).rejects.toThrow("Invalid agent snapshot");
     expect(checkpoints[0]?.models[0]?.status).toBe("running");
     expect(checkpoints.at(-1)?.state.status).toBe("completed");
     const restored = await agent.resume(JSON.parse(JSON.stringify(result.snapshot)), {
@@ -277,6 +281,7 @@ describe("portable agent lifecycle", () => {
     const interrupted = await agent.run("Read", {
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           checkpoint = structuredClone(snapshot);
           const last = snapshot.models.at(-1);
           if (last?.status === "completed" && last.tools[0]?.status === "completed")
@@ -399,7 +404,8 @@ describe("portable agent lifecycle", () => {
     expect(result.status).toBe("cancelled");
     expect(later).not.toHaveBeenCalled();
     expect(wire.requests).toBe(1);
-    expect(result.history).toHaveLength(2);
+    // The unfinished tool round stays out; outcome.history carries no system prompt (0.2.0).
+    expect(result.history).toEqual([{ role: "user", content: "Work" }]);
     const cancelled = await agent.run("Work", { signal: controller.signal });
     expect(cancelled.status).toBe("cancelled");
     expect(wire.requests).toBe(1);
@@ -425,13 +431,15 @@ describe("portable agent lifecycle", () => {
     expect(result.snapshot.models[0]?.status).toBe("running");
   });
 
-  it.each(["turns", "toolCalls"] as const)("admits no work past the %s limit", async (limit) => {
+  it.each(["turns", "toolCalls"] as const)("executes no tools past the %s limit", async (limit) => {
     const run = vi.fn(async () => "done");
     const wire = fake([
       calls(
         call("read", "{}", "first"),
         ...(limit === "toolCalls" ? [call("read", "{}", "second")] : []),
       ),
+      // The 0.2.0 final tool-free turn is allowed to answer, never to run another tool.
+      calls(call("read", "{}", "past-limit")),
     ]);
     const agent = defineAgent({
       ...base,
@@ -443,7 +451,7 @@ describe("portable agent lifecycle", () => {
       status: "limited",
       limit,
     });
-    expect(wire.requests).toBe(1);
+    expect(wire.requests).toBe(limit === "turns" ? 2 : 1);
     expect(run).toHaveBeenCalledTimes(1);
   });
 
@@ -466,6 +474,7 @@ describe("portable agent lifecycle", () => {
     const recheck = vi.fn();
     const host: AgentHost & { authorizeResume: NonNullable<AgentHost["authorizeResume"]> } = {
       checkpoint(snapshot) {
+        assertAgent(snapshot);
         authoritative = structuredClone(snapshot);
       },
       authorizeResume(snapshot) {
@@ -473,25 +482,29 @@ describe("portable agent lifecycle", () => {
         if (JSON.stringify(snapshot) !== JSON.stringify(authoritative))
           throw new Error("Stale or unauthorized snapshot");
       },
-      approvalContext(request) {
-        expect(Object.isFrozen(request.arguments.nested)).toBe(true);
+      prepareRequest(request) {
+        assertCall(request);
+        expect(Object.isFrozen(request.call.arguments.nested)).toBe(true);
         return {
-          actorId: "actor",
-          resource: { id: "record", version: "4" },
-          expiresAt: Date.now() + 60_000,
+          scope: {
+            actorId: "actor",
+            resource: { id: "record", version: "4" },
+            expiresAt: Date.now() + 60_000,
+          },
         };
       },
-      resolveApproval(approval, decision) {
+      resolveRequest(approval, decision) {
+        assertCall(approval);
         expect(Object.isFrozen(approval.scope.resource)).toBe(true);
-        expect(approval.request.call.id).toBe("wire-exact");
-        if (decision !== "signed-ticket") return "pending";
+        expect(approval.call.call.id).toBe("wire-exact");
+        if (decision !== "signed-ticket") return { type: "pending" };
         if (consumed) throw new Error("Decision already consumed");
         consumed = true;
-        return "approved";
+        return { type: "approve" };
       },
       beforeTool(request, approval) {
         recheck(request.operationId);
-        expect(approval?.scope.resource.version).toBe("4");
+        expect(approval?.request.scope.resource.version).toBe("4");
         expect(Object.isFrozen(request.call)).toBe(true);
       },
     };
@@ -505,26 +518,32 @@ describe("portable agent lifecycle", () => {
     if (!pendingCall || corrupted.state.status !== "suspended")
       throw new Error("Expected a pending approval");
     pendingCall.arguments = '{"nested":';
-    corrupted.state.approval.request.call.arguments = pendingCall.arguments;
-    corrupted.state.approval.request.arguments = {};
+    firstRequest(corrupted).call.call.arguments = pendingCall.arguments;
+    firstRequest(corrupted).call.arguments = {};
     const unauthorized = vi.fn();
     await expect(
       agent.resume(corrupted, { host: { authorizeResume: unauthorized } }),
-    ).rejects.toThrow("approval does not match");
+    ).rejects.toThrow("request does not match");
     expect(unauthorized).not.toHaveBeenCalled();
     const pending = await agent.resume(JSON.parse(JSON.stringify(suspended.snapshot)), {
       host,
-      decision: true,
+      answers: evidenceFor(suspended.snapshot, true),
     });
     expect(pending.status).toBe("suspended");
     expect(write).not.toHaveBeenCalled();
-    const result = await agent.resume(pending.snapshot, { host, decision: "signed-ticket" });
+    const result = await agent.resume(pending.snapshot, {
+      host,
+      answers: evidenceFor(pending.snapshot, "signed-ticket"),
+    });
     expect(result.status).toBe("completed");
     expect(consumed).toBe(true);
     expect(write).toHaveBeenCalledTimes(1);
     expect(recheck).toHaveBeenCalledWith(`${suspended.runId}/model/1/tool/1`);
     await expect(
-      agent.resume(pending.snapshot, { host, decision: "signed-ticket" }),
+      agent.resume(pending.snapshot, {
+        host,
+        answers: evidenceFor(pending.snapshot, "signed-ticket"),
+      }),
     ).rejects.toThrow("Stale");
     expect(write).toHaveBeenCalledTimes(1);
   });
@@ -532,8 +551,8 @@ describe("portable agent lifecycle", () => {
   it.each([
     ["denied", "completed"],
     ["revoked", "failed"],
-    ["expired", "failed"],
-    ["expired at tool start", "failed"],
+    ["expired", "suspended"],
+    ["expired at tool start", "suspended"],
     ["elapsed", "limited"],
   ] as const)("does not invoke a write when approval is %s", async (reason, expectedStatus) => {
     vi.useFakeTimers();
@@ -545,16 +564,18 @@ describe("portable agent lifecycle", () => {
       tools: [tool("write", write, { approval: true })],
       limits: { elapsedMs: 100 },
     });
-    const resolveApproval = vi.fn(() =>
-      reason === "denied" ? ("denied" as const) : ("approved" as const),
+    const resolveRequest = vi.fn(() =>
+      reason === "denied" ? { type: "deny" as const } : { type: "approve" as const },
     );
     const host = {
       authorizeResume,
-      resolveApproval,
-      approvalContext: () => ({
-        actorId: "actor",
-        resource: { id: "record", version: "1" },
-        expiresAt: Date.now() + 5,
+      resolveRequest,
+      prepareRequest: () => ({
+        scope: {
+          actorId: "actor",
+          resource: { id: "record", version: "1" },
+          expiresAt: Date.now() + 5,
+        },
       }),
       beforeTool() {
         if (reason === "revoked") throw new Error("Access revoked");
@@ -565,18 +586,20 @@ describe("portable agent lifecycle", () => {
       await vi.advanceTimersByTimeAsync(reason === "expired" ? 6 : 101);
     const result = await agent.resume(suspended.snapshot, {
       host,
-      decision: "ticket",
+      answers: evidenceFor(suspended.snapshot, "ticket"),
       onEvent(event) {
         if (reason === "expired at tool start" && event.type === "tool_start")
           vi.setSystemTime(Date.now() + 6);
       },
     });
-    expect(result.status).toBe(expectedStatus);
+    expect(
+      result.status,
+      JSON.stringify({ state: result.snapshot.state, writes: write.mock.calls.length }),
+    ).toBe(expectedStatus);
     expect(write).not.toHaveBeenCalled();
-    if (reason === "expired" || reason === "elapsed")
-      expect(resolveApproval).not.toHaveBeenCalled();
+    if (reason === "expired" || reason === "elapsed") expect(resolveRequest).not.toHaveBeenCalled();
     if (reason === "denied")
-      expect(result.history[3]).toMatchObject({
+      expect(result.history[2]).toMatchObject({
         role: "tool",
         content: expect.stringContaining("denied"),
       });
@@ -596,6 +619,7 @@ describe("portable agent lifecycle", () => {
       const failed = await agent.run("Work", {
         host: {
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             const last = snapshot.models.at(-1);
             if (
               last?.status === "completed" &&
@@ -631,6 +655,7 @@ describe("portable agent lifecycle", () => {
       const result = await agent.run("Work", {
         host: {
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             const last = snapshot.models.at(-1);
             if (
               kind === "model" ||

@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/agents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An experimental, provider-independent agent loop with tools and resumable checkpoints.",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,34 @@
     "./runs": {
       "types": "./dist/runs.d.ts",
       "default": "./dist/runs.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "default": "./dist/mcp.js"
+    },
+    "./evals": {
+      "types": "./dist/evals.d.ts",
+      "default": "./dist/evals.js"
+    },
+    "./otel": {
+      "types": "./dist/otel.d.ts",
+      "default": "./dist/otel.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow.d.ts",
+      "default": "./dist/workflow.js"
+    },
+    "./a2a": {
+      "types": "./dist/a2a/index.d.ts",
+      "default": "./dist/a2a/index.js"
+    },
+    "./code-mode": {
+      "types": "./dist/code-mode.d.ts",
+      "default": "./dist/code-mode.js"
+    },
+    "./code-mode/quickjs": {
+      "types": "./dist/quickjs.d.ts",
+      "default": "./dist/quickjs.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -21,7 +49,9 @@
     "src",
     "examples",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "LICENSE-APACHE-2.0",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "sideEffects": false,
   "engines": {
@@ -40,17 +70,39 @@
     "release": "bun publish --access public"
   },
   "peerDependencies": {
-    "@providerkit/core": "^0.30.0",
-    "@gusnips/server": "^0.19.0"
+    "@providerkit/core": "^0.33.1",
+    "@gusnips/server": "^0.19.0 || ^0.20.0 || ^0.21.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@opentelemetry/api": "^1.10.0",
+    "quickjs-emscripten-core": "^0.32.0",
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0"
   },
   "peerDependenciesMeta": {
     "@gusnips/server": {
       "optional": true
+    },
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
+      "optional": true
+    },
+    "quickjs-emscripten-core": {
+      "optional": true
+    },
+    "@jitl/quickjs-wasmfile-release-sync": {
+      "optional": true
     }
   },
   "devDependencies": {
+    "@a2a-js/sdk": "1.3.0",
+    "@gusnips/server": "^0.21.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@opentelemetry/api": "^1.10.0",
+    "quickjs-emscripten-core": "^0.32.0",
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
+    "@jitl/quickjs-wasmfile-debug-sync": "^0.32.0",
     "@providerkit/core": "workspace:*",
-    "@gusnips/server": "^0.19.0",
     "@types/pg": "^8.15.0",
     "pg": "^8.16.0",
     "typescript": "^7.0.2",

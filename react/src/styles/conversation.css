@@ -1,0 +1,158 @@
+@layer providerkit {
+  :where(.pk-conversation, .pk-message-list, .pk-scroll-root) {
+    display: flex;
+    flex-direction: column;
+    min-inline-size: 0;
+    min-block-size: 0;
+    font: inherit;
+    color: var(--pk-color, inherit);
+  }
+
+  :where(.pk-message-list, .pk-scroll-root) {
+    flex: 1;
+  }
+
+  :where(.pk-scroll-viewport) {
+    flex: 1;
+    min-block-size: 0;
+    overflow: auto;
+    /* MessageList chooses one owner for resize and prepend anchoring, even without this CSS. */
+    scrollbar-gutter: stable;
+  }
+
+  :where(.pk-scroll-content) {
+    display: flex;
+    flex-direction: column;
+    gap: var(--pk-message-gap, 1.5em);
+    padding: var(--pk-conversation-padding, 1em);
+  }
+
+  :where(.pk-scroll-item, .pk-message) {
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
+  }
+
+  :where(.pk-message) {
+    box-sizing: border-box;
+    inline-size: 100%;
+    max-inline-size: var(--pk-message-width, 72ch);
+    margin-inline: auto;
+    line-height: var(--pk-line-height, 1.6);
+  }
+
+  :where(.pk-message-heading) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em 1em;
+    align-items: baseline;
+    margin-block-end: 0.5em;
+    font-size: 0.875em;
+  }
+
+  :where(.pk-message-author) {
+    font-weight: 600;
+  }
+
+  :where(.pk-message-state) {
+    color: var(--pk-muted-color, inherit);
+  }
+
+  :where(.pk-message-body > * + *) {
+    margin-block-start: 0.75em;
+  }
+
+  :where(.pk-message-text) {
+    white-space: pre-wrap;
+  }
+
+  :where(.pk-message-attachment) {
+    display: block;
+    padding: 0.5em 0.75em;
+    border: 1px solid var(--pk-border-color, color-mix(in srgb, currentColor 45%, transparent));
+    border-radius: var(--pk-radius, 0.375em);
+  }
+
+  :where(.pk-conversation-notice) {
+    padding: var(--pk-conversation-padding, 1em);
+    overflow-wrap: anywhere;
+  }
+
+  :where(.pk-conversation-notice > p, .pk-message-error) {
+    margin-block: 0 0.5em;
+  }
+
+  :where(.pk-message-actions) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    margin-block-start: 0.75em;
+  }
+
+  :where(.pk-jump-to-latest) {
+    align-self: center;
+    margin: 0.5em;
+    min-block-size: 2em;
+    padding: 0.3em 0.75em;
+    border: 1px solid var(--pk-border-color, color-mix(in srgb, currentColor 45%, transparent));
+    border-radius: var(--pk-radius, 0.375em);
+    background: var(--pk-action-background, transparent);
+    color: var(--pk-action-color, inherit);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  :where(.pk-jump-to-latest:active) {
+    background: color-mix(in srgb, currentColor 16%, transparent);
+  }
+
+  :where(.pk-jump-to-latest[aria-disabled="true"]) {
+    cursor: default;
+    opacity: 0.6;
+  }
+
+  :where(.pk-scroll-viewport:focus-visible, .pk-jump-to-latest:focus-visible) {
+    outline: 2px solid var(--pk-focus-color, currentColor);
+    outline-offset: -2px;
+  }
+
+  :where(.pk-conversation-announcement) {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    white-space: nowrap;
+    clip-path: inset(50%);
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    :where(.pk-jump-to-latest:not([aria-disabled="true"]):hover) {
+      background: color-mix(in srgb, currentColor 8%, transparent);
+    }
+  }
+
+  @media (pointer: coarse) {
+    :where(.pk-jump-to-latest) {
+      min-block-size: 44px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :where(.pk-scroll-viewport) {
+      scroll-behavior: auto;
+    }
+    :where(.pk-jump-to-latest) {
+      transition: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    :where(.pk-scroll-viewport:focus-visible, .pk-jump-to-latest:focus-visible) {
+      outline-color: Highlight;
+    }
+    :where(.pk-jump-to-latest, .pk-message-attachment) {
+      border-color: ButtonText;
+    }
+  }
+}
