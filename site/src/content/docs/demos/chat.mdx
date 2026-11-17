@@ -1,0 +1,25 @@
+---
+title: Try the chat components
+description: Use the released composer, messages and run controls with sample replies that stay in this tab.
+---
+
+import { DemoPanel } from "../../../components/TaskExample.tsx";
+
+<DemoPanel task="chat" client:only="react">
+  <p slot="fallback">Loading the chat example. If it does not appear, reload this page.</p>
+</DemoPanel>
+
+## What this demonstrates
+
+This page uses the published chat client, composer hook, message list and Markdown renderer. The transport
+returns scripted display events. It makes no provider request and does not send your text to a
+server. Messages and drafts stay in this tab. The demo checks their age when it opens and removes
+copies last saved more than an hour ago. This does not erase an open conversation on a timer.
+Choose Clear demo to delete the messages and draft now.
+
+Send a message to see incremental output. Try Refused send to see a failure that preserves the
+draft. Stop ends the local sample stream. Reloading restores your text but does not restart a
+sample reply. These are browser examples, not a durable backend or authorization service.
+
+[Connect your server](/react/getting-started/), [compose your own screen](/react/components/) or
+[use your app's styles](/react/styles/).

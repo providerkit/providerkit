@@ -1,0 +1,108 @@
+@import "@providerkit/react/styles.css";
+
+.package-demo {
+  min-width: 0;
+  color: var(--ink-2);
+}
+.package-demo :is(button, textarea) {
+  font: inherit;
+}
+.package-demo button,
+.demo-actions button {
+  min-height: 44px;
+  padding: 0.5rem 0;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+}
+.package-demo button:active {
+  opacity: 0.7;
+}
+.package-demo button:is(:disabled, [aria-disabled="true"]) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.package-demo :is(button, textarea):focus-visible {
+  outline: 2px solid var(--beam);
+  outline-offset: 4px;
+}
+.demo-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+.demo-actions p {
+  flex-basis: 100%;
+}
+.demo-notice {
+  color: var(--ink);
+}
+.chat-demo .pk-conversation {
+  color: var(--ink);
+  font: inherit;
+}
+.chat-demo .pk-scroll-viewport {
+  max-height: 25rem;
+}
+.chat-demo :is(.pk-message, .pk-activity, .pk-composer) {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+.chat-demo .pk-composer {
+  border: 0;
+  padding-inline: 0;
+}
+.chat-demo textarea {
+  min-height: 6rem;
+  width: 100%;
+  padding: 0.75rem 0;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 0;
+  font-size: 1rem;
+  resize: vertical;
+}
+.chat-demo textarea::placeholder {
+  color: var(--ink-3);
+}
+.chat-demo :is(.pk-message-heading, .pk-message-state, .pk-composer-hint, .pk-composer-draft) {
+  color: var(--ink-3);
+}
+.chat-demo .pk-md {
+  color: var(--ink-2);
+}
+.chat-demo :is(.pk-md-codeblock, .pk-md-pre) {
+  background: var(--paper-2);
+  color: var(--ink);
+  border-radius: 0;
+  max-width: 100%;
+}
+.chat-demo .pk-md code {
+  font-family: var(--sl-font-mono);
+}
+.chat-demo .demo-actions {
+  margin-top: 1rem;
+}
+.package-demo a {
+  color: var(--ink);
+  text-decoration: underline var(--beam);
+  text-underline-offset: 0.22em;
+}
+@media (hover: hover) and (pointer: fine) {
+  .package-demo button:hover:not(:disabled, [aria-disabled="true"]) {
+    border-bottom-color: var(--beam);
+  }
+}
+@media (max-width: 50rem) {
+  .chat-demo .pk-scroll-viewport {
+    max-height: 22rem;
+  }
+}

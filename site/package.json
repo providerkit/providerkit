@@ -7,6 +7,7 @@
     "dev": "astro dev",
     "build": "bun scripts/reference-routes.ts && astro build",
     "preview": "astro preview",
+    "check:demos": "bun --no-env-file scripts/check-demos.ts",
     "typecheck": "astro check",
     "lint": "oxlint -c ../.oxlintrc.json src"
   },
@@ -16,6 +17,8 @@
     "@fontsource-variable/archivo": "^5.3.0",
     "@fontsource/commit-mono": "^5.3.0",
     "@providerkit/core": "workspace:*",
+    "@providerkit/agents": "0.2.0",
+    "@providerkit/react": "0.1.0",
     "astro": "^7.2.10",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
