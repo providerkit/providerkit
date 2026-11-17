@@ -870,6 +870,16 @@ export type RunOutcome<T = string> = RunRecord &
   );
 
 export type AgentEvent =
+  /** Portable start identity for nodes without agent lifecycle hooks. No host context or
+   * signal is serialized. Cached terminal nodes do not emit a new execution start. */
+  | {
+      type: "execution_start";
+      kind: "workflow" | "remote";
+      nodeId: string;
+      version: string;
+      runId: string;
+      attemptId: string;
+    }
   | {
       type: "remote_status";
       runId: string;

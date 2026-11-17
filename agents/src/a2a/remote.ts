@@ -1256,6 +1256,14 @@ export function defineRemoteAgent<T>(config: RemoteAgentOptions<T>): RemoteAgent
       }
     }
     try {
+      emitEvent(opts, {
+        type: "execution_start",
+        kind: "remote",
+        nodeId: id,
+        version,
+        runId: snapshot.runId,
+        attemptId: snapshot.attemptId,
+      });
       active();
       if (r.wakeAt !== undefined) {
         if (Date.now() < r.wakeAt) throw new Halt({ status: "suspended" });

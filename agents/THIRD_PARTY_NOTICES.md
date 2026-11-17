@@ -5,6 +5,11 @@ block has a short comment that names its source. Their copyright notices and lic
 
 ## TanStack AI
 
+- Tracing source: `packages/ai/src/middlewares/otel.ts`.
+  Used in `src/otel.ts`: explicit parent contexts and operation spans. Changed: SDK attempt
+  identities, bounded observation and callback composition; Core's public adapter owns provider
+  CLIENT spans and reported usage. No content capture, exporter or context manager is installed.
+
 - Code-mode sources: `packages/ai-code-mode/src/type-generator/json-schema-to-ts.ts`,
   `packages/ai-code-mode/src/code-wrapper.ts`, `create-code-mode-tool.ts`,
   `bindings/tool-to-binding.ts`, `create-system-prompt.ts` and `packages/ai-isolate-quickjs`.

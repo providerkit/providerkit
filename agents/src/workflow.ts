@@ -1060,6 +1060,14 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
       ...(options.signal ? [options.signal] : []),
     ]);
     try {
+      emitEvent(options, {
+        type: "execution_start",
+        kind: "workflow",
+        nodeId: id,
+        version,
+        runId: snapshot.runId,
+        attemptId: snapshot.attemptId,
+      });
       scope.tree.active();
       checkMemoryBinding(snapshot, options.memory);
       // Refuse unknown writes before any coordination callback or sibling effect.

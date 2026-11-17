@@ -275,6 +275,73 @@ notifications and can repeat after a crash. For background runs, configure hooks
 
 See [the offline guard example](examples/guardrails.ts). It makes no network calls.
 
+## Trace a run
+
+Add OpenTelemetry tracing to your existing run options:
+
+```ts
+const options = tracing.options(runOptions);
+```
+
+This keeps your current options, including authorization hooks, and adds tracing callbacks.
+Import the adapter only where you use it:
+
+```ts
+import { createAgentTracing } from "@providerkit/agents/otel";
+
+const tracing = createAgentTracing();
+try {
+  await agent.run("Summarize the changes.", tracing.options());
+} finally {
+  tracing.close();
+}
+```
+
+Install the optional `@opentelemetry/api` peer. Your app must register its tracer and exporter,
+which sends trace records to your chosen service. The package installs neither and makes no
+telemetry request by itself. You can pass an existing `tracer` and `parentContext` instead.
+Normal SDK imports do not load this adapter.
+
+A span is a timed record of an operation. Agents records runs, tool calls and workflow steps.
+Core records the provider stream and its reported usage. The SDK's internal model-operation span
+only connects SDK identities to the Core span; it does not duplicate provider usage. Missing or
+partial usage is not a zero charge, and traces are not audited bills. A resumed run starts a new
+span; time between attempts is not included.
+
+`tracing.options(existingOptions)` composes existing observers and provider instrumentation.
+For manual wiring, attach `onLifecycle`, `onEvent` and `bindModelProvider` once. Apply the provider
+binding last, outside other provider decorators. A directly wrapped Core provider can be rebound;
+a tracing wrapper hidden inside another decorator cannot be deduplicated.
+
+### Context and privacy
+
+Explicit parent contexts work without installing a context manager. Core activates context
+around provider iterator calls. Tool and workflow-step hooks only observe execution: they do
+not activate async context for HTTP calls inside your code. Use your app's instrumentation and
+context manager for those child spans.
+
+Prompts, results and raw errors are not captured. Code, tool inputs and remote payloads stay
+private too. Node, run and operation IDs are recorded, so do not use secrets or personal text as
+IDs. `AgentSpanInfo` distinguishes `nodeKind` and `nodeId` for agents, workflows and remote nodes.
+The optional `attributes(info)` callback accepts host-approved scalar values under
+`providerkit.host.*`: at most 32 attributes, 64-character keys and 256-character strings.
+
+Remote spans cover local observation, not the peer's full task lifetime. The last remote state
+is separate from the local run state, and billing stays unknown. Explicit `remote.cancel()` has
+no separate SDK operation span; its receipt still records the request. Host HTTP instrumentation
+may observe that call. A status update is not proof that a send or cancellation happened.
+
+### End an observation
+
+`close()` stops Agents observations, not execution. It does not cancel work, replay a request or
+flush an exporter. Core streams already bound by the adapter remain observed until they end or
+the caller aborts. If a stream is abandoned without ending or being aborted, this adapter cannot
+close its Core span.
+
+Defaults are 128 run observations, 1,024 operation/relationship records per run and a 30-minute
+observation lifetime. `maxRuns`, `maxSpansPerRun` and `maxRunMs` change those bounds. Reaching a
+bound ends or skips observations only; it never changes execution permissions or limits.
+
 ## Conversations
 
 Pass the thread's messages. The last one is the new user turn:
