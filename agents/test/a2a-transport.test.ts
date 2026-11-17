@@ -691,6 +691,27 @@ describe("wire validation", () => {
     expect(tracker.accept(complete)).toBe(true);
     expect(() => createA2AStreamTracker({}, 1024, observation).accept(complete)).toThrow(A2AError);
   });
+  it("refuses duplicate JSON members before an answer map loses its original meaning", async () => {
+    const escapedKey = String.fromCharCode(92) + "u0069d";
+    for (const body of [
+      '{"id":"first","id":"last"}',
+      `{"id":"first","${escapedKey}":"last"}`,
+      '{"metadata":{"answers":{"request":{"type":"deny","type":"approve"}}}}',
+    ]) {
+      expect(() => parseA2AJson(body)).toThrow(A2AError);
+      await expect(
+        readA2AJson(
+          new Request(endpoint, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+          }),
+        ),
+      ).rejects.toBeInstanceOf(A2AError);
+    }
+    const value = { text: '{"id":1,"id":2}', items: [{ id: 1 }, { id: 2 }], other: { id: 3 } };
+    expect(parseA2AJson(JSON.stringify(value))).toEqual(value);
+  });
   it("bounds UTF-8 bytes, nesting, nodes and part counts", () => {
     expect(() => parseA2AJson('"éé"', { bodyBytes: 5 })).toThrow(A2AError);
     expect(() => parseA2AJson("[[[[]]]]", { depth: 2 })).toThrow(A2AError);

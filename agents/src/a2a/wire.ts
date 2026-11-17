@@ -174,6 +174,33 @@ function checkJson(value: unknown, limits: A2ALimits): asserts value is A2AJson 
     if (pending.length + count > limits.nodes) throw new A2AError("limit");
   }
 }
+/** JSON.parse validates grammar but discards duplicate members. Scan only the already-valid
+ * tokens so conflicting approval fields cannot be silently reduced to the last value. */
+function uniqueJsonMembers(text: string): void {
+  const objects: (Set<string> | undefined)[] = [];
+  for (const match of text.matchAll(/"(?:\\.|[^"\\])*"|[{}[\]]/g)) {
+    const token = match[0];
+    if (token === "{") objects.push(new Set());
+    else if (token === "[") objects.push(undefined);
+    else if (token === "}" || token === "]") objects.pop();
+    else {
+      let next = match.index + token.length;
+      while (
+        text[next] === " " ||
+        text[next] === "\t" ||
+        text[next] === "\r" ||
+        text[next] === "\n"
+      )
+        next++;
+      if (text[next] !== ":") continue;
+      const names = objects.at(-1);
+      const name: unknown = JSON.parse(token);
+      if (!names || typeof name !== "string" || names.has(name)) return invalid();
+      names.add(name);
+    }
+  }
+}
+
 export function parseA2AJson(text: string, overrides?: Partial<A2ALimits>): A2AJson {
   const limits = a2aLimits(overrides);
   if (
@@ -188,6 +215,7 @@ export function parseA2AJson(text: string, overrides?: Partial<A2ALimits>): A2AJ
     throw new A2AError("protocol", { code: -32700 });
   }
   checkJson(value, limits);
+  uniqueJsonMembers(text);
   return value;
 }
 function checked(value: unknown, limits: A2ALimits): A2AJson {
