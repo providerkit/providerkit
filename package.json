@@ -21,6 +21,7 @@
     "dev:site": "bun run build && bun run --filter providerkit-site dev",
     "build:site": "bun run build && bun run --filter providerkit-site build",
     "brand:assets": "bun run brand/generate.ts",
+    "profile:pr": "bash brand/profile-pr.sh",
     "format:check": "oxfmt --check",
     "release": "bun run --filter @providerkit/core release",
     "release:agents": "bun run --filter @providerkit/agents release",
