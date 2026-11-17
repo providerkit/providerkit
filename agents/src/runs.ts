@@ -75,6 +75,7 @@ export interface BackgroundContext {
 
 export interface BackgroundPolicy
   extends
+    Pick<RunOptions, "onEvent" | "onLifecycle" | "bindModelProvider">,
     Required<
       Pick<AgentHost, "authorizeResume" | "prepareRequest" | "resolveRequest" | "beforeTool">
     >,
@@ -460,6 +461,9 @@ function bindBackground<I, R extends NodeOutcome>(
     const result = await runtime.resume(snapshot, {
       signal,
       context: trusted.context,
+      onEvent: trusted.onEvent,
+      onLifecycle: trusted.onLifecycle,
+      bindModelProvider: trusted.bindModelProvider,
       memory,
       host,
       ...(session ? { session } : {}),

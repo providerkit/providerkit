@@ -189,6 +189,17 @@ export interface LifecycleContext {
   readonly signal: AbortSignal;
 }
 
+export interface ModelProviderScope {
+  readonly run: LifecycleContext;
+  readonly operationId: string;
+  readonly operationAttemptId: string;
+  readonly purpose: "turn" | "compaction";
+}
+
+/** Synchronous instrumentation binding at the final dispatch boundary. Never starts a call,
+ * changes routing or grants permission. A failure before dispatch leaves the provider unchanged. */
+export type ModelProviderBinding = (provider: Provider, scope: ModelProviderScope) => Provider;
+
 export interface ModelInput {
   messages: ChatMessage[];
   tools: ToolDefinition[];
@@ -580,6 +591,9 @@ export interface RunOptions {
   onEvent?: (event: AgentEvent) => void | Promise<void>;
   /** Privileged observer, inherited by children. Return values and failures are ignored. */
   onLifecycle?: LifecycleHook;
+  /** Per-dispatch provider instrumentation. Inherited by children, never saved in checkpoints.
+   * Does not wrap tool execution or install an ambient async context manager. */
+  bindModelProvider?: ModelProviderBinding;
   /** Loads the history once, before the run is saved, and appends the turn once the run
    * settles. The input must then be the new turn only, not `{ messages }`. Never passed to
    * specialists. */

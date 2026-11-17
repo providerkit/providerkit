@@ -91,7 +91,14 @@ export interface WorkflowSnapshot {
 }
 export type WorkflowRunOptions = Pick<
   RunOptions,
-  "runId" | "signal" | "context" | "memory" | "host" | "onEvent" | "onLifecycle"
+  | "runId"
+  | "signal"
+  | "context"
+  | "memory"
+  | "host"
+  | "onEvent"
+  | "onLifecycle"
+  | "bindModelProvider"
 >;
 export type WorkflowResumeOptions = Omit<ResumeOptions, "session">;
 export type WorkflowOutcome<O = unknown> = {

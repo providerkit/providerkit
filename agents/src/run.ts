@@ -1831,7 +1831,25 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       let bufferedBytes = 0;
       const guarded = !!guardrails?.modelOutput;
       async function* observed(): AsyncIterable<ProviderChunk> {
-        const stream = selectedProvider.createStream(request, modelInput.tools, {
+        let dispatchProvider = selectedProvider;
+        if (options.bindModelProvider) {
+          try {
+            const bound = options.bindModelProvider(
+              selectedProvider,
+              Object.freeze({
+                run: callbackContext,
+                operationId: model.id,
+                operationAttemptId: model.attemptId,
+                purpose: summary ? "compaction" : "turn",
+              }),
+            );
+            if (bound && typeof bound.createStream === "function") dispatchProvider = bound;
+          } catch {
+            // Instrumentation can fail before dispatch. Never catch/replay the provider call.
+          }
+        }
+        active();
+        const stream = dispatchProvider.createStream(request, modelInput.tools, {
           ...modelSettings,
           ...(settings.onActivity ? { onActivity: settings.onActivity } : {}),
           ...(settings.onRateLimit ? { onRateLimit: settings.onRateLimit } : {}),
