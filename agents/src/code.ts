@@ -76,6 +76,8 @@ export interface CodeTool {
   readonly needsApproval: boolean;
   /** The loop supplies only the enabled subset; callers cannot add bindings. */
   definition(enabled?: readonly string[]): ToolDefinition;
+  /** Return a new descriptor with the same binding names, driver and limits. No object is mutated. */
+  withTools(tools: readonly Tool[]): CodeTool;
   /** @internal Called only with the run's journal bridge. */
   execute(raw: unknown, bridge: ProgramBridge): Promise<ProgramOutcome>;
   /** @internal Close an interrupted program without evaluating its source. */
@@ -204,6 +206,7 @@ function errorKind(error: ProgramError): Extract<ToolResult, { ok: false }>["kin
 }
 
 export function codeMode(options: CodeModeOptions): CodeTool {
+  options = { ...options };
   const name = options.name ?? "run_code";
   const bound = [...options.tools];
   if (
@@ -285,6 +288,14 @@ export function codeMode(options: CodeModeOptions): CodeTool {
     isReadOnly: tools.every((tool) => tool.isReadOnly),
     needsApproval: options.needsApproval ?? false,
     definition,
+    withTools(replacements: readonly Tool[]): CodeTool {
+      if (
+        replacements.length !== tools.length ||
+        replacements.some((tool, index) => tool.name !== tools[index]?.name)
+      )
+        throw new TypeError("Replace code bindings by the same names in the same order.");
+      return codeMode({ ...options, name, tools: replacements, limits, driver, transpile });
+    },
     async execute(raw: unknown, bridge: ProgramBridge): Promise<ProgramOutcome> {
       let error: ProgramError | undefined;
       let value: unknown;

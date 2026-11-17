@@ -137,7 +137,11 @@ export function matchTrajectory(
   const steps = all.filter(
     (step) =>
       expected.includeFailed ||
-      (step.workflowId !== undefined ? step.status === "completed" : step.result?.ok === true),
+      (step.kind === "remote-operation"
+        ? step.status === "accepted"
+        : step.workflowId !== undefined
+          ? step.status === "completed"
+          : step.result?.ok === true),
   );
   const calls = expected.calls ?? [];
   const mode = expected.match ?? "inOrder";
@@ -170,17 +174,20 @@ export function matchTrajectory(
     runs.set(step.runId, run);
   }
   for (const run of runs.values()) {
+    const previousByParent = new Map<string | undefined, TrajectoryStep>();
     if (
       expected.noRepeats &&
-      (run.some((step) => step.attempts > 1) ||
-        run.some((step, index) => {
-          const previous = run[index - 1];
-          return (
-            previous?.name === step.name &&
+      run.some((step) => {
+        const previous = previousByParent.get(step.parentOperationId);
+        previousByParent.set(step.parentOperationId, step);
+        return (
+          step.attempts > 1 ||
+          (previous?.kind === step.kind &&
+            previous.name === step.name &&
             equalData(previous.arguments, step.arguments) &&
-            equalData(previous.input, step.input)
-          );
-        }))
+            equalData(previous.input, step.input))
+        );
+      })
     )
       problems.push("A tool or workflow step repeated the same input.");
     if (

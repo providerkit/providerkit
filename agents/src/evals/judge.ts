@@ -129,9 +129,16 @@ export function llmJudge(options: JudgeOptions): Scorer {
               kind: step.kind,
               name: step.name,
               status: step.status,
-              ...(step.workflowId !== undefined
-                ? { workflowId: step.workflowId, input: step.input, output: step.output }
-                : { agentId: step.agentId, arguments: step.arguments, result: step.result }),
+              ...(step.kind === "remote-operation"
+                ? {
+                    agentId: step.agentId,
+                    version: step.version,
+                    action: step.action,
+                    billing: step.billing,
+                  }
+                : step.workflowId !== undefined
+                  ? { workflowId: step.workflowId, input: step.input, output: step.output }
+                  : { agentId: step.agentId, arguments: step.arguments, result: step.result }),
             })),
           ),
         );

@@ -19,6 +19,13 @@ import {
 import { isRecord } from "../src/snapshot.ts";
 import { snapshots } from "../src/tree.ts";
 import { defineWorkflow } from "../src/workflow.ts";
+import { codeMode } from "../src/code.ts";
+import { subagentTool } from "../src/subagents.ts";
+import { createQuickJsDriver } from "../src/quickjs.ts";
+import { createDriver } from "../src/evals/driver.ts";
+import { defineRemoteAgent } from "../src/a2a/remote.ts";
+import { decodeA2AAgentCard, decodeA2ARpcRequest, encodeA2AResult } from "../src/a2a/wire.ts";
+import { journalTrajectory, runResult, usageOf } from "../src/evals/journal.ts";
 import {
   assertReport,
   answeredBy,
@@ -1198,6 +1205,746 @@ describe("mixed workflow evaluations", () => {
     );
     expect(retry?.attempts).toBe(2);
     expect(retry?.children).toHaveLength(2);
+  });
+});
+
+describe("remote child evaluations", () => {
+  function remoteFixture(question = false) {
+    const dialect = { version: "1.0", binding: "JSONRPC" } as const;
+    const endpoint = "https://private-peer.test/a2a";
+    const card = decodeA2AAgentCard(
+      {
+        name: "Offline peer",
+        description: "PRIVATE_CARD",
+        version: "peer-version",
+        capabilities: {},
+        defaultInputModes: ["text/plain"],
+        defaultOutputModes: ["text/plain"],
+        skills: [],
+        supportedInterfaces: [
+          { url: endpoint, protocolVersion: "1.0", protocolBinding: "JSONRPC" },
+        ],
+      },
+      dialect.version,
+    );
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const rpc = decodeA2ARpcRequest(await new Request(input, init).json(), dialect.version);
+      const method = rpc.request.method;
+      if (method !== "SendMessage" && method !== "CancelTask")
+        throw new Error("Unexpected offline request");
+      return Response.json({
+        jsonrpc: "2.0",
+        id: rpc.id,
+        result: encodeA2AResult(
+          {
+            method,
+            result: {
+              kind: "task",
+              id: "PRIVATE_TASK",
+              contextId: "PRIVATE_CONTEXT",
+              status: {
+                state:
+                  method === "CancelTask" ? "working" : question ? "input_required" : "completed",
+                ...(question && method === "SendMessage"
+                  ? {
+                      message: {
+                        kind: "message",
+                        role: "agent",
+                        messageId: "question",
+                        parts: [{ kind: "text", text: "PRIVATE_QUESTION" }],
+                      },
+                    }
+                  : {}),
+              },
+              artifacts: question
+                ? []
+                : [{ artifactId: "answer", parts: [{ kind: "text", text: "peer answer" }] }],
+              metadata: { callback: "https://private-callback.test/notify" },
+            },
+          },
+          dialect,
+        ),
+      });
+    });
+    return {
+      fetch,
+      remote: defineRemoteAgent({
+        id: "remote-reader",
+        agentVersion: "2",
+        ...dialect,
+        card,
+        policy: { allow: (url) => url.origin === new URL(endpoint).origin },
+        fetch,
+      }),
+    };
+  }
+
+  it.each(["Next", "Go"])("compares remote message content for repetition (%s)", async (answer) => {
+    const { remote, fetch } = remoteFixture(true);
+    const report = await runEvals({
+      name: "remote repeats",
+      agent: defineAgent({
+        ...base,
+        tools: [remote.asTool({ name: "consult", description: "Ask the peer" })],
+        provider: scriptedProvider([
+          { toolCalls: [{ name: "consult", arguments: { input: "Go" } }] },
+        ]),
+      }),
+      cases: [{ id: "x", input: "Go", expectStatus: "suspended" }],
+      drivers: {
+        x: {
+          answers: [
+            {
+              agentId: "remote-reader",
+              tool: "remote_input",
+              path: ["result"],
+              ask: "question",
+              key: "question",
+              decision: { type: "answer", answer: { text: answer } },
+            },
+          ],
+        },
+      },
+      host: { beforeTool() {} },
+      includePrivateData: true,
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(
+      await check(trajectory({ noRepeats: true }), report.cases[0]?.run?.snapshot),
+    ).toMatchObject({ passed: answer !== "Go" });
+  });
+
+  it("keeps mixed remote identity, unknown bills and safe judge/report metadata", async () => {
+    const { remote, fetch } = remoteFixture();
+    const child = defineAgent({
+      ...base,
+      id: "local-child",
+      provider: scriptedProvider(["local answer"]),
+    });
+    const flow = defineWorkflow({
+      id: "mixed-remote",
+      version: "1",
+      input: { schema: { type: "object" }, validate: () => null },
+      agents: [child, remote],
+      async run(_, context) {
+        await context.agent("local", child, "Local input");
+        const result = await context.agent("peer", remote, { input: "PRIVATE_REMOTE_INPUT" });
+        if (result.status !== "completed") throw new Error("Peer did not finish");
+        return result.output;
+      },
+    });
+    let saved: RunSnapshot | undefined;
+    const price = vi.fn(() => ({ input: 0, output: 0, cacheRead: 0 }));
+    const report = await runEvals({
+      name: "remote tree",
+      agent: defineAgent({
+        ...base,
+        tools: [flow.asTool({ name: "work", description: "Run the workflow" })],
+        provider: scriptedProvider([{ toolCalls: [{ name: "work" }] }, "done"]),
+      }),
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      scorers: [exact()],
+      price,
+      host: {
+        beforeTool() {},
+        checkpoint(node) {
+          if (node.kind === "agent") saved = structuredClone(node);
+        },
+      },
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(report.cases[0]?.run).toMatchObject({ modelCalls: 3, toolCalls: 1 });
+    expect(report.cases[0]?.run?.modelAttempts).toHaveLength(3);
+    expect(report.cases[0]?.run?.toolAttempts).toHaveLength(1);
+    expect(report.cases[0]?.run?.remoteAttempts).toMatchObject([
+      {
+        kind: "remote",
+        agentId: "remote-reader",
+        version: "2",
+        action: "send",
+        status: "accepted",
+        billing: "unknown",
+      },
+    ]);
+    expect(report.summary.agentUsage).toMatchObject({
+      costUsd: null,
+      knownCostUsd: 0,
+      unknownCharges: 1,
+      unpricedCalls: 0,
+    });
+    expect(price).not.toHaveBeenCalled();
+    if (!saved) throw new Error("Missing mixed root");
+    const path = trajectoryOf(saved);
+    expect(path.flat.map((step) => [step.kind, step.name])).toEqual([
+      ["delegation", "work"],
+      ["agent", "local"],
+      ["remote", "peer"],
+      ["remote-operation", "remote_send"],
+    ]);
+    const peerStep = path.flat[2];
+    const send = path.flat[3];
+    expect(peerStep?.children[0]).toMatchObject({
+      kind: "remote",
+      agentId: "remote-reader",
+      version: "2",
+    });
+    expect(send).toMatchObject({
+      agentId: "remote-reader",
+      runId: peerStep?.children[0]?.runId,
+      operationId: report.cases[0]?.run?.remoteAttempts[0]?.operationId,
+      status: "accepted",
+      action: "send",
+      billing: "unknown",
+      attempts: 1,
+    });
+    expect(send).not.toHaveProperty("arguments");
+    expect(send).not.toHaveProperty("result");
+    expect(send).not.toHaveProperty("turn");
+    expect(
+      await check(trajectory({ scope: "tree", calls: [{ name: "remote_send" }] }), saved),
+    ).toMatchObject({ passed: true });
+    expect(
+      await check(toolArguments("remote_send", {}, { scope: "tree", includeFailed: true }), saved),
+    ).toMatchObject({ passed: false });
+    expect(await check(maxCost(1), saved)).toMatchObject({ kind: "skipped" });
+    const remoteNode = [...snapshots(saved)].find((node) => node.kind === "remote");
+    await expect(scoreRun(remoteNode, [exact()])).rejects.toThrow("agent run journal");
+    const judge = scriptedProvider([
+      {
+        toolCalls: [
+          { name: RESULT_TOOL_NAME, arguments: { pass: true, score: 1, reason: "Recorded" } },
+        ],
+      },
+    ]);
+    const judged = await scoreRun(
+      saved,
+      [
+        llmJudge({
+          provider: judge,
+          rubric: "Check the recorded operations.",
+          include: { trajectory: true },
+        }),
+      ],
+      { allowJudge: true },
+    );
+    expect(judged.scores[0]?.passed).toBe(true);
+    const prompt = JSON.stringify(judge.calls[0]?.messages);
+    expect(prompt).toContain("remote-operation");
+    expect(prompt).toContain("unknown");
+    for (const privateValue of [
+      "private-peer",
+      "private-callback",
+      "PRIVATE_CARD",
+      "PRIVATE_TASK",
+      "PRIVATE_CONTEXT",
+    ]) {
+      expect(reportJson(report)).not.toContain(privateValue);
+      expect(prompt).not.toContain(privateValue);
+    }
+    expect(reportJson(report)).not.toContain("PRIVATE_REMOTE_INPUT");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    judge.assertComplete();
+  });
+
+  it("counts accepted cancellation as unknown remote work, not proof of cancellation", async () => {
+    const { remote, fetch } = remoteFixture(true);
+    let saved: RunSnapshot | undefined;
+    const report = await runEvals({
+      name: "remote cancellation",
+      agent: defineAgent({
+        ...base,
+        tools: [remote.asTool({ name: "consult", description: "Ask the peer" })],
+        provider: scriptedProvider([
+          { toolCalls: [{ name: "consult", arguments: { input: "Go" } }] },
+          "The peer may still be working.",
+        ]),
+      }),
+      cases: [{ id: "x", input: "Go", expected: "The peer may still be working." }],
+      scorers: [exact()],
+      drivers: {
+        x: {
+          answers: [
+            {
+              agentId: "remote-reader",
+              tool: "remote_input",
+              path: ["result"],
+              ask: "question",
+              key: "question",
+              decision: { type: "cancel" },
+            },
+          ],
+        },
+      },
+      host: {
+        beforeTool() {},
+        checkpoint(node) {
+          if (node.kind === "agent") saved = structuredClone(node);
+        },
+      },
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(report.cases[0]?.run).toMatchObject({
+      modelCalls: 2,
+      toolCalls: 1,
+      unknownCharges: 2,
+      costUsd: null,
+    });
+    expect(
+      report.cases[0]?.run?.remoteAttempts.map((receipt) => [
+        receipt.action,
+        receipt.status,
+        receipt.billing,
+      ]),
+    ).toEqual([
+      ["send", "accepted", "unknown"],
+      ["cancel", "accepted", "unknown"],
+    ]);
+    if (!saved) throw new Error("Missing cancelled root");
+    const peer = [...snapshots(saved)].find((node) => node.kind === "remote");
+    if (peer?.kind !== "remote") throw new Error("Missing remote child");
+    expect(peer.remote.cancel?.state).toBe("working");
+    expect(
+      trajectoryOf(saved).flat.find((step) => step.name === "remote_send")?.asks,
+    ).toMatchObject([{ decision: { type: "cancel" } }]);
+    expect(trajectoryOf(saved).flat.at(-1)).toMatchObject({
+      kind: "remote-operation",
+      action: "cancel",
+      status: "accepted",
+    });
+    expect(reportJson(report)).not.toContain("PRIVATE");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("code-mode evaluations", () => {
+  const driver = createQuickJsDriver();
+
+  it("shares mocked code capabilities with generated helpers without sharing cases", async () => {
+    const effect = vi.fn(async () => "REAL_EFFECT");
+    const mode = codeMode({ tools: [tool("read", effect)], driver });
+    const providers: ScriptedProvider[] = [];
+    const report = await runEvals({
+      name: "generated code mock",
+      cases: [
+        { id: "first", input: "Go", expected: "done" },
+        { id: "second", input: "Go", expected: "done" },
+      ],
+      drivers: {
+        first: { toolMocks: [{ name: "read", result: "first mock" }] },
+        second: { toolMocks: [{ name: "read", result: "second mock" }] },
+      },
+      agent: ({ stub }) => {
+        const provider = scriptedProvider([
+          { toolCalls: [{ name: mode.name, arguments: { code: "return await tools.read({});" } }] },
+          "helper done",
+        ]);
+        providers.push(provider);
+        const worker = defineAgent({ ...base, id: "worker", tools: stub([mode]), provider });
+        const helpers = subagentTool({
+          name: "helpers",
+          description: "Create helpers",
+          agent: worker,
+        });
+        return defineAgent({
+          ...base,
+          tools: [...stub([mode]), helpers],
+          provider: scriptedProvider([
+            {
+              toolCalls: [
+                {
+                  name: "helpers",
+                  arguments: {
+                    agents: [{ name: "reader", task: "Read", tools: [mode.name, "read"] }],
+                  },
+                },
+              ],
+            },
+            "done",
+          ]),
+        });
+      },
+      scorers: [
+        exact(),
+        trajectory({
+          calls: [
+            {
+              name: "helpers",
+              inside: { calls: [{ name: mode.name }, { name: "read" }], match: "exact" },
+            },
+          ],
+        }),
+      ],
+      includePrivateData: true,
+    });
+    expect(report.summary.passed).toBe(2);
+    expect(providers.map((provider) => provider.calls.length)).toEqual([2, 2]);
+    for (const [index, row] of report.cases.entries()) {
+      const call = trajectoryOf(row.run?.snapshot).flat.find((step) => step.name === "read");
+      expect(call?.result).toMatchObject({
+        ok: true,
+        content: index === 0 ? "first mock" : "second mock",
+      });
+    }
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("preserves generated output types when replacing code bindings", () => {
+    const binding = defineTool({
+      name: "typed_read",
+      description: "Read a count",
+      inputSchema: { type: "object" },
+      outputSchema: {
+        type: "object",
+        properties: { count: { type: "number" } },
+        required: ["count"],
+      },
+      isReadOnly: true,
+      run: async () => ({ count: 1 }),
+    });
+    const mode = codeMode({ tools: [binding], driver });
+    const mocked = createDriver("schema", {
+      toolMocks: [{ name: binding.name, result: { count: 2 } }],
+    }).stub([mode])[0];
+    if (!mocked || !("kind" in mocked) || mocked.kind !== "code")
+      throw new Error("Missing code mock");
+    expect(mocked.tools[0]?.outputSchema).toEqual(binding.outputSchema);
+    expect(mocked.definition()).toEqual(mode.definition());
+  });
+
+  it("detects repeated outer programs even when inner calls follow each one", async () => {
+    const mode = codeMode({ tools: [tool("read")], driver });
+    const call = {
+      toolCalls: [{ name: mode.name, arguments: { code: "return await tools.read({});" } }],
+    };
+    const outcome = await defineAgent({
+      ...base,
+      tools: [mode],
+      provider: scriptedProvider([call, call, "done"]),
+    }).run("Go", { host: { beforeTool() {} } });
+    expect(outcome.status).toBe("completed");
+    expect(trajectoryOf(outcome).toolCalls).toBe(4);
+    expect(await check(trajectory({ noRepeats: true }), outcome)).toMatchObject({ passed: false });
+    const inner = await defineAgent({
+      ...base,
+      tools: [mode],
+      provider: scriptedProvider([
+        {
+          toolCalls: [
+            {
+              name: mode.name,
+              arguments: { code: "await tools.read({}); return await tools.read({});" },
+            },
+          ],
+        },
+        "done",
+      ]),
+    }).run("Go", { host: { beforeTool() {} } });
+    expect(trajectoryOf(inner).toolCalls).toBe(3);
+    expect(await check(trajectory({ noRepeats: true }), inner)).toMatchObject({ passed: false });
+  });
+
+  it("keeps refused code classified as code and its literal source unchanged", async () => {
+    const mode = codeMode({ tools: [tool("read")], driver, needsApproval: true });
+    const code = String.raw`return "\\u0061";`;
+    const report = await runEvals({
+      name: "refused source",
+      agent: defineAgent({
+        ...base,
+        tools: [mode],
+        provider: scriptedProvider([
+          { toolCalls: [{ name: mode.name, arguments: { code } }] },
+          "done",
+        ]),
+      }),
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      drivers: {
+        x: {
+          answers: [
+            { agentId: base.id, tool: mode.name, ask: "approval", decision: { type: "deny" } },
+          ],
+        },
+      },
+      scorers: [exact()],
+      includePrivateData: true,
+    });
+    expect(report.summary.passed).toBe(1);
+    const saved = report.cases[0]?.run?.snapshot;
+    expect(trajectoryOf(saved).steps[0]).toMatchObject({ kind: "code", arguments: { code } });
+    expect(
+      await check(
+        toolArguments(mode.name, { code }, { match: "exact", includeFailed: true }),
+        saved,
+      ),
+    ).toMatchObject({ passed: true });
+  });
+  function program(snapshot: RunSnapshot) {
+    const model = snapshot.models[0];
+    if (model?.status !== "completed" || !model.tools[0]) throw new Error("Missing program");
+    return model.tools[0];
+  }
+  it("scores exact guest input and approved edits without changing scripted request identity", async () => {
+    const original: Record<string, unknown> = JSON.parse(
+      '{"text":"\\\\u0061","__proto__":{"own":true}}',
+    );
+    const edited: Record<string, unknown> = JSON.parse(
+      '{"text":"\\\\u0062","__proto__":{"edited":true}}',
+    );
+    const effect = vi.fn(async (input: Record<string, unknown>) => input);
+    const bound = defineTool({
+      name: "read",
+      description: "Read",
+      inputSchema: { type: "object" },
+      isReadOnly: true,
+      run: effect,
+    });
+    const mode = codeMode({ tools: [bound], driver });
+    const code = `const input = JSON.parse(${JSON.stringify(JSON.stringify(original))}); console.log("PRIVATE_LOG"); return await tools.read(input);`;
+    const report = await runEvals({
+      name: "code inputs",
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      agent: defineAgent({
+        ...base,
+        tools: [mode],
+        provider: scriptedProvider([
+          { toolCalls: [{ name: mode.name, arguments: { code } }] },
+          "done",
+        ]),
+      }),
+      drivers: {
+        x: {
+          answers: [
+            {
+              agentId: base.id,
+              tool: "read",
+              arguments: original,
+              ask: "approval",
+              decision: { type: "approve", arguments: edited },
+            },
+          ],
+        },
+      },
+      host: {
+        needsApproval: (call) => Boolean(call.parentOperationId),
+        prepareRequest: (draft) => ({
+          scope: {
+            actorId: "eval",
+            resource: { id: "x", version: "1" },
+            expiresAt: Date.now() + 60_000,
+          },
+          ask: { ...draft.ask, type: "approval", editable: true },
+        }),
+      },
+      scorers: [
+        exact(),
+        toolArguments("read", edited, { match: "exact" }),
+        toolArguments(mode.name, { code }, { match: "exact" }),
+        trajectory({
+          calls: [
+            { name: mode.name },
+            { name: "read", arguments: edited, argumentsMatch: "exact" },
+          ],
+          match: "exact",
+          maxModelCalls: 2,
+          maxToolCalls: 2,
+        }),
+      ],
+    });
+    expect(report.cases[0]).toMatchObject({
+      status: "passed",
+      run: { modelCalls: 2, toolCalls: 2 },
+    });
+    expect(effect.mock.calls[0]?.[0]).toEqual(edited);
+    expect(Object.hasOwn(effect.mock.calls[0]?.[0] ?? {}, "__proto__")).toBe(true);
+    const attempts = report.cases[0]!.run!.toolAttempts;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.parentOperationId).toBe(attempts[0]?.operationId);
+    expect(reportJson(report)).not.toContain("PRIVATE_LOG");
+    expect(reportJson(report)).not.toContain("__proto__");
+    expect(report.cases[0]?.run).not.toHaveProperty("snapshot");
+  });
+
+  it("replaces code-only and shared bindings on both paths and never falls through to real effects", async () => {
+    const effect = vi.fn(async () => "REAL_EFFECT");
+    const validate = vi.fn((input: unknown) => input);
+    const original = defineTool({
+      name: "read",
+      description: "Read",
+      inputSchema: { type: "object" },
+      isReadOnly: true,
+      run: effect,
+      validate,
+    });
+    const mode = codeMode({ tools: [original], driver });
+    const mocks = createDriver("direct", {
+      toolMocks: [
+        { name: "read", result: "call" },
+        { name: "read", result: "invoke" },
+      ],
+    });
+    const rebound = mocks.stub([mode])[0];
+    if (!rebound || !("kind" in rebound) || rebound.kind !== "code")
+      throw new Error("Missing code mock");
+    expect(await rebound.tools[0]!.call({})).toBe("call");
+    expect(await rebound.tools[0]!.invoke({})).toMatchObject({ ok: true, output: "invoke" });
+    await expect(rebound.tools[0]!.call({})).rejects.toThrow("No mock");
+    expect(await rebound.tools[0]!.invoke({})).toMatchObject({ ok: false });
+    mocks.assertApplied();
+    expect(mode.tools[0]).toBe(original);
+    for (const shared of [false, true]) {
+      const report = await runEvals({
+        name: "code mock",
+        cases: [{ id: "x", input: "Go", expected: "done" }],
+        scorers: [exact()],
+        drivers: { x: { toolMocks: [{ name: "read", arguments: { n: 2 }, result: "mock" }] } },
+        host: {
+          beforeTool: (request) => {
+            if (request.parentOperationId) expect(request.arguments).toEqual({ n: 1 });
+          },
+        },
+        agent: ({ stub }) => {
+          const tools = stub(shared ? [original, mode] : [mode]);
+          if (shared) {
+            const program = tools[1];
+            if (!program || !("kind" in program) || program.kind !== "code")
+              throw new Error("Missing program");
+            expect(program.tools[0]).toBe(tools[0]);
+            expect(stub([original])[0]).toBe(tools[0]);
+            expect(stub(tools)).toEqual(tools);
+          }
+          return defineAgent({
+            ...base,
+            tools,
+            provider: scriptedProvider([
+              {
+                toolCalls: [
+                  {
+                    name: mode.name,
+                    arguments: { code: "try { await tools.read({n: 1}); } catch {} return null;" },
+                  },
+                ],
+              },
+              "done",
+            ]),
+          });
+        },
+      });
+      expect(report.cases[0]).toMatchObject({ status: "passed", run: { toolCalls: 2 } });
+      expect(report.cases[0]?.run?.toolAttempts[1]).toMatchObject({ ok: false });
+    }
+    expect(effect).not.toHaveBeenCalled();
+    expect(validate).not.toHaveBeenCalled();
+    expect(() =>
+      createDriver("bad", { toolMocks: [{ name: mode.name, result: null }] }).stub([mode]),
+    ).toThrow("ordinary tools");
+    const { withTools: _replace, ...unsupported } = mode;
+    expect(() =>
+      Reflect.apply(
+        createDriver("unsupported", { toolMocks: [{ name: "read", result: null }] }).stub,
+        undefined,
+        [[unsupported]],
+      ),
+    ).toThrow("cannot replace its bindings");
+    // The registry, not a name-keyed mock cache, must still reject distinct same-name objects.
+    const conflicting = createDriver("identity", { toolMocks: [{ name: "read", result: null }] });
+    expect(() =>
+      defineAgent({
+        ...base,
+        provider: scriptedProvider([]),
+        tools: conflicting.stub([tool("read"), mode]),
+      }),
+    ).toThrow("same tool object");
+  });
+
+  it("counts inner retries and interrupted program attempts without counting pending work", async () => {
+    let attempts = 0;
+    const mode = codeMode({
+      tools: [
+        tool("read", async () => {
+          if (++attempts === 1) throw new Error("Retry this read");
+          return "PRIVATE_INNER";
+        }),
+      ],
+      driver,
+    });
+    const recovery = { identity: "reads", maxAttempts: 2, readOnlyTools: [mode.name] };
+    const toolRetries = {
+      identity: "inner",
+      tools: { read: { maxAttempts: 2, replay: "read-only" as const } },
+    };
+    let pending: RunSnapshot | undefined;
+    const agent = defineAgent({
+      ...base,
+      tools: [mode],
+      recovery,
+      toolRetries,
+      provider: scriptedProvider([
+        { toolCalls: [{ name: mode.name, arguments: { code: "return await tools.read({});" } }] },
+        "done",
+      ]),
+    });
+    const host = { beforeTool() {}, authorizeResume() {} };
+    const complete = await agent.run("Go", {
+      host: {
+        ...host,
+        checkpoint(snapshot) {
+          if (
+            snapshot.kind === "agent" &&
+            snapshot.models[0]?.status === "completed" &&
+            snapshot.models[0].tools[0]?.calls?.[0]?.status === "pending"
+          )
+            pending = structuredClone(snapshot);
+        },
+      },
+    });
+    expect(complete.status).toBe("completed");
+    expect(journalTrajectory(complete.snapshot)).toMatchObject({ modelCalls: 2, toolCalls: 3 });
+    expect(journalTrajectory(complete.snapshot).steps.map((step) => step.kind)).toEqual([
+      "code",
+      "tool",
+    ]);
+    if (!pending) throw new Error("Missing pending retry");
+    const pendingReport = runResult(pending, usageOf(pending), "agent");
+    expect(pendingReport.toolAttempts).toHaveLength(2);
+    expect(pendingReport.toolCalls).toBe(2);
+    const prior = structuredClone(complete.snapshot);
+    const model = prior.models[0];
+    const execution = program(prior);
+    if (model?.status !== "completed" || execution.status !== "completed")
+      throw new Error("Missing completed program");
+    model.tools[0] = {
+      id: execution.id,
+      attemptId: execution.attemptId,
+      status: "running",
+      interrupted: [],
+      retries: [],
+      calls: execution.calls,
+    };
+    prior.models = [model];
+    prior.state = { status: "running" };
+    const resumed = await defineAgent({
+      ...base,
+      tools: [mode],
+      recovery,
+      toolRetries,
+      provider: scriptedProvider(["done"]),
+    }).resume(prior, { host });
+    expect(resumed.status).toBe("completed");
+    const projected = trajectoryOf(resumed);
+    expect(projected).toMatchObject({ modelCalls: 2, toolCalls: 5 });
+    expect(projected.steps.map((step) => step.attempts)).toEqual([2, 2, 1]);
+    const receipt = runResult(resumed.snapshot, usageOf(resumed.snapshot), "agent");
+    expect(receipt.toolAttempts).toHaveLength(5);
+    expect(
+      new Set(receipt.toolAttempts.map((item) => `${item.operationId}:${item.attemptId}`)).size,
+    ).toBe(5);
+    expect(
+      receipt.toolAttempts
+        .filter((item) => item.parentOperationId)
+        .map((item) => item.parentOperationId),
+    ).toEqual([execution.id, execution.id, execution.id]);
+    expect(JSON.stringify(receipt)).not.toContain("PRIVATE_INNER");
+    expect(await check(trajectory({ noRepeats: true }), resumed)).toMatchObject({ passed: false });
   });
 });
 

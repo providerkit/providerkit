@@ -123,6 +123,33 @@ function interrupted(snapshot: RunSnapshot): RunSnapshot {
 }
 
 describe("journaled code mode", () => {
+  it("rebinds the same tools without mutating the descriptor or its pinned settings", async () => {
+    const original = ordinary("read");
+    const options = { tools: [original], driver, instructions: "Pinned", needsApproval: false };
+    const mode = codeMode(options);
+    options.instructions = "Changed";
+    options.needsApproval = true;
+    const replacement = ordinary("read", { run: async () => 7 });
+    const rebound = mode.withTools([replacement]);
+    expect(rebound.tools[0]).toBe(replacement);
+    expect(mode.tools[0]).toBe(original);
+    expect(rebound.definition()).toEqual(mode.definition());
+    expect(rebound.needsApproval).toBe(false);
+    expect(rebound.limits).toEqual(mode.limits);
+    expect(() => mode.withTools([])).toThrow("same names");
+    expect(() => mode.withTools([ordinary("other")])).toThrow("same names");
+    expect(() => mode.withTools([ordinary("read", { needsApproval: true })])).toThrow(
+      "cannot bind",
+    );
+    const agent = defineAgent({
+      ...base,
+      tools: [replacement, rebound],
+      provider: wire([chunks(rebound.name, { code: "return await tools.read({});" }), done])
+        .provider,
+    });
+    expect(program((await agent.run("Go", { host })).snapshot)).toMatchObject({ result: 7 });
+  });
+
   it("uses the approved defaults and refuses control descriptors and duplicate bindings", () => {
     expect(codeMode({ tools: [ordinary()], driver }).limits).toEqual(CODE_LIMITS);
     const target = defineAgent({ ...base, provider: wire([done]).provider });

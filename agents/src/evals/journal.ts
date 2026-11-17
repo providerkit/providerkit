@@ -6,8 +6,15 @@ import {
   parseToolArgs,
   type TokenUsage,
 } from "@providerkit/core";
-import { RESULT_TOOL_NAME, type AskRecord, type RunSnapshot, type TreeNode } from "../index.ts";
+import {
+  RESULT_TOOL_NAME,
+  type AskRecord,
+  type RunSnapshot,
+  type ToolExecution,
+  type TreeNode,
+} from "../index.ts";
 import { allModels } from "../compaction.ts";
+import type { RemoteSnapshot } from "../a2a/remote.ts";
 import { inputOf, readInput } from "../input.ts";
 import {
   agentSnapshot,
@@ -15,6 +22,7 @@ import {
   isId,
   isRecord,
   isUsage,
+  jsonArguments,
   readLimits,
   readSnapshot,
 } from "../snapshot.ts";
@@ -113,6 +121,11 @@ export function usageOf(root: TreeNode, price?: EvalPrice): EvalUsage {
   const totals = emptyUsage();
   const seen = new Set<string>();
   for (const node of snapshots(root)) {
+    if (node.kind === "remote") {
+      // The peer supplied no local model bill. Each admitted send/cancel remains unknown.
+      totals.unknownCharges += node.remote.sends.length + (node.remote.cancel ? 1 : 0);
+      continue;
+    }
     if (node.kind !== "agent") continue;
     for (const model of allModels(node)) {
       if (seen.has(model.id)) continue;
@@ -178,12 +191,31 @@ function childTrajectory({
 }): TrajectoryStep["children"][number] {
   return {
     key,
-    ...(snapshot.kind === "agent"
-      ? { kind: "agent" as const, agentId: snapshot.agentId }
-      : { kind: "workflow" as const, workflowId: snapshot.workflowId }),
+    ...(snapshot.kind === "workflow"
+      ? { kind: "workflow" as const, workflowId: snapshot.workflowId }
+      : snapshot.kind === "remote"
+        ? { kind: "remote" as const, agentId: snapshot.agentId, version: snapshot.version }
+        : { kind: "agent" as const, agentId: snapshot.agentId }),
     runId: snapshot.runId,
     trajectory: journalTrajectory(snapshot),
   };
+}
+
+function remoteAttempts(snapshot: RemoteSnapshot): EvalRunResult["remoteAttempts"] {
+  return [
+    ...snapshot.remote.sends.map((send) => ({ ...send, action: "send" as const })),
+    ...(snapshot.remote.cancel ? [{ ...snapshot.remote.cancel, action: "cancel" as const }] : []),
+  ].map((receipt) => ({
+    kind: "remote",
+    action: receipt.action,
+    agentId: snapshot.agentId,
+    version: snapshot.version,
+    runId: snapshot.runId,
+    operationId: receipt.id,
+    attemptId: receipt.attemptId,
+    status: receipt.status,
+    billing: "unknown",
+  }));
 }
 
 function approvedInput<T>(input: T, asks: readonly AskRecord[] = []): T | Record<string, unknown> {
@@ -192,6 +224,11 @@ function approvedInput<T>(input: T, asks: readonly AskRecord[] = []): T | Record
     if (ask.decision?.type === "approve") effective = ask.decision.arguments ?? input;
   }
   return effective;
+}
+
+// Admission reserves budget for a pending ask; evals count only journaled attempt receipts.
+function toolAttempts(tool: ToolExecution): number {
+  return tool.interrupted.length + tool.retries.length + (tool.status === "pending" ? 0 : 1);
 }
 
 /** Admission order comes from the journal, never completion time. Workflow steps retain their
@@ -219,11 +256,23 @@ export function journalTrajectory(root: TreeNode): Trajectory {
       attempts:
         step.kind === "step"
           ? step.attempts.filter((attempt) => attempt.status !== "not_run").length
-          : step.kind === "agent" || step.kind === "workflow"
+          : step.kind === "agent" || step.kind === "remote" || step.kind === "workflow"
             ? step.children.length
             : 1,
       asks: copyData(step.asks ?? []),
       children: step.children.map(childTrajectory),
+    }));
+  } else if (root.kind === "remote") {
+    result.steps = remoteAttempts(root).map((receipt, index) => ({
+      ...receipt,
+      kind: "remote-operation",
+      name: `remote_${receipt.action}`,
+      attempts: 1,
+      ...(receipt.action === "send" && {
+        input: copyData(root.remote.sends[index]?.message.parts),
+      }),
+      asks: copyData(root.remote.sends[index]?.asks ?? []),
+      children: [],
     }));
   } else {
     for (const [index, model] of root.models.entries()) {
@@ -231,15 +280,16 @@ export function journalTrajectory(root: TreeNode): Trajectory {
       for (const [position, call] of (model.turn.message.toolCalls ?? []).entries()) {
         const execution = model.tools[position];
         if (!execution || call.name === RESULT_TOOL_NAME) continue;
-        const attempts =
-          execution.interrupted.length +
-          execution.retries.length +
-          (execution.status === "pending" ? 0 : 1);
-        if (!attempts) continue;
+        const attempts = toolAttempts(execution);
+        if (!attempts && !execution.calls?.length) continue;
         const journal = root.delegations.find((entry) => entry.operationId === execution.id);
-        const args = approvedInput(parseToolArgs(call.arguments), execution.asks);
+        const code = Object.hasOwn(root.definition.codeTools ?? {}, call.name);
+        const args = approvedInput(
+          code ? (jsonArguments(call.arguments) ?? {}) : parseToolArgs(call.arguments),
+          execution.asks,
+        );
         result.steps.push({
-          kind: journal?.kind ?? "tool",
+          kind: code ? "code" : (journal?.kind ?? "tool"),
           name: call.name,
           arguments: copyData(args),
           status:
@@ -258,6 +308,25 @@ export function journalTrajectory(root: TreeNode): Trajectory {
           children: (journal?.children ?? []).map(childTrajectory),
         });
         result.toolCalls += attempts;
+        for (const inner of execution.calls ?? []) {
+          const attempts = toolAttempts(inner);
+          result.steps.push({
+            kind: "tool",
+            name: inner.name,
+            arguments: copyData(approvedInput(inner.arguments, inner.asks)),
+            status: inner.status,
+            attempts,
+            ...(inner.status === "completed" && { result: copyData(inner.result) }),
+            asks: copyData(inner.asks ?? []),
+            agentId: root.agentId,
+            runId: root.runId,
+            operationId: inner.id,
+            parentOperationId: execution.id,
+            turn: index + 1,
+            children: [],
+          });
+          result.toolCalls += attempts;
+        }
       }
     }
   }
@@ -347,31 +416,44 @@ export function runResult(
       node.models.flatMap((model) =>
         model.status !== "completed"
           ? []
-          : model.tools.flatMap((tool) => [
-              ...tool.interrupted.map((attempt) => ({
-                operationId: tool.id,
-                attemptId: attempt.attemptId,
-                status: "interrupted" as const,
-              })),
-              ...tool.retries.map((attempt) => ({
-                operationId: tool.id,
-                attemptId: attempt.attemptId,
-                status: "completed" as const,
-                ok: false,
-              })),
-              ...(tool.status === "pending"
-                ? []
-                : [
-                    {
-                      operationId: tool.id,
-                      attemptId: tool.attemptId,
-                      status:
-                        tool.status === "completed" ? ("completed" as const) : ("running" as const),
-                      ...(tool.status === "completed" ? { ok: tool.result.ok } : {}),
-                    },
-                  ]),
-            ]),
+          : model.tools.flatMap((outer) =>
+              [
+                { tool: outer, parentOperationId: undefined },
+                ...(outer.calls ?? []).map((tool) => ({ tool, parentOperationId: outer.id })),
+              ].flatMap(({ tool, parentOperationId }) => [
+                ...tool.interrupted.map((attempt) => ({
+                  operationId: tool.id,
+                  ...(parentOperationId && { parentOperationId }),
+                  attemptId: attempt.attemptId,
+                  status: "interrupted" as const,
+                })),
+                ...tool.retries.map((attempt) => ({
+                  operationId: tool.id,
+                  ...(parentOperationId && { parentOperationId }),
+                  attemptId: attempt.attemptId,
+                  status: "completed" as const,
+                  ok: false,
+                })),
+                ...(tool.status === "pending"
+                  ? []
+                  : [
+                      {
+                        operationId: tool.id,
+                        ...(parentOperationId && { parentOperationId }),
+                        attemptId: tool.attemptId,
+                        status:
+                          tool.status === "completed"
+                            ? ("completed" as const)
+                            : ("running" as const),
+                        ...(tool.status === "completed" ? { ok: tool.result.ok } : {}),
+                      },
+                    ]),
+              ]),
+            ),
       ),
+    ),
+    remoteAttempts: [...snapshots(snapshot)].flatMap((node) =>
+      node.kind === "remote" ? remoteAttempts(node) : [],
     ),
     ...(includePrivateData ? { snapshot: copyData(snapshot) } : {}),
   };

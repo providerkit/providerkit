@@ -1,7 +1,8 @@
 // One-use mock matching adapted from Google ADK JS (Apache-2.0),
 // core/src/cli/cli_eval.ts. Copyright 2026 Google LLC.
 // Changed: replace both core tool entry points, never fall through to real execution.
-import { defineTool } from "@providerkit/core";
+import { defineTool, type Tool } from "@providerkit/core";
+import { isCodeTool, type CodeTool } from "../code.ts";
 import type { AgentHost, Decision, PendingRequest } from "../index.ts";
 import { copyData, equalData, isId, isRecord } from "../snapshot.ts";
 import type { EvalDriver, EvalHost, EvalTools } from "./types.ts";
@@ -80,6 +81,43 @@ export function createDriver(caseId: string, driver: EvalDriver = {}, host?: Eva
   const applied = new Set<string>();
   const issued = new Map<string, PendingRequest>();
   const accepted = new Map<string, Decision>();
+  // A direct tool and every code binding must still point at one object in the SDK registry.
+  const replacements = new Map<Tool, Tool>();
+  const codeReplacements = new Map<CodeTool, CodeTool>();
+  function stubTool(tool: Tool): Tool {
+    if (!mocks.some((mock) => mock.name === tool.name)) return tool;
+    const held = replacements.get(tool);
+    if (held) return held;
+    applied.add(tool.name);
+    const definition = copyData(tool.definition());
+    const replacement = defineTool({
+      ...definition,
+      ...(tool.outputSchema !== undefined && { outputSchema: copyData(tool.outputSchema) }),
+      timeoutMs: tool.timeoutMs,
+      isReadOnly: tool.isReadOnly,
+      needsApproval: tool.needsApproval,
+      isConcurrencySafe: tool.isConcurrencySafe,
+      isTerminal: tool.isTerminal,
+      async run(args) {
+        const index = mocks.findIndex(
+          (mock, index) =>
+            !usedMocks.has(index) &&
+            mock.name === tool.name &&
+            (mock.arguments === undefined || equalData(mock.arguments, args)),
+        );
+        const mock = mocks[index];
+        if (!mock)
+          throw new Error("No mock for these arguments. Add an unused matching tool mock.");
+        usedMocks.add(index);
+        if (mock.error !== undefined) throw new Error(mock.error);
+        return copyData(mock.result ?? null);
+      },
+      summarize: (result) => (typeof result === "string" ? result : JSON.stringify(result)),
+    });
+    replacements.set(tool, replacement);
+    replacements.set(replacement, replacement);
+    return replacement;
+  }
   function checkDecision(decided?: { request: PendingRequest; decision: Decision }): void {
     if (
       decided &&
@@ -153,36 +191,25 @@ export function createDriver(caseId: string, driver: EvalDriver = {}, host?: Eva
     host: requestHost,
     stub(tools: EvalTools): EvalTools {
       return tools.map((tool) => {
-        if (!mocks.some((mock) => mock.name === tool.name)) return tool;
-        if ("kind" in tool)
-          throw new TypeError(
-            "Mock ordinary tools only. Use scripted answers for client tools and scripted providers for specialists.",
-          );
-        applied.add(tool.name);
-        const definition = copyData(tool.definition());
-        return defineTool({
-          ...definition,
-          timeoutMs: tool.timeoutMs,
-          isReadOnly: tool.isReadOnly,
-          needsApproval: tool.needsApproval,
-          isConcurrencySafe: tool.isConcurrencySafe,
-          isTerminal: tool.isTerminal,
-          async run(args) {
-            const index = mocks.findIndex(
-              (mock, index) =>
-                !usedMocks.has(index) &&
-                mock.name === tool.name &&
-                (mock.arguments === undefined || equalData(mock.arguments, args)),
+        if ("kind" in tool) {
+          if (mocks.some((mock) => mock.name === tool.name))
+            throw new TypeError(
+              "Mock ordinary tools only. Use scripted answers for client tools and scripted providers for specialists.",
             );
-            const mock = mocks[index];
-            if (!mock)
-              throw new Error("No mock for these arguments. Add an unused matching tool mock.");
-            usedMocks.add(index);
-            if (mock.error !== undefined) throw new Error(mock.error);
-            return copyData(mock.result ?? null);
-          },
-          summarize: (result) => (typeof result === "string" ? result : JSON.stringify(result)),
-        });
+          if (!isCodeTool(tool)) return tool;
+          const held = codeReplacements.get(tool);
+          if (held) return held;
+          const bound = tool.tools.map(stubTool);
+          if (bound.every((binding, index) => binding === tool.tools[index])) return tool;
+          if (typeof tool.withTools !== "function")
+            throw new TypeError("This code tool cannot replace its bindings. No mock was run.");
+          // Creator and helper grants compare the descriptor itself, not just its bindings.
+          const replacement = tool.withTools(bound);
+          codeReplacements.set(tool, replacement);
+          codeReplacements.set(replacement, replacement);
+          return replacement;
+        }
+        return stubTool(tool);
       });
     },
     assertApplied() {

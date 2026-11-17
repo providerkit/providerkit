@@ -1,4 +1,5 @@
 import type { ModelRate, Provider, TokenUsage } from "@providerkit/core";
+import type { RemoteReceipt } from "../a2a/remote.ts";
 import type {
   Agent,
   AgentHost,
@@ -95,7 +96,8 @@ export interface ToolMock {
 
 export interface EvalDriver {
   answers?: readonly ScriptedAnswer[];
-  /** Applied only by factory.stub(). Unmatched calls to a mocked tool fail closed.
+  /** Applied only by factory.stub(), including code-only bindings. Unmatched calls fail closed.
+   * Direct and code paths share the same replacement object and current host checks.
    * Replaces validation and execution: this does not test the real backend's checks. */
   toolMocks?: readonly ToolMock[];
 }
@@ -145,21 +147,41 @@ export type TrajectoryStep = {
   asks: AskRecord[];
   runId: string;
   operationId: string;
+  /** The real program operation for an inner tool, never a child run. */
+  parentOperationId?: string;
   children: ({ key: string; runId: string; trajectory: Trajectory } & (
     | { kind: "agent"; agentId: string }
+    | { kind: "remote"; agentId: string; version: string }
     | { kind: "workflow"; workflowId: string }
   ))[];
 } & (
   | {
-      kind: "tool" | "delegation" | "handoff";
+      kind: "tool" | "code" | "delegation" | "handoff";
       arguments: Record<string, unknown>;
-      status: "running" | "completed" | "interrupted";
+      status: "pending" | "running" | "completed" | "interrupted";
       result?: ToolResult;
       agentId: string;
       turn: number;
       workflowId?: never;
       input?: never;
       output?: never;
+    }
+  | {
+      /** A remote receipt, not a workflow's remote-child step. Acceptance is not task completion. */
+      kind: "remote-operation";
+      action: RemoteReceipt["action"];
+      status: RemoteReceipt["status"];
+      billing: "unknown";
+      agentId: string;
+      version: string;
+      attemptId: string;
+      workflowId?: never;
+      /** Message parts only, without transport IDs. Kept out of built-in judge prompts. */
+      input?: unknown;
+      output?: never;
+      arguments?: never;
+      result?: never;
+      turn?: never;
     }
   | {
       kind: StepKind;
@@ -175,12 +197,13 @@ export type TrajectoryStep = {
 );
 
 export interface Trajectory {
+  /** This run's operations in admission order, including inner calls after their code operation. */
   steps: TrajectoryStep[];
   flat: TrajectoryStep[];
   /** SDK admissions, including interrupted attempts, not provider-internal retries. */
   modelCalls: number;
-  /** Agent tool calls and coordination attempts, excluding submit_result and workflow steps.
-   * Failed attempts count. */
+  /** Agent tool calls and coordination attempts, including inner code calls but not workflow
+   * steps or submit_result. Failed/interrupted attempts count; pending calls have no current receipt. */
   toolCalls: number;
 }
 
@@ -196,7 +219,7 @@ export interface EvalUsage {
   usage: TokenUsage;
   /** Sum of available bills/estimates, including partial usage. Not a full bill. */
   knownCostUsd: number;
-  /** Null if any model attempt has unknown billing or lacks a price. */
+  /** Null if any model attempt or remote operation has unknown billing, or a model lacks a price. */
   costUsd: number | null;
   unknownCharges: number;
   unpricedCalls: number;
@@ -292,7 +315,7 @@ export interface ScoringOptions<E = unknown> {
 
 export interface EvalOptions<T = string, E = unknown>
   extends EvalDataset<E>, Omit<ScoringOptions<E>, "case"> {
-  /** Cases start from an agent. Its delegated tree may contain workflows. */
+  /** Cases start from an agent. Its delegated tree may contain workflows and remote agents. */
   agent: Agent<T> | ((context: AgentFactoryContext<E>) => Agent<T> | Promise<Agent<T>>);
   /** Explicit routing after a handoff, by both id and version. Missing targets stop the case. */
   resolveAgent?: (ref: AgentRef) => Agent<T> | Promise<Agent<T>>;
@@ -339,10 +362,19 @@ export interface EvalRunResult extends EvalUsage {
   }[];
   toolAttempts: {
     operationId: string;
+    parentOperationId?: string;
     attemptId: string;
     status: "running" | "completed" | "interrupted";
     ok?: boolean;
   }[];
+  /** Remote sends and cancellation requests, not local model or tool attempts. No peer endpoints,
+   * callbacks, message bodies or task/context handles. Accepted does not mean cancelled. */
+  remoteAttempts: (Pick<RemoteReceipt, "kind" | "action" | "attemptId" | "status" | "billing"> & {
+    agentId: string;
+    version: string;
+    runId: string;
+    operationId: string;
+  })[];
   /** Present only after explicit consent to include private data. */
   snapshot?: RunSnapshot;
 }
