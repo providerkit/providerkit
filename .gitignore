@@ -12,7 +12,9 @@ react/LICENSE
 # Astro's generated types, and the TypeDoc reference — both rebuilt by
 # `bun run build:site`, so committing them would just add noise to every diff.
 site/.astro/
-site/src/content/docs/reference/
+site/src/content/docs/reference/core/
+site/src/content/docs/reference/agents/
+site/src/content/docs/reference/react/
 
 # Internal: the product/brand brief and the migration roadmap both name private
 # codebases. This repo is public — they stay on disk and out of it.

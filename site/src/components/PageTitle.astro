@@ -18,10 +18,10 @@ const markdownHref = `/${entry.id}.md`;
 
 {
   !isSplash && (
-    <div class="page-head">
+    <div class="page-head" data-reference={entry.id.startsWith("reference/") || undefined}>
       <h1 id="_top">{entry.data.title}</h1>
       <button class="copy-md" type="button" data-md={markdownHref} title={markdownHref}>
-        <span data-label>Copy page as Markdown</span>
+        <span data-label aria-live="polite">Copy page as Markdown</span>
       </button>
     </div>
   )
@@ -46,6 +46,8 @@ const markdownHref = `/${entry.id}.md`;
     };
 
     button.addEventListener("click", async () => {
+      button.disabled = true;
+      label.textContent = "Copying...";
       try {
         const response = await fetch(href);
         if (!response.ok) throw new Error(String(response.status));
@@ -54,6 +56,8 @@ const markdownHref = `/${entry.id}.md`;
       } catch {
         window.open(href, "_blank", "noopener");
         settle("failed", "Opened the .md instead");
+      } finally {
+        button.disabled = false;
       }
     });
   });

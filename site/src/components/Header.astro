@@ -1,0 +1,111 @@
+---
+import MobileMenuFooter from "@astrojs/starlight/components/MobileMenuFooter.astro";
+import MobileMenuToggle from "@astrojs/starlight/components/MobileMenuToggle.astro";
+import Search from "@astrojs/starlight/components/Search.astro";
+import SiteTitle from "@astrojs/starlight/components/SiteTitle.astro";
+import SocialIcons from "@astrojs/starlight/components/SocialIcons.astro";
+import ThemeSelect from "@astrojs/starlight/components/ThemeSelect.astro";
+import HeaderLinks from "./HeaderLinks.astro";
+
+const { hasSidebar } = Astro.locals.starlightRoute;
+---
+
+<div class="mastbar">
+  <SiteTitle />
+  <div class="desktop-nav"><HeaderLinks /></div>
+  <div class="utilities print:hidden">
+    <Search />
+    <div class="preferences"><SocialIcons /><ThemeSelect /></div>
+  </div>
+  {!hasSidebar && (
+    <div class="home-menu print:hidden">
+      <MobileMenuToggle />
+      <div id="starlight__sidebar" class="home-panel" popover="auto">
+        <HeaderLinks />
+        <MobileMenuFooter />
+      </div>
+    </div>
+  )}
+</div>
+
+<script>
+  // The docs drawer already closes at this breakpoint. Do the same on the landing page.
+  const menu = document.querySelector<HTMLElement>(".home-panel");
+  if (menu) matchMedia("(min-width: 50rem)").addEventListener("change", ({ matches }) => {
+    if (matches && menu.matches(":popover-open")) menu.hidePopover();
+  });
+</script>
+
+<style>
+  .mastbar {
+    display: flex;
+    align-items: center;
+    gap: clamp(1rem, 2.6vw, 2.75rem);
+    height: 100%;
+    max-inline-size: 100rem;
+    margin-inline: auto;
+  }
+  .mastbar :global(.site-title) {
+    flex: none;
+    gap: 0.4rem;
+    min-block-size: 44px;
+    color: var(--ink);
+    font-size: 1.375rem;
+    font-weight: 650;
+    letter-spacing: -0.035em;
+  }
+  .mastbar :global(.site-title img) { inline-size: 2rem; block-size: 2rem; }
+  .utilities, .preferences { display: flex; align-items: center; }
+  .utilities { gap: 0.625rem; margin-inline-start: auto; }
+  .preferences { gap: 0.25rem; }
+  .utilities :global(button[data-open-modal]) { inline-size: clamp(9rem, 13vw, 13rem); min-block-size: 44px; }
+  .mastbar :global(a:focus-visible), .mastbar :global(button:focus-visible), .mastbar :global(select:focus-visible) {
+    outline: 2px solid var(--beam);
+    outline-offset: 2px;
+  }
+  .mastbar :global(:is(a, button):active) { opacity: 0.75; }
+  .mastbar :global(.preferences a), .home-panel :global(.social-icons a) {
+    display: inline-grid;
+    place-items: center;
+    margin: 0;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+    color: var(--ink-2);
+  }
+  /* Starlight normally expands the select into the gap around it. Keep its hit area off GitHub. */
+  .mastbar :global(starlight-theme-select label) { --sl-inline-padding: 0px; }
+  .mastbar :global(starlight-theme-select select) { min-block-size: 44px; }
+  .home-menu { display: none; }
+  @media (width < 64rem) {
+    .mastbar { gap: 1rem; }
+    .utilities :global(button[data-open-modal]) {
+      inline-size: 44px;
+      block-size: 44px;
+      padding: 0;
+      justify-content: center;
+      border: 0;
+      font-size: 1.125rem;
+    }
+    .utilities :global(button[data-open-modal] > :is(span, kbd)) { display: none; }
+  }
+  @media (width < 50rem) {
+    .desktop-nav, .preferences { display: none; }
+    .home-menu { display: contents; }
+    /* The docs shell reserves the menu button's space. A splash page has no sidebar. */
+    :global(html:not([data-has-sidebar])) .mastbar { padding-inline-end: calc(var(--sl-menu-button-size) + var(--sl-nav-gap)); }
+    .home-panel {
+      position: fixed;
+      inset: var(--sl-nav-height) 0 auto;
+      margin: 0;
+      inline-size: 100%;
+      max-block-size: calc(100dvh - var(--sl-nav-height));
+      overflow-y: auto;
+      padding: 0.75rem var(--sl-nav-pad-x) 0;
+      border: 0;
+      border-block-end: 1px solid var(--rule-strong);
+      color: var(--ink);
+      background: var(--paper);
+    }
+  }
+  @media print { .desktop-nav, .utilities, .home-menu { display: none; } }
+</style>

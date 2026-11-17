@@ -1,0 +1,22 @@
+---
+title: Run a task
+description: Watch a real SDK tool call using a scripted provider and local sample data.
+---
+
+import { DemoPanel } from "../../../components/TaskExample.tsx";
+
+<DemoPanel task="agents" client:only="react">
+  <p slot="fallback">Loading the local example. If it does not appear, reload this page.</p>
+</DemoPanel>
+
+## What runs here
+
+The published Agents package calls a scripted provider, invokes a registered read-only tool and
+records the result. React's projector turns the execution into display data. The provider follows
+a fixed sample script; it is not a live model deciding what to do.
+
+No provider key, server request or external write is involved. Stop cancels this local execution.
+Your app still needs server-side authorization for tools with real access.
+
+[Set up the agent](/agents/getting-started/), [read the tool rules](/agents/tools/) or
+[try the chat components](/demos/chat/).

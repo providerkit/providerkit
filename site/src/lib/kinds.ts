@@ -18,8 +18,14 @@ export interface Kind {
  *  add a kind to core and this stops compiling until it is described. */
 const FIX: Record<ErrorKind, { family: Family; fix: string }> = {
   aborted: { family: "inert", fix: "Nothing. The caller pressed Stop. This is not a failure." },
-  timeout: { family: "retry", fix: "Retry. Our deadline fired, not their answer." },
-  network: { family: "retry", fix: "Retry. The request never reached them." },
+  timeout: {
+    family: "retry",
+    fix: "A deadline expired. Retry only when the call's policy allows it.",
+  },
+  network: {
+    family: "retry",
+    fix: "The connection failed. Check whether work finished before repeating it.",
+  },
   overload: { family: "retry", fix: "Retry, or fall back to another model." },
   rate: { family: "retry", fix: "Wait out the window, or rotate the key or model." },
   quota: { family: "account", fix: "Top up, or wait for the reset. Retrying will not help." },
@@ -33,9 +39,18 @@ const FIX: Record<ErrorKind, { family: Family; fix: string }> = {
     fix: "Send less. Compact the conversation. Waiting fixes nothing.",
   },
   model: { family: "ours", fix: "Use a model this endpoint actually serves." },
-  content: { family: "ours", fix: "A safety filter caught the prompt or the answer." },
-  invalid: { family: "ours", fix: "Fix the request. This one is our bug." },
-  unknown: { family: "inert", fix: "Unrecognised. Surface the body and look at it." },
+  content: {
+    family: "ours",
+    fix: "A safety filter blocked the prompt or answer. Review the content before trying again.",
+  },
+  invalid: {
+    family: "ours",
+    fix: "Check the request and output limit. Correct them before trying again.",
+  },
+  unknown: {
+    family: "inert",
+    fix: "The cause is not recognized. Inspect the provider's message in trusted logs.",
+  },
 };
 
 /** `Object.keys` widens to `string[]` — the assertion restores what the Record

@@ -7,37 +7,42 @@ An error only ever answers one question: **what do I do now?** So the taxonomy i
 the fix, not by the vendor or the status code.
 
 ```ts
-import { ProviderError, isTransient, isBackupEligible } from "@providerkit/core";
-
-try {
-  /* ... */
-} catch (raw) {
-  const err = ProviderError.from("anthropic", raw);
-
-  if (err.kind === "context") return compactAndRetry();
-  if (isBackupEligible(err.kind)) return otherModel();
-  if (isTransient(err.kind)) return retry(err.retryAfterMs);
-  surface(err); // .body has their actual words
-}
+isTransient("overload"); // true
 ```
+
+[Import and setup](#try-it-in-your-code). A transient kind can pass with time. It does not prove
+that a request is safe to repeat. [Try the classifier](/demos/errors/) with a response body.
+
+## Try it in your code
+
+Install `@providerkit/core` with [the Core quickstart](/guides/getting-started/), then import:
+
+```ts
+import { isTransient, ProviderError, isRetryable } from "@providerkit/core";
+```
+
+Use `ProviderError.from(providerId, raw)` to normalize a caught error. Use its `kind` to choose a
+remedy. Use `isRetryable(err)` to check the per-error retry policy, then apply the
+[stream commitment and paid-call rules](/guides/retries/). An emitted chunk forbids a stream
+replay even if the error itself is retryable.
 
 ## The thirteen kinds
 
-| Kind          | What fixes it                                               |
-| ------------- | ----------------------------------------------------------- |
-| `aborted`     | Nothing. The caller pressed Stop. This is not a failure.    |
-| `timeout`     | Retry. Our deadline fired, not their answer.                |
-| `network`     | Retry. The request never reached them.                      |
-| `overload`    | Retry, or fall back to another model.                       |
-| `rate`        | Wait out the window, or rotate the key or model.            |
-| `quota`       | Top up, or wait for the reset. Retrying will not help.      |
-| `entitlement` | Change the plan. A new key and a top-up both fail here.     |
-| `auth`        | Fix the credential. Every retry lands the same.             |
-| `model`       | Use a model this endpoint actually serves.                  |
-| `context`     | Send less. Compact the conversation. Waiting fixes nothing. |
-| `content`     | A safety filter caught the prompt or the answer.            |
-| `invalid`     | Fix the request. This one is our bug.                       |
-| `unknown`     | Unrecognised. Surface the body and look at it.              |
+| Kind          | What fixes it                                                           |
+| ------------- | ----------------------------------------------------------------------- |
+| `aborted`     | Nothing. The caller pressed Stop. This is not a failure.                |
+| `timeout`     | A deadline expired. Retry only when the call's policy allows it.        |
+| `network`     | The connection failed. Check whether work finished before repeating it. |
+| `overload`    | Retry, or fall back to another model.                                   |
+| `rate`        | Wait out the window, or rotate the key or model.                        |
+| `quota`       | Top up, or wait for the reset. Retrying will not help.                  |
+| `entitlement` | Change the plan. A new key and a top-up both fail here.                 |
+| `auth`        | Fix the credential. Every retry lands the same.                         |
+| `model`       | Use a model this endpoint actually serves.                              |
+| `context`     | Send less. Compact the conversation. Waiting fixes nothing.             |
+| `content`     | Review the prompt or answer blocked by a safety filter.                 |
+| `invalid`     | Check the request and output limit before trying again.                 |
+| `unknown`     | Inspect the provider's message in trusted diagnostics.                  |
 
 `isTransient` covers `timeout`, `network`, `overload` and `rate`. `isBackupEligible` covers
 `overload` and `rate`, the two where a _different model_ is a real fix.
@@ -51,7 +56,7 @@ any caught error or response:
 import { isRetryable } from "@providerkit/core";
 
 if (isRetryable(err)) {
-  // Safe to retry on the same endpoint
+  // The error allows retry; stream commitment and paid-call rules still apply.
 }
 ```
 
@@ -160,7 +165,8 @@ class ProviderError extends Error {
   readonly status?: number;
   readonly code?: string;
   readonly retryAfterMs?: number;
-  readonly body?: string; // their words, kept for the surface
+  readonly body?: string; // may contain private request data
+  readonly shouldRetry?: boolean;
   get isTransient(): boolean;
   get isBackupEligible(): boolean;
   static from(provider: string, err: unknown): ProviderError;
@@ -170,5 +176,5 @@ class ProviderError extends Error {
 `ProviderError.from` is idempotent: passing one back in returns it unchanged, so wrapping at
 several layers is safe.
 
-Keep `body`. When a failure lands as `unknown`, the vendor's own words are the only thing that
-tells you what to add to the classifier.
+Inspect `body` in trusted diagnostics when a failure is unknown. A vendor message can echo
+private request data, so do not send it to a browser or public log without checking it.

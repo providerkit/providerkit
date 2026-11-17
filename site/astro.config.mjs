@@ -2,31 +2,29 @@
 import react from "@astrojs/react";
 import starlight from "@astrojs/starlight";
 import starlightLlmsTxt from "starlight-llms-txt";
-import starlightTypeDoc, { typeDocSidebarGroup } from "starlight-typedoc";
+import { createStarlightTypeDocPlugin } from "starlight-typedoc";
 import { defineConfig, passthroughImageService } from "astro/config";
 
 const REPO = "https://github.com/providerkit/providerkit";
 const DESCRIPTION =
-  "One seam for every LLM provider, plus the failure handling you only learn in production. Zero dependencies, fetch-only, MIT.";
+  "Call models, run agents and build chat screens in TypeScript. Choose the package for the part your app needs.";
+const [coreTypeDoc, coreSidebar] = createStarlightTypeDocPlugin();
+const [agentsTypeDoc, agentsSidebar] = createStarlightTypeDocPlugin();
+const [reactTypeDoc, reactSidebar] = createStarlightTypeDocPlugin();
+/** @satisfies {import("starlight-typedoc").StarlightTypeDocOptions["typeDoc"]} */
+const typeDoc = { excludeInternal: true, useCodeBlocks: true, parametersFormat: "table" };
 
 export default defineConfig({
   site: "https://providerkit.dev",
-  // The only processed image is the SVG mark, and there is nothing to
-  // optimize in a vector. Passthrough keeps sharp — a native binary — out of
-  // the dependency tree and out of CI.
+  // The mark is a vector. No native image optimizer is needed.
   image: { service: passthroughImageService() },
   integrations: [
-    // React is here for one reason: the classifier on the landing page runs the
-    // real package in the reader's browser. Everything else is static Astro.
     react(),
     starlight({
       title: "providerkit",
       description: DESCRIPTION,
       logo: { src: "./src/assets/mark.svg", alt: "" },
       favicon: "/favicon.svg",
-      // Archivo is the drafting grotesque (one variable file carries 100–900);
-      // Commit Mono is the code face. Both OFL, both self-hosted — no third-party
-      // font request, and neither is the category default the site is avoiding.
       customCss: [
         "@fontsource-variable/archivo/wght.css",
         "@fontsource-variable/archivo/wght-italic.css",
@@ -34,62 +32,67 @@ export default defineConfig({
         "@fontsource/commit-mono/latin-600.css",
         "./src/styles/bench.css",
       ],
-      // The page title slot also carries "Copy page as Markdown" — the human
-      // half of the per-page .md endpoint.
-      components: { PageTitle: "./src/components/PageTitle.astro" },
+      components: {
+        Header: "./src/components/Header.astro",
+        PageTitle: "./src/components/PageTitle.astro",
+      },
       social: [{ icon: "github", label: "GitHub", href: REPO }],
-      // The reference is generated from the TSDoc already in core/src, so it
-      // cannot drift from the code the way a hand-written one does.
       plugins: [
-        // Agents read this site as much as people do, and they never render the
-        // visual world — they want the markdown underneath. See the per-page
-        // .md endpoint in src/pages for the other half of this.
         starlightLlmsTxt({
           projectName: "providerkit",
           description: DESCRIPTION,
           details: [
-            "- Install: `bun add @providerkit/core` (npm/pnpm/yarn also fine). ESM only.",
-            "- It is NOT an agent framework: no loop, no prompts, no memory, no graph.",
-            "- Zero runtime dependencies, `fetch` only, so one build runs in Bun, Node,",
-            "  Cloudflare Workers, Deno and a Chrome MV3 service worker.",
-            "- Errors are classified into 13 kinds named by what FIXES them, not by vendor",
-            "  or HTTP status. See the Errors guide before reasoning about a failure.",
-            "- All 13 kinds with their remedy, `isTransient` and `isBackupEligible` flags",
-            "  are available as data at https://providerkit.dev/kinds.json",
-            "- Every page also serves its own markdown: append `.md` to any path, e.g.",
-            "  https://providerkit.dev/guides/errors.md",
+            "- Core 0.33.1 calls providers and handles their failures. Its main entry is fetch-only with no runtime dependencies.",
+            "- Agents 0.2.0 runs agents and workflows using Core. The host owns authorization, storage and retention.",
+            "- React 0.1.0 provides chat hooks and optional components. Its portable protocol works with an app's own state owner.",
+            "- Start at https://providerkit.dev/start/ to choose a package.",
+            "- Error remedies and flags are data at https://providerkit.dev/kinds.json.",
+            "- Every page serves Markdown: /guides/errors.md matches /guides/errors/.",
           ].join("\n"),
           optionalLinks: [
-            { label: "npm", url: "https://www.npmjs.com/package/@providerkit/core" },
             { label: "Source", url: REPO },
             { label: "Error kinds as JSON", url: "https://providerkit.dev/kinds.json" },
           ],
-          // Serve the original markdown rather than markdown reconstructed from
-          // rendered HTML: code fences and tables survive exactly, and it skips
-          // rendering the landing page's React island, which has no meaning as text.
           rawContent: true,
-          // llms-small.txt is the cheap one — guides only, no generated reference.
           exclude: ["reference/**"],
-          // Split by cost: an agent answering "what does this error mean" wants the
-          // guides, and one writing code against the package wants the signatures.
-          // Concatenating all ~93 pages into one context file serves neither.
           customSets: [
             {
               label: "Guides",
               paths: ["guides/**"],
-              description:
-                "the hand-written guides only: setup, errors, retries, streaming, sign-in, tools, context, resume, cost, decision models, speech, transcription",
+              description: "Core guides, at their existing URLs",
             },
             {
               label: "API reference",
               paths: ["reference/**"],
-              description: "every exported symbol, generated from the TypeScript source",
+              description: "Released Core, Agents and React exports",
+            },
+            {
+              label: "Core",
+              paths: ["core", "guides/**", "reference/core", "reference/core/**"],
+              description: "Provider calls, failures, tools and media",
+            },
+            {
+              label: "Agents",
+              paths: ["agents", "agents/**", "reference/agents", "reference/agents/**"],
+              description: "Agent execution, workflows and host-run binding",
+            },
+            {
+              label: "React",
+              paths: ["react", "react/**", "reference/react", "reference/react/**"],
+              description: "Chat hooks, display data and optional components",
+            },
+            {
+              label: "Concepts",
+              paths: ["start", "concepts/**", "examples/**", "demos/**"],
+              description: "Package boundaries and runnable examples",
             },
           ],
         }),
-        starlightTypeDoc({
+        coreTypeDoc({
           entryPoints: [
             "../core/src/index.ts",
+            "../core/src/hosted.ts",
+            "../core/src/otel.ts",
             "../core/src/zod.ts",
             "../core/src/decisions.ts",
             "../core/src/speech.ts",
@@ -97,11 +100,41 @@ export default defineConfig({
             "../core/src/auth/index.ts",
           ],
           tsconfig: "../core/tsconfig.json",
-          output: "reference",
-          // Six entry points, so the generated group has six children named
-          // after the import paths they document.
-          sidebar: { label: "API reference", collapsed: true },
-          typeDoc: { excludeInternal: true, useCodeBlocks: true, parametersFormat: "table" },
+          output: "reference/core",
+          sidebar: { label: "Core API", collapsed: true },
+          typeDoc,
+        }),
+        agentsTypeDoc({
+          entryPoints: [
+            "../agents/src/index.ts",
+            "../agents/src/runs.ts",
+            "../agents/src/mcp.ts",
+            "../agents/src/evals.ts",
+            "../agents/src/workflow.ts",
+            "../agents/src/a2a/index.ts",
+            "../agents/src/code-mode.ts",
+            "../agents/src/quickjs.ts",
+            "../agents/src/otel.ts",
+          ],
+          tsconfig: "../agents/tsconfig.json",
+          output: "reference/agents",
+          sidebar: { label: "Agents API", collapsed: true },
+          typeDoc,
+        }),
+        reactTypeDoc({
+          entryPoints: [
+            "../react/src/index.ts",
+            "../react/src/protocol.ts",
+            "../react/src/sse.ts",
+            "../react/src/agents.ts",
+            "../react/src/ui/index.ts",
+            "../react/src/markdown.tsx",
+            "../react/src/ag-ui.ts",
+          ],
+          tsconfig: "../react/tsconfig.json",
+          output: "reference/react",
+          sidebar: { label: "React API", collapsed: true },
+          typeDoc,
         }),
       ],
       editLink: { baseUrl: `${REPO}/edit/main/site/` },
@@ -118,37 +151,83 @@ export default defineConfig({
         { tag: "link", attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" } },
       ],
       sidebar: [
+        { label: "Start here", slug: "start" },
         {
-          label: "Start here",
+          label: "Core",
+          collapsed: true,
           items: [
-            { label: "Getting started", slug: "guides/getting-started" },
-            { label: "The provider seam", slug: "guides/providers" },
-            { label: "Set up providers once", slug: "guides/registry" },
-          ],
-        },
-        {
-          label: "Surviving production",
-          items: [
+            { label: "Overview", slug: "core" },
+            { label: "Quickstart", slug: "guides/getting-started" },
+            { label: "Providers", slug: "guides/providers" },
+            { label: "Provider registry", slug: "guides/registry" },
             { label: "Errors", slug: "guides/errors" },
             { label: "Retries and fallback", slug: "guides/retries" },
             { label: "Limits and key pools", slug: "guides/limits" },
-            { label: "Streaming and the watchdog", slug: "guides/streaming" },
-            { label: "Sign in to a subscription", slug: "guides/auth" },
-          ],
-        },
-        {
-          label: "Building a loop",
-          items: [
+            { label: "Streaming", slug: "guides/streaming" },
+            { label: "Subscription sign-in", slug: "guides/auth" },
             { label: "Tools", slug: "guides/tools" },
             { label: "Context and compaction", slug: "guides/context" },
-            { label: "Resume after a crash", slug: "guides/resume" },
+            { label: "Restore provider history", slug: "guides/resume" },
             { label: "Usage and cost", slug: "guides/usage" },
             { label: "Decision models", slug: "guides/decisions" },
             { label: "Speech", slug: "guides/speech" },
             { label: "Transcription", slug: "guides/transcription" },
           ],
         },
-        typeDocSidebarGroup,
+        {
+          label: "Agents",
+          collapsed: true,
+          items: [
+            { label: "Overview", slug: "agents" },
+            { label: "Quickstart", slug: "agents/getting-started" },
+            { label: "Conversations and media", slug: "agents/conversations" },
+            { label: "Tools and guards", slug: "agents/tools" },
+            { label: "Questions and approvals", slug: "agents/requests" },
+            { label: "Recovery and retries", slug: "agents/recovery" },
+            { label: "Specialists and helpers", slug: "agents/specialists" },
+            { label: "Workflows", slug: "agents/workflows" },
+            { label: "Memory", slug: "agents/memory" },
+            { label: "Code mode", slug: "agents/code-mode" },
+            { label: "Remote agents and A2A", slug: "agents/a2a" },
+            { label: "MCP tools", slug: "agents/mcp" },
+            { label: "Evals", slug: "agents/evals" },
+            { label: "Tracing", slug: "agents/tracing" },
+            { label: "Background runs", slug: "agents/background-runs" },
+          ],
+        },
+        {
+          label: "React",
+          collapsed: true,
+          items: [
+            { label: "Overview", slug: "react" },
+            { label: "Quickstart", slug: "react/getting-started" },
+            { label: "Transport and display data", slug: "react/transport" },
+            { label: "Requests and client actions", slug: "react/requests" },
+            { label: "Components and content", slug: "react/components" },
+            { label: "Styling", slug: "react/styles" },
+            { label: "Recovery and drafts", slug: "react/recovery" },
+            { label: "AG-UI", slug: "react/ag-ui" },
+          ],
+        },
+        {
+          label: "Concepts",
+          collapsed: true,
+          items: [
+            { label: "Package boundaries", slug: "concepts/package-boundaries" },
+            { label: "Messages and events", slug: "concepts/messages-and-events" },
+            { label: "Tools and permissions", slug: "concepts/tools-and-permissions" },
+            { label: "Retry, resume and reconnect", slug: "concepts/retry-resume-reconnect" },
+          ],
+        },
+        { label: "Examples", slug: "examples" },
+        { label: "Demos", slug: "demos" },
+        { label: "Error classifier", slug: "demos/errors" },
+        { label: "Run a task", slug: "demos/agent" },
+        { label: "Chat components", slug: "demos/chat" },
+        { label: "API reference", slug: "reference" },
+        coreSidebar,
+        agentsSidebar,
+        reactSidebar,
       ],
     }),
   ],

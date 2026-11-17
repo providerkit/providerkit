@@ -1,0 +1,45 @@
+---
+const { pathname } = Astro.url;
+const groups = [
+  { label: "Packages", links: [["Core", "/core/"], ["Agents", "/agents/"], ["React", "/react/"]] },
+  { label: "Resources", links: [["Examples", "/examples/"], ["Demos", "/demos/"], ["API reference", "/reference/"]] },
+] as const;
+
+function current(href: string) {
+  if (pathname === href) return "page";
+  if (pathname.startsWith(href) || (href === "/core/" && pathname.startsWith("/guides/"))) return "location";
+}
+---
+
+<nav class="section-links" aria-label="Site navigation">
+  {groups.map(({ label, links }) => (
+    <ul aria-label={label}>
+      {links.map(([name, href]) => <li><a href={href} aria-current={current(href)}>{name}</a></li>)}
+    </ul>
+  ))}
+</nav>
+
+<style>
+  .section-links, ul { display: flex; align-items: center; }
+  .section-links { gap: clamp(1.25rem, 2.2vw, 2rem); }
+  ul { gap: clamp(0.75rem, 1.3vw, 1.25rem); margin: 0; padding: 0; list-style: none; }
+  a {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 2.75rem;
+    color: var(--ink-2);
+    font-size: 0.9rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  ul:first-child a { color: var(--ink); font-weight: 550; }
+  a[aria-current] { color: var(--ink); text-decoration: underline 2px var(--beam); text-underline-offset: 0.45em; }
+  @media (hover: hover) and (pointer: fine) {
+    a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 0.45em; }
+  }
+  @media (width < 50rem) {
+    .section-links { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 1rem; }
+    ul { display: grid; gap: 0; }
+    a { display: flex; font-size: 1rem; }
+  }
+</style>

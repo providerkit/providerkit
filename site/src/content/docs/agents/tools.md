@@ -1,0 +1,56 @@
+---
+title: Tools and guards
+description: Register tools, validate results and reject work before an external effect.
+---
+
+Run the offline guard example:
+
+```sh
+bun node_modules/@providerkit/agents/examples/guardrails.ts
+```
+
+It exercises real SDK guards without a model request. [Read the complete source](https://github.com/providerkit/providerkit/blob/340d8af/agents/examples/guardrails.ts).
+
+## Register the capabilities you allow
+
+Agents uses Core `Tool` objects. Define input validation, a timeout and the operation in the tool;
+the SDK records its attempts and outcomes. A failing tool returns data the model can use to
+correct its next call. A caller's abort remains cancellation, not a retryable tool failure.
+
+The registered catalog is the ceiling. Per-run `enabledTools` may remove capabilities, not add
+unregistered ones. Instructions, selected tools and model settings are resolved once and saved.
+Model-written instructions cannot grant a tool.
+
+Unmarked tools run serially. Parallel execution needs both `isConcurrencySafe` on the tool and
+permission from the host. `isReadOnly` is a claim you make about the real implementation, not a
+promise inferred from its name.
+
+## Check output
+
+`output.schema` tells the model what result to submit. `output.validate` checks the actual value
+and returns your typed result or throws a correction message. The SDK reserves `submit_result`
+for this path. Keep validation free of effects: restoring a completed result may run it again.
+
+An ordinary tool may return JSON or text and inline image parts. Its summary controls what the
+model reads. Saved output and images remain private host data; they are not automatic browser
+content. Media limits include images returned by tools.
+
+## Reject work with guards
+
+Guards can inspect model input/output and tool input/output. They are blocking checks with
+recorded identities, time limits and bounded data. A rejected guard prevents the protected next
+step. Guarded model output is held back until the guard allows it, rather than leaked to progress
+first. Changed guard policies cannot silently resume old work.
+
+The host's `beforeTool` check is still required for application permissions. A model-generated
+approval, a guard result or a tracing callback cannot replace it. Output validation cannot undo
+a tool that already changed an external service.
+
+## Observe without controlling
+
+`onLifecycle` observes starts, ends and failures. Its errors do not change execution decisions.
+`onEvent` is best-effort progress. Both can contain private data, and either can repeat after a
+restart. Do not use an observer to perform a non-repeatable business action.
+
+Use [tracing](/agents/tracing/) for content-free operation records, [requests](/agents/requests/)
+for human decisions and [recovery policies](/agents/recovery/) for interrupted work.

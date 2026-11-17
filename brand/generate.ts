@@ -27,7 +27,11 @@ function png(svg: string, width: number, out: string): void {
   const r = new Resvg(svg, {
     fitTo: { mode: "width", value: width },
     // Only the OG card has text; the icons are pure vector.
-    font: { loadSystemFonts: true, defaultFontFamily: "Inter, sans-serif" },
+    font: {
+      loadSystemFonts: false,
+      fontFiles: [`${HERE}/fonts/Archivo.ttf`],
+      defaultFontFamily: "Archivo",
+    },
   });
   writeFileSync(out, r.render().asPng());
   console.log(`  ${out.replace(ROOT, ".")}`);
@@ -70,4 +74,4 @@ console.log("  ./site/src/assets/mark.svg");
 // apple-touch-icon sits on whatever colour the OS puts behind it — the opaque
 // tile, not the transparent mark.
 png(avatar, 180, `${SITE_PUBLIC}/apple-touch-icon.png`);
-png(ogCardSvg(), 1200, `${SITE_PUBLIC}/og.png`);
+png(ogCardSvg(avatar), 1200, `${SITE_PUBLIC}/og.png`);
