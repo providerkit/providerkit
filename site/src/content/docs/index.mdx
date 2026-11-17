@@ -1,168 +1,84 @@
 ---
 title: providerkit
-description: One seam for every LLM provider, plus the failure handling you only learn in production. Zero dependencies, fetch-only, MIT.
+description: Call models, run agents and build chat screens in TypeScript. Start with Core or Agents, and follow React as it develops.
 template: splash
 ---
 
-import OpticalBench from "../../components/OpticalBench.tsx";
+import TaskExample from "../../components/TaskExample.tsx";
 
-<p class="leader">
-  <span>Thirteen failure kinds, each named by what fixes it</span>
-</p>
-
-<div class="plate">
-
-<OpticalBench client:load />
-
-<div class="masthead">
-  <h1>providerkit</h1>
-  <p>
-    One seam for every LLM provider, plus the failure handling you only learn in production. Not a
-    framework: no loop, no prompts, no graph. Your loop is where your product lives.
+<div class="foundation-home">
+<header class="masthead">
+  <h1>Call models. Run agents.<br />Build chat screens.</h1>
+  <p>TypeScript packages for the parts between your app and an AI model. Use Core for provider calls, Agents for tools and tasks, and follow the React chat package as it develops.</p>
+  <p class="masthead-actions">
+    <a href="/start/">Choose where to start</a>
+    <a href="/examples/">Find an example</a>
   </p>
+</header>
 
-```bash
-bun add @providerkit/core
-```
+<TaskExample client:load />
 
-<p class="masthead-actions">
-  <a href="/guides/getting-started/">Get started</a>
-  <a href="/guides/errors/">Read the taxonomy</a>
-  <a href="https://github.com/providerkit/providerkit">Source</a>
-</p>
+<section class="package-rows" aria-label="Choose a package">
+  <div class="package-row">
+    <div>
+      <h2>Core</h2>
+      <code>@providerkit/core</code>
+    </div>
+    <div>
+      <p>
+        Call a model, stream its answer and handle failures. Keep your own agent loop, or use ours.
+      </p>
+      <p class="package-detail">
+        0.33.0. Chat, hosted tools, speech, transcription and opt-in tracing. The main entry has no
+        runtime dependencies.
+      </p>
+      <p class="masthead-actions">
+        <a href="/guides/getting-started/">Make your first call</a>
+        <a href="/core/">Explore Core</a>
+      </p>
+    </div>
+  </div>
+  <div class="package-row">
+    <div>
+      <h2>Agents</h2>
+      <code>@providerkit/agents</code>
+    </div>
+    <div>
+      <p>
+        Give an agent a task. It calls a model, runs the tools you allow and returns a result you
+        can check.
+      </p>
+      <p class="package-detail">
+        0.1.0, experimental. Built on Core, with specialist calls and checkpoints your app can save.
+      </p>
+      <p class="masthead-actions">
+        <a href="/agents/getting-started/">Run an agent offline</a>
+        <a href="/agents/">Explore Agents</a>
+      </p>
+    </div>
+  </div>
+  <div class="package-row">
+    <div>
+      <h2>React</h2>
+      <code>@providerkit/react</code>
+    </div>
+    <div>
+      <p>Chat state, hooks and optional components for an app's conversation screen.</p>
+      <p class="package-detail">
+        In development. Follow the public implementation and local chat example before the first
+        release.
+      </p>
+      <p class="masthead-actions">
+        <a href="/react/">See the React work</a>
+      </p>
+    </div>
+  </div>
+</section>
 
-  <p class="agents-note">
-    Reading this as an agent? <a href="/llms.txt">/llms.txt</a> indexes the site,{" "}
-    <a href="/kinds.json">/kinds.json</a> is the taxonomy as data, and appending <code>.md</code> to
-    any page returns its source.
-  </p>
+<section class="home-next">
+  <h2>Keep the parts you already have.</h2>
+  <p>Use Core under your own loop. Add Agents when you want a shared loop. Your app keeps sign-in, permission checks and stored conversations.</p>
+  <p class="masthead-actions"><a href="/concepts/package-boundaries/">Understand the boundaries</a><a href="/reference/">Look up an API</a></p>
+  <p class="agents-note">Reading with an AI assistant? <a href="/llms.txt">llms.txt</a> indexes the docs. Each page has a Markdown version, and <a href="/kinds.json">kinds.json</a> lists error remedies as data. All packages are MIT licensed.</p>
+</section>
 </div>
-
-</div>
-
-## The interface is the easy part.
-
-Most "unified LLM interface" libraries stop at the interface. That is not where the time goes. This
-is where the time goes.
-
-<div class="specimens">
-  <div>
-    <h3>The stream that never ends</h3>
-    <p>
-      A provider accepts the request and then sends nothing. Every SDK's default is to wait forever,
-      and the symptom is the worst kind: none at all.
-    </p>
-  </div>
-  <div>
-    <h3>The socket four levels down</h3>
-    <p>
-      A dead connection carries no HTTP status, and the useful code sits on{" "}
-      <code>cause.cause.cause</code>. Miss it and every network blip reads as permanent.
-    </p>
-  </div>
-  <div>
-    <h3>One cause, five statuses</h3>
-    <p>
-      Running out of credit arrives as 429, 402, 403 and 400 depending on the vendor. Status alone
-      tells you to retry an empty balance.
-    </p>
-  </div>
-  <div>
-    <h3>The 429 that is really a full prompt</h3>
-    <p>
-      Waiting fixes a throttle and does nothing for an overflowing context window. They arrive under
-      the same status.
-    </p>
-  </div>
-  <div>
-    <h3>Cache tokens, counted twice</h3>
-    <p>
-      Anthropic reports cache reads outside the input count; OpenAI reports them inside it. Hand
-      both through unreconciled and the same conversation costs two different things.
-    </p>
-  </div>
-  <div>
-    <h3>The answer that was already there</h3>
-    <p>
-      A turn cut off at its output ceiling leaves invalid JSON, and a run reports nothing while the
-      answer sits in the fragments.
-    </p>
-  </div>
-</div>
-
-## Small surface. Boring on purpose.
-
-One provider interface, one error type, and the handful of primitives a loop actually needs
-underneath it.
-
-```ts
-import { createAnthropicProvider } from "@providerkit/core";
-
-const provider = createAnthropicProvider({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  model: "claude-sonnet-5",
-});
-
-for await (const chunk of provider.createStream(messages, tools, { effort: "medium" })) {
-  if (chunk.content) write(chunk.content);
-  // one usage shape across every provider
-  if (chunk.usage) record(chunk.usage);
-}
-```
-
-```ts
-import { ProviderError, isTransient, isBackupEligible } from "@providerkit/core";
-
-try {
-  /* ... */
-} catch (raw) {
-  const err = ProviderError.from("anthropic", raw);
-
-  if (err.kind === "context") return compactAndRetry();
-  if (isBackupEligible(err.kind)) return otherModel();
-  if (isTransient(err.kind)) return retry(err.retryAfterMs);
-  surface(err); // .body has their actual words
-}
-```
-
-## Five codebases learned this separately.
-
-providerkit was extracted from five production codebases that had each independently grown the same
-layer: **about 9,100 lines solving one ~2,000-line problem**. They had three separate 60-second idle
-watchdogs, identical down to the constant. On one day in September 2026, two of them shipped the same
-five fixes independently.
-
-They had also each learned a **different** part of it. One walked the cause chain for dead sockets.
-One parsed Gemini's RetryInfo. One read the body before the status and knew the quota wordings in
-five languages. One knew Anthropic's 529 and when a failure is worth a different model. One could
-rescue an answer from a tool call the model truncated.
-
-<div class="dims">
-  <div class="dim">
-    <span class="dim-value">5</span>
-    <span class="dim-rule" />
-    <span class="dim-label">codebases pooled</span>
-  </div>
-  <div class="dim">
-    <span class="dim-value">13</span>
-    <span class="dim-rule" />
-    <span class="dim-label">failure kinds, by their fix</span>
-  </div>
-  <div class="dim">
-    <span class="dim-value">416</span>
-    <span class="dim-rule" />
-    <span class="dim-label">tests, every failure any of them saw</span>
-  </div>
-  <div class="dim">
-    <span class="dim-value">0</span>
-    <span class="dim-rule" />
-    <span class="dim-label">runtime dependencies</span>
-  </div>
-</div>
-
-The classifier on this page is the union of all five, and the test suite is every failure any of them
-ever saw. That is the part worth having.
-
-**Four of the five run their AI on it in production today.** The migrations that put it there were
-net-negative every time: −452, −1,621 and −197 lines, and the last one trades three vendor SDKs
-for this package.

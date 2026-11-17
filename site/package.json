@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
+    "build": "bun scripts/reference-routes.ts && astro build",
     "preview": "astro preview",
     "typecheck": "astro check",
     "lint": "oxlint -c ../.oxlintrc.json src"

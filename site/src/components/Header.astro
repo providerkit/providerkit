@@ -1,0 +1,89 @@
+---
+import Header from "@astrojs/starlight/components/Header.astro";
+
+const { pathname } = Astro.url;
+const links = [
+  {
+    label: "Core",
+    href: "/core/",
+    active: pathname.startsWith("/core/") || pathname.startsWith("/guides/"),
+  },
+  { label: "Agents", href: "/agents/", active: pathname.startsWith("/agents/") },
+  { label: "React", href: "/react/", active: pathname.startsWith("/react/") },
+  { label: "Examples", href: "/examples/", active: pathname.startsWith("/examples/") },
+  { label: "Demos", href: "/demos/", active: pathname.startsWith("/demos/") },
+  { label: "API reference", href: "/reference/", active: pathname.startsWith("/reference/") },
+];
+---
+
+<div class="site-header">
+  <Header />
+  <nav class="package-nav" aria-label="Packages and examples">
+    {
+      links.map(({ label, href, active }) => (
+        <a href={href} aria-current={active ? "location" : undefined}>{label}</a>
+      ))
+    }
+  </nav>
+</div>
+
+<style>
+  .site-header {
+    display: grid;
+    height: 100%;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  .site-header > :global(.header) {
+    height: auto;
+    border: 0;
+  }
+  .package-nav {
+    display: flex;
+    gap: 1.5rem;
+    align-items: center;
+  }
+  .package-nav a {
+    color: var(--ink-2);
+    font-size: 0.875rem;
+    text-decoration: none;
+    padding-block: 0.55rem;
+  }
+  .package-nav a[aria-current],
+  .package-nav a:hover {
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: var(--beam);
+    text-underline-offset: 0.4rem;
+  }
+  .package-nav a[aria-current] {
+    font-weight: 600;
+  }
+  @media (max-width: 49.99rem) {
+    /* Docs retain Starlight's drawer. Splash pages have no drawer, so keep
+       their package links and theme selector visible instead of hiding both. */
+    :global(html[data-has-sidebar]) .package-nav {
+      display: none;
+    }
+    :global(html[data-has-sidebar]) .site-header {
+      display: block;
+    }
+    .package-nav {
+      gap: 0.5rem;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    .package-nav a {
+      font-size: 0.8125rem;
+      min-height: 44px;
+      min-width: 44px;
+      display: inline-flex;
+      align-items: center;
+    }
+    :global(html:not([data-has-sidebar]) .site-header .right-group) {
+      display: flex;
+    }
+    :global(html:not([data-has-sidebar]) .site-header .social-icons) {
+      display: none;
+    }
+  }
+</style>

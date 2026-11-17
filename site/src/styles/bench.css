@@ -122,7 +122,7 @@ body {
 }
 
 /* Archivo carries tabular lining figures. Numbers on a drafting sheet line up. */
-:where(h1, h2, h3, h4, h5, h6, th, td, .dim-value, code, kbd) {
+:where(h1, h2, h3, h4, h5, h6, th, td, code, kbd) {
   font-variant-numeric: tabular-nums lining-nums;
 }
 
@@ -400,50 +400,6 @@ starlight-toc a[aria-current="true"] {
   border-top: 1px solid var(--rule);
 }
 
-/* A dimensioned value: the number, the extension line, the label under it. */
-.dim {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.dim-value {
-  color: var(--ink);
-  font-size: clamp(2.25rem, 5vw, 3.25rem);
-  font-weight: 500;
-  line-height: 1;
-  letter-spacing: -0.03em;
-}
-
-.dim-rule {
-  position: relative;
-  border-top: 1px solid var(--rule-strong);
-  height: 0;
-}
-
-/* Witness ticks at both ends, exactly as a dimension line is drawn. */
-.dim-rule::before,
-.dim-rule::after {
-  content: "";
-  position: absolute;
-  top: -3px;
-  height: 7px;
-  border-inline-start: 1px solid var(--rule-strong);
-}
-
-.dim-rule::before {
-  inset-inline-start: 0;
-}
-.dim-rule::after {
-  inset-inline-end: 0;
-}
-
-.dim-label {
-  color: var(--ink-3);
-  font-size: var(--sl-text-xs);
-  line-height: 1.4;
-}
-
 /* --- The landing plate ---------------------------------------------------- */
 
 /* Splash pages carry no sidebar, so the sheet can open to the full plate.
@@ -473,63 +429,29 @@ astro-static-slot {
   display: contents;
 }
 
-/* The plate: the bench spans it, and under the axis the masthead and the
-   console sit side by side, both left-aligned to their own column. */
-.plate {
+/* The classifier has its own wide demo route. */
+.error-demo {
   display: grid;
-  gap: 2.75rem 4rem;
-  grid-template-columns: minmax(0, 1fr);
-  margin-block: 1rem 2.5rem;
-}
-
-@media (min-width: 62rem) {
-  .plate {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-
-  /* Descendant, not child: the island wrapper is `display: contents`, which
-     changes the box tree and not the DOM, so `>` would never match through it. */
-  .plate .bench-plate {
-    grid-column: 1 / -1;
-  }
-
-  /* The masthead reads first even though the island prints first. */
-  .plate .masthead {
-    grid-column: 1;
-    grid-row: 2;
-    /* The console runs ~260px longer than the masthead, and with the masthead
-       packed to the top all of that fell out as one void under the left
-       column. Stretching the column and dropping the agent note to its foot
-       spends the difference as a deliberate gap between two groups instead. */
-    align-self: stretch;
-  }
-
-  .plate .masthead .agents-note {
-    margin-top: auto;
-  }
-
-  .plate .bench-console {
-    grid-column: 2;
-    grid-row: 2;
-  }
-}
-
-/* A grid item is `min-width: auto` by default, so the bench's own min-width
-   would push the whole plate — and with it the page — wider than the viewport
-   instead of scrolling inside its own frame. */
-.plate :is(.bench-plate, .bench-console, .masthead) {
+  gap: 2.75rem;
+  margin-block: 2.5rem;
   min-width: 0;
-  margin-block: 0;
 }
 
-/* Starlight puts `margin-top: 1rem` on every markdown sibling, and that lands
-   on grid ITEMS too — so in each of these grids every cell after the first was
-   pushed a rem down inside its own track while the first stretched to cover it.
-   It showed as the first dimensioned figure and the first specimen sitting a
-   rem higher than their rows, and as a phantom rem between every readout line.
-   A grid's own gap owns its spacing; nothing else may add to it. */
-.specimens > *,
-.dims > *,
+.error-demo .bench-plate {
+  min-width: 0;
+}
+
+.error-demo .bench-console {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3.5rem;
+}
+
+@media (max-width: 49.99rem) {
+  .error-demo .bench-console {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .readout > * {
   margin-top: 0;
 }
@@ -538,9 +460,8 @@ html:not([data-has-sidebar]) .sl-markdown-content > * {
   max-width: 46rem;
 }
 
-/* The bench, the specimen columns and the dimension row are plate-wide; prose
-   stays at reading measure. */
-html:not([data-has-sidebar]) .sl-markdown-content > :is(.plate, .specimens, .dims) {
+/* Work areas use the full width; paragraphs keep their reading measure. */
+html:not([data-has-sidebar]) .sl-markdown-content > :is(.foundation-home, .error-demo) {
   max-width: none;
 }
 
@@ -626,7 +547,7 @@ html:not([data-has-sidebar]) .sl-markdown-content > .expressive-code {
 .bench-svg {
   display: block;
   width: 100%;
-  min-width: 46rem;
+  min-width: 77.5rem;
   height: auto;
   font-family: var(--sl-font), var(--sl-font-system);
 }
@@ -958,51 +879,238 @@ html:not([data-has-sidebar]) .sl-markdown-content > .expressive-code {
   font-variant-numeric: tabular-nums;
 }
 
-/* --- Specimens: the failure inventory, grouped by density, never boxed ---- */
+/* --- Package foundation --------------------------------------------------- */
 
-.specimens {
-  display: grid;
-  gap: 2.25rem 3.5rem;
-  margin-block: 2rem;
-  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+@media (min-width: 50rem) {
+  :root {
+    --sl-nav-height: 6.75rem;
+  }
+}
+@media (max-width: 49.99rem) {
+  html:root:not([data-has-sidebar]) {
+    --sl-nav-height: 6.5rem;
+  }
+}
+@media (max-width: 23rem) {
+  html:root:not([data-has-sidebar]) {
+    --sl-nav-height: 9.25rem;
+  }
 }
 
-.specimens h3 {
-  margin: 0 0 0.5rem;
-  padding-left: 1.1rem;
-  position: relative;
+html .sl-menu-button {
+  border-radius: 0;
+  background: none;
   color: var(--ink);
-  font-size: 1.05rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+}
+.field-error {
+  color: var(--ray-ours);
+  font-size: 0.875rem;
 }
 
-/* Each specimen is witnessed by a tick, the way an item on a plot is called out. */
-.specimens h3::before {
-  content: "";
-  position: absolute;
-  inset-inline-start: 0;
-  top: 0.62em;
-  width: 0.65rem;
-  border-top: 1px solid var(--rule-strong);
+:where(a, button, summary, select):focus-visible {
+  outline: 2px solid var(--beam);
+  outline-offset: 4px;
 }
 
-.specimens p {
-  margin: 0;
-  padding-left: 1.1rem;
+:where(button, .action-link, .masthead-actions a):active {
+  opacity: 0.7;
+}
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.foundation-home {
+  padding-block: 1.5rem 3rem;
+}
+.foundation-home .masthead {
+  max-width: 58rem;
+  margin-bottom: 3.5rem;
+}
+.foundation-home .masthead h1 {
+  font-size: clamp(2.4rem, 4.8vw, 4rem);
+  text-wrap: balance;
+}
+.foundation-home .masthead p {
+  max-width: 46rem;
+}
+.foundation-home :is(h2, h3) {
+  border: 0;
+  padding: 0;
+  margin-top: 0;
+}
+.foundation-home h2::before {
+  display: none;
+}
+.foundation-home h2 {
+  font-size: 1.65rem;
+}
+.foundation-home p {
+  max-width: 46rem;
+}
+
+.task-example {
+  margin-block: 0 4.5rem;
+}
+.example-heading p {
+  margin-block: 0.6rem 1rem;
+}
+.example-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.example-choices button {
   color: var(--ink-2);
-  font-size: var(--sl-text-sm);
-  line-height: 1.62;
-  text-wrap: pretty;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--rule-strong);
+  padding: 0.65rem 0;
+  font: inherit;
+  cursor: pointer;
+  min-height: 44px;
+}
+.example-choices button[aria-pressed="true"] {
+  color: var(--ink);
+  border-bottom: 2px solid var(--beam);
+  font-weight: 600;
+}
+.example-choices button:hover {
+  border-bottom-color: var(--beam);
+}
+.example-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 3.5rem;
+}
+.example-workspace > * {
+  min-width: 0;
+}
+.example-label {
+  color: var(--ink-3);
+  font-size: 0.875rem;
+  margin: 0 0 0.75rem;
+}
+.example-workspace pre {
+  padding: 1.4rem;
+  overflow-x: auto;
+  font-size: 1rem;
+}
+.example-workspace a,
+.task-example a {
+  color: var(--ink);
+  text-decoration-color: var(--beam);
+  text-underline-offset: 0.22em;
+}
+.example-result output {
+  font:
+    600 2rem/1.4 var(--sl-font-mono),
+    monospace;
+  color: var(--ink);
+}
+.example-result p {
+  margin-block: 0.6rem;
+}
+.example-result .example-label {
+  margin-top: 0;
+}
+.example-note {
+  color: var(--ink-3);
+  font-size: 0.875rem;
+  margin-block: 1.5rem;
+}
+.action-link {
+  display: inline-block;
+  padding-block: 0.55rem;
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--beam);
+  text-underline-offset: 0.3em;
+}
+.action-link::after {
+  content: " →";
+  color: var(--beam);
+}
+.package-row {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(0, 2fr);
+  gap: 3.5rem;
+  margin-block: 0 3.5rem;
+}
+.package-row > *,
+.package-row p {
+  margin-top: 0;
+}
+.package-row h2 {
+  margin-bottom: 0.65rem;
+  font-size: 2.1875rem;
+}
+.package-row code {
+  font-size: 0.875rem;
+}
+.package-row .package-detail {
+  color: var(--ink-3);
+  font-size: 0.9375rem;
+}
+.home-next {
+  margin-top: 4rem;
+}
+.masthead-actions a {
+  display: inline-block;
+  padding-block: 0.6rem;
+  min-height: 44px;
+}
+.copy-md {
+  min-height: 44px;
 }
 
-/* --- Dimensioned figures -------------------------------------------------- */
+/* A reference is a lookup surface, not a landing section. */
+html:has(.page-head[data-reference]) .sl-markdown-content h2 {
+  font-size: 1.5rem;
+  padding: 0;
+  border: 0;
+  margin-top: 2rem;
+}
+html:has(.page-head[data-reference]) .sl-markdown-content h2::before {
+  display: none;
+}
+html:has(.page-head[data-reference]) .sl-markdown-content h3 {
+  font-size: 1.15rem;
+  margin-top: 1.5rem;
+}
+html:has(.page-head[data-reference]) .page-head h1 {
+  font-size: 2rem;
+  overflow-wrap: anywhere;
+}
+html:has(.page-head[data-reference]) .sl-markdown-content {
+  line-height: 1.65;
+}
 
-.dims {
-  display: grid;
-  gap: 2rem 3rem;
-  margin-block: 2.5rem;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+@media (max-width: 49.99rem) {
+  .foundation-home {
+    padding-top: 0.5rem;
+  }
+  .foundation-home .masthead {
+    margin-bottom: 2.5rem;
+  }
+  .example-workspace,
+  .package-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+  .task-example {
+    margin-bottom: 3rem;
+  }
+  .package-row {
+    margin-bottom: 3rem;
+  }
+  .field :is(input, textarea) {
+    font-size: 1rem;
+  }
+  .masthead-actions {
+    gap: 0.5rem 1.5rem;
+  }
 }
 
 /* --- Copy page as Markdown ------------------------------------------------ */

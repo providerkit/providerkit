@@ -19,6 +19,7 @@ on:
     paths:
       - "site/**"
       - "core/**"
+      - "agents/**"
       - "brand/**"
       - "package.json"
       - "bun.lock"

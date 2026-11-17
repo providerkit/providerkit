@@ -1,6 +1,6 @@
 ---
 name: providerkit
-description: An optical layout plot for LLM failure — drafting grammar, wavelength-coded remedies, no cards.
+description: TypeScript provider calls, agent execution and chat screens, with the optical bench's type, palettes and mark.
 colors:
   paper: "#16191d"
   paper-2: "#1c2026"
@@ -119,33 +119,22 @@ components:
 
 ## Overview
 
-**Creative North Star: "The Optical Bench"**
+**The world: the optical bench**
 
-Optics has named its defects by their correction for two centuries — spherical, coma,
-astigmatism, chromatic — and diagnosed them with ray fans and spot diagrams. providerkit does
-the same thing to LLM failure: it names thirteen kinds by what fixes each one, not by the
-vendor or the status code that carried it. So the site is drawn as an optical layout plot.
-Scattered rays enter, one element sorts them, and what leaves is parallel, evenly spaced, and
-named. The brand mark is that same collimator, and the landing page is the mark at full scale
-with the real classifier running inside it.
+The collimator mark, Archivo, Commit Mono and the two existing palettes remain the site's
+visual identity. The site now covers Core, Agents and React, rather than describing the whole
+project as a provider layer with no agent loop.
 
-The consequence that governs every decision here: **a line is drafting, or it is deleted.**
-Every rule on every page has to be doing a draftsman's job — an optical centreline, a
-dimension line with witness ticks, a leader running from a label to the thing it names — and
-if it cannot name its job it is decoration and comes out. That single test is what keeps this
-world from sliding into the broadsheet-editorial look its hairlines could otherwise become.
-The composition is always a horizontal bench, never newspaper columns.
+Purpose and useful actions come before the drawing. The landing has one shared example area
+followed by full-width package rows. The full classifier lives at `/demos/errors/`. It still runs
+Core's real classifier, with the same ray geometry and remedy colors.
 
-The palette is not decorative either. Colour here is **wavelength**, and a wavelength stands
-for a remedy: amber is "time fixes it", red is "money or a plan fixes it", blue is "sending
-less fixes it", violet is "our request was wrong", graphite is "nothing to do". The teal beam
-is reserved for what leaves the seam normalized. That coding _is_ the taxonomy — which also
-means it can never be spent on emphasis. Emphasis comes from line frequency and ink weight
-before it comes from another hue.
+Rules are for useful marks: a focus indicator, a selected action, a leader or a diagram axis.
+They are not repeated ornaments over every landing or reference heading. Group packages through
+spacing and type, not three equal marketing cards. No filled controls, shadows or rounded boxes.
 
-The audience reads long technical prose at 3am during an incident, so both grounds are
-built for endurance: light is cool technical paper, dark is an anodized lab bench under work
-light — never a void, never near-black with one neon accent.
+Remedy colors keep their meanings. They never become package colors. Body prose keeps its
+bounded reading width and both themes remain comfortable for long documentation sessions.
 
 **Key Characteristics:**
 
@@ -228,11 +217,9 @@ subtraction: Inter and JetBrains Mono are retired from this project as category 
 
 ### Hierarchy
 
-- **Display** (600, `clamp(2.4rem, 6vw, 3.6rem)`, 1.22, −0.03em): the masthead wordmark only.
-  One per site.
-- **Headline** (600, `2.1875rem`, 1.22, −0.017em): section headings. Always dimensioned from
-  the margin — a hairline across the top with a 2.5rem heavier witness mark at its left,
-  never an underline and never a box.
+- **Display** (600, `clamp(2.4rem, 4.8vw, 4rem)`, 1.22, −0.03em): the landing's purpose.
+- **Headline** (600, `2.1875rem`, 1.22, −0.017em): guide headings and package names. Guide
+  headings keep their witness mark; landing and reference headings do not repeat it.
 - **Figure** (500, `clamp(2.25rem, 5vw, 3.25rem)`, 1, −0.03em, tabular): a dimensioned value —
   the number in a `.dim`, sitting above its own dimension line.
 - **Title** (600, `1.05rem`, −0.01em): a specimen or callout heading, indented `1.1rem` behind
@@ -258,20 +245,22 @@ case. Starlight's uppercase aside titles are explicitly overridden.
 
 ## Layout
 
-The page is a **plate**: a horizontal optical axis running the full width, with everything
-else dimensioned off it. The splash template opens to the full plate width (**67.5rem /
-1080px effective**) and drops Starlight's empty title panel, because the landing page carries
-its own masthead beneath the bench. Docs pages run at the standard **47rem** reading column
-with sidebar and table of contents.
+The splash template opens to **78rem**. Docs use a **47rem** column with the existing Starlight
+sidebar and table of contents. Prose is capped at **46rem**, even on the wide landing.
 
-Within a plate, three widths coexist: the bench, the specimen columns and the dimension row
-run plate-wide, while prose is capped at **46rem** so the measure never follows the container.
-Below `62rem` the plate collapses to a single column and the masthead is ordered to read
-before the classifier console even though the island prints first.
+The landing reads in DOM order: purpose, actions, example, package rows, next steps. On desktop,
+the example's call and result share a row. Below `50rem`, code comes above output and package rows
+stack. Nothing is reordered away from the keyboard or screen-reader sequence.
 
-The bench itself has a natural minimum width of `46rem` and **scrolls horizontally inside its
-own container** below that, exactly as a wide drawing does. It is never reflowed into
-something that is no longer a bench, and the caption tells a narrow reader to scroll sideways.
+The full classifier is the only wide optical drawing. Its `77.5rem` minimum width keeps the
+1240-unit drawing and its labels at their intended size. It scrolls inside the demo, never the
+page. A caption tells narrow-screen readers how to see the rest. Its input and verdict stack
+on phones; provider labels have 44px hit targets.
+
+Desktop header navigation names Core, Agents, React, Examples, Demos and API reference. The
+existing Starlight mobile drawer contains the same destinations on documentation pages. Splash
+pages have no drawer, so their package links and theme selector remain visible in the header.
+Package sidebar groups start collapsed; Starlight expands the current page's ancestors.
 
 Spacing is role-named rather than a numeric ramp: `0.4rem` at a tick, `0.6rem` between a label
 and its rule, **`1.1rem` as the standing leader indent** (the distance from a witness tick or
@@ -398,9 +387,8 @@ always lands somewhere useful.
 
 ### The Optical Bench (signature component)
 
-The landing page's classifier, drawn as the optical layout it actually is. Seven real vendor
-failures enter at scattered angles from the left, converge on the lens, and thirteen named
-exits leave parallel to the right, grouped into five remedy bands.
+The classifier on `/demos/errors/`, drawn as an optical layout. Seven vendor error examples
+enter from the left and thirteen named exits leave on the right, grouped into five remedy bands.
 
 - **The axis** is a dash-dot centreline (`14 5 2 5`) at `rule-strong`, spanning the full plate.
 - **Every lane is always drawn**, unlit at 0.32 opacity. The reader sees the whole taxonomy at
@@ -409,10 +397,8 @@ exits leave parallel to the right, grouped into five remedy bands.
   failure" reads before "this is `overload`".
 - **The struck beam is three hairlines**, 2.6px apart, rather than one heavy stroke — emphasis
   from line frequency, so no extra hue is spent on it.
-- **Motion:** a changed verdict re-traces the ray by remounting and running a 420ms
-  `stroke-dashoffset` draw, with the landing dot scaling in over the last 30%. A ray being
-  drawn is the only motion this world contains. Wrapped in
-  `@media (prefers-reduced-motion: no-preference)`.
+- **Motion:** a changed verdict re-traces the ray in 230ms. The dot arrives within 300ms.
+  Both animations run only under `prefers-reduced-motion: no-preference`. No idle animation.
 
 ### Dimensioned figures
 
@@ -443,15 +429,12 @@ so they are set for what lands on the page (a 12px label would render at 9).
 
 ### Reference pages (Read register)
 
-The ~85 generated TypeDoc pages take the world's **colour, type and rules but none of its
-figures or drafting devices**. They are lookup surfaces read in seconds, and expression there
-costs scan speed while buying nothing. Headings on a generated page should sit closer to body
-scale than the guides' headline role, and the emblematic-figure treatment used to open a
-hand-written guide is explicitly not extended to them.
+Generated reference pages use the same colors and fonts with quieter reading styles. Their
+page title is `2rem`, second-level headings `1.5rem` and third-level headings `1.15rem`. No
+ornamental heading rules or figures. The page title identifies reference routes for these styles.
 
-> Standing decision, not yet fully implemented: generated reference pages currently inherit
-> the guides' headline scale (`2.1875rem` on "Parameters", "Returns"). Bringing them down to
-> the Read register is outstanding work.
+Authored package reference indexes sit beside the generated directories. TypeDoc owns only
+`reference/core/` and `reference/agents/`; regenerating them cannot erase the authored indexes.
 
 ## Do's and Don'ts
 
@@ -494,59 +477,51 @@ hand-written guide is explicitly not extended to them.
 
 ## Landing
 
-providerkit.dev, all of it. The landing page is Persuade; every guide and reference page is Read
-and keeps the same world in a quieter register. One world, two registers, not two designs. The
-Optical Bench above is the landing page's first screen.
+The landing helps a TypeScript developer choose a useful starting point. It takes a provider
+failure and turns it into a remedy, then shows where provider calls, agent tasks and chat screens
+belong. Guides and references keep the same visual world in a quieter reading style.
 
-Spine: one optical bench, where seven real vendor failures enter as scattered rays, pass one element, and leave parallel and named.
-Driver: the reader's own edits. Changing the status or the body re-traces the ray through the real classifier.
-Motion: the ray redraws in place, and its entering angle, exit lane and wavelength follow the verdict.
+Spine: purpose, one real working example, full-width package rows, then boundaries and reference.
+Driver: the reader chooses an error kind; Core computes the result locally and the choice stays in the URL.
+Motion: results change immediately in place; the full classifier redraws its ray on the demo route, never on a timer.
 
-Who it's for: a TypeScript developer who is either weighing a provider layer, or is mid-incident
-at 2am with a status code that is lying to them. On the landing page, the action is to believe
-the taxonomy is real and go read a guide. On a docs page, the job is to find the one paragraph
-that says what to do about the failure in front of them, fast, and to keep reading comfortably
-for an hour.
+The approved shared work area won over three equal package cards because readers need a job
+before an import path. A diagram-first landing hid the purpose; a feature inventory hid the
+starting point; separate package landings split the choice too early; a chat-first demo would
+promise an unreleased package. These were alternatives, not extra designs to build.
 
-The story: the reader sees seven real vendor failures enter as scattered rays, pass one element,
-and leave parallel and named. They understand the seam and the taxonomy in one image, believe it
-because the diagram runs the real package, and go read the guide for their failure.
+First screen: what providerkit does, who it is for and links to Start and Examples. Code is above
+output on phones. Controls are underlined and unfilled. The earlier suggestion of a filled
+neutral primary action was not approved and is not part of this direction.
 
-First screen: a horizontal optical axis across the page, and the live classifier is that
-diagram, not a widget beside it. Title and install sit under the axis, left-aligned. No hero
-card, no gradient.
+The Core example runs `isTransient`, not a copied classifier. The full demo reuses OpticalBench.
+The package rows explain the next action with accurate release state: Core 0.33, Agents 0.1 and
+React in development. No invented installs, no pretend chat run, no unmaintained test counts.
 
-Proof on hand: five pooled production codebases (~9,100 lines), three independently derived
-identical 60s watchdogs, two of them shipping the same five fixes on the same day, 380 tests, 13
-error kinds, one migration that deleted 634 lines from an MV3 extension, and a classifier that
-runs the real published package in the reader's browser. Nothing beyond that list: no
-testimonials, no benchmarks, no download counts. None may be invented, and none may be implied.
-
-The other ideas, and the rule each one left in this world:
-
-- Struck cathode gauze (a close second): every alternative shown at once as an unlit ghost, the
-  chosen one struck forward; no boxes, rules or dividers, grouping by density and depth instead.
-- Accretion-disk threshold (a close second): an irreversible threshold drawn as a place. It
-  became the retries guide's commitment horizon.
-- Night instrument six-pack: show trend as well as value. The classifier shows a verdict's
-  neighbours, not only its verdict.
-- Riley moiré gallery: contrast from line frequency, not from adding a hue.
-- Colour-chord counterpoint: every failure family readable without hue.
-- Push Pin poster: one emblematic figure anchors a section. The finish narrowed it to the two
-  guides with something spatial to show.
+Finished Agent and React demos and their expanded guides/reference belong in a later integration
+after publication. That is sequenced work, not a decision to omit them. The site must use the
+published React components rather than build another reducer, composer or Markdown renderer.
+No new runtime library is needed for this foundation.
 
 ## Decisions behind the site
 
-What the rebuild removed, and what must not come back: `site/src/styles/brand.css` with every
-`--pk-*` token and the whole `pk-` class family; the `.pk-eyebrow` tracked ALL-CAPS label above
-a heading (drafting labels use a leader line or a dimensioned callout instead); the `.pk-meta`
-middle-dot string (`A · B · C`); the `.pk-grid` / `.pk-cell` / `.pk-stats` / `.pk-stat` cards
-with one shared radius and a hairline gap; `--pk-radius: 10px` on every surface.
+The user explicitly expanded the site from Core alone to Core, Agents and React. Package-specific
+boundaries replace the umbrella claim that providerkit has no agent loop. The mark, fonts,
+palettes, guide URLs and machine-readable channels stay. Core's zero-runtime-dependency claim
+never becomes a claim about the whole toolkit.
 
-What stayed, because it is product truth or a brand commitment, not visual habit: all copy and
-content, the collimator mark and its geometry, the teal as the collimated beam, the
-failure-family semantics (retry / account / context / ours / inert), the classifier's logic in
-`Classifier.tsx`, Astro + Starlight, and every route.
+The shared example precedes full-width package rows. No three-card package grid, no statistics
+strip and no diagram before the purpose. Reference headings now use the quiet reading style.
+
+Generated references move to package directories using the locked plugin's multi-instance
+factory. `scripts/legacy-reference-routes.json` captures the actual old build's routes.
+`scripts/reference-routes.ts` generates explicit HTML and Markdown redirects, including paths
+with and without a trailing slash. Its `--check` mode checks every destination after a build.
+Never replace these with a wildcard prefix redirect: old and new trees overlap.
+
+The retired `pk-*` card system, rounded surfaces, uppercase eyebrows and middle-dot metadata
+strips remain retired. The later React package's `pk-*` selectors are unrelated library styles,
+not permission to restore that old site design.
 
 Fonts: Archivo Variable and Commit Mono, both OFL-1.1, self-hosted from Fontsource. One 32 KB
 latin variable file covers weights 100–900 for Archivo.
@@ -564,10 +539,10 @@ Agents read this site as much as people do, and they never render the visual wor
 the markdown underneath. (`AGENTS.md` speaks to agents working _on_ providerkit; this part is
 for agents _using_ it.)
 
-- `starlight-llms-txt` serves `/llms.txt`, `/llms-full.txt` and `/llms-small.txt`. 13 guides plus
-  ~85 generated TypeDoc pages is too much for one context file, so `llms-small.txt` covers the
-  guides and `llms-full.txt` carries guides plus reference. The plugin does **not** emit
-  per-page markdown.
+- `starlight-llms-txt` keeps `/llms.txt`, `/llms-full.txt` and `/llms-small.txt`. The small
+  bundle omits generated reference. Existing Guides and API reference sets remain; Core,
+  Agents, React and Concepts sets make the package split explicit. The plugin does not emit
+  per-page Markdown.
 - Per-page `.md`, Bun-style: `providerkit.dev/guides/errors.md` returns `text/markdown` from a
   small Astro endpoint over the content collection. Agents use this one most: `llms.txt` says
   the page exists, and the `.md` fetches it without spending tokens on HTML chrome.

@@ -1,0 +1,27 @@
+---
+title: Error classifier
+description: Paste a provider failure and run the real Core classifier locally in your browser.
+template: splash
+---
+
+import OpticalBench from "../../../components/OpticalBench.tsx";
+
+<header class="masthead">
+  <h1>Find what fixes the failure.</h1>
+  <p>
+    Choose an example or paste a response. Core reads the body before the status and names the kind
+    by what fixes it. Nothing you type leaves this browser.
+  </p>
+  <p class="masthead-actions">
+    <a href="/guides/errors/">Read the error guide</a>
+    <a href="/demos/">All demos</a>
+  </p>
+</header>
+
+<div class="error-demo not-content">
+  <OpticalBench client:load />
+</div>
+
+A kind describes the cause. It does not authorize a replay. Check `shouldRetry` and whether the
+stream already emitted output. A network failure cannot tell you whether the provider did work.
+[Read the retry rules](/guides/retries/) before resending a request.

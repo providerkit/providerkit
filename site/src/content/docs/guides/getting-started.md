@@ -1,10 +1,19 @@
 ---
-title: Getting started
-description: Install providerkit, stream your first completion, and understand where the package stops and your loop begins.
+title: Core quickstart
+description: Install Core, stream a first answer and choose whether to keep your own loop or use Agents.
 ---
 
+```ts
+isTransient("overload"); // true
+```
+
+[Import this helper](/guides/errors/#try-it-in-your-code), or continue below to make a provider call.
+The helper runs locally. A provider call needs a key and may be billed.
+
+## Install Core
+
 ```bash
-bun add @providerkit/core   # npm / pnpm / yarn all fine
+bun add @providerkit/core
 ```
 
 Zero runtime dependencies. `fetch` only, with no vendor SDKs and no Node built-ins, so the same build
@@ -62,9 +71,9 @@ import { withWatchdog } from "@providerkit/core";
 const guarded = withWatchdog(provider); // same Provider, both silent failures handled
 ```
 
-A stream that stops sending now fails as a retryable `timeout` instead of hanging forever, and a
-turn that completes without an answer fails instead of showing an empty one. A turn that only
-thought counts as no answer.
+A stream that stalls now fails instead of hanging forever. Whether its timeout can be retried
+depends on when the response started and whether anything was emitted. A turn that completes
+without an answer also fails. Reasoning alone does not count as an answer.
 [Streaming](/guides/streaming/) has the details.
 
 ## Swapping the vendor
@@ -85,14 +94,14 @@ const provider = createOpenAIProvider({
 
 Everything downstream is unchanged. That is the point of the seam.
 
-## What this package is not
+## Choose your loop
 
-It is **not** an agent framework. There is no loop, no prompt templates, no graph, no memory
-abstraction, no chain. Your loop is where your product actually lives: the approval gates, the
-sub-agents, the terminal-submit rules. Every one of those differs per app.
+Core handles provider calls, errors, retry policy, stream deadlines, tools and usage. It does not
+choose your prompts or run an agent loop.
 
-What is here is everything _underneath_ that loop: the provider seam, the error taxonomy, retry
-and fallback, the idle watchdog, the tool kernel, compaction decisions, and cost maths.
+Keep your own loop, or use [Agents](/agents/) for a shared model/tool loop with specialists and
+checkpoints. Either way, your app owns permission checks and stored data. See
+[package boundaries](/concepts/package-boundaries/).
 
 ## Where to go next
 

@@ -1,12 +1,13 @@
 ---
-title: Resume after a crash
-description: Save each message as the turn makes it, repair the history when you load it, and send the conversation again on the same session. What this package covers, and what stays with your job runner.
+title: Restore provider history
+description: Save and repair messages for the next provider call. History repair is not execution recovery.
 ---
 
 A process can stop in the middle of an agent turn: a deploy, a crash, a restart. When it comes
 back, the conversation is wherever your store left it, maybe with a tool call that never got its
-result. This guide covers how to save that history so it can be sent again, using pieces this
-package already has.
+result. This guide covers saving and repairing provider history with Core. It does not recover
+an interrupted action. For saved agent execution, see [Agents](/agents/) and
+[retry, resume and reconnect](/concepts/retry-resume-reconnect/).
 
 ## Save each message as it happens
 
@@ -24,8 +25,9 @@ for (const call of turn.message.toolCalls ?? []) {
 
 `collectTurn` reads one turn to the end and gives you the assistant message to append, as it is:
 the text, the reasoning, and the tool calls put back together from their fragments. Save it before
-you run its tools, then save each tool result as it comes back. A crash then loses at most the
-step that was running: the turn being streamed, or the tool being run.
+you run its tools, then save each tool result as it comes back. A crash can leave the current
+operation's outcome unknown: a tool may have changed external state before its result was saved.
+Inspect that state before repeating the action.
 
 Save the message whole. `reasoning`, `reasoningDetails`, `reasoningItems` and each call's
 `thoughtSignature` go back to the provider on the next request. DeepSeek answers a tool-call turn
@@ -33,8 +35,9 @@ that lacks its reasoning with a 400, and Gemini without its signature forgets th
 made. [The provider seam](/guides/providers/) has the rest.
 
 A turn that dies mid-stream saves nothing. `collectTurn` returns only once the stream has ended,
-so a half-written answer never lands in your history. On resume, the last saved message is a user
-message or a tool result, and you send the history again.
+so a half-written answer never lands in your history through this helper. That does not make the
+interrupted call free or safe to repeat. Decide whether to send the saved history again using the
+[retry rules](/guides/retries/) and the known outcome of any external actions.
 
 ## Repair what you load
 

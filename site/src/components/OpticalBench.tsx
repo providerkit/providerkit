@@ -1,6 +1,6 @@
 import { ProviderError } from "@providerkit/core";
 import { useId, useMemo, useState } from "react";
-import { BY_KIND, FAMILIES, KINDS, type Family } from "../lib/kinds";
+import { BY_KIND, FAMILIES, KINDS, type Family } from "../lib/kinds.ts";
 
 /*
   The classifier, drawn as the optical layout it actually is: scattered failures
@@ -124,8 +124,8 @@ const LANE_Y = new Map(
 );
 
 function classifySample(status: string, body: string) {
-  // No status means the response never arrived — the shape a dead socket really
-  // throws, and exactly what the cause-chain walk exists for.
+  // No status means no response was available to the caller, not proof that
+  // the provider received nothing or performed no work.
   const raw = status.trim()
     ? Object.assign(new Error(`${status} status code`), { status: Number(status), error: body })
     : new TypeError(body);
@@ -138,6 +138,7 @@ export default function OpticalBench() {
   const [status, setStatus] = useState(SAMPLES[0]!.status);
   const [body, setBody] = useState(SAMPLES[0]!.body);
   const uid = useId();
+  const invalidStatus = status.trim() !== "" && !/^[1-5]\d{2}$/.test(status.trim());
 
   const err = useMemo(() => classifySample(status, body), [status, body]);
   const verdict = BY_KIND[err.kind];
@@ -249,7 +250,7 @@ export default function OpticalBench() {
                   }}
                   style={on ? { color: `var(--ray-${verdict.family})` } : undefined}
                 >
-                  <rect className="src-hit" x="8" y={sample.y - 18} width={SRC_X - 4} height="36" />
+                  <rect className="src-hit" x="8" y={sample.y - 22} width={SRC_X - 4} height="44" />
                   <text className="src-label" x="288" y={sample.y - 3} textAnchor="end">
                     {sample.label}
                   </text>
@@ -349,8 +350,8 @@ export default function OpticalBench() {
         <p className="bench-hint">Wider than this screen. Scroll the plate sideways.</p>
         <figcaption className="leader">
           <span>
-            Fig. 1: the real classifier from the package, running in your browser. Click a ray, or
-            paste your own failure below.
+            The real Core classifier, running in your browser. Choose a provider label or paste your
+            own failure below.
           </span>
         </figcaption>
       </figure>
@@ -367,9 +368,16 @@ export default function OpticalBench() {
               type="text"
               inputMode="numeric"
               placeholder="(none)"
+              aria-invalid={invalidStatus}
+              aria-describedby={invalidStatus ? `${uid}-status-error` : undefined}
               value={status}
               onChange={(e) => edit(() => setStatus(e.target.value))}
             />
+            {invalidStatus && (
+              <p id={`${uid}-status-error`} className="field-error" role="alert">
+                Enter a status from 100 to 599, or clear this field if there was no response.
+              </p>
+            )}
           </div>
           <div className="field">
             <label htmlFor={`${uid}-body`}>Response body, or the message that was thrown</label>

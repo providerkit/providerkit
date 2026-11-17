@@ -5,6 +5,16 @@ description: Full-jitter backoff, the commitment rule that keeps a retried strea
 
 import CommitmentHorizon from "../../../components/CommitmentHorizon.astro";
 
+## Before repeating a call
+
+A transient error does not prove the provider did no work. Respect an error's `shouldRetry: false`
+and whether the stream already emitted output. Use the supplied retry helpers rather than a loop
+that checks only the error kind.
+
+Paid [speech](/guides/speech/) and [transcription](/guides/transcription/) replies arrive whole.
+A timeout, lost connection or 5xx can happen after billing started, so Core does not replay them
+automatically. Do not wrap those calls in a retry loop that overrides this policy.
+
 ## Backoff
 
 ```ts
