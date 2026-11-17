@@ -25,7 +25,7 @@ import {
   readLimits,
   readModelSettings,
 } from "./snapshot.ts";
-import { fail, Halt, isLocalStop, untilAbort } from "./tree.ts";
+import { childJournals, fail, Halt, isLocalStop, untilAbort } from "./tree.ts";
 import type {
   Agent,
   AgentConfig,
@@ -35,6 +35,7 @@ import type {
   RunDefinition,
   RunLimits,
   RunSnapshot,
+  TreeNode,
   ToolRequest,
   ToolResult,
 } from "./types.ts";
@@ -462,7 +463,9 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
         const entries = before ? ordered.slice(0, ordered.indexOf(before)) : ordered;
         return entries.flatMap((entry) =>
           entry.children.flatMap((child) =>
-            child.snapshot.subagent?.tool === name ? [child.snapshot] : [],
+            child.snapshot.kind === "agent" && child.snapshot.subagent?.tool === name
+              ? [child.snapshot]
+              : [],
           ),
         );
       }
@@ -579,6 +582,8 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
           }
         });
         for (const child of journal.children) {
+          if (child.snapshot.kind !== "agent")
+            throw new TypeError("A generated helper must be an agent.");
           const index = Number(child.key.slice("helper-".length)) - 1;
           const record = child.snapshot.subagent;
           if (
@@ -845,7 +850,7 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
           for (const child of journal.children)
             if (
               !equalData(
-                child.snapshot.subagent?.requested,
+                child.snapshot.kind === "agent" ? child.snapshot.subagent?.requested : undefined,
                 items[Number(child.key.slice("helper-".length)) - 1],
               )
             )
@@ -853,18 +858,23 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
                 "subagent_input_changed",
                 "An admitted helper's definition cannot change. Reconcile the saved run before starting different work.",
               );
-          const ancestors = scope.path.reduce<RunSnapshot[]>(
+          const ancestors = scope.path.reduce<TreeNode[]>(
             (nodes, step) => {
-              const node = nodes
-                .at(-1)
-                ?.delegations.find((entry) => entry.operationId === step.operationId)
-                ?.children.find((child) => child.key === step.key)?.snapshot;
-              if (node) nodes.push(node);
+              const parent = nodes.at(-1);
+              const node =
+                parent &&
+                childJournals(parent)
+                  .find((entry) => entry.operationId === step.operationId)
+                  ?.children.find((child) => child.key === step.key)?.snapshot;
+              if (!node) throw new TypeError("Missing helper ancestor in the execution tree.");
+              nodes.push(node);
               return nodes;
             },
             [scope.tree.root],
           );
-          const created = ancestors.flatMap((node) => (node.subagent ? [node.subagent] : []));
+          const created = ancestors.flatMap((node) =>
+            node.kind === "agent" && node.subagent ? [node.subagent] : [],
+          );
           const level = created.length + 1;
           if (
             level > Math.min(policy.maxLevels, ...created.map((record) => record.policy.maxLevels))
@@ -912,7 +922,11 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
               grantable: Object.freeze(allowed(parent)),
               signal,
             };
-            let admitted = saved?.snapshot.subagent?.spec;
+            if (saved && saved.snapshot.kind !== "agent")
+              throw new TypeError("A generated helper must be an agent.");
+            const savedHelper =
+              saved?.snapshot.kind === "agent" ? saved.snapshot.subagent : undefined;
+            let admitted = savedHelper?.spec;
             if (!admitted) {
               const prepared = await prepareDraft(requested, parent, admissionContext);
               if ("refuse" in prepared) {
@@ -928,7 +942,7 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
                 "subagent_spec_limit",
                 `The helper's saved definition and new task exceed ${SUBAGENT_SPEC_BYTES} UTF-8 JSON bytes. Send a shorter task.`,
               );
-            let fork = saved?.snapshot.subagent?.fork;
+            let fork = savedHelper?.fork;
             let history = prior ? conversationOf(prior) : [];
             if (admitted.fork) {
               if (!fork) {
@@ -960,7 +974,7 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
               await internal.recheck(holder(), parent);
               if (prior) await internal.recheck(template(), prior);
             }
-            const identity = saved?.snapshot.subagent?.identity ??
+            const identity = savedHelper?.identity ??
               prior?.subagent?.identity ?? {
                 id: crypto.randomUUID(),
                 rootRunId: parent.tree.runId,
@@ -1063,6 +1077,8 @@ export function checkSubagentChildren(
 ): void {
   if (MARK in descriptor && "check" in descriptor && typeof descriptor.check === "function")
     descriptor.check(parent, journal);
-  else if (journal.children.some((child) => child.snapshot.subagent))
+  else if (
+    journal.children.some((child) => child.snapshot.kind === "agent" && child.snapshot.subagent)
+  )
     throw new TypeError("A model-created helper must belong to its registered creation tool.");
 }

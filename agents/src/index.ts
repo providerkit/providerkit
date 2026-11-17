@@ -59,3 +59,4 @@ export type {
   SpecialistToolOptions,
 } from "./delegation.ts";
 export type * from "./types.ts";
+export type * from "./workflow-types.ts";

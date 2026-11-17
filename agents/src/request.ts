@@ -16,8 +16,9 @@ import type {
   QuestionAsk,
   Resolution,
   RunOptions,
-  ToolExecution,
   ToolRequest,
+  StepRequest,
+  RequestOrigin,
 } from "./types.ts";
 
 const INPUT_REQUIRED = Symbol.for("@providerkit/agents/InputRequired");
@@ -299,10 +300,10 @@ export function questionTool(options: { name?: string; description?: string } = 
 }
 
 /** One call's request receipts. No second store or independent continuation engine. */
-export class RequestJournal {
+export class RequestJournal<C extends ToolRequest | StepRequest = ToolRequest> {
   constructor(
-    readonly execution: ToolExecution,
-    readonly call: ToolRequest,
+    readonly execution: { asks?: AskRecord[] },
+    readonly call: C,
     private readonly options: RunOptions,
     private readonly scope: ExecutionScope,
     private readonly signal: AbortSignal,
@@ -334,10 +335,12 @@ export class RequestJournal {
         "Provide host.prepareRequest to ask for input.",
         this.call.operationId,
       );
+    const origin: RequestOrigin =
+      "workflowId" in this.call ? { step: this.call } : { call: this.call };
     const draft = {
       id: `${this.call.operationId}/ask/${(this.execution.asks?.length ?? 0) + 1}`,
       path: this.scope.path,
-      call: this.call,
+      ...origin,
       definitionHash: await this.identity(),
       ask,
       createdAt: Date.now(),
@@ -469,32 +472,34 @@ export class RequestJournal {
         throw new Halt({ status: "suspended" });
   }
 
-  async recheck(call: ToolRequest): Promise<void> {
+  async recheck(call: C): Promise<void> {
     const decided = (this.execution.asks ?? []).filter(
       (record) => record.decision && !record.closed,
     );
-    const before = this.options.host?.beforeTool;
-    if (decided.length && !before)
+    const host = this.options.host;
+    const isStep = "workflowId" in call;
+    if ((isStep || decided.length) && !(isStep ? host?.beforeStep : host?.beforeTool))
       fail(
         "request_host_missing",
-        "Provide host.beforeTool to recheck access before using an answer.",
+        isStep
+          ? "Provide host.beforeStep to check ownership before workflow work."
+          : "Provide host.beforeTool to recheck access before using an answer.",
         call.operationId,
       );
+    const current: ToolRequest | StepRequest = call;
+    const before = (record?: AskRecord) => {
+      const decision = record?.decision
+        ? immutableCopy({ request: record.request, decision: record.decision })
+        : undefined;
+      return "workflowId" in current
+        ? host?.beforeStep?.(immutableCopy(current), decision)
+        : host?.beforeTool?.(immutableCopy(current), decision);
+    };
     for (const record of decided) {
       if ((await this.refresh(record)) !== record) throw new Halt({ status: "suspended" });
-      if (record.decision)
-        await untilAbort(
-          Promise.resolve(
-            before?.(
-              immutableCopy(call),
-              immutableCopy({ request: record.request, decision: record.decision }),
-            ),
-          ),
-          this.signal,
-        );
+      await untilAbort(Promise.resolve(before(record)), this.signal);
       if ((await this.refresh(record)) !== record) throw new Halt({ status: "suspended" });
     }
-    if (!decided.length)
-      await untilAbort(Promise.resolve(before?.(immutableCopy(call))), this.signal);
+    if (!decided.length) await untilAbort(Promise.resolve(before()), this.signal);
   }
 }

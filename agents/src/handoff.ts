@@ -3,7 +3,7 @@
 import type { ToolDefinition } from "@providerkit/core";
 import { AGENT_RUNTIME, type Delegation } from "./delegation.ts";
 import { conversationOf, inputOf, toClientMessages } from "./input.ts";
-import { copyData, immutableCopy, isId, isRecord } from "./snapshot.ts";
+import { agentSnapshot, copyData, immutableCopy, isId, isRecord } from "./snapshot.ts";
 import { Halt } from "./tree.ts";
 import type {
   Agent,
@@ -150,7 +150,7 @@ export function handoffDelegation(
       const saved = journal.children[0]?.snapshot;
       // The filter may depend on host state. Once admitted, the recorded input wins forever.
       const input = saved
-        ? inputOf(saved)
+        ? inputOf(agentSnapshot(saved))
         : {
             messages: [
               ...handoff.history({
@@ -192,6 +192,7 @@ export function handoffRecord(snapshot: RunSnapshot) {
     );
     const child = journal?.children[0]?.snapshot;
     if (!journal || journal.kind !== "handoff" || !child) break;
+    if (child.kind !== "agent") throw new TypeError("A handoff target must be an agent.");
     handoffs.push({
       operationId: journal.operationId,
       runId: active.runId,

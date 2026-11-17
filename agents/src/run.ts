@@ -53,6 +53,7 @@ import {
   executeDelegation,
   isDelegation,
   specialistTool,
+  runtimeOf,
   type AgentRuntime,
   type Delegation,
   type RunStart,
@@ -83,6 +84,8 @@ import {
   emitEvent,
   fail,
   treeUsage,
+  nodeId,
+  wakeAt,
   openRequests,
   readAnswers,
   requestRecords,
@@ -92,6 +95,7 @@ import {
 } from "./tree.ts";
 import {
   checkOptions,
+  agentSnapshot,
   completeArguments,
   copyData,
   equalData,
@@ -640,10 +644,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           continue;
         const specialist = descriptor.specialists.find(
           (agent) =>
-            agent.id === child.snapshot.agentId && agent.version === child.snapshot.version,
+            agent.kind === child.snapshot.kind &&
+            agent.id === nodeId(child.snapshot) &&
+            agent.version === child.snapshot.version,
         );
         if (!specialist) throw new TypeError("Unregistered specialist.");
-        await specialist[AGENT_RUNTIME].answerRequests(
+        await runtimeOf(specialist).answerRequests(
           child.snapshot,
           options,
           {
@@ -2057,7 +2063,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       return { ...record, status: "completed", output: completed.output };
     }
     return state.status === "suspended"
-      ? { ...record, ...state, requests: openRequests(snapshot) }
+      ? { ...record, ...state, requests: openRequests(snapshot), wakeAt: wakeAt(snapshot) }
       : { ...record, ...state };
   }
 
@@ -2116,6 +2122,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     const { history, input, session } = frozen;
     const startedAt = Date.now();
     return {
+      kind: "agent",
       format: 3,
       agentId: id,
       version,
@@ -2146,6 +2153,14 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
   }
 
   const runtime: AgentRuntime<T | string | H> = {
+    node: {
+      restore: (raw, tree, subagent) => runtime.restore(raw, tree, subagent),
+      hydrate: (node) => runtime.hydrate(agentSnapshot(node)),
+      answerRequests: (node, options, scope, answers, signal) =>
+        answerRequests(agentSnapshot(node), options, scope, answers, signal),
+      execute: (node, options, scope, answers) =>
+        execute(agentSnapshot(node), options, scope, answers),
+    },
     handoffs: [...handoffs.values()],
     tools: Object.freeze(registeredTools),
     enabledTools: Array.isArray(enabledTools) ? Object.freeze([...enabledTools]) : undefined,
@@ -2350,14 +2365,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           for (const entry of journal.children) {
             const agent = descriptor.specialists.find(
               (agent) =>
-                agent.id === entry.snapshot.agentId && agent.version === entry.snapshot.version,
+                agent.kind === entry.snapshot.kind &&
+                agent.id === nodeId(entry.snapshot) &&
+                agent.version === entry.snapshot.version,
             );
             if (!agent)
               throw new TypeError("The saved child is not a registered specialist version.");
-            entry.snapshot = agent[AGENT_RUNTIME].restore(
+            entry.snapshot = runtimeOf(agent).restore(
               entry.snapshot,
               snapshot.tree,
-              entry.snapshot.subagent,
+              entry.snapshot.kind === "agent" ? entry.snapshot.subagent : undefined,
             );
           }
         }
@@ -2372,7 +2389,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       return state.status === "completed"
         ? { ...record, status: "completed", output: completedOutput(record.snapshot) }
         : state.status === "suspended"
-          ? { ...record, ...state, requests: openRequests(snapshot) }
+          ? { ...record, ...state, requests: openRequests(snapshot), wakeAt: wakeAt(snapshot) }
           : { ...record, ...state };
     },
   };
@@ -2448,6 +2465,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
   }
 
   const agent: Agent<T | string | H> = {
+    kind: "agent",
     id,
     version,
     [AGENT_RUNTIME]: runtime,

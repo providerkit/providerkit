@@ -2,13 +2,14 @@ import { EMPTY_USAGE, addUsage, createGate, messageOf, type TokenUsage } from "@
 import { allModels } from "./compaction.ts";
 import { modelUsage } from "./recovery.ts";
 import { copyData, immutableCopy, isRecord } from "./snapshot.ts";
+import type { StepExecution } from "./workflow-types.ts";
 import type {
   AgentEvent,
   AgentHost,
   AskRecord,
   ChildPathStep,
   RunOptions,
-  RunSnapshot,
+  TreeNode,
   RunState,
   ToolExecution,
   UserContent,
@@ -26,10 +27,12 @@ export class Halt extends Error {
 export function isLocalStop(state: RunState): boolean {
   return (
     (state.status === "limited" &&
-      ["turns", "toolCalls", "elapsedMs", "outputTokens"].includes(state.limit)) ||
+      ["turns", "toolCalls", "elapsedMs", "outputTokens", "steps"].includes(state.limit)) ||
     (state.status === "failed" &&
       [
         "model_failed",
+        "step_failed",
+        "workflow_failed",
         "invalid_model_output",
         "content_filtered",
         "incomplete_turn",
@@ -74,16 +77,50 @@ export async function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Prom
   }
 }
 
-export function* snapshots(root: RunSnapshot): Generator<RunSnapshot> {
+export function childJournals(root: TreeNode) {
+  return root.kind === "agent"
+    ? root.delegations
+    : root.steps.map((step) => ({
+        operationId: step.id,
+        children: step.children,
+      }));
+}
+
+export function nodeId(node: TreeNode): string {
+  return node.kind === "agent" ? node.agentId : node.workflowId;
+}
+
+export function* snapshots(root: TreeNode): Generator<TreeNode> {
   yield root;
-  for (const delegation of root.delegations)
-    for (const child of delegation.children) yield* snapshots(child.snapshot);
+  for (const journal of childJournals(root))
+    for (const child of journal.children) yield* snapshots(child.snapshot);
+}
+
+export function wakeAt(root: TreeNode): number | undefined {
+  const wakes = [...snapshots(root)].flatMap((node) =>
+    node.kind === "workflow" &&
+    (node.state.status === "running" || node.state.status === "suspended")
+      ? node.steps.flatMap((step) =>
+          (step.status === "waiting" || step.status === "retrying") && step.wakeAt !== undefined
+            ? [step.wakeAt]
+            : [],
+        )
+      : [],
+  );
+  return wakes.length ? Math.min(...wakes) : undefined;
 }
 
 /** Requests come from the effect journal, in tool and child admission order. */
 export function* requestRecords(
-  root: RunSnapshot,
-): Generator<{ record: AskRecord; execution: ToolExecution; snapshot: RunSnapshot }> {
+  root: TreeNode,
+): Generator<{ record: AskRecord; execution: ToolExecution | StepExecution; snapshot: TreeNode }> {
+  if (root.kind === "workflow") {
+    for (const execution of root.steps) {
+      for (const record of execution.asks ?? []) yield { record, execution, snapshot: root };
+      for (const child of execution.children) yield* requestRecords(child.snapshot);
+    }
+    return;
+  }
   for (const model of root.models) {
     if (model.status !== "completed") continue;
     for (const execution of model.tools) {
@@ -94,7 +131,7 @@ export function* requestRecords(
   }
 }
 
-export function openRequests(root: RunSnapshot) {
+export function openRequests(root: TreeNode) {
   if (root.state.status !== "running" && root.state.status !== "suspended") return [];
   return [...requestRecords(root)]
     .filter(
@@ -112,7 +149,7 @@ export function openRequests(root: RunSnapshot) {
 
 /** Do this before authorization callbacks. A JSON object cannot contain duplicate keys after
  * parsing; HTTP hosts must reject duplicate raw JSON members before constructing this map. */
-export function readAnswers(root: RunSnapshot, value: unknown): Record<string, unknown> {
+export function readAnswers(root: TreeNode, value: unknown): Record<string, unknown> {
   if (!isRecord(value) || Object.values(value).some((evidence) => evidence === undefined))
     throw new TypeError("Provide JSON evidence by request id.");
   const pending = new Set(openRequests(root).map((request) => request.id));
@@ -122,7 +159,7 @@ export function readAnswers(root: RunSnapshot, value: unknown): Record<string, u
   return copyData(value);
 }
 
-export function stopRequests(root: RunSnapshot): void {
+export function stopRequests(root: TreeNode): void {
   for (const { record } of requestRecords(root))
     if (!record.closed && !record.decision) record.closed = "stopped";
   for (const snapshot of snapshots(root))
@@ -131,10 +168,11 @@ export function stopRequests(root: RunSnapshot): void {
 }
 
 /** Count local receipts once. Never add a child's already aggregated total. */
-export function treeUsage(root: RunSnapshot): TokenUsage {
+export function treeUsage(root: TreeNode): TokenUsage {
   let usage = { ...EMPTY_USAGE };
   const seen = new Set<string>();
   for (const snapshot of snapshots(root)) {
+    if (snapshot.kind !== "agent") continue;
     for (const model of allModels(snapshot)) {
       if (seen.has(model.id)) continue;
       seen.add(model.id);
@@ -144,7 +182,7 @@ export function treeUsage(root: RunSnapshot): TokenUsage {
   return usage;
 }
 
-export async function authorizeTree(root: RunSnapshot, host: AgentHost): Promise<void> {
+export async function authorizeTree(root: TreeNode, host: AgentHost): Promise<void> {
   if (!host.authorizeResume)
     throw new TypeError("Resume requires a trusted host.authorizeResume callback.");
   // A parent's ownership is not authority over a descendant's tools or approvals.
@@ -164,7 +202,7 @@ export class ExecutionTree {
   private checkpointFailure: Extract<RunState, { status: "failed" }> | undefined;
 
   constructor(
-    readonly root: RunSnapshot,
+    readonly root: TreeNode,
     private readonly options: RunOptions,
   ) {
     this.gate = createGate(root.tree.limits.maxParallel);
@@ -202,7 +240,8 @@ export class ExecutionTree {
     // preserves every reservation across resume without a second mutable ledger.
     let models = 0;
     for (const snapshot of snapshots(this.root))
-      for (const model of allModels(snapshot)) models += 1 + model.interrupted.length;
+      if (snapshot.kind === "agent")
+        for (const model of allModels(snapshot)) models += 1 + model.interrupted.length;
     if (models >= this.root.tree.limits.modelCalls)
       throw new Halt({ status: "limited", limit: "modelCalls" });
   }

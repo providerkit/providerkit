@@ -187,18 +187,20 @@ export function createMemoryInbox(rootRunId: string): InputInbox & {
 
 export function inputReceipts(root: RunSnapshot): InputReceipt[] {
   return [...snapshots(root)].flatMap((snapshot) =>
-    snapshot.inputs.map((input): InputReceipt => {
-      const model = snapshot.models[input.beforeModel];
-      return {
-        id: input.id,
-        rootRunId: snapshot.tree.runId,
-        runId: snapshot.runId,
-        beforeModel: input.beforeModel,
-        modelId: modelId(snapshot.runId, input.beforeModel),
-        status: model?.status === "completed" ? "consumed" : "accepted",
-        ...(model?.status === "completed" ? { attemptId: model.attemptId } : {}),
-      };
-    }),
+    snapshot.kind !== "agent"
+      ? []
+      : snapshot.inputs.map((input): InputReceipt => {
+          const model = snapshot.models[input.beforeModel];
+          return {
+            id: input.id,
+            rootRunId: snapshot.tree.runId,
+            runId: snapshot.runId,
+            beforeModel: input.beforeModel,
+            modelId: modelId(snapshot.runId, input.beforeModel),
+            status: model?.status === "completed" ? "consumed" : "accepted",
+            ...(model?.status === "completed" ? { attemptId: model.attemptId } : {}),
+          };
+        }),
   );
 }
 
@@ -238,6 +240,7 @@ function conversationOwner(root: RunSnapshot): RunSnapshot {
       (entry) => entry.kind === "handoff" && entry.children.length,
     )?.children[0]?.snapshot;
     if (!next) return owner;
+    if (next.kind !== "agent") throw new TypeError("A handoff target must be an agent.");
     owner = next;
   }
 }
@@ -249,8 +252,15 @@ export async function acceptInputs(
   signal: AbortSignal,
 ): Promise<void> {
   const inbox = options.host?.inbox;
-  if (!inbox || conversationOwner(scope.tree.root).runId !== snapshot.runId) return;
-  const recorded = [...snapshots(scope.tree.root)].flatMap((node) => node.inputs);
+  if (
+    !inbox ||
+    scope.tree.root.kind !== "agent" ||
+    conversationOwner(scope.tree.root).runId !== snapshot.runId
+  )
+    return;
+  const recorded = [...snapshots(scope.tree.root)].flatMap((node) =>
+    node.kind === "agent" ? node.inputs : [],
+  );
   const limit = {
     count: Math.min(INPUT_LIMITS.pending, INPUT_LIMITS.count - recorded.length),
     bytes: INPUT_LIMITS.bytes - recorded.reduce((total, input) => total + inputBytes(input), 0),

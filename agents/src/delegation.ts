@@ -1,13 +1,15 @@
+import type { Workflow, WorkflowOutcome } from "./workflow-types.ts";
+import type { TreeNode } from "./types.ts";
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
+import { startChild, childOptions, prepareChild } from "./child.ts";
 import { RequestJournal } from "./request.ts";
 import { checkMemoryBinding } from "./memory.ts";
 import { isSubagentTool, type SubagentCreation, type SubagentRecord } from "./subagents.ts";
 import { successfulToolResult } from "./extensions.ts";
 import { handoffRef, type Handoff } from "./handoff.ts";
-import { conversationOf, inputOf, readInput } from "./input.ts";
+import { conversationOf, inputOf } from "./input.ts";
 import {
-  checkChildProgress,
-  checkTree,
+  agentSnapshot,
   childRunId,
   copyData,
   equalData,
@@ -15,7 +17,15 @@ import {
   isId,
   isRecord,
 } from "./snapshot.ts";
-import { emitEvent, fail, Halt, isLocalStop, untilAbort, type ExecutionScope } from "./tree.ts";
+import {
+  emitEvent,
+  fail,
+  Halt,
+  isLocalStop,
+  nodeId,
+  untilAbort,
+  type ExecutionScope,
+} from "./tree.ts";
 import type {
   Agent,
   AgentConfig,
@@ -47,8 +57,35 @@ export interface RunStart {
   session?: RunSnapshot["session"];
 }
 
+export type Specialist = Agent<unknown> | Workflow<unknown, unknown>;
+export type NodeOutcome<T = unknown> = RunOutcome<T> | WorkflowOutcome<T>;
+export interface NodeRuntime<R extends NodeOutcome = NodeOutcome> {
+  restore(raw: unknown, tree?: RunSnapshot["tree"], subagent?: SubagentRecord): TreeNode;
+  hydrate(snapshot: TreeNode): R;
+  answerRequests(
+    snapshot: TreeNode,
+    options: RunOptions,
+    scope: ExecutionScope,
+    answers: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<void>;
+  execute(
+    snapshot: TreeNode,
+    options: RunOptions,
+    scope: ExecutionScope,
+    answers?: Readonly<Record<string, unknown>>,
+  ): Promise<R>;
+}
+export function runtimeOf<T>(node: Agent<T>): NodeRuntime<RunOutcome<T>>;
+export function runtimeOf<I, O>(node: Workflow<I, O>): NodeRuntime<WorkflowOutcome<O>>;
+export function runtimeOf(node: Specialist): NodeRuntime;
+export function runtimeOf(node: Specialist): NodeRuntime {
+  return node.kind === "agent" ? node[AGENT_RUNTIME].node : node[AGENT_RUNTIME];
+}
+
 /** @internal */
 export interface AgentRuntime<T> {
+  readonly node: NodeRuntime<RunOutcome<T>>;
   readonly handoffs: readonly Handoff[];
   readonly tools: NonNullable<AgentConfig["tools"]>;
   readonly enabledTools: readonly string[] | undefined;
@@ -88,15 +125,15 @@ export interface AgentRuntime<T> {
   ): Promise<RunOutcome<T>>;
 }
 
-export interface ChildHandle<T = unknown> {
+export interface ChildHandle<T = unknown, R extends NodeOutcome<T> = RunOutcome<T>> {
   readonly key: string;
   readonly runId: string;
   /** A started child, not another provider call. Repeated joins reuse the same outcome. */
-  join(): Promise<RunOutcome<T>>;
+  join(): Promise<R>;
 }
 
-export type Joined<H extends readonly ChildHandle<unknown>[]> = {
-  [K in keyof H]: H[K] extends ChildHandle<infer T> ? RunOutcome<T> : never;
+export type Joined<H extends readonly ChildHandle<unknown, NodeOutcome>[]> = {
+  [K in keyof H]: H[K] extends ChildHandle<unknown, infer R> ? R : never;
 };
 
 export interface DelegationContext {
@@ -123,9 +160,12 @@ export interface DelegationContext {
    * fixed name ("topic-1"), never by the input. The input is checked like `run`'s, except
    * that provider-owned fields are kept: coordinator code is trusted. A child never gets the
    * parent's session. */
+  child<I, O>(key: string, workflow: Workflow<I, O>, input: I): ChildHandle<O, WorkflowOutcome<O>>;
   child<T>(key: string, agent: Agent<T>, input: AgentInput): ChildHandle<T>;
   /** Settles in caller order, not completion order. No child may outlive this barrier. */
-  join<const H extends readonly ChildHandle<unknown>[]>(handles: H): Promise<Joined<H>>;
+  join<const H extends readonly ChildHandle<unknown, NodeOutcome>[]>(
+    handles: H,
+  ): Promise<Joined<H>>;
   /** The parent's conversation before this tool call: no system prompt and no unfinished
    * round. Frozen. A child sees none of it unless you forward it, for example
    * `{ messages: [...context.conversation, { role: "user", content: task }] }`. */
@@ -139,7 +179,7 @@ export interface DelegationSpec<I, O> {
   needsApproval?: boolean;
   validate: (raw: unknown) => I;
   /** Fixed allow-list. Agents cannot add tools or specialists at runtime. */
-  specialists: readonly Agent<unknown>[];
+  specialists: readonly Specialist[];
   /** Pure, deterministic coordination only: use child and join for work. This callback
    * can replay after interruption; do not put external effects or mutable host state here. */
   run: (input: I, context: DelegationContext) => Promise<O>;
@@ -151,7 +191,7 @@ export interface Delegation {
   readonly kind: "delegation";
   readonly name: string;
   readonly needsApproval: boolean;
-  readonly specialists: readonly Agent<unknown>[];
+  readonly specialists: readonly Specialist[];
   definition(): ToolDefinition;
   /** @internal Errors and suspensions must not go through Tool.invoke's error conversion. */
   execute(raw: unknown, context: DelegationContext): Promise<ToolResult>;
@@ -242,6 +282,11 @@ export function specialistTool<T>(agent: Agent<T>, options: SpecialistToolOption
       return result.output;
     },
   });
+  return specialistFailures(descriptor);
+}
+
+/** Known local failures are tool data. Authority and journal failures still stop the tree. */
+export function specialistFailures(descriptor: Delegation): Delegation {
   return Object.freeze({
     ...descriptor,
     async execute(raw: unknown, context: DelegationContext): Promise<ToolResult> {
@@ -251,7 +296,7 @@ export function specialistTool<T>(agent: Agent<T>, options: SpecialistToolOption
         if (!(error instanceof Halt) || !isLocalStop(error.state)) throw error;
         const reason =
           error.state.status === "limited"
-            ? `its ${error.state.limit === "elapsedMs" ? "time" : error.state.limit === "outputTokens" ? "output" : error.state.limit === "toolCalls" ? "tool-call" : "model-turn"} limit`
+            ? `its ${error.state.limit === "steps" ? "step" : error.state.limit === "elapsedMs" ? "time" : error.state.limit === "outputTokens" ? "output" : error.state.limit === "toolCalls" ? "tool-call" : "model-turn"} limit`
             : error.state.status === "failed" &&
                 ["memory_missing", "memory_unavailable"].includes(error.state.error.code)
               ? "a problem reading saved notes"
@@ -283,24 +328,16 @@ export async function executeDelegation(
   const started = new Map<string, Promise<void>>();
   const requested = new Map<
     string,
-    { agentId: string; version: string; start: RunStart; subagent?: SubagentCreation }
+    { agentId: string; version: string; start: unknown; subagent?: SubagentCreation }
   >();
   // Resolve new child definitions in admission order, without delaying children already
   // running. No half-resolved definition can appear in another child's root checkpoint.
   let admissions = Promise.resolve();
-  const handles = new WeakSet<ChildHandle<unknown>>();
+  const handles = new WeakSet<ChildHandle<unknown, NodeOutcome>>();
   // Computed again on a replay from the same settled rounds, so a coordinator that forwards it
   // asks for the same child input and reuses the saved child.
   const conversation = immutableCopy(conversationOf(parent));
-  // A specialist never loads or appends its parent's conversation.
-  const {
-    session: _session,
-    historyLimit: _historyLimit,
-    prepareHistory: _prepareHistory,
-    modelSettings: _modelSettings,
-    enabledTools: _enabledTools,
-    ...inherited
-  } = options;
+  const inherited = childOptions(options);
 
   async function recheck(agent: Agent<unknown>, snapshot: RunSnapshot): Promise<void> {
     if (!options.host?.beforeTool)
@@ -338,7 +375,18 @@ export async function executeDelegation(
     agent: Agent<T>,
     input: AgentInput,
     subagent?: SubagentCreation,
-  ): ChildHandle<T> {
+  ): ChildHandle<T>;
+  function child<I, O>(
+    key: string,
+    agent: Workflow<I, O>,
+    input: I,
+  ): ChildHandle<O, WorkflowOutcome<O>>;
+  function child(
+    key: string,
+    agent: Specialist,
+    input: unknown,
+    subagent?: SubagentCreation,
+  ): ChildHandle<unknown, NodeOutcome> {
     if (!open)
       throw new Error("This delegation has ended; start children only inside its coordinator.");
     active();
@@ -346,63 +394,54 @@ export async function executeDelegation(
     if (!descriptor.specialists.includes(agent))
       fail(
         "unregistered_specialist",
-        "Register this specialist in the delegation before starting it.",
+        "Register this specialist before starting it.",
         journal.operationId,
       );
-    const runtime = agent[AGENT_RUNTIME];
-    const start = runtime.freeze(readInput(input, "trusted"));
+    const runtime = runtimeOf(agent);
+    const prepared = prepareChild(agent, input, subagent);
+    const start = prepared.input;
+    const identity = { agentId: agent.id, version: agent.version, start, subagent };
     const prior = requested.get(key);
-    if (
-      prior &&
-      (prior.agentId !== agent.id ||
-        prior.version !== agent.version ||
-        !equalData(prior.start, start) ||
-        !equalData(prior.subagent, subagent))
-    )
+    if (prior && !equalData(prior, identity))
       fail(
         "child_key_conflict",
-        "This child key already belongs to another agent, version or input.",
+        "This child key belongs to another definition or input.",
         journal.operationId,
       );
-    requested.set(key, { agentId: agent.id, version: agent.version, start, subagent });
+    requested.set(key, identity);
     const runId = childRunId(journal.operationId, key);
     let entry = journal.children.find((saved) => saved.key === key);
     const resume = entry !== undefined;
-    if (
-      entry &&
-      (entry.snapshot.agentId !== agent.id ||
-        entry.snapshot.version !== agent.version ||
-        !equalData(entry.snapshot.history, start.history) ||
-        !equalData(entry.snapshot.input, start.input) ||
+    if (entry) {
+      const saved = entry.snapshot;
+      const savedStart =
+        saved.kind === "agent" ? { history: saved.history, input: saved.input } : saved.input;
+      if (
+        saved.kind !== agent.kind ||
+        nodeId(saved) !== agent.id ||
+        saved.version !== agent.version ||
+        !equalData(savedStart, start) ||
         !equalData(
-          entry.snapshot.subagent && { ...entry.snapshot.subagent, base: undefined },
+          saved.kind === "agent" && saved.subagent
+            ? { ...saved.subagent, base: undefined }
+            : undefined,
           subagent?.record,
-        ))
-    )
-      fail(
-        "child_key_conflict",
-        "This child key already belongs to another agent, version or input.",
-        journal.operationId,
-      );
+        )
+      )
+        fail(
+          "child_key_conflict",
+          "This child key belongs to another definition or input.",
+          journal.operationId,
+        );
+    }
     if (!started.has(key)) {
       let admitted: Promise<ChildEnvelope & { key: string }>;
       if (entry) admitted = Promise.resolve(entry);
       else {
         scope.tree.reserveChild(scope.depth + 1);
         admitted = admissions.then(async () => {
-          const snapshot = await runtime.create(
-            start,
-            runId,
-            parent.tree,
-            {
-              ...inherited,
-              signal,
-            },
-            subagent,
-          );
+          const snapshot = await prepared.create(runId, parent.tree, { ...inherited, signal });
           active();
-          // Recheck after the async definition, and push without an await: children in
-          // another delegation may have used the tree's last admission in the meantime.
           scope.tree.reserveChild(scope.depth + 1);
           entry = { key, snapshot };
           journal.children.push(entry);
@@ -415,122 +454,39 @@ export async function executeDelegation(
       }
       const work = async () => {
         const saved = await admitted;
-        if (
-          saved.snapshot.state.status !== "running" &&
-          saved.snapshot.state.status !== "suspended"
-        )
-          return;
-        await scope.tree.save();
-        active();
-        const step = { operationId: journal.operationId, key, runId: saved.snapshot.runId };
-        if (journal.kind === "handoff")
-          emitEvent(options, {
-            type: "handoff",
-            runId: parent.runId,
-            attemptId: parent.attemptId,
-            operationId: journal.operationId,
-            childRunId: saved.snapshot.runId,
-            from: handoffRef(parent),
-            to: journal.target,
-            ...(journal.note !== undefined ? { note: journal.note } : {}),
-          });
-        let execution: Promise<ChildEnvelope> | undefined;
-        let hookOpen = true;
-        let executionSettled = false;
-        const execute = () => {
-          if (!hookOpen || execution)
-            throw new Error("A host child may execute once, before its hook returns.");
-          execution = (async () => {
-            if (saved.snapshot.subagent?.fork || saved.snapshot.subagent?.previousRunId)
+        await startChild(
+          saved,
+          parent,
+          journal.operationId,
+          runtime,
+          inherited,
+          scope,
+          signal,
+          active,
+          resume,
+          async () => {
+            if (
+              agent.kind === "agent" &&
+              saved.snapshot.kind === "agent" &&
+              (saved.snapshot.subagent?.fork || saved.snapshot.subagent?.previousRunId)
+            )
               await recheck(agent, saved.snapshot);
-            if (resume) saved.snapshot.attemptId = crypto.randomUUID();
-            // Sent here, not where the child is admitted, so it always comes with a run: the
-            // child's own state event follows it. A settled child that is reused, or one the host
-            // serves from a saved copy without running it, never gets this far, and a row for it
-            // would wait for a status that no event brings. Once per key: `started` and the
-            // execute-once check above both guard it.
-            emitEvent(options, {
-              type: "child",
-              parentRunId: parent.runId,
-              ...step,
-              agentId: agent.id,
-              version: agent.version,
-              ...(saved.snapshot.subagent ? { subagent: true } : {}),
-            });
-            const result = await runtime.execute(
-              saved.snapshot,
-              { ...inherited, signal },
-              {
-                tree: scope.tree,
-                depth: scope.depth + 1,
-                path: [...scope.path, step],
-                // Inherit the person's query only across transfers, never ordinary tasks.
-                // Rebuild from journals on resume, even when the source has no memory policy.
-                handoffInput:
-                  journal.kind === "handoff"
-                    ? (parent.inputs.at(-1)?.content ?? scope.handoffInput ?? parent.input)
-                    : undefined,
-              },
-            );
-            executionSettled = true;
-            return { snapshot: result.snapshot };
-          })();
-          // A hook that throws or forgets to await cannot leave an unhandled child promise.
-          void execution.catch(() => {});
-          return execution;
-        };
-        let envelope: ChildEnvelope;
-        try {
-          envelope = options.host?.child
-            ? await untilAbort(
-                Promise.resolve(
-                  options.host.child(
-                    immutableCopy({
-                      ...saved,
-                      parentRunId: parent.runId,
-                      operationId: journal.operationId,
-                      resume,
-                    }),
-                    execute,
-                  ),
-                ),
-                signal,
-              )
-            : await execute();
-          if (execution && !executionSettled)
-            fail(
-              "invalid_child_host",
-              "The child hook returned before its execution settled.",
-              journal.operationId,
-            );
-        } finally {
-          hookOpen = false;
-          if (execution) await execution;
-        }
-        if (!isRecord(envelope) || (envelope.reference !== undefined && !isId(envelope.reference)))
-          fail(
-            "invalid_child_host",
-            "The child hook must return a snapshot envelope.",
-            journal.operationId,
-          );
-        const restored = runtime.restore(envelope.snapshot, parent.tree, saved.snapshot.subagent);
-        checkChildProgress(saved.snapshot, restored);
-        if (restored.state.status === "running")
-          fail(
-            "invalid_child_host",
-            "The child hook returned an unfinished child.",
-            journal.operationId,
-          );
-        const previous = saved.snapshot;
-        saved.snapshot = restored;
-        try {
-          checkTree(scope.tree.root);
-        } catch (error) {
-          saved.snapshot = previous;
-          throw error;
-        }
-        saved.reference = envelope.reference ?? saved.reference;
-        await scope.tree.save();
+            if (journal.kind === "handoff")
+              emitEvent(options, {
+                type: "handoff",
+                runId: parent.runId,
+                attemptId: parent.attemptId,
+                operationId: journal.operationId,
+                childRunId: saved.snapshot.runId,
+                from: handoffRef(parent),
+                to: journal.target,
+                ...(journal.note !== undefined ? { note: journal.note } : {}),
+              });
+          },
+          journal.kind === "handoff"
+            ? (parent.inputs.at(-1)?.content ?? scope.handoffInput ?? parent.input)
+            : undefined,
+        );
       };
       const promise = work().catch(async (error: unknown) => {
         let failure = error;
@@ -558,10 +514,10 @@ export async function executeDelegation(
     const handle = Object.freeze({
       key,
       runId,
-      async join(): Promise<RunOutcome<T>> {
+      async join(): Promise<NodeOutcome> {
         await pending;
         const saved = journal.children.find((child) => child.key === key);
-        if (!saved) throw new Error("The child ended before its definition was resolved.");
+        if (!saved) throw new Error("The child ended before its definition resolved.");
         return runtime.hydrate(saved.snapshot);
       },
     });
@@ -569,8 +525,10 @@ export async function executeDelegation(
     return handle;
   }
 
-  function join<const H extends readonly ChildHandle<unknown>[]>(items: H): Promise<Joined<H>>;
-  async function join(items: readonly ChildHandle<unknown>[]): Promise<RunOutcome<unknown>[]> {
+  function join<const H extends readonly ChildHandle<unknown, NodeOutcome>[]>(
+    items: H,
+  ): Promise<Joined<H>>;
+  async function join(items: readonly ChildHandle<unknown, NodeOutcome>[]): Promise<NodeOutcome[]> {
     if (items.some((handle) => !handles.has(handle)))
       throw new TypeError("Join only handles created by this delegation context.");
     return Promise.all(items.map((handle) => handle.join()));
@@ -655,14 +613,16 @@ export async function executeDelegation(
         if (started.has(entry.key)) continue;
         const agent = descriptor.specialists.find(
           (agent) =>
-            agent.id === entry.snapshot.agentId && agent.version === entry.snapshot.version,
+            agent.kind === entry.snapshot.kind &&
+            agent.id === nodeId(entry.snapshot) &&
+            agent.version === entry.snapshot.version,
         );
         if (!agent)
           fail("unregistered_specialist", "The saved child is not a registered specialist.");
         // A rejected helper definition must not resume saved work through this fallback.
         // Already started children still settle below, as for every delegation.
-        if (failure && entry.snapshot.subagent) continue;
-        if (entry.snapshot.subagent) {
+        if (failure && entry.snapshot.kind === "agent" && entry.snapshot.subagent) continue;
+        if (entry.snapshot.kind === "agent" && entry.snapshot.subagent && agent.kind === "agent") {
           const { base, ...record } = entry.snapshot.subagent;
           child(entry.key, agent, inputOf(entry.snapshot), {
             record,
@@ -672,7 +632,9 @@ export async function executeDelegation(
                 ? { source: parent.definition }
                 : {}),
           });
-        } else child(entry.key, agent, inputOf(entry.snapshot));
+        } else if (agent.kind === "agent")
+          child(entry.key, agent, inputOf(agentSnapshot(entry.snapshot)));
+        else child(entry.key, agent, entry.snapshot.input);
       }
     } catch (error) {
       failure ??= { error };

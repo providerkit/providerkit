@@ -9,12 +9,13 @@ import type {
 import { createProgress, type EventDurability } from "./progress.ts";
 export type { EventDurability, ProgressGap } from "./progress.ts";
 import { checkMemoryBinding, readMemoryBinding, type MemoryBinding } from "./memory.ts";
+import type { NodeOutcome } from "./delegation.ts";
+import type { Workflow, WorkflowOutcome } from "./workflow-types.ts";
 import { AGENT_RUNTIME } from "./delegation.ts";
 import {
   checkOptions,
   checkChildProgress,
   copyData,
-  equalData,
   immutableCopy,
   isId,
   isRecord,
@@ -22,7 +23,7 @@ import {
   isSessionStatus,
   readModelSettings,
 } from "./snapshot.ts";
-import { openRequests, readAnswers, untilAbort } from "./tree.ts";
+import { openRequests, readAnswers, untilAbort, wakeAt } from "./tree.ts";
 import type {
   Agent,
   AgentHost,
@@ -31,7 +32,8 @@ import type {
   RecordedModelSettings,
   RunOptions,
   RunOutcome,
-  RunSnapshot,
+  TreeNode,
+  ResumeOptions,
   Session,
   SessionStatus,
 } from "./types.ts";
@@ -59,6 +61,8 @@ export interface Continuation {
   /** Unique authorization claim, distinct from both the logical run and the host row. */
   id: string;
   sourceId: string;
+  /** Empty-answer continuations must atomically claim this wake for this logical run. */
+  wakeAt?: number;
   answers: Readonly<Record<string, unknown>>;
 }
 
@@ -76,7 +80,13 @@ export interface BackgroundPolicy
     >,
     Pick<
       AgentHost,
-      "canRunConcurrently" | "needsApproval" | "answerNow" | "inbox" | "reconcileToolRetry"
+      | "canRunConcurrently"
+      | "needsApproval"
+      | "answerNow"
+      | "inbox"
+      | "reconcileToolRetry"
+      | "beforeStep"
+      | "reconcileStep"
     > {
   /** Worker-only values for tools, such as the authenticated actor or a database handle.
    * Never serialized. The SDK supplies reserved operation IDs and cancellation signals. */
@@ -88,11 +98,19 @@ export interface BackgroundPolicy
    * AND context.segmentId. Repeating that exact claim must succeed; any other claim or segment
    * must fail. authorizeResume checks ownership on every attempt. resolveRequest may reuse a
    * consumed answer only for this same claim/segment. These guarantees need durable host state. */
-  claimContinuation: (snapshot: RunSnapshot, continuation: Continuation) => void | Promise<void>;
+  claimContinuation: (snapshot: TreeNode, continuation: Continuation) => void | Promise<void>;
 }
 
-export interface BackgroundOptions<T> {
+export interface BackgroundOptions<T> extends BackgroundBase {
   agent: Agent<T>;
+}
+export interface BackgroundWorkflowOptions<I, O> extends Omit<
+  BackgroundBase,
+  "session" | "historyLimit" | "prepareHistory"
+> {
+  workflow: Workflow<I, O>;
+}
+interface BackgroundBase {
   /** Dedicated handler key for this agent version. */
   kind: string;
   /** Injected create must resolve after its transaction commits. Only then is enqueue called. */
@@ -118,13 +136,15 @@ export interface BackgroundOptions<T> {
 
 /** Server-side: the snapshot holds the whole conversation, prompts and tool data. Send a
  * browser a projection, never this object. */
-export interface BackgroundRun<T> {
+export interface BackgroundRun<T, R extends NodeOutcome<T> = RunOutcome<T>> {
   id: string;
   /** Host completion is not SDK completion: a successful segment can be suspended or failed. */
   status: StoredRun["status"];
-  snapshot: RunSnapshot;
+  snapshot: R["snapshot"];
   /** outcome.session says whether the worker's append saved the turn. */
-  outcome: RunOutcome<T> | null;
+  outcome: R | null;
+  /** Earliest pending wake in the tree. The host schedules continuation. */
+  wakeAt?: number;
   error: StoredRun["error"];
 }
 
@@ -142,9 +162,9 @@ export class BackgroundEnqueueError extends Error {
   }
 }
 
-interface Segment {
+interface Segment<N extends TreeNode = TreeNode> {
   format: 1;
-  snapshot: RunSnapshot;
+  snapshot: N;
   continuation?: Continuation;
 }
 
@@ -167,16 +187,41 @@ function settled(raw: unknown): Settled {
 
 /** Background work uses the host's lease, queue and cancellation. Children stay in-process.
  * Usage remains in stable SDK receipts; this binding never calls additive Run.spend. */
-export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
-  const {
-    agent,
-    kind,
-    runs,
-    enqueue,
-    historyLimit,
-    prepareHistory,
-    events = "best-effort",
-  } = options;
+export function createBackgroundAgent<T>(
+  options: BackgroundOptions<T>,
+): ReturnType<typeof bindBackground<AgentInput, RunOutcome<T>>>;
+export function createBackgroundAgent<I, O>(
+  options: BackgroundWorkflowOptions<I, O>,
+): ReturnType<typeof bindBackground<I, WorkflowOutcome<O>>>;
+export function createBackgroundAgent<I, O>(
+  options: BackgroundOptions<O> | BackgroundWorkflowOptions<I, O>,
+) {
+  if ("workflow" in options) {
+    const workflow = options.workflow;
+    return bindBackground<I, WorkflowOutcome<O>>(options, {
+      ...workflow[AGENT_RUNTIME],
+      resume: (raw, opts) => workflow.resume(raw, opts),
+    });
+  }
+  const agent = options.agent;
+  const runtime = agent[AGENT_RUNTIME];
+  return bindBackground<AgentInput, RunOutcome<O>>(options, {
+    open: (input, opts, id) => runtime.open(input, opts, id),
+    restore: (raw) => runtime.restore(raw),
+    hydrate: (snapshot) => runtime.node.hydrate(snapshot),
+    resume: (raw, opts) => agent.resume(raw, opts),
+  });
+}
+function bindBackground<I, R extends NodeOutcome>(
+  options: BackgroundBase,
+  runtime: {
+    open(input: I, options: RunOptions, runId: string): Promise<R["snapshot"]>;
+    restore(raw: unknown): R["snapshot"];
+    hydrate(snapshot: TreeNode): R;
+    resume(raw: unknown, options: ResumeOptions): Promise<R>;
+  },
+) {
+  const { kind, runs, enqueue, historyLimit, prepareHistory, events = "best-effort" } = options;
   if (events !== "best-effort" && events !== "awaited")
     throw new TypeError('events must be "best-effort" or "awaited".');
   if (!isId(kind) || typeof enqueue !== "function" || typeof options.policy !== "function")
@@ -193,8 +238,6 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       ? readMemoryBinding(await untilAbort(Promise.resolve(options.memory(owner)), signal))
       : undefined;
   }
-  const runtime = agent[AGENT_RUNTIME];
-
   async function sessionFor(owner: string, id: string, signal: AbortSignal): Promise<Session> {
     const factory = options.session;
     if (!factory)
@@ -221,7 +264,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     return value;
   }
 
-  function segment(raw: unknown): Segment {
+  function segment(raw: unknown): Segment<R["snapshot"]> {
     if (!isRecord(raw) || raw.format !== 1)
       throw new TypeError("This row is not an agent background segment.");
     const snapshot = runtime.restore(raw.snapshot);
@@ -231,7 +274,9 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       !isRecord(continuation) ||
       !isId(continuation.id) ||
       !isId(continuation.sourceId) ||
-      !isRecord(continuation.answers)
+      !isRecord(continuation.answers) ||
+      (continuation.wakeAt !== undefined &&
+        (typeof continuation.wakeAt !== "number" || continuation.wakeAt !== wakeAt(snapshot)))
     )
       throw new TypeError("The saved continuation is invalid.");
     return {
@@ -240,22 +285,14 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       continuation: {
         id: continuation.id,
         sourceId: continuation.sourceId,
+        ...(typeof continuation.wakeAt === "number" ? { wakeAt: continuation.wakeAt } : {}),
         answers: readAnswers(snapshot, continuation.answers),
       },
     };
   }
 
-  function restore(raw: unknown, initial: RunSnapshot): RunSnapshot {
+  function restore(raw: unknown, initial: TreeNode): R["snapshot"] {
     const saved = runtime.restore(raw);
-    if (
-      saved.runId !== initial.runId ||
-      !equalData(saved.definition, initial.definition) ||
-      !equalData(saved.history, initial.history) ||
-      !equalData(saved.input, initial.input) ||
-      !equalData(saved.session, initial.session) ||
-      !equalData(saved.tree, initial.tree)
-    )
-      throw new TypeError("The saved journal belongs to another logical run.");
     checkChildProgress(initial, saved);
     return saved;
   }
@@ -277,12 +314,13 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     return { row, initial, snapshot, session: result?.session };
   }
 
-  async function read(owner: string, id: string): Promise<BackgroundRun<T>> {
+  async function read(owner: string, id: string): Promise<BackgroundRun<unknown, R>> {
     const { row, snapshot, session } = await load(owner, id);
     return {
       id: row.id,
       status: row.status,
       snapshot,
+      wakeAt: wakeAt(snapshot),
       outcome:
         snapshot.state.status === "running"
           ? null
@@ -334,12 +372,15 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     );
     run.signal.throwIfAborted();
     // From the stored owner, never from the request that queued this segment.
-    const session = snapshot.session
-      ? await sessionFor(run.owner, snapshot.session.id, run.signal)
-      : undefined;
+    const session =
+      snapshot.kind === "agent" && snapshot.session
+        ? await sessionFor(run.owner, snapshot.session.id, run.signal)
+        : undefined;
     const memory = await memoryFor(run.owner, signal);
     checkMemoryBinding(snapshot, memory);
     run.signal.throwIfAborted();
+    if (initial.continuation?.wakeAt !== undefined && Date.now() < initial.continuation.wakeAt)
+      throw new Error("The saved workflow wake is not due yet.");
     if (initial.continuation)
       await untilAbort(
         Promise.resolve(
@@ -361,6 +402,8 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       prepareRequest: (request) => trusted.prepareRequest(request),
       resolveRequest: (request, evidence) => trusted.resolveRequest(request, evidence),
       beforeTool: (request, decided) => trusted.beforeTool(request, decided),
+      ...(trusted.beforeStep ? { beforeStep: trusted.beforeStep } : {}),
+      ...(trusted.reconcileStep ? { reconcileStep: trusted.reconcileStep } : {}),
       ...(trusted.reconcileToolRetry ? { reconcileToolRetry: trusted.reconcileToolRetry } : {}),
       ...(trusted.needsApproval ? { needsApproval: trusted.needsApproval } : {}),
       ...(trusted.answerNow ? { answerNow: trusted.answerNow } : {}),
@@ -414,7 +457,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     const answers = Object.fromEntries(
       Object.entries(initial.continuation?.answers ?? {}).filter(([id]) => pending.has(id)),
     );
-    const result = await agent.resume(snapshot, {
+    const result = await runtime.resume(snapshot, {
       signal,
       context: trusted.context,
       memory,
@@ -428,7 +471,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
     return {
       format: 1,
       snapshot: result.snapshot,
-      ...(result.session ? { session: result.session } : {}),
+      ...("session" in result && result.session ? { session: result.session } : {}),
     };
   }
 
@@ -442,7 +485,7 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
      * creation; it does not cancel the run once it is saved. */
     async start(
       owner: string,
-      input: AgentInput,
+      input: I,
       start: Pick<RunOptions, "signal" | "context" | "enabledTools"> & {
         sessionId?: string;
         modelSettings?: RecordedModelSettings;
@@ -489,7 +532,11 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
         yield event;
       }
     },
-    async wait(owner: string, id: string, signal?: AbortSignal): Promise<BackgroundRun<T>> {
+    async wait(
+      owner: string,
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<BackgroundRun<unknown, R>> {
       await load(owner, id);
       for await (const _event of runs.tail(id, 0, signal)) signal?.throwIfAborted();
       signal?.throwIfAborted();
@@ -510,8 +557,15 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
       if (row.status !== "succeeded" || snapshot.state.status !== "suspended")
         throw new Error("Only a settled, suspended agent segment can accept a decision.");
       const submitted = readAnswers(snapshot, answers);
-      if (!Object.keys(submitted).length)
-        throw new TypeError("Provide at least one answer by request id.");
+      if (!Object.keys(submitted).length) {
+        const at = wakeAt(snapshot);
+        if (at === undefined || at > Date.now())
+          throw new TypeError(
+            at === undefined
+              ? "Provide at least one answer by request id."
+              : `This workflow wakes at ${at}. Continue at or after that time.`,
+          );
+      }
       if (
         openRequests(snapshot).some(
           (request) =>
@@ -519,7 +573,12 @@ export function createBackgroundAgent<T>(options: BackgroundOptions<T>) {
         )
       )
         throw new Error("A request expired. Ask the host to renew it before continuing.");
-      const continuation = copyData({ id: crypto.randomUUID(), sourceId: id, answers: submitted });
+      const continuation = copyData({
+        id: crypto.randomUUID(),
+        sourceId: id,
+        answers: submitted,
+        ...(!Object.keys(submitted).length ? { wakeAt: wakeAt(snapshot) } : {}),
+      });
       return create(owner, { format: 1, snapshot, continuation });
     },
   });

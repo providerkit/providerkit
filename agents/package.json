@@ -22,6 +22,10 @@
       "types": "./dist/evals.d.ts",
       "default": "./dist/evals.js"
     },
+    "./workflow": {
+      "types": "./dist/workflow.d.ts",
+      "default": "./dist/workflow.js"
+    },
     "./code-mode/quickjs": {
       "types": "./dist/quickjs.d.ts",
       "default": "./dist/quickjs.js"

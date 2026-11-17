@@ -5,6 +5,19 @@ block has a short comment that names its source. Their copyright notices and lic
 
 ## TanStack AI
 
+- Code-mode sources: `packages/ai-code-mode/src/type-generator/json-schema-to-ts.ts`,
+  `packages/ai-code-mode/src/code-wrapper.ts` and `packages/ai-isolate-quickjs`.
+- Used in: `src/schema-to-ts.ts`, `src/code-script.ts`, `src/quickjs.ts` and their tests.
+  Changed: reference aliases are scoped to each tool and schema document; nullable unions are
+  deduplicated. Guest programs cannot access raw host bridges. JSON values cross as strings,
+  each job gets a fresh runtime, and settled programs cannot start more host calls. CPU time,
+  admission and cleanup are bounded; optional engine dependencies load only in the driver.
+
+- Workflow source: `packages/ai-harness/src/durable-tool.ts`, `createToolStep`.
+  Used in `src/workflow.ts`: unique keys, JSON copies on first execution and replay, and saved
+  wake times. Changed: interrupted effects fail closed; repeatability needs explicit read-only
+  policy or authoritative reconciliation. Storage uses the existing tree checkpoint barrier.
+
 - Source: [TanStack/ai](https://github.com/TanStack/ai/tree/1888233ddb501d14b17aa9a5f3497373a0e9242e),
   `packages/ai-harness/src/inline-media.ts`, `packages/ai-harness/src/media.ts`,
   `packages/ai-harness/src/handoff.ts`, `packages/ai-harness/src/log-records.ts`,
@@ -259,6 +272,10 @@ SOFTWARE.
 
 ## Microsoft Agent Framework
 
+- Workflow source: `python/packages/core/agent_framework/_workflows/_functional.py`, explicit
+  replay-key uniqueness and incompatible-definition refusal. Used in `src/workflow.ts`.
+  Changed: explicit versions and JSON identities replace code hashes and positional keys.
+
 - Source: [microsoft/agent-framework](https://github.com/microsoft/agent-framework),
   `python/packages/core/agent_framework/_tools.py`, `_reset_required_tool_choice` and the
   final tool-free call after the iteration allowance.
@@ -294,6 +311,10 @@ SOFTWARE
 
 ## LangGraph.js
 
+- Workflow source: `libs/langgraph-core/src/pregel/retry.ts`, retry exclusions. Used in
+  `src/workflow.ts`. Changed: core classifies provider errors, retries require repeatability,
+  each attempt remains in the journal and delayed retries return control to the host.
+
 - Source: [langchain-ai/langgraphjs](https://github.com/langchain-ai/langgraphjs),
   `libs/langgraph-core/src/interrupt.ts`.
 - Used in: `src/delegation.ts`, returning a saved answer when pure coordination replays and
@@ -327,6 +348,11 @@ THE SOFTWARE.
 
 ## Google ADK
 
+- Workflow sources: `google/adk-js`, `core/src/workflow/dynamic_node_scheduler.ts` and
+  `core/src/workflow/node_context.ts`, saved child results and suspension propagation.
+  Used in `src/workflow.ts`. Changed: duplicates are refused rather than deduplicated, the
+  existing SDK child executor owns execution, and every started branch settles before return.
+
 Copyright 2026 Google LLC. Licensed under Apache 2.0; the full license is included as
 `LICENSE-APACHE-2.0`.
 
@@ -343,6 +369,13 @@ Copyright 2026 Google LLC. Licensed under Apache 2.0; the full license is includ
 
 Copyright (c) 2025 Kepler Software, Inc. Licensed under Apache 2.0; the full license is included
 as `LICENSE-APACHE-2.0`. No code from `ee/` is used.
+
+- Code-mode sources: `packages/core/src/tools/code-mode/stub-generator.ts`,
+  `code-mode/quickjs/src/transport.ts` and `code-mode/quickjs/src/transport.test.ts`.
+- Used in: `src/schema-to-ts.ts`, `src/quickjs.ts` and their tests. Changed: safe quoted
+  property names, empty enums, dictionary types and scoped schema references. The driver
+  owns one fresh runtime per job, uses string-only bridges and drops late replies. Cleanup
+  disables host work, frees deferred handles and discards a broken shared engine module.
 
 - Source: [mastra-ai/mastra](https://github.com/mastra-ai/mastra),
   `packages/core/src/evals/not-scorable.ts`, `packages/core/src/evals/hooks.ts`

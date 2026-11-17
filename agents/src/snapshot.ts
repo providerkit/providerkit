@@ -1,4 +1,10 @@
 import {
+  isWorkflowSnapshot,
+  checkWorkflowSnapshot,
+  checkWorkflowProgress,
+} from "./workflow-snapshot.ts";
+import type { TreeNode, WorkflowSnapshot, StepRequest } from "./types.ts";
+import {
   HOSTED_TOOL_TYPES,
   isEffort,
   parseToolArgs,
@@ -600,6 +606,8 @@ export function checkOptions(
       "resolveRequest",
       "needsApproval",
       "answerNow",
+      "beforeStep",
+      "reconcileStep",
       "beforeTool",
       "reconcileToolRetry",
       "canRunConcurrently",
@@ -652,12 +660,28 @@ function isRequest(value: unknown): value is ToolRequest {
   );
 }
 
+function isStepRequest(value: unknown): value is StepRequest {
+  return (
+    isRecord(value) &&
+    [
+      value.workflowId,
+      value.version,
+      value.runId,
+      value.attemptId,
+      value.operationId,
+      value.key,
+    ].every(isId) &&
+    ["step", "ask", "agent", "workflow", "sleep"].includes(String(value.kind))
+  );
+}
+
 function isPendingRequest(value: unknown): value is PendingRequest {
   return (
     isRecord(value) &&
     isId(value.id) &&
     isPath(value.path) &&
-    isRequest(value.call) &&
+    ((value.step === undefined && isRequest(value.call)) ||
+      (value.call === undefined && isStepRequest(value.step))) &&
     isScope(value.scope) &&
     isAsk(value.ask) &&
     positive(value.createdAt) &&
@@ -666,7 +690,7 @@ function isPendingRequest(value: unknown): value is PendingRequest {
   );
 }
 
-function isAskRecord(value: unknown): value is AskRecord {
+export function isAskRecord(value: unknown): value is AskRecord {
   if (
     !isRecord(value) ||
     !isPendingRequest(value.request) ||
@@ -842,7 +866,7 @@ function isCompaction(value: unknown): value is CompactionExecution {
   );
 }
 
-function isState(value: unknown): value is RunState {
+export function isState(value: unknown): value is RunState {
   if (!isRecord(value)) return false;
   switch (value.status) {
     case "running":
@@ -861,6 +885,7 @@ function isState(value: unknown): value is RunState {
         "maxChildren",
         "maxDepth",
         "modelCalls",
+        "steps",
         "treeElapsedMs",
       ].some((v) => v === value.limit);
     case "failed":
@@ -887,7 +912,7 @@ function isDelegationJournal(value: unknown): value is DelegationExecution {
         isRecord(child) &&
         isId(child.key) &&
         optional(child.reference, isId) &&
-        isSnapshot(child.snapshot),
+        isTreeNode(child.snapshot),
     )
   );
 }
@@ -910,6 +935,7 @@ function isSnapshot(value: unknown): value is RunSnapshot {
   return (
     isRecord(value) &&
     value.format === 3 &&
+    value.kind === "agent" &&
     [value.agentId, value.version, value.runId, value.attemptId].every(isId) &&
     positive(value.startedAt) &&
     isRunDefinition(value.definition) &&
@@ -942,6 +968,33 @@ function isSnapshot(value: unknown): value is RunSnapshot {
   );
 }
 
+export function isTreeInfo(value: unknown): value is RunSnapshot["tree"] {
+  return (
+    isRecord(value) &&
+    isId(value.runId) &&
+    positive(value.startedAt) &&
+    isTreeLimits(value.limits) &&
+    optional(value.memory, isMemoryScopes)
+  );
+}
+
+export function isTreeNode(value: unknown): value is TreeNode {
+  return isSnapshot(value) || isWorkflowSnapshot(value);
+}
+
+export function agentSnapshot(node: TreeNode): RunSnapshot {
+  if (node.kind !== "agent") throw new TypeError("Expected an agent node, not a workflow.");
+  return node;
+}
+
+export function readWorkflowSnapshot(raw: unknown): WorkflowSnapshot {
+  if (!serializable(raw) || !isWorkflowSnapshot(raw))
+    throw new TypeError("Invalid workflow snapshot.");
+  checkWorkflowSnapshot(raw);
+  checkTree(raw);
+  return copyData(raw);
+}
+
 export function modelId(runId: string, index: number): string {
   return `${runId}/model/${index + 1}`;
 }
@@ -955,19 +1008,44 @@ export function childRunId(operationId: string, key: string): string {
 }
 
 /** Check global reservations from saved local journals, including work not yet sent. */
-export function checkTree(root: RunSnapshot): void {
+export function checkTree(root: TreeNode): void {
   let children = 0;
   let models = 0;
   const inputIds = new Set<string>();
   let inputSize = 0;
   function visit(
-    node: RunSnapshot,
+    node: TreeNode,
     depth: number,
     path: ChildPathStep[],
     conversation: boolean,
     createdLevel: number,
     createdCeiling: number,
   ): void {
+    if (!equalData(node.tree, root.tree) || node.startedAt < root.tree.startedAt)
+      throw new TypeError("The child belongs to a different tree or deadline.");
+    if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
+    if (node.kind === "workflow") {
+      checkWorkflowSnapshot(node);
+      for (const step of node.steps) {
+        if (
+          root.runId === root.tree.runId &&
+          step.asks?.some((record) => !equalData(record.request.path, path))
+        )
+          throw new TypeError("The workflow request path is invalid.");
+        for (const child of step.children) {
+          children++;
+          visit(
+            child.snapshot,
+            depth + 1,
+            [...path, { operationId: step.id, key: child.key, runId: child.snapshot.runId }],
+            false,
+            createdLevel,
+            createdCeiling,
+          );
+        }
+      }
+      return;
+    }
     if (node.subagent) {
       createdLevel++;
       createdCeiling = Math.min(createdCeiling, node.subagent.policy.maxLevels);
@@ -1011,6 +1089,7 @@ export function checkTree(root: RunSnapshot): void {
           model.tools.length !== 1 ||
           (child &&
             (child.key !== "handoff" ||
+              child.snapshot.kind !== "agent" ||
               child.snapshot.session !== undefined ||
               child.snapshot.agentId !== journal.target.id ||
               child.snapshot.version !== journal.target.version)) ||
@@ -1101,7 +1180,29 @@ function checkAttemptProgress(
 }
 
 /** A host cache may fill a missing receipt, never erase or replace a known effect. */
-export function checkChildProgress(previous: RunSnapshot, next: RunSnapshot): void {
+export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
+  if (
+    previous.kind !== next.kind ||
+    previous.runId !== next.runId ||
+    previous.version !== next.version ||
+    previous.startedAt !== next.startedAt ||
+    !equalData(previous.definition, next.definition) ||
+    !equalData(previous.input, next.input) ||
+    !equalData(previous.limits, next.limits) ||
+    !equalData(previous.tree, next.tree) ||
+    (previous.state.status !== "running" &&
+      previous.state.status !== "suspended" &&
+      !equalData(previous.state, next.state))
+  )
+    throw new TypeError("The child host returned a different or regressed node.");
+  if (previous.kind === "workflow" && next.kind === "workflow") {
+    if (previous.workflowId !== next.workflowId)
+      throw new TypeError("The child host changed the workflow.");
+    checkWorkflowProgress(previous, next);
+    return;
+  }
+  if (previous.kind !== "agent" || next.kind !== "agent")
+    throw new TypeError("The child kind changed.");
   if (
     previous.runId !== next.runId ||
     !equalData(previous.definition, next.definition) ||
@@ -1262,7 +1363,7 @@ export function finalHandoffResult(
   if (model.tools.length !== 1 || tool?.status !== "completed" || !tool.result.ok) return undefined;
   const journal = snapshot.delegations.find((entry) => entry.operationId === tool.id);
   const child = journal?.kind === "handoff" ? journal.children[0]?.snapshot : undefined;
-  return child?.state.status === "completed"
+  return child?.kind === "agent" && child.state.status === "completed"
     ? { candidate: child.state.candidate, child }
     : undefined;
 }
@@ -1412,6 +1513,8 @@ export function readSnapshot(
       for (const [askIndex, record] of (tool.asks ?? []).entries()) {
         const request = record.request;
         if (
+          !request.call ||
+          request.step !== undefined ||
           request.id !== `${tool.id}/ask/${askIndex + 1}` ||
           request.call.operationId !== tool.id ||
           request.call.runId !== raw.runId ||

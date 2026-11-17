@@ -257,7 +257,10 @@ export function memoryScopes(binding?: MemoryBinding): MemoryScopes | undefined 
     })
   );
 }
-export function checkMemoryBinding(snapshot: RunSnapshot, binding?: MemoryBinding): void {
+export function checkMemoryBinding(
+  snapshot: Pick<RunSnapshot, "tree">,
+  binding?: MemoryBinding,
+): void {
   if (!equalData(snapshot.tree.memory, memoryScopes(binding)))
     throw new TypeError("Resume with this run's original memory scopes and erasure revisions.");
 }

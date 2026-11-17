@@ -862,6 +862,170 @@ A child key becomes part of the child's run ID and of every operation ID under i
 carry those IDs, and a screen that shows the run may send them to a browser. So key children by
 position or by a fixed name, such as `topic-1`, and never by their input.
 
+## Workflows
+
+A workflow is an ordinary async function with saved steps. Its input and result are typed:
+
+```ts
+const result = await totals.run({ count: 2 }); // A completed result has output: 4.
+```
+
+This small workflow needs no host because it has no effects:
+
+```ts
+import { defineWorkflow } from "@providerkit/agents/workflow";
+
+const totals = defineWorkflow({
+  id: "totals",
+  version: "1",
+  input: {
+    schema: { type: "object", properties: { count: { type: "number" } }, required: ["count"] },
+    validate(raw) {
+      if (
+        typeof raw !== "object" ||
+        raw === null ||
+        !("count" in raw) ||
+        typeof raw.count !== "number"
+      )
+        throw new TypeError("Provide a count.");
+      return { count: raw.count };
+    },
+  },
+  async run({ count }) {
+    return count * 2;
+  },
+});
+```
+
+For work outside that function, use its context:
+
+- `ctx.step(key, callback, options?)` saves a host callback's result.
+- `ctx.agent(key, agent, input)` runs a registered agent under the same tree budgets.
+- `ctx.workflow(key, workflow, input)` runs a registered workflow under those budgets.
+- `ctx.ask(question, validate)` saves a question and reads its authenticated answer.
+- `ctx.sleep(key, ms)` saves a wake time and returns control while it waits.
+
+Register children in `agents` and `workflows`. A child receives explicit input only. Agent children
+keep their own guards, memory policy, tool journals and helper limits. Memory access stays bound to
+this root's host-supplied scopes. A workflow has no model, transcript, session or inbox of its own.
+`workflow.asTool({ name, description })` makes it a typed specialist. `defineDelegation` also accepts
+workflow children. Known local failures return as tool feedback; cancellation, shared limits and
+host or journal failures stop the parent.
+
+### Put effects in steps
+
+Supply `host.beforeStep` on every run that uses effects, children or answers. It must check current
+ownership and any execution lease. The callback runs again immediately before dispatch, including
+after the running marker is saved. A saved approval does not waive that check.
+
+```ts
+await ctx.step(
+  "save",
+  ({ input, signal, idempotencyKey }) =>
+    posts.insert(input, {
+      signal,
+      idempotencyKey,
+    }),
+  { input: draft, needsApproval: true },
+);
+```
+
+`posts` is your authorized host service. Step callbacks also receive `context`, `key`, `attempt`
+and `report(data)`. Context stays in memory. Reported data and raw step results are server data,
+not automatic display content. Use opaque fixed keys such as `save` or `review-2`, never private
+input: keys appear in operation ids and progress.
+
+Input and results must be plain JSON within `limits.resultBytes`. The first run returns the same
+JSON copy as replay. Optional `validate` checks results on both paths. Approval edits require
+`validateInput`; the host must explicitly allow editing. Questions and approvals use the existing
+`prepareRequest`, `resolveRequest` and `answers` contracts. Workflow requests have `step`, not
+`call`. Text that says "approve" and client-supplied flags grant no permission.
+
+### Replay and parallel work
+
+The function runs from its start after interruption. Completed effects are read from the journal,
+not called again. Only context calls are recorded. Keep all other code pure: clock reads, random
+values, new ids and external reads belong inside a step. Declare every value the callback uses
+in `options.input`. Do not start an agent directly inside a callback or call context methods from
+inside another step; that bypasses accounting or can deadlock the step gate.
+
+Use ordinary promises for parallel branches:
+
+```ts
+const [draft, review] = await Promise.all([
+  ctx.agent("draft", writer, task),
+  ctx.agent("review", reviewer, task),
+]);
+```
+
+A sequence uses `await`. A branch uses `if`. A map includes its position in each key; a bounded
+loop includes its iteration. An evaluator loop is the same pattern: await the worker, await the
+reviewer, then stop or advance the iteration. Check child statuses before using their outputs.
+The barrier waits for every admitted step, even after `Promise.all` rejects or the function
+returns early. A pending question or sleep still suspends a function that caught its pause.
+Catch `StepFailedError` only; its `key`, `reason` and `error` describe a saved failure. A caught
+failure takes the same fallback branch on replay. Do not use `Promise.race` to select a branch:
+its winner is not recorded. Await every context call.
+
+Duplicate keys in one attempt, changed step kind/input/definition and skipped recorded steps are
+refused before new effects. Final output must reach every recorded step. Change `version` when
+callback implementations, keys, inputs or result meaning change. Old unreleased snapshots without
+the new node discriminator are refused, not converted. Keep old definitions until their runs settle.
+`checkReplay(workflow, snapshot)` checks saved coordination without a host or effects; it also
+compares the result of a completed journal. It cannot prove that hidden code kept the same meaning.
+
+Defaults are 100 saved steps, four concurrent host callbacks, 262,144 UTF-8 JSON bytes per input
+or result and no in-process wait. `limits.inlineWaitMs` opts into short waits in the worker.
+An effect's default timeout is 60 seconds. Each step allows at most 100 recorded reservations.
+Tree limits still bound children, depth, model calls and elapsed time. Workflows hold no agent
+slot, so a workflow can wait on children with `maxParallel: 1`. An infinite loop without a context
+call cannot be stopped by this SDK.
+
+### Retry only repeatable work
+
+No retry is automatic. A step left running after a crash has an unknown result and fails with
+`interrupted_operation`. A timeout cannot stop code that ignores its signal. An idempotency string
+or `idempotent: true` is not accepted as proof that a write can be repeated.
+
+For a callback you know is read-only, set `retry: { maxAttempts: 2, replay: "read-only" }`.
+It can still cost money or return newer data. For a write, use `replay: "reconcile"` and supply
+`host.reconcileStep`. Return `{ outcome: "not_run", receipt }` only after authoritative checks
+prove the entire attempt did not run **and cannot still complete**. Otherwise return
+`{ outcome: "unknown" }`. The SDK saves the receipt before reserving another attempt.
+Retries retain errors and every attempt id. Approval-gated steps cannot retry an old decision.
+
+Retries default to core's full-jitter backoff with a 1-second base and 30-second cap.
+`baseDelayMs`, `maxDelayMs` and a pure `retryOn` can narrow this policy. Aborts, non-transient
+provider failures, quota errors and HTTP 400–407 or 409 do not retry by default. Invalid results,
+failed authorization, cancellation, checkpoint failure and tree limits never become retries.
+Delayed retries save their wake time before returning control.
+
+Agent and workflow steps also accept `{ retry: { maxAttempts, replay, retryOn? } }`.
+This repeats a whole child, not only its last operation. The read-only assertion must cover
+**every** effect in that child. Reconciliation must cover them all too. Children with requests
+or configured hosted effects cannot use whole-child retries. Each attempt gets another child
+run and consumes the existing child and model-call budgets. Local limits are not retried; every
+previous child and its usage remain recorded.
+
+### Resume a wake in the background
+
+`createBackgroundAgent({ workflow, kind, runs, enqueue, policy })` uses the same binding as agents.
+It keeps injected `runs.create`'s commit-before-enqueue boundary. Set `policy.beforeStep` and use
+one `kind` per workflow version. `read().wakeAt` and suspended outcomes report the earliest wake.
+At that time, your existing delayed queue or scheduled job calls `resume(owner, id, {})`. An early
+call is refused with the wake time. The SDK supplies no scheduler.
+
+An empty-answer continuation includes `continuation.wakeAt`. Your `claimContinuation` must
+atomically reserve `(snapshot.runId, wakeAt)` for that claim and physical segment, even though
+there are no answers. Repeating the same claim in recovery may succeed; another segment must
+fail. Otherwise two delayed jobs could repeat future effects. Authentication, claims and fencing
+remain host responsibilities. A wake does not refresh the tree deadline; one beyond it is a limit,
+not a successful sleep. Worker cancellation and lease loss return control to the run service.
+
+See [the offline workflow example](examples/workflow.ts). Run it with
+`bun agents/examples/workflow.ts`. It asks a question, restores JSON state and reuses the completed
+agent child without a live provider or application store.
+
 ## Helpers the model creates
 
 Let an agent split a task among helpers:

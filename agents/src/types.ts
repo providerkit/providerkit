@@ -25,6 +25,9 @@ import type {
   MemoryScopes,
 } from "./memory.ts";
 import type { ClientTool } from "./request.ts";
+import type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
+export type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
+export type TreeNode = RunSnapshot | WorkflowSnapshot;
 import type { SubagentRecord } from "./subagents.ts";
 import type { InputInbox, InputReceipt, RunInput } from "./steering.ts";
 import type { Handoff } from "./handoff.ts";
@@ -357,6 +360,7 @@ export type AgentDefinition<T = string, H = never> = AgentConfig<H> & { output?:
 
 /** T is every possible completed output, including registered handoff chains. */
 export interface Agent<T = string> {
+  readonly kind: "agent";
   readonly id: string;
   readonly version: string;
   /** Invalid input throws a TypeError before anything is saved or loaded. */
@@ -420,16 +424,19 @@ export interface ClientAsk {
 
 export type Ask = ApprovalAsk | QuestionAsk | ClientAsk;
 
-export interface PendingRequest {
+export type RequestOrigin =
+  | { call: ToolRequest; step?: never }
+  | { step: StepRequest; call?: never };
+
+export type PendingRequest = RequestOrigin & {
   id: string;
   /** Absolute path from the logical root, derived by the SDK, never supplied by the client. */
   path: ChildPathStep[];
-  call: ToolRequest;
   definitionHash: string;
   ask: Ask;
   scope: RequestScope;
   createdAt: number;
-}
+};
 
 export interface Answer {
   choices?: string[];
@@ -467,7 +474,7 @@ export interface ChildPathStep {
 }
 
 export interface ChildEnvelope {
-  snapshot: RunSnapshot;
+  snapshot: TreeNode;
   /** An opaque host execution segment, not an independently owned SDK run. */
   reference?: string;
 }
@@ -495,16 +502,16 @@ export interface AgentHost {
     flush(): Promise<void>;
   };
   /** Persist the whole snapshot before returning. Writes are serialized within this attempt. */
-  checkpoint?: (snapshot: RunSnapshot) => void | Promise<void>;
+  checkpoint?: (snapshot: TreeNode) => void | Promise<void>;
   /** Load/compare authoritative state and check ownership and freshness, or throw.
    * The host must also exclude concurrent attempts; this loop does not take a lease. */
-  authorizeResume?: (snapshot: RunSnapshot) => void | Promise<void>;
+  authorizeResume?: (snapshot: TreeNode) => void | Promise<void>;
   /** May require approval for an unmarked tool, never waive a tool's needsApproval. */
   needsApproval?: (call: ToolRequest) => boolean | Promise<boolean>;
   /** Required to open a request. Supplies trusted actor, resource version and expiry.
    * Only an approval's presentation/edit policy may be overridden. */
   prepareRequest?: (
-    draft: Omit<PendingRequest, "scope">,
+    draft: RequestOrigin & Omit<PendingRequest, "scope" | "call" | "step">,
   ) =>
     | { scope: RequestScope; ask?: ApprovalAsk }
     | Promise<{ scope: RequestScope; ask?: ApprovalAsk }>;
@@ -525,6 +532,19 @@ export interface AgentHost {
   reconcileToolRetry?: (
     attempt: { request: ToolRequest; result: Extract<ToolResult, { ok: false }> },
     context: LifecycleContext,
+  ) =>
+    | { outcome: "not_run"; receipt: string }
+    | { outcome: "unknown" }
+    | Promise<{ outcome: "not_run"; receipt: string } | { outcome: "unknown" }>;
+  /** Required before every workflow effect or use of an answer. Check current ownership and lease. */
+  beforeStep?: (
+    step: StepRequest,
+    decided?: { request: PendingRequest; decision: Decision },
+  ) => void | Promise<void>;
+  reconcileStep?: (
+    step: StepRequest,
+    attempt: { attemptId: string; error?: StepError },
+    signal: AbortSignal,
   ) =>
     | { outcome: "not_run"; receipt: string }
     | { outcome: "unknown" }
@@ -597,6 +617,7 @@ export type LimitReason =
   | "maxChildren"
   | "maxDepth"
   | "modelCalls"
+  | "steps"
   | "treeElapsedMs";
 
 export type RunState =
@@ -700,6 +721,7 @@ export type DelegationExecution = {
  * the host owns storage, access and retention. Never accept it as proof of permission, and
  * never send it to a browser. */
 export interface RunSnapshot {
+  kind: "agent";
   format: 3;
   agentId: string;
   version: string;
@@ -784,13 +806,27 @@ interface RunRecord {
 export type RunOutcome<T = string> = RunRecord &
   (
     | { status: "completed"; output: T }
-    | { status: "suspended"; requests: (PendingRequest & { problem?: RequestProblem })[] }
+    | {
+        status: "suspended";
+        requests: (PendingRequest & { problem?: RequestProblem })[];
+        wakeAt?: number;
+      }
     | { status: "cancelled" }
     | { status: "limited"; limit: LimitReason }
     | { status: "failed"; error: RunFailure }
   );
 
 export type AgentEvent =
+  | ({ runId: string; attemptId: string; operationId: string; key: string } & (
+      | { type: "step_start"; kind: StepKind; attempt: number }
+      | { type: "step_progress"; data: unknown }
+      | {
+          type: "step_result";
+          kind: StepKind;
+          status: "completed" | "retrying" | "failed";
+          error?: StepError;
+        }
+    ))
   /** Best-effort delivery update without the input's content. The snapshot is authoritative. */
   | { type: "input"; receipt: InputReceipt }
   /** Sent before the target's progress, also on resume. Upsert by operationId. Raw events
@@ -825,7 +861,7 @@ export type AgentEvent =
    * or an interruption sends it again with the same identity, so upsert by runId. Only a child
    * that runs here sends it: a settled child that is reused, or one the host serves from a
    * saved copy, stays silent. */
-  | {
+  | ({
       type: "child";
       /** A model-created helper. Its private name, instructions and task are not display data. */
       subagent?: true;
@@ -833,6 +869,5 @@ export type AgentEvent =
       operationId: string;
       key: string;
       runId: string;
-      agentId: string;
       version: string;
-    };
+    } & ({ kind: "agent"; agentId: string } | { kind: "workflow"; workflowId: string }));
