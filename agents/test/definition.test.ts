@@ -17,7 +17,9 @@ import {
   type ModelSettings,
   type RunContext,
   type RunSnapshot,
+  type TreeNode,
 } from "../src/index.ts";
+import { assertAgent } from "./fixtures/assertions.ts";
 
 const base = { id: "definition", version: "1", instructions: "Answer the question." };
 const usage = { inputTokens: 5, cachedInputTokens: 1, outputTokens: 2 };
@@ -215,7 +217,8 @@ describe("model settings", () => {
         modelSettings: { hostedTools: source === "agent" ? hostedTools : [{ type: "web_search" }] },
       });
       if (source === "agent") hostedTools.length = 0;
-      const checkpoint = vi.fn((snapshot: RunSnapshot) => {
+      const checkpoint = vi.fn((snapshot: TreeNode) => {
+        assertAgent(snapshot);
         expect(snapshot.definition.modelSettings.hostedTools).toEqual(expected);
         // Mutating the caller's list cannot edit the resolved definition or a later call.
         hostedTools.length = 0;
@@ -225,7 +228,9 @@ describe("model settings", () => {
         host: { ...approval, checkpoint },
       });
       expect(pending.status).toBe("suspended");
-      const definition = checkpoint.mock.calls[0]?.[0].definition;
+      const checkpointed = checkpoint.mock.calls[0]?.[0];
+      assertAgent(checkpointed);
+      const definition = checkpointed.definition;
       const search = definition?.modelSettings.hostedTools?.[0];
       expect(Object.isFrozen(definition)).toBe(true);
       expect(Object.isFrozen(definition?.modelSettings.hostedTools)).toBe(true);
@@ -743,7 +748,7 @@ describe("definition resolved once", () => {
     });
     expect(result).toMatchObject({
       status: "failed",
-      error: { message: expect.stringContaining("different child") },
+      error: { message: "The child host returned a different or regressed node." },
     });
     expect(wire.requests).toHaveLength(1);
   });
@@ -855,6 +860,7 @@ describe("ending on a tool result", () => {
       const result = await agent.run("Write once", {
         host: {
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             if (snapshot.state.status === "running") durable = structuredClone(snapshot);
           },
         },
@@ -952,6 +958,7 @@ describe("ending on a tool result", () => {
     await agent.run("Finish", {
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           if (snapshot.state.status !== "running") throw new Error("Worker stopped");
           durable = structuredClone(snapshot);
         },

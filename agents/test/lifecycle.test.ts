@@ -1,4 +1,5 @@
 import { evidenceFor, firstRequest } from "./fixtures/requests.ts";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   defineTool,
@@ -109,6 +110,7 @@ describe("portable agent lifecycle", () => {
       },
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           expect(Object.isFrozen(snapshot.models)).toBe(true);
           checkpoints.push(structuredClone(snapshot));
         },
@@ -279,6 +281,7 @@ describe("portable agent lifecycle", () => {
     const interrupted = await agent.run("Read", {
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           checkpoint = structuredClone(snapshot);
           const last = snapshot.models.at(-1);
           if (last?.status === "completed" && last.tools[0]?.status === "completed")
@@ -471,6 +474,7 @@ describe("portable agent lifecycle", () => {
     const recheck = vi.fn();
     const host: AgentHost & { authorizeResume: NonNullable<AgentHost["authorizeResume"]> } = {
       checkpoint(snapshot) {
+        assertAgent(snapshot);
         authoritative = structuredClone(snapshot);
       },
       authorizeResume(snapshot) {
@@ -479,6 +483,7 @@ describe("portable agent lifecycle", () => {
           throw new Error("Stale or unauthorized snapshot");
       },
       prepareRequest(request) {
+        assertCall(request);
         expect(Object.isFrozen(request.call.arguments.nested)).toBe(true);
         return {
           scope: {
@@ -489,6 +494,7 @@ describe("portable agent lifecycle", () => {
         };
       },
       resolveRequest(approval, decision) {
+        assertCall(approval);
         expect(Object.isFrozen(approval.scope.resource)).toBe(true);
         expect(approval.call.call.id).toBe("wire-exact");
         if (decision !== "signed-ticket") return { type: "pending" };
@@ -586,7 +592,10 @@ describe("portable agent lifecycle", () => {
           vi.setSystemTime(Date.now() + 6);
       },
     });
-    expect(result.status).toBe(expectedStatus);
+    expect(
+      result.status,
+      JSON.stringify({ state: result.snapshot.state, writes: write.mock.calls.length }),
+    ).toBe(expectedStatus);
     expect(write).not.toHaveBeenCalled();
     if (reason === "expired" || reason === "elapsed") expect(resolveRequest).not.toHaveBeenCalled();
     if (reason === "denied")
@@ -610,6 +619,7 @@ describe("portable agent lifecycle", () => {
       const failed = await agent.run("Work", {
         host: {
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             const last = snapshot.models.at(-1);
             if (
               last?.status === "completed" &&
@@ -645,6 +655,7 @@ describe("portable agent lifecycle", () => {
       const result = await agent.run("Work", {
         host: {
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             const last = snapshot.models.at(-1);
             if (
               kind === "model" ||

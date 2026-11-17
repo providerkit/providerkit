@@ -24,6 +24,7 @@ import { defineHandoff } from "../src/handoff.ts";
 import { questionTool } from "../src/request.ts";
 import { createAgentTracing, type AgentTracing } from "../src/otel.ts";
 import type { LifecycleContext, RunSnapshot, ToolRequest } from "../src/types.ts";
+import { assertAgent } from "./fixtures/assertions.ts";
 
 // A public-API fake, not a second OTel SDK or exporter dependency.
 class RecordedSpan implements Span {
@@ -379,6 +380,7 @@ describe("OpenTelemetry observer", () => {
       tracing.options({
         host: {
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             if (snapshot.models[0]?.status === "running") saved = structuredClone(snapshot);
           },
         },
@@ -548,6 +550,7 @@ describe("OpenTelemetry observer", () => {
     await tracing.onLifecycle({ type: "tool_start", request: request(ctx) }, ctx);
     await tracing.onEvent({
       type: "child",
+      kind: "agent",
       parentRunId: ctx.runId,
       operationId: "tool",
       runId: "missing-child",
@@ -588,6 +591,7 @@ describe("OpenTelemetry observer", () => {
     for (let index = 0; index < 4; index++) {
       await tracing.onEvent({
         type: "child",
+        kind: "agent",
         parentRunId: first.runId,
         operationId: "tool",
         runId: `child-${index}`,
@@ -617,6 +621,7 @@ describe("OpenTelemetry observer", () => {
     await tracing.onLifecycle({ type: "run_start" }, parent);
     await tracing.onEvent({
       type: "child",
+      kind: "agent",
       parentRunId: "parent",
       operationId: "tool",
       runId: "child",
@@ -673,6 +678,7 @@ describe("OpenTelemetry observer", () => {
       const parent = context("parent");
       const child = {
         type: "child" as const,
+        kind: "agent" as const,
         parentRunId: parent.runId,
         operationId: "tool",
         runId: "child",

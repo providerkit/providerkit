@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { assertAgent } from "./fixtures/assertions.ts";
 import { defineTool, type Provider, type ProviderChunk, type ToolSpec } from "@providerkit/core";
 import {
   defineAgent,
@@ -435,6 +436,7 @@ describe("bounded tool retries", () => {
         ...host,
         reconcileToolRetry,
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           const model = snapshot.models[0];
           const tool = model?.status === "completed" ? model.tools[0] : undefined;
           if (tool?.retries.length && tool.status === "running") throw new Error("Worker lost");
@@ -472,6 +474,7 @@ describe("bounded tool retries", () => {
         host: {
           ...host,
           checkpoint: (snapshot) => {
+            assertAgent(snapshot);
             const model = snapshot.models[0];
             const tool = model?.status === "completed" ? model.tools[0] : undefined;
             if (tool?.retries.length && tool.status === "completed") throw new Error("Worker lost");

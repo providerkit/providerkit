@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 import { defineTool, type ChatMessage, type Provider, type ProviderChunk } from "@providerkit/core";
 import {
   createMemorySession,
@@ -61,6 +62,7 @@ function transfer<T>(to: HandoffSpec<T>["to"], name = "transfer") {
 function child(snapshot: RunSnapshot): RunSnapshot {
   const node = snapshot.delegations[0]?.children[0]?.snapshot;
   if (!node) throw new Error("Missing target snapshot");
+  assertAgent(node);
   return node;
 }
 function host(): AgentHost & { authorizeResume(): void } {
@@ -179,6 +181,7 @@ describe("structured handoff", () => {
     const result = await source.run("Original question", {
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           saved.push(snapshot);
         },
       },
@@ -284,6 +287,7 @@ describe("structured handoff", () => {
     if (waiting.status !== "suspended" || !waiting.requests[0])
       throw new Error("Expected approval");
     const request = waiting.requests[0];
+    assertCall(request);
     expect(request.path).toHaveLength(1);
     expect(request.call.agentId).toBe("target");
     expect(session.append).not.toHaveBeenCalled();

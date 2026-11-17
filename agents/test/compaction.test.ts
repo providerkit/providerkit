@@ -15,6 +15,7 @@ import {
   type RunSnapshot,
 } from "../src/index.ts";
 import { checkChildProgress } from "../src/snapshot.ts";
+import { assertAgent } from "./fixtures/assertions.ts";
 
 const base = { id: "compact", version: "1", instructions: "Keep these instructions." };
 const policy = { identity: "trim-1", contextWindow: 1_000, keepTokens: 5 };
@@ -234,6 +235,7 @@ describe("model-only compaction", () => {
           },
         },
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           expect(flushed).toBe(true);
           checkpoints.push(snapshot);
         },
@@ -296,6 +298,7 @@ describe("model-only compaction", () => {
       const result = await agent.run(input, {
         host: {
           checkpoint: (snapshot) => {
+            assertAgent(snapshot);
             const entry = snapshot.compactions[0];
             if (
               (point === "before-dispatch" && entry?.model) ||
@@ -340,6 +343,7 @@ describe("model-only compaction", () => {
     await agent.run(input, {
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           if (snapshot.models[0]?.status === "completed") throw new Error("Worker lost");
           checkpoint = structuredClone(snapshot);
         },

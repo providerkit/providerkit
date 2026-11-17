@@ -16,8 +16,10 @@ import {
   type AgentHost,
   type AgentMessage,
   type HandoffSpec,
+  type PendingRequest,
   type RunSnapshot,
 } from "../src/index.ts";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 import { checkChildProgress, isRecord } from "../src/snapshot.ts";
 import { AGENT_RUNTIME } from "../src/delegation.ts";
 
@@ -64,6 +66,7 @@ function transfer<T>(
 function targetNode(snapshot: RunSnapshot): RunSnapshot {
   const child = snapshot.delegations[0]?.children[0]?.snapshot;
   if (!child) throw new Error("Missing handoff child");
+  assertAgent(child);
   return child;
 }
 function host(): AgentHost & { authorizeResume(): void } {
@@ -135,9 +138,7 @@ describe("conversation handoff", () => {
       tools: [transfer(target)],
     });
     const events: AgentEvent[] = [];
-    const child = vi.fn(async (_request, execute: () => Promise<{ snapshot: RunSnapshot }>) =>
-      execute(),
-    );
+    const child = vi.fn<NonNullable<AgentHost["child"]>>(async (_request, execute) => execute());
     const result = await source.run("Help me.", {
       host: { child },
       onEvent: (event) => {
@@ -485,6 +486,7 @@ describe("conversation handoff", () => {
     const result = await source.run("Help", {
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           saved.push(snapshot);
         },
       },
@@ -678,8 +680,10 @@ describe("conversation handoff", () => {
     const policy = {
       ...host(),
       needsApproval: () => true,
-      answerNow: (request: { call: { agentId: string } }) =>
-        request.call.agentId === "source" ? { type: "approve" as const } : undefined,
+      answerNow: (request: PendingRequest) => {
+        assertCall(request);
+        return request.call.agentId === "source" ? { type: "approve" as const } : undefined;
+      },
     };
     const waiting = await source.run("Help", { host: policy });
     expect(waiting.status).toBe("suspended");
@@ -687,7 +691,10 @@ describe("conversation handoff", () => {
     vi.setSystemTime(Date.now() + 60_001);
     const renewed = await source.resume(waiting.snapshot, { host: policy });
     if (renewed.status !== "suspended") throw new Error(renewed.status);
-    const transferRequest = renewed.requests.find((request) => request.call.agentId === "source");
+    const transferRequest = renewed.requests.find((request) => {
+      assertCall(request);
+      return request.call.agentId === "source";
+    });
     if (!transferRequest) throw new Error("Missing renewed transfer approval");
     const stopped = await source.resume(renewed.snapshot, {
       host: { ...policy, resolveRequest: () => ({ type: "deny" }) },
@@ -717,8 +724,10 @@ describe("conversation handoff", () => {
         },
         ask: { type: "approval" as const, editable: true },
       }),
-      answerNow: (request: { call: { agentId: string } }) =>
-        request.call.agentId === "source" ? { type: "approve" as const } : undefined,
+      answerNow: (request: PendingRequest) => {
+        assertCall(request);
+        return request.call.agentId === "source" ? { type: "approve" as const } : undefined;
+      },
     };
     const waiting = await f.source.run("Help", { host: policy });
     vi.setSystemTime(Date.now() + 60_001);
@@ -727,10 +736,15 @@ describe("conversation handoff", () => {
     const result = await f.source.resume(renewed.snapshot, {
       host: {
         ...policy,
-        resolveRequest: (request) => ({
-          type: "approve",
-          ...(request.call.agentId === "source" ? { arguments: { note: "A different task" } } : {}),
-        }),
+        resolveRequest: (request) => {
+          assertCall(request);
+          return {
+            type: "approve",
+            ...(request.call.agentId === "source"
+              ? { arguments: { note: "A different task" } }
+              : {}),
+          };
+        },
       },
       answers: Object.fromEntries(renewed.requests.map((request) => [request.id, "approve"])),
     });
@@ -841,12 +855,14 @@ describe("conversation handoff", () => {
       await source.run("Help", {
         host: {
           checkpoint: (snapshot) => {
+            assertAgent(snapshot);
             saved.push(snapshot);
           },
         },
       });
       const interrupted = saved.find((snapshot) => {
         const child = snapshot.delegations[0]?.children[0]?.snapshot;
+        if (child) assertAgent(child);
         return child?.models[0]?.status === "running" && child.models[0].usage.inputTokens === 7;
       });
       expect(interrupted).toBeDefined();

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { assertAgent } from "./fixtures/assertions.ts";
 import {
   collectTurn,
   defineTool,
@@ -395,6 +396,7 @@ describe("withheld output and recovery", () => {
       },
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           checkpoints.push(snapshot);
         },
       },
@@ -433,6 +435,7 @@ describe("withheld output and recovery", () => {
     const result = await agent.run("Answer", {
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           if (snapshot.models[0]?.status === "completed") persisted = true;
         },
       },
@@ -665,6 +668,7 @@ describe("withheld output and recovery", () => {
     const first = await agent.run("Finish", {
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           if (
             snapshot.state.status === "running" &&
             snapshot.models[0]?.status === "completed" &&
@@ -724,6 +728,7 @@ describe("withheld output and recovery", () => {
       await agent.run("Read", {
         host: {
           checkpoint: (snapshot) => {
+            assertAgent(snapshot);
             if (
               snapshot.guards.at(-1)?.status === status &&
               snapshot.models[0]?.status === "completed" &&
@@ -812,6 +817,7 @@ describe("withheld output and recovery", () => {
     await agent.run("Answer", {
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           if (snapshot.models[0]?.status === "running" && snapshot.guards.length === 1)
             checkpoint = structuredClone(snapshot);
         },
@@ -832,6 +838,7 @@ describe("withheld output and recovery", () => {
     await hosted.run("Answer", {
       host: {
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           if (snapshot.models[0]?.status === "running" && snapshot.guards.length === 1)
             checkpoint = structuredClone(snapshot);
         },

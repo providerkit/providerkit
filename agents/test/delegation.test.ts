@@ -22,7 +22,9 @@ import {
   type DelegationContext,
   type RunOutcome,
   type RunSnapshot,
+  type TreeNode,
 } from "../src/index.ts";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 
 const usage = { inputTokens: 7, cachedInputTokens: 2, outputTokens: 3, reasoningTokens: 1 };
 const base = { version: "1", instructions: "Complete this task." };
@@ -91,6 +93,7 @@ function coordinator(
 function firstChild(snapshot: RunSnapshot): RunSnapshot {
   const child = snapshot.delegations[0]?.children[0]?.snapshot;
   if (!child) throw new Error("Missing child checkpoint");
+  assertAgent(child);
   return child;
 }
 function checkpoint(snapshot: RunSnapshot | undefined): RunSnapshot {
@@ -119,13 +122,13 @@ function reporter(event: AgentEvent): string {
   if (event.type === "child") return event.parentRunId;
   if (event.type === "input") return event.receipt.runId;
   if (event.type === "decision") return "decision";
-  if (event.type === "request") return event.request.call.runId;
-  return event.type === "model_chunk" ||
-    event.type === "state" ||
-    event.type === "handoff" ||
-    event.type === "operation_restart"
-    ? event.runId
-    : event.request.runId;
+  if (event.type === "request") {
+    assertCall(event.request);
+    return event.request.call.runId;
+  }
+  return event.type === "tool_start" || event.type === "tool_result"
+    ? event.request.runId
+    : event.runId;
 }
 function approvalFixture(treeLimits = {}) {
   const effect = vi.fn(async (context: ToolContext) => {
@@ -408,7 +411,7 @@ describe("specialist delegation", () => {
       const authorized: string[] = [];
       const resolved: string[] = [];
       const host = {
-        authorizeResume(snapshot: RunSnapshot) {
+        authorizeResume(snapshot: TreeNode) {
           authorized.push(snapshot.runId);
           expect(Object.isFrozen(snapshot)).toBe(true);
         },
@@ -417,6 +420,7 @@ describe("specialist delegation", () => {
           approval: Parameters<NonNullable<AgentHost["resolveRequest"]>>[0],
           decision: unknown,
         ) {
+          assertCall(approval);
           expect(Object.isFrozen(approval.call.call)).toBe(true);
           expect(approval.call.call.id).toBe("exact-leaf-call");
           expect(decision).toEqual({ ticket: "signed" });
@@ -431,6 +435,7 @@ describe("specialist delegation", () => {
             expect(approval).toBeUndefined();
             return;
           }
+          assertCall(approval?.request);
           expect(approval?.request.call.operationId).toBe(request.operationId);
           if (answer === "revoked") throw new Error("Access revoked");
         },
@@ -543,6 +548,7 @@ describe("specialist delegation", () => {
       prepareRequest: () => ({ scope: scope() }),
       beforeTool() {},
       resolveRequest(approval: Parameters<NonNullable<AgentHost["resolveRequest"]>>[0]) {
+        assertCall(approval);
         resolutions.push(approval.call.call.id);
         return { type: "approve" as const };
       },
@@ -655,6 +661,7 @@ describe("specialist delegation", () => {
     const failed = await root.run("work", {
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           durable = structuredClone(snapshot);
           if (snapshot.delegations[0]?.children[0]?.snapshot.state.status === "completed")
             throw new Error("Worker stopped after saving the child");
@@ -699,7 +706,10 @@ describe("specialist delegation", () => {
       await root.run("work", {
         host: {
           checkpoint(snapshot) {
-            const last = snapshot.delegations[0]?.children[0]?.snapshot.models.at(-1);
+            assertAgent(snapshot);
+            const child = snapshot.delegations[0]?.children[0]?.snapshot;
+            if (child) assertAgent(child);
+            const last = child?.models.at(-1);
             if (
               last?.status === "completed" &&
               (kind === "model" || last.tools[0]?.status === "completed")
@@ -747,6 +757,7 @@ describe("specialist delegation", () => {
       await root.run("work", {
         host: {
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             durable = structuredClone(snapshot);
             if (snapshot.delegations[0]?.children[0]?.snapshot.state.status === "completed")
               throw new Error("Stopped after child");
@@ -955,7 +966,8 @@ describe("specialist delegation", () => {
       const child = durable?.delegations[0]?.children.find(
         (entry) => entry.snapshot.runId === context.runId,
       )?.snapshot;
-      const last = child?.models.at(-1);
+      assertAgent(child);
+      const last = child.models.at(-1);
       expect(last?.status === "completed" ? last.tools[0]?.status : undefined).toBe("running");
       return "saved";
     });
@@ -966,7 +978,8 @@ describe("specialist delegation", () => {
         const saved = durable?.delegations[0]?.children.find(
           (entry) => entry.snapshot.runId === options?.sessionId,
         )?.snapshot;
-        expect(saved?.models.at(-1)?.status).toBe("running");
+        assertAgent(saved);
+        expect(saved.models.at(-1)?.status).toBe("running");
         yield* history.length === 2 ? calls(call("write")) : text("done");
       },
     };
@@ -992,6 +1005,7 @@ describe("specialist delegation", () => {
     const result = await root.run("work", {
       host: {
         async checkpoint(snapshot) {
+          assertAgent(snapshot);
           writing++;
           peakWrites = Math.max(peakWrites, writing);
           await Promise.resolve();
@@ -1045,7 +1059,7 @@ describe("specialist delegation", () => {
     });
     expect(result).toMatchObject({
       status: "failed",
-      error: { message: expect.stringContaining("dropped saved model receipts") },
+      error: { message: "The child host returned a different or regressed node." },
     });
     expect(firstChild(result.snapshot).state.status).toBe("completed");
     expect(effect).toHaveBeenCalledTimes(1);
@@ -1136,6 +1150,7 @@ describe("specialist delegation", () => {
     expect(children).toEqual([
       {
         type: "child",
+        kind: "agent",
         parentRunId: "root-run",
         operationId,
         key: "a",
@@ -1145,6 +1160,7 @@ describe("specialist delegation", () => {
       },
       {
         type: "child",
+        kind: "agent",
         parentRunId: "root-run",
         operationId,
         key: "b",
@@ -1297,8 +1313,22 @@ describe("specialist delegation", () => {
     const [middle, leaf] = firstRequest(pending.snapshot).path;
     if (!middle || !leaf) throw new Error("Missing approval path");
     const expected = [
-      { type: "child", parentRunId: pending.runId, ...middle, agentId: "middle", version: "1" },
-      { type: "child", parentRunId: middle.runId, ...leaf, agentId: "leaf", version: "1" },
+      {
+        type: "child",
+        kind: "agent",
+        parentRunId: pending.runId,
+        ...middle,
+        agentId: "middle",
+        version: "1",
+      },
+      {
+        type: "child",
+        kind: "agent",
+        parentRunId: middle.runId,
+        ...leaf,
+        agentId: "leaf",
+        version: "1",
+      },
     ];
     expect(before.children()).toEqual(expected);
     // Resuming walks the same route, so both levels are named again, parent first.
@@ -1422,6 +1452,7 @@ describe("specialist delegation", () => {
     await root.run("work", {
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           durable = structuredClone(snapshot);
           if (snapshot.delegations[0]?.children[0]?.snapshot.state.status === "completed")
             throw new Error("Stopped after child");

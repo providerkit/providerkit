@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { assertAgent } from "./fixtures/assertions.ts";
 import { defineTool, type ChatMessage, type Provider, type ProviderChunk } from "@providerkit/core";
 import {
   createMemoryInbox,
@@ -191,6 +192,7 @@ describe("safe-boundary steering", () => {
       },
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           durable = saved(snapshot);
         },
         inbox: {
@@ -301,6 +303,7 @@ describe("safe-boundary steering", () => {
         host: {
           inbox,
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             if (point === "final-save" && snapshot.state.status === "completed") enqueue();
           },
         },
@@ -459,6 +462,7 @@ describe("input checkpoint boundaries", () => {
           authorizeResume,
           inbox: { ...inbox, acknowledge: ack },
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             if (lost) throw new Error("Worker gone");
             const at =
               point === "before-save" || point === "after-save"
@@ -503,6 +507,7 @@ describe("input checkpoint boundaries", () => {
       host: {
         inbox,
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           durable = saved(snapshot);
           throw new Error("Saved, reply lost");
         },
@@ -596,6 +601,7 @@ describe("input checkpoint boundaries", () => {
         host: {
           inbox,
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             if (snapshot.models[0]?.status === "completed") throw new Error("Worker gone");
             durable = saved(snapshot);
           },

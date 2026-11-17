@@ -7,7 +7,9 @@ import {
   type AgentHost,
   type RunLimits,
   type RunSnapshot,
+  type TreeNode,
 } from "../src/index.ts";
+import { assertAgent } from "./fixtures/assertions.ts";
 import { AGENT_RUNTIME } from "../src/delegation.ts";
 import { checkChildProgress } from "../src/snapshot.ts";
 
@@ -48,14 +50,16 @@ function saved(snapshot: RunSnapshot | undefined): RunSnapshot {
 }
 /** Simulates a process lost after a usage checkpoint, before the turn result is saved. */
 function crashModel(
-  select: (snapshot: RunSnapshot) => RunSnapshot | undefined = (snapshot) => snapshot,
+  select: (snapshot: RunSnapshot) => TreeNode | undefined = (snapshot) => snapshot,
   ignoreAttemptId?: string,
 ) {
   let durable: RunSnapshot | undefined;
   const host: AgentHost & { authorizeResume: typeof authorizeResume } = {
     authorizeResume,
     checkpoint(snapshot) {
+      assertAgent(snapshot);
       const node = select(snapshot);
+      if (node) assertAgent(node);
       const model = node?.models.at(-1);
       if (model?.status === "completed") throw new Error("Lost worker");
       durable = saved(snapshot);
@@ -332,6 +336,7 @@ describe("guarded interrupted-operation recovery", () => {
     await agent.run("Work", {
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           const last = snapshot.models[0];
           if (last?.status === "completed" && last.tools[1]?.status === "completed")
             throw new Error("Lost result save");
@@ -431,7 +436,8 @@ describe("guarded interrupted-operation recovery", () => {
       const host = {
         authorizeResume,
         beforeTool() {},
-        checkpoint(snapshot: RunSnapshot) {
+        checkpoint(snapshot: TreeNode) {
+          assertAgent(snapshot);
           const last = snapshot.models[0];
           if (last?.status === "completed" && last.tools[0]?.status === "completed")
             throw new Error("Lost result");
@@ -651,6 +657,7 @@ describe("guarded interrupted-operation recovery", () => {
       }),
       answerNow: () => ({ type: "approve" }),
       checkpoint(snapshot) {
+        assertAgent(snapshot);
         const last = snapshot.models[0];
         if (last?.status === "completed" && last.tools[0]?.status === "completed")
           throw new Error("Lost result");

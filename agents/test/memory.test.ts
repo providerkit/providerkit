@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { assertAgent } from "./fixtures/assertions.ts";
 import {
   defineTool,
   type ChatMessage,
@@ -225,6 +226,7 @@ describe("recorded recall", () => {
       session,
       host: {
         checkpoint: (saved) => {
+          assertAgent(saved);
           checkpoints.push(structuredClone(saved));
         },
       },
@@ -274,6 +276,7 @@ describe("recorded recall", () => {
       memory,
       host: {
         checkpoint(saved) {
+          assertAgent(saved);
           if (saved.models[0]?.status === "running") interrupted = structuredClone(saved);
         },
       },
@@ -445,6 +448,7 @@ describe("recorded recall", () => {
       memory,
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           if (snapshot.models[0]?.status === "running") saved = structuredClone(snapshot);
         },
       },
@@ -547,6 +551,7 @@ describe("scoped memory tools and children", () => {
       memory,
       host: {
         checkpoint(saved) {
+          assertAgent(saved);
           const model = saved.models[0];
           if (model?.status === "completed" && model.tools[0]?.status === "running")
             interrupted = structuredClone(saved);
@@ -643,6 +648,7 @@ describe("scoped memory tools and children", () => {
       memory,
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           const model = snapshot.models[0];
           if (model?.status === "completed" && model.tools[0]?.status === "running")
             saved = structuredClone(snapshot);
@@ -735,7 +741,8 @@ describe("scoped memory tools and children", () => {
     const result = await agent.run("Work", { memory });
     expect(result.status).toBe("completed");
     const saved = result.snapshot.delegations[0]?.children[0]?.snapshot;
-    expect(saved?.tree.memory).toEqual(result.snapshot.tree.memory);
+    assertAgent(saved);
+    expect(saved.tree.memory).toEqual(result.snapshot.tree.memory);
     expect(saved?.definition.enabledTools).toEqual(["memory_search"]);
     expect(child.calls[0]?.tools.map((tool) => tool.name)).toEqual(["memory_search"]);
     if (!saved) throw new Error("Missing child.");
@@ -835,8 +842,14 @@ describe("scoped memory tools and children", () => {
         memory,
         host: {
           checkpoint(saved) {
-            const child = saved.delegations[0]?.children[0]?.snapshot.delegations[0]?.children[0];
-            if (child && !child.snapshot.recall) beforeRecall = structuredClone(saved);
+            assertAgent(saved);
+            const middle = saved.delegations[0]?.children[0]?.snapshot;
+            if (middle) assertAgent(middle);
+            const child = middle?.delegations[0]?.children[0]?.snapshot;
+            if (child) {
+              assertAgent(child);
+              if (!child.recall) beforeRecall = structuredClone(saved);
+            }
           },
         },
       });

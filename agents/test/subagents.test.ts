@@ -1,6 +1,7 @@
 // Validation/replay cases adapted from PydanticAI Harness / Vstorm (MIT),
 // test_task_control.py and test_dbos.py; attenuation from TanStack AI (MIT), agents.test.ts.
 import { describe, expect, it, vi } from "vitest";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 import {
   defineTool,
   type ChatMessage,
@@ -99,7 +100,12 @@ function lead(
   return { agent, source };
 }
 function children(snapshot: RunSnapshot) {
-  return snapshot.delegations.flatMap((entry) => entry.children.map((child) => child.snapshot));
+  return snapshot.delegations.flatMap((entry) =>
+    entry.children.map(({ snapshot }) => {
+      assertAgent(snapshot);
+      return snapshot;
+    }),
+  );
 }
 function first(snapshot: RunSnapshot): RunSnapshot {
   const node = children(snapshot)[0];
@@ -165,6 +171,7 @@ describe("model-created helpers", () => {
       host: {
         ...policy,
         checkpoint: (snapshot) => {
+          assertAgent(snapshot);
           checkpoints.push(snapshot);
         },
       },
@@ -203,6 +210,7 @@ describe("model-created helpers", () => {
         subagent: draft.name,
         call: expect.objectContaining({ name: "read" }),
       }),
+      undefined,
     );
     const childEvents = events.filter((event) => event.type === "child");
     expect(childEvents).toHaveLength(1);
@@ -339,6 +347,7 @@ describe("model-created helpers", () => {
     await original.agent.run("Create", {
       host: {
         checkpoint(saved) {
+          assertAgent(saved);
           if (
             firstOrUndefined(saved)?.state.status === "completed" &&
             saved.models[0]?.status === "completed" &&
@@ -472,6 +481,7 @@ describe("model-created helpers", () => {
     if (waiting.status !== "suspended" || !waiting.requests[0])
       throw new Error("Expected approval");
     const request = waiting.requests[0];
+    assertCall(request);
     expect(request.path[0]?.key).toBe("helper-1");
     expect(request.call.subagent).toBe(draft.name);
     expect(read.performed).not.toHaveBeenCalled();
@@ -632,6 +642,7 @@ describe("model-created helpers", () => {
       host: {
         async child(_request, execute) {
           const envelope = await execute();
+          assertAgent(envelope.snapshot);
           if (!envelope.snapshot.subagent) throw new Error("Missing admission");
           envelope.snapshot.subagent.spec.instructions = "Changed";
           return envelope;
@@ -718,6 +729,7 @@ describe("model-created helpers", () => {
     const finished = await agent.run("Create", {
       host: {
         checkpoint(saved) {
+          assertAgent(saved);
           if (
             firstOrUndefined(saved)?.state.status === "completed" &&
             saved.models[0]?.status === "completed" &&
@@ -848,6 +860,7 @@ describe("model-created helpers", () => {
     await agent.run("Create", {
       host: {
         checkpoint(saved) {
+          assertAgent(saved);
           if (firstOrUndefined(saved)?.models[0]?.status === "running") checkpoint = saved;
         },
       },
@@ -879,7 +892,7 @@ describe("model-created helpers", () => {
     });
     const initial = await agent.run("Create", { host: policy });
     if (initial.status !== "suspended" || !initial.requests[0])
-      throw new Error("Expected create approval");
+      throw new Error(`Expected create approval: ${JSON.stringify(initial.snapshot.state)}`);
     const waiting = await agent.resume(initial.snapshot, {
       host: policy,
       answers: { [initial.requests[0].id]: "approval" },
@@ -893,7 +906,10 @@ describe("model-created helpers", () => {
     approval.request.scope.expiresAt = Date.now() - 1;
     const renewed = await agent.resume(saved, { host: policy });
     if (renewed.status !== "suspended") throw new Error("Expected renewed approval");
-    const request = renewed.requests.find((request) => request.call.agentId === "lead");
+    const request = renewed.requests.find((request) => {
+      assertCall(request);
+      return request.call.agentId === "lead";
+    });
     if (!request) throw new Error("Missing renewed creation approval");
     policy.resolveRequest = () => ({
       type: "approve",
@@ -915,6 +931,7 @@ describe("model-created helpers", () => {
     const finished = await agent.run("Create", {
       host: {
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           if (children(snapshot).length) throw new Error("Checkpoint unavailable");
         },
       },
@@ -987,6 +1004,7 @@ describe("helper forks and follow-ups", () => {
       host: {
         ...host(),
         checkpoint(saved) {
+          assertAgent(saved);
           if (firstOrUndefined(saved)?.models.length === 0) admitted = saved;
         },
       },
@@ -1084,6 +1102,7 @@ describe("helper forks and follow-ups", () => {
       host: {
         ...host(),
         checkpoint(saved) {
+          assertAgent(saved);
           if (
             children(saved).length === 3 &&
             children(saved)[2]?.state.status === "completed" &&
@@ -1158,6 +1177,7 @@ describe("helper forks and follow-ups", () => {
         host: {
           ...host(),
           checkpoint(saved) {
+            assertAgent(saved);
             if (
               children(saved)[1]?.state.status === "completed" &&
               saved.models[1]?.status === "completed" &&
@@ -1311,6 +1331,7 @@ describe("helper forks and follow-ups", () => {
     if (waiting.status !== "suspended" || !waiting.requests[0])
       throw new Error("Expected follow-up approval");
     expect(read.performed).not.toHaveBeenCalled();
+    assertCall(waiting.requests[0]);
     expect(waiting.requests[0].call.runId).toBe(children(waiting.snapshot)[1]?.runId);
     const altered = structuredClone(waiting.snapshot);
     const next = children(altered)[1];
@@ -1419,6 +1440,7 @@ describe("helper forks and follow-ups", () => {
       host: {
         ...host(),
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           siblingId ??= firstOrUndefined(snapshot)?.subagent?.identity.id;
         },
       },
@@ -1568,6 +1590,7 @@ describe("helper forks and follow-ups", () => {
       host: {
         ...host(),
         checkpoint(saved) {
+          assertAgent(saved);
           if (children(saved)[1]?.models[0]?.status === "running") checkpoint = saved;
         },
       },

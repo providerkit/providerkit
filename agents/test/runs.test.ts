@@ -1,4 +1,5 @@
 import { evidenceFor, firstRequest } from "./fixtures/requests.ts";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 import { openRequests } from "../src/tree.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -367,7 +368,10 @@ describe("background binding on local Postgres", () => {
               const nodes = [
                 saved,
                 ...saved.delegations.flatMap((entry) =>
-                  entry.children.map((child) => child.snapshot),
+                  entry.children.map(({ snapshot }) => {
+                    assertAgent(snapshot);
+                    return snapshot;
+                  }),
                 ),
               ];
               const { rows } = await pool.query<{ data: unknown }>(
@@ -1798,6 +1802,7 @@ describe("background binding on local Postgres", () => {
               await run.save(value);
               const current = root.agent[AGENT_RUNTIME].restore(value);
               const mid = current.delegations[0]?.children[0]?.snapshot;
+              if (mid) assertAgent(mid);
               const child = mid?.delegations[0]?.children[0]?.snapshot;
               if (
                 !pause ||
@@ -1806,6 +1811,7 @@ describe("background binding on local Postgres", () => {
                 !child
               )
                 return;
+              assertAgent(child);
               const shouldPause =
                 (point === "route" && child.state.status === "suspended") ||
                 (point === "effect" &&
@@ -1813,9 +1819,10 @@ describe("background binding on local Postgres", () => {
                   child.models.at(-1)?.status === "completed") ||
                 (point === "later-approval" &&
                   child.state.status === "suspended" &&
-                  openRequests(child).some(
-                    (request) => request.call.operationId !== originalApproval.call.operationId,
-                  ));
+                  openRequests(child).some((request) => {
+                    assertCall(request);
+                    return request.call.operationId !== originalApproval.call.operationId;
+                  }));
               if (shouldPause) {
                 pause = false;
                 parked.resolve();
@@ -2039,6 +2046,7 @@ describe("background binding on local Postgres", () => {
           const children = before.snapshot.delegations[0]?.children;
           const child = children?.find((entry) => entry.key === "one")?.snapshot;
           if (!child) throw new Error("Missing running child");
+          assertAgent(child);
           const operation = child.models.at(-1);
           if (!operation) throw new Error("Missing operation");
           attempts.push(
@@ -2080,6 +2088,7 @@ describe("background binding on local Postgres", () => {
         (entry) => entry.key === "one",
       )?.snapshot;
       if (!child) throw new Error("Missing saved child");
+      assertAgent(child);
       if (profile === "hosted") {
         expect(child.state).toMatchObject({
           status: "failed",

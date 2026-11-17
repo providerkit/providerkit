@@ -117,6 +117,11 @@ if (result.status !== "completed") throw new Error(`The example ended with ${res
 if (result.snapshot.delegations[0]?.children.length !== 2) throw new Error("Expected two helpers.");
 const original = result.snapshot.delegations[0]?.children[0]?.snapshot;
 const followup = result.snapshot.delegations[1]?.children[0]?.snapshot;
-if (!followup?.subagent || followup.subagent.previousRunId !== original?.runId)
+if (
+  original?.kind !== "agent" ||
+  followup?.kind !== "agent" ||
+  !followup.subagent ||
+  followup.subagent.previousRunId !== original.runId
+)
   throw new Error("Expected a follow-up to the first helper.");
 console.log(result.output);

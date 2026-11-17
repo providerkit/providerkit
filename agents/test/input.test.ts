@@ -1,5 +1,6 @@
 import { evidenceFor } from "./fixtures/requests.ts";
 import { describe, expect, it, vi } from "vitest";
+import { assertAgent } from "./fixtures/assertions.ts";
 import {
   defineTool,
   type ChatMessage,
@@ -435,6 +436,7 @@ describe("media references", () => {
         host: {
           ...(loadMedia ? { loadMedia } : {}),
           checkpoint(snapshot) {
+            assertAgent(snapshot);
             checkpoints.push(structuredClone(snapshot));
           },
         },
@@ -699,7 +701,8 @@ describe("sessions in a run", () => {
     const { session, load, append } = spied(createMemorySession());
     const result = await agent.run("Start", { session });
     const child = result.snapshot.delegations[0]?.children[0]?.snapshot;
-    expect(child?.state.status).toBe("completed");
+    assertAgent(child);
+    expect(child.state.status).toBe("completed");
     expect(child?.session).toBeUndefined();
     expect(child?.history).toEqual([]);
     expect(load).toHaveBeenCalledTimes(1);

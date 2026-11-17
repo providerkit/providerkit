@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { assertAgent, assertCall } from "./fixtures/assertions.ts";
 import { defineTool, type Provider, type ProviderChunk, type ToolContext } from "@providerkit/core";
 import {
   answerOf,
@@ -64,7 +65,7 @@ function host(decision: (evidence: unknown) => Decision = () => ({ type: "approv
   } satisfies AgentHost;
 }
 function pending<T>(result: RunOutcome<T>) {
-  expect(result.status).toBe("suspended");
+  expect(result.status, JSON.stringify(result.snapshot.state)).toBe("suspended");
   if (result.status !== "suspended") throw new Error(JSON.stringify(result));
   return result;
 }
@@ -136,6 +137,7 @@ describe("durable requests", () => {
         host: {
           ...policy,
           checkpoint: (snapshot) => {
+            assertAgent(snapshot);
             saved.push(snapshot);
           },
         },
@@ -144,7 +146,12 @@ describe("durable requests", () => {
         },
       }),
     );
-    expect(waiting.requests.map((request) => request.call.call.id)).toEqual(["wire-0", "wire-1"]);
+    expect(
+      waiting.requests.map((request) => {
+        assertCall(request);
+        return request.call.call.id;
+      }),
+    ).toEqual(["wire-0", "wire-1"]);
     expect(saved.at(-1)?.state.status).toBe("suspended");
     expect(records(saved.at(-1) ?? waiting.snapshot)).toHaveLength(2);
     expect(events.filter((event) => event.type === "request")).toHaveLength(2);
@@ -182,8 +189,12 @@ describe("durable requests", () => {
     const done = await agent.run("Write", {
       host: {
         ...policy,
-        answerNow: (request) => (request.call.call.id === "wire-1" ? { type: "stop" } : undefined),
+        answerNow: (request) => {
+          assertCall(request);
+          return request.call.call.id === "wire-1" ? { type: "stop" } : undefined;
+        },
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           if (
             snapshot.state.status === "running" &&
             records(snapshot).some((record) => record.decision?.type === "stop")
@@ -449,6 +460,7 @@ describe("durable requests", () => {
       host: {
         ...policy,
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           if (records(snapshot).some((record) => record.decision)) {
             saved = snapshot;
             throw new Error("Worker stopped after save");
@@ -832,6 +844,7 @@ describe("durable requests", () => {
       host: {
         ...policy,
         checkpoint(snapshot) {
+          assertAgent(snapshot);
           const execution = snapshot.models[0];
           if (execution?.status === "completed" && execution.tools[0]?.status === "completed")
             throw new Error("Lost receipt");
@@ -962,6 +975,7 @@ describe("client tools", () => {
         host: {
           ...trusted,
           checkpoint: (snapshot) => {
+            assertAgent(snapshot);
             saved = snapshot;
           },
         },
@@ -979,10 +993,13 @@ describe("client tools", () => {
     expect(events.find((event) => event.type === "request")).toMatchObject({ request: dispatch });
     if (!saved) throw new Error("Missing client checkpoint");
     expect(records(saved)[1]?.request).toEqual(dispatch);
-    expect(records(saved)[0]?.request.call.arguments).toEqual({ folder: "original" });
+    const originalRequest = records(saved)[0]?.request;
+    assertCall(originalRequest);
+    expect(originalRequest.call.arguments).toEqual({ folder: "original" });
     const corrupted = structuredClone(saved);
     const clientRequest = records(corrupted)[1];
     if (!clientRequest) throw new Error("Missing client request");
+    assertCall(clientRequest.request);
     clientRequest.request.call.arguments = { folder: "forged" };
     const authorize = policy.authorizeResume.mock.calls.length;
     await expect(agent.resume(corrupted, { host: trusted })).rejects.toThrow(
