@@ -660,17 +660,22 @@ export function decodeA2AAgentCard(
 ): A2AAgentCard {
   const l = a2aLimits(overrides);
   const card = input(value, l);
+  // ProtoJSON omits empty repeated/scalar defaults. Legacy JSON Schema requires these fields.
+  const repeated = (field: A2AJson | undefined) =>
+    version === "1.0" && field == null ? [] : field;
+  const description = (field: A2AJson | undefined) =>
+    version === "1.0" && field == null ? "" : field;
   str(card.name);
-  str(card.description, l.textChars, true);
+  str(description(card.description), l.textChars, true);
   str(card.version);
-  strings(card.defaultInputModes, l.items);
-  strings(card.defaultOutputModes, l.items);
-  for (const skill of list(card.skills, l.items)) {
+  strings(repeated(card.defaultInputModes), l.items);
+  strings(repeated(card.defaultOutputModes), l.items);
+  for (const skill of list(repeated(card.skills), l.items)) {
     const s = obj(skill);
     id(s.id);
     str(s.name);
-    str(s.description, l.textChars, true);
-    strings(s.tags, l.items);
+    str(description(s.description), l.textChars, true);
+    strings(repeated(s.tags), l.items);
     optionalStrings(s.examples, l.items);
     optionalStrings(s.inputModes, l.items);
     optionalStrings(s.outputModes, l.items);

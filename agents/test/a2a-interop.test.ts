@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentCard,
+  AgentSkill,
   GetTaskRequest,
   SendMessageRequest,
   Task,
@@ -20,6 +21,7 @@ import { LegacyJsonRpcTransportHandler } from "@a2a-js/sdk/compat/v0_3/server";
 import { createA2AClient, decodeA2AHttpRequest } from "../src/a2a/client.ts";
 import {
   decodeA2ARpcRequest,
+  decodeA2AAgentCard,
   encodeA2AResult,
   encodeA2AError,
   type A2ADialect,
@@ -55,6 +57,41 @@ function card(dialect: A2ADialect) {
 // This exercises real SDK serializers/handlers with an in-memory fetch. It is not a
 // production server, authentication scheme or proof of the later run-store integration.
 describe("official A2A SDK interoperability", () => {
+  it.each([false, true])("reads omitted protobuf card defaults with skills=%s", (withSkill) => {
+    const original = card({ version: "1.0", binding: "JSONRPC" });
+    original.description = "";
+    original.defaultInputModes = [];
+    original.defaultOutputModes = [];
+    original.skills = withSkill ? [AgentSkill.fromJSON({ id: "read", name: "Read" })] : [];
+    const encoded = AgentCard.toJSON(original);
+    const parsed = decodeA2AAgentCard(encoded, "1.0");
+    expect(parsed.document).toEqual(encoded);
+    expect(parsed.interfaces).toMatchObject([{ url: endpoint, version: "1.0" }]);
+    expect(() => decodeA2AAgentCard({ ...parsed.document, skills: null }, "1.0")).not.toThrow();
+    expect(() => decodeA2AAgentCard({ ...parsed.document, name: "" }, "1.0")).toThrow();
+    expect(() =>
+      decodeA2AAgentCard({ ...parsed.document, supportedInterfaces: [] }, "1.0"),
+    ).toThrow();
+  });
+
+  it("keeps legacy JSON card fields required", () => {
+    expect(() =>
+      decodeA2AAgentCard(
+        {
+          name: "Legacy",
+          description: "",
+          version: "1",
+          protocolVersion: "0.3",
+          url: endpoint,
+          capabilities: {},
+          defaultInputModes: [],
+          defaultOutputModes: [],
+        },
+        "0.3",
+      ),
+    ).toThrow();
+  });
+
   it.each(versions)(
     "calls the official %s JSON-RPC handler without adapting its response",
     async (version) => {
