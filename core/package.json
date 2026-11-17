@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/core",
-  "version": "0.31.0",
+  "version": "0.33.0",
   "description": "The layer under your agent loop: one seam for every LLM provider, plus the failure handling you only learn in production.",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,10 @@
     "./hosted": {
       "types": "./dist/hosted.d.ts",
       "default": "./dist/hosted.js"
+    },
+    "./otel": {
+      "types": "./dist/otel.d.ts",
+      "default": "./dist/otel.js"
     },
     "./zod": {
       "types": "./dist/zod.d.ts",
@@ -80,14 +84,19 @@
     "release:alpha": "bun publish --access public --tag alpha"
   },
   "peerDependencies": {
+    "@opentelemetry/api": "^1.10.0",
     "zod": "^4"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
     "zod": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.10.0",
     "@types/node": "^24.13.3",
     "typescript": "^7.0.2",
     "vitest": "^4.1.2",

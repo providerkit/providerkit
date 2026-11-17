@@ -2,6 +2,24 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.33.0] - 2026-11-16
+
+### Added
+
+- Optional `outputSchema` on `ToolSpec` and `Tool`, kept by `defineTool`, lets consumers generate types for tool results. It accepts JSON Schema objects for any result shape, including non-object results.
+- This is metadata only: core does not validate results against it. Tool execution, `ToolDefinition`, `definition()` and provider payloads stay unchanged.
+
+## [0.32.0] - 2026-11-16
+
+### Added
+
+- Optional chat tracing through `@providerkit/core/otel`: `withProviderTracing(provider)` returns a provider with the same call interface. It starts one OpenTelemetry span when you read the stream. Wrap the final provider, outside its retries, fallbacks and gate.
+- Traces record selected usage counts, finish reasons, timing and error kinds. They do not capture prompts, answers, tool data, credentials or vendor error text. Missing usage stays unknown; partial usage is not a final bill.
+- Pass your host's tracer and parent context when needed. The adapter preserves lazy reads, iterator results, errors and cancellation, even when instrumentation fails. Wrapping an owned tracing adapter again replaces its tracing settings instead of adding another span.
+- Normal imports remain telemetry-free. Only `/otel` needs the optional `@opentelemetry/api` peer; no SDK, exporter or context manager is included.
+
+Only chat Providers are covered. Speech, transcription, decisions and standalone auth are not traced. Agent dispatch binding remains pending, so combined agent/core tracing is not yet automatically parented.
+
 ## [0.31.0] - 2026-11-16
 
 ### Added
