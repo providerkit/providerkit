@@ -198,6 +198,48 @@ Live state events do not carry that time, so the host must send the saved snapsh
 labels customize that copy. No client timer resumes work. A wake time is not permission: the host
 must claim the continuation and recheck access before resuming, even with an empty answer map.
 
+## Show code activity
+
+```ts
+const message = projector.snapshot(savedRun);
+```
+
+A code program uses one tool row. Each tool it calls appears beneath it, linked by
+`ToolPart.parentOperationId`. These calls are not agents or model turns. Retries update the
+call's `attempt`; a restarted program keeps its earlier calls and gives new calls new IDs.
+Never split an ID to find its parent.
+
+The same rows work for saved and live runs. Pending calls have no current execution receipt.
+An inner approval is an immediate host decision, not a question the program can leave open in
+the browser. The display keeps approved, denied and closed receipts, but never offers a browser
+answer for them.
+
+Source, logs, arguments and results stay private. `tool(activity)` receives the real
+`parentOperationId` and can return viewer-safe summaries or details. Inner results in snapshots
+are previews of at most 1,024 UTF-8 bytes, without raw output, images or final-result data. The
+program's final return is the durable full result. Read the saved journal before exposing result
+details after interruption; a progress stream is not a replacement for that journal.
+
+## Show remote agents
+
+```ts
+const message = projector.snapshot(savedRun);
+```
+
+Remote children use `kind: "remote"`, their registered `agentId` and the last confirmed
+`remoteState`. They have no local model turns or tool journal. `remote_status` events update
+status; send saved snapshots to show text and wake times. Remote questions still need the
+`request` callback before their words or answer controls reach the browser.
+
+Snapshots replace the whole current text artifact, including a shorter replacement. They use
+settled text parts, not invented model attempts. Specialist text stays hidden unless `text`
+allows it. Peer metadata, endpoints, task handles and raw errors stay private.
+
+Stopping the local run does not prove that the peer stopped. Unfinished remote rows show
+"Status unknown" and ask the reader to check before starting again. A confirmed peer cancellation
+uses `remoteState: "canceled"`. The display extension preserves these states in AG-UI; the writer
+reports the native protocol's losses instead of claiming remote completion.
+
 ## Answer requests
 
 Requests have their own IDs. A tool can ask more than once, so never use its operation ID as the
@@ -622,6 +664,10 @@ A native-only child beneath a workflow loses that parent link. Step-origin reque
 tool-call route. Scheduled pauses use an interrupt outcome with no requests; `wakeAt` also requires
 the extension. These losses are reported as `unsupported` issues even when the extension preserves
 the full view.
+
+Code-mode inner calls emit native tool events, not child-agent events. Native AG-UI flattens
+these calls and has no operation-attempt field. The writer reports this loss; the owned display
+extension keeps `parentOperationId` and `attempt` intact.
 
 Arguments, raw results, reasoning, private messages, vendor errors and opaque app state are
 hidden by default. Explicit projection callbacks choose what may be shown. Shared-state patches

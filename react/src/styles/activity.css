@@ -91,8 +91,8 @@
   }
 
   :where(
-    .pk-tool[data-state="failed"] .pk-activity-state,
-    .pk-specialist[data-state="failed"] .pk-activity-state
+    .pk-tool[data-state="failed"] > .pk-activity-heading > .pk-activity-state,
+    .pk-specialist[data-state="failed"] > .pk-activity-heading > .pk-activity-state
   ) {
     font-weight: 600;
     color: var(--pk-error-color, inherit);
@@ -134,7 +134,7 @@
     white-space: pre-wrap;
   }
 
-  :where(.pk-specialist-children) {
+  :where(.pk-specialist-children, .pk-activity-children) {
     padding-inline-start: 1em;
     border-inline-start: 1px solid
       var(--pk-border-color, color-mix(in srgb, currentColor 45%, transparent));
@@ -248,7 +248,13 @@
   }
 
   @media (forced-colors: active) {
-    :where(.pk-approval-action, .pk-status-action, button.pk-source-link, .pk-specialist-children) {
+    :where(
+      .pk-approval-action,
+      .pk-status-action,
+      button.pk-source-link,
+      .pk-specialist-children,
+      .pk-activity-children
+    ) {
       border-color: ButtonText;
     }
     :where(

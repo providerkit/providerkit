@@ -27,8 +27,10 @@ import type {
   RunState,
   ToolResult,
 } from "@providerkit/agents";
+import { sameData } from "./state.ts";
 import {
   PROTOCOL_VERSION,
+  REMOTE_STATUS_UNKNOWN,
   type AgentPart,
   type AgentState,
   type ApprovalPart,
@@ -55,11 +57,13 @@ import {
 export interface ToolActivity {
   /** The SDK's id for this call, and the row's id. */
   operationId: string;
+  /** Actual program operation for an inner call. No child agent was started. */
+  parentOperationId?: string;
   /** The run that made the call, and the id of that run's agent. */
   runId: string;
   agentId: string;
-  /** The call as the model wrote it. `arguments` is raw JSON text holding whatever the model
-   * sent, often the user's own data: copy out only what this viewer may see. */
+  /** Original call, before approval edits. `arguments` is raw JSON from the model or program,
+   * often the user's own data: copy out only what this viewer may see. */
   call: ToolCall;
   /** How the call ended. Absent while it runs. Its `content` is private in the same way. */
   result?: ToolResult;
@@ -243,6 +247,17 @@ function defaultError(state: Extract<RunState, { status: "failed" | "limited" }>
       };
 }
 
+type RemoteState = NonNullable<AgentPart["remoteState"]>;
+function remoteState(state: RemoteState | undefined, detached = false): AgentState {
+  if (state === "completed") return "completed";
+  if (state === "canceled") return "stopped";
+  if (state === "failed" || state === "rejected") return "failed";
+  if (detached) return "unknown";
+  return state === "input_required" || state === "auth_required" || state === "unknown"
+    ? "waiting"
+    : "running";
+}
+
 function stepState(status: StepExecution["status"], ended: boolean): ToolState {
   if (status === "completed") return "done";
   if (status === "failed" || ended) return "failed";
@@ -269,12 +284,13 @@ function lookup(table: Readonly<Record<string, string>> | undefined, key: string
 
 function activityOf(request: {
   operationId: string;
+  parentOperationId?: string;
   runId: string;
   agentId: string;
   call: ToolCall;
 }): ToolActivity {
-  const { operationId, runId, agentId, call } = request;
-  return { operationId, runId, agentId, call };
+  const { operationId, parentOperationId, runId, agentId, call } = request;
+  return { operationId, ...(parentOperationId && { parentOperationId }), runId, agentId, call };
 }
 
 function requestOrigin(request: PendingRequest) {
@@ -283,12 +299,22 @@ function requestOrigin(request: PendingRequest) {
 
 /** The two journals share children, not model history or execution inputs. */
 function childrenOf(node: TreeNode): TreeNode[] {
+  if (node.kind === "remote") return [];
   const journals = node.kind === "workflow" ? node.steps : node.delegations;
   return journals.flatMap((entry) => entry.children.map((child) => child.snapshot));
 }
 
 function savedWaiting(node: TreeNode): Pick<RunInfo, "waitingFor" | "wakeAt"> {
   if (isOver(node.state)) return {};
+  if (node.kind === "remote")
+    return {
+      waitingFor: node.remote.sends.some((send) =>
+        send.asks?.some((record) => !record.decision && !record.closed),
+      )
+        ? "response"
+        : "continuation",
+      ...(node.remote.wakeAt !== undefined && { wakeAt: node.remote.wakeAt }),
+    };
   const executions =
     node.kind === "workflow"
       ? node.steps
@@ -328,6 +354,7 @@ function speakerOf(event: AgentEvent): string | undefined {
     case "step_start":
     case "step_progress":
     case "step_result":
+    case "remote_status":
       return event.runId;
     case "input":
       return event.receipt.runId;
@@ -372,6 +399,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
   const handoffs = new Map<string, string>();
   let rootAgentId = options.agentId;
   let rootWorkflowId = options.workflowId;
+  let rootRemote = false;
+  const remoteStates = new Map<string, RemoteState>();
   if (rootAgentId && rootWorkflowId)
     throw new TypeError("Choose an agent or workflow root, not both.");
 
@@ -390,7 +419,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       runId = handoffs.get(runId)!;
     }
     const specialist = specialists.get(runId);
-    if (specialist?.kind === "workflow") return undefined;
+    if (rootRemote || specialist?.kind === "workflow" || specialist?.kind === "remote")
+      return undefined;
     const agentId = runId === root ? rootAgentId : specialist?.definitionId;
     return agentId ? { runId, agentId, label: agentLabel(runId, agentId) } : undefined;
   }
@@ -424,6 +454,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     activity: ToolActivity,
     owner: string | undefined,
     state: ToolState,
+    attempt = operations.get(activity.operationId)?.attempt ?? 1,
   ): ToolPart | null {
     const display = describeTool(activity);
     if (!display) return null;
@@ -432,6 +463,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     const part: ToolPart = {
       type: "tool",
       id: activity.operationId,
+      ...(activity.parentOperationId && { parentOperationId: activity.parentOperationId }),
+      ...(attempt > 1 && { attempt }),
       label: label ?? (madeUp ? "Unknown tool" : lookup(options.labels?.tool, activity.call.name)),
       state,
     };
@@ -514,6 +547,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
                 : "pending"),
         ...(display === null && { canAnswer: false }),
         ...(display?.canAnswer !== undefined && { canAnswer: display.canAnswer }),
+        // Programs cannot suspend for a browser answer. These are immediate-decision receipts.
+        ...(request.call?.parentOperationId && { canAnswer: false }),
         ...(display?.edit !== undefined && { edit: display.edit }),
         ...(display?.approveForm !== undefined && { approveForm: display.approveForm }),
         ...(display?.denyForm !== undefined && { denyForm: display.denyForm }),
@@ -561,6 +596,10 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       state,
       ...(specialists.get(runId)?.kind && { kind: specialists.get(runId)?.kind }),
       ...(specialists.get(runId)?.toolId && { toolId: specialists.get(runId)?.toolId }),
+      ...(specialists.get(runId)?.kind === "remote" && {
+        ...(remoteStates.has(runId) && { remoteState: remoteStates.get(runId) }),
+        ...(state === "unknown" && { summary: REMOTE_STATUS_UNKNOWN }),
+      }),
     };
     if (parentId !== undefined) part.parentId = parentId;
     return part;
@@ -570,6 +609,12 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     const info: RunInfo = { id: runId, status: STATUS[state.status], messageId, owner: owner() };
     if (state.status === "failed" || state.status === "limited")
       info.error = (options.error ?? defaultError)(state);
+    if (rootRemote) {
+      info.owner = undefined;
+      info.remoteState = remoteStates.get(runId);
+      if (isOver(state) && remoteState(info.remoteState, true) === "unknown")
+        info.error = { code: "remote_status_unknown", message: REMOTE_STATUS_UNKNOWN };
+    }
     if (state.status === "suspended") {
       info.waitingFor = [...requests.values()].some((record) => !record.decision && !record.closed)
         ? "response"
@@ -589,7 +634,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       definitionId: string;
       parentId: string | undefined;
       over: boolean;
-      kind?: "delegation" | "handoff" | "workflow";
+      kind?: AgentPart["kind"];
       toolId?: string;
     }
   >();
@@ -611,8 +656,25 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     return out;
   }
   const running = new Map<string, { runId: string; part: ToolPart }>();
+  const closedCalls = new Set<string>();
   const stepActivities = new Map<string, StepActivity>();
   const requests = new Map<string, AskRecord>();
+  function rememberRequest(incoming: AskRecord): AskRecord {
+    const held = requests.get(incoming.request.id);
+    // A pending checkpoint may precede an observed decision. A changed scope, closure or
+    // problem is authoritative, so only an exact, still-pending copy keeps settled evidence.
+    const record =
+      held &&
+      (held.decision || held.closed) &&
+      !incoming.decision &&
+      !incoming.closed &&
+      !incoming.problem &&
+      sameData(held.request, incoming.request)
+        ? held
+        : incoming;
+    requests.set(record.request.id, record);
+    return record;
+  }
   const operations = new Map<
     string,
     { attemptId: string; attempt: number; old: Set<string>; completed: boolean }
@@ -637,7 +699,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       operations.set(id, held);
     } else if (
       held.old.has(attemptId) ||
-      held.completed ||
+      (held.completed && !(previous === held.attemptId && previous !== attemptId)) ||
       (number !== undefined && number < held.attempt)
     )
       return undefined;
@@ -646,8 +708,19 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       if (previous) held.old.add(previous);
       held.attemptId = attemptId;
       held.attempt = number ?? held.attempt + 1;
+      held.completed = false;
     }
     return held.attempt;
+  }
+
+  function toolAttempt(operationId: string, attemptId: string): void {
+    const held = operations.get(operationId);
+    // A delegation continuation changes the run epoch without retrying the tool. Advance only
+    // for a recorded pending replacement here; live retries already have operation_restart.
+    const number = held
+      ? held.attempt + Number(held.old.has(held.attemptId) && held.attemptId !== attemptId)
+      : 1;
+    attemptOf(operationId, attemptId, undefined, Math.max(1, number));
   }
 
   function shows(runId: string): boolean {
@@ -704,7 +777,35 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       if (runId === ended || specialist.over || !within(runId, ended)) continue;
       specialist.over = true;
       endedRuns.add(runId);
-      part(agentPart(runId, specialist.definitionId, specialist.parentId, "stopped"));
+      part(
+        agentPart(
+          runId,
+          specialist.definitionId,
+          specialist.parentId,
+          specialist.kind === "remote" ? remoteState(remoteStates.get(runId), true) : "stopped",
+        ),
+      );
+    }
+  }
+
+  /** A restarted or finished VM cannot keep an earlier inner call open. */
+  function endProgram(part: (value: DisplayPart) => void, operationId: string): void {
+    for (const [id, entry] of running) {
+      if (entry.part.parentOperationId !== operationId) continue;
+      closedCalls.add(id);
+      running.delete(id);
+      part({ ...entry.part, state: "failed" });
+    }
+    for (const [id, record] of requests) {
+      if (
+        record.request.call?.parentOperationId !== operationId ||
+        record.decision ||
+        record.closed
+      )
+        continue;
+      const closed: AskRecord = { ...record, closed: "stopped" };
+      requests.set(id, closed);
+      part(requestPart(closed));
     }
   }
 
@@ -744,12 +845,14 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     if (speaker === undefined || (speaker !== root && !specialists.has(speaker))) return [];
     if (endedRuns.has(root) || endedRuns.has(speaker)) return [];
     if (agentEvent.type === "request") {
+      if (closedCalls.has(requestOrigin(agentEvent.request).operationId)) return [];
       const held = requests.get(agentEvent.request.id);
       if (held?.decision || held?.closed) return [];
     }
     // Tool retries have their own attempt ids; they do not replace the run's model/state epoch.
     const executionAttempt =
       agentEvent.type === "state" ||
+      agentEvent.type === "remote_status" ||
       agentEvent.type === "model_chunk" ||
       agentEvent.type === "handoff" ||
       (agentEvent.type === "operation_restart" && agentEvent.kind === "model")
@@ -767,6 +870,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       }
       if (agentEvent.type === "operation_restart") held.old.add(agentEvent.previousAttemptId);
     }
+    if (agentEvent.type === "operation_restart" && closedCalls.has(agentEvent.operationId))
+      return [];
     let attempt: number | undefined;
     if (agentEvent.type === "model_chunk" || agentEvent.type === "operation_restart") {
       attempt = attemptOf(
@@ -777,6 +882,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       if (attempt === undefined) return [];
     }
     if (agentEvent.type === "tool_start" || agentEvent.type === "tool_result") {
+      if (closedCalls.has(agentEvent.request.operationId)) return [];
       const operation = operations.get(agentEvent.request.operationId);
       if (operation?.completed || operation?.old.has(agentEvent.request.attemptId)) return [];
     }
@@ -835,6 +941,24 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     }
 
     switch (agentEvent.type) {
+      case "remote_status": {
+        remoteStates.set(speaker, agentEvent.state);
+        const specialist = specialists.get(speaker);
+        if (speaker === root) {
+          rootRemote = true;
+          out.push({ v, type: "run", run: runInfo(root, { status: "running" }) });
+        }
+        if (specialist?.kind === "remote")
+          part(
+            agentPart(
+              speaker,
+              specialist.definitionId,
+              specialist.parentId,
+              remoteState(agentEvent.state),
+            ),
+          );
+        break;
+      }
       case "step_start":
       case "step_progress":
       case "step_result": {
@@ -875,7 +999,10 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       }
       case "operation_restart":
       case "model_chunk": {
-        if (agentEvent.type === "operation_restart" && agentEvent.kind !== "model") break;
+        if (agentEvent.type === "operation_restart" && agentEvent.kind !== "model") {
+          endProgram(part, agentEvent.operationId);
+          break;
+        }
         const content =
           !checkpointOnly && agentEvent.type === "model_chunk"
             ? (agentEvent.chunk.content ?? "")
@@ -934,6 +1061,12 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         if (active) {
           active.part = { ...active.part, state: "waiting" };
           part(active.part);
+        } else if (request.call?.parentOperationId) {
+          const row = toolPart(activityOf(request.call), ownerOf(speaker), "waiting");
+          if (row) {
+            running.set(row.id, { runId: speaker, part: row });
+            part(row);
+          }
         } else if (request.step) {
           const activity: StepActivity = { ...request.step, status: "waiting" };
           if (speaker === root) rootWorkflowId = request.step.workflowId;
@@ -963,7 +1096,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       }
       case "tool_start": {
         const { request } = agentEvent;
-        attemptOf(request.operationId, request.attemptId);
+        toolAttempt(request.operationId, request.attemptId);
         const row = toolPart(activityOf(request), ownerOf(request.runId), "running");
         if (row) {
           running.set(row.id, { runId: request.runId, part: row });
@@ -973,10 +1106,22 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       }
       case "tool_result": {
         const { request, result } = agentEvent;
-        attemptOf(request.operationId, request.attemptId);
+        toolAttempt(request.operationId, request.attemptId);
         const operation = operations.get(request.operationId);
         if (operation) operation.completed = true;
         running.delete(request.operationId);
+        endProgram(part, request.operationId);
+        for (const [id, record] of requests) {
+          if (
+            requestOrigin(record.request).operationId !== request.operationId ||
+            record.decision ||
+            record.closed
+          )
+            continue;
+          const closed: AskRecord = { ...record, closed: "stopped" };
+          requests.set(id, closed);
+          part(requestPart(closed));
+        }
         const row = toolPart(
           { ...activityOf(request), result },
           ownerOf(request.runId),
@@ -1013,6 +1158,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         const parentId = ownerOf(speaker);
         let kind: AgentPart["kind"] = specialists.get(runId)?.kind ?? "delegation";
         if (agentEvent.kind === "workflow") kind = "workflow";
+        else if (agentEvent.kind === "remote") kind = "remote";
         specialists.set(runId, {
           kind,
           toolId: agentEvent.operationId,
@@ -1031,7 +1177,17 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           specialist.over = isOver(state);
           if (specialist.over) endUnder(part, speaker);
           part(
-            agentPart(speaker, specialist.definitionId, specialist.parentId, STATUS[state.status]),
+            agentPart(
+              speaker,
+              specialist.definitionId,
+              specialist.parentId,
+              specialist.kind === "remote"
+                ? remoteState(
+                    remoteStates.get(speaker),
+                    state.status !== "completed" && isOver(state),
+                  )
+                : STATUS[state.status],
+            ),
           );
           break;
         }
@@ -1076,6 +1232,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     if (saved.runId !== root) throw new TypeError("The snapshot belongs to another run.");
     rootAgentId = saved.kind === "agent" ? saved.agentId : undefined;
     rootWorkflowId = saved.kind === "workflow" ? saved.workflowId : undefined;
+    rootRemote = saved.kind === "remote";
     handoffs.clear();
     conversationRuns.clear();
     conversationRuns.add(root);
@@ -1093,7 +1250,9 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       kind: "delegation" | "handoff" = "delegation",
     ): void {
       const { runId, state } = child;
-      const definitionId = child.kind === "agent" ? child.agentId : child.workflowId;
+      const definitionId = child.kind === "workflow" ? child.workflowId : child.agentId;
+      if (child.kind === "remote" && child.remote.state !== undefined)
+        remoteStates.set(runId, child.remote.state);
       if (kind === "handoff" && child.kind === "agent") {
         handoffs.set(parentRunId, runId);
         if (conversationRuns.has(parentRunId)) conversationRuns.add(runId);
@@ -1102,16 +1261,51 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
         definitionId,
         parentId: owner,
         over: ended || isOver(state),
-        kind: child.kind === "workflow" ? "workflow" : kind,
+        kind: child.kind === "workflow" ? "workflow" : child.kind === "remote" ? "remote" : kind,
         toolId: operationId,
       });
-      const shownState = ended && !isOver(state) ? "stopped" : STATUS[state.status];
+      const shownState =
+        child.kind === "remote"
+          ? remoteState(
+              child.remote.state,
+              (ended && !isOver(state)) || (state.status !== "completed" && isOver(state)),
+            )
+          : ended && !isOver(state)
+            ? "stopped"
+            : STATUS[state.status];
       parts.push(agentPart(runId, definitionId, owner, shownState));
       visit(child, runId, ended);
     }
 
     function visit(node: TreeNode, owner: string | undefined, over: boolean): void {
       const ended = over || isOver(node.state);
+      if (node.kind === "remote") {
+        if (node.remote.state !== undefined) remoteStates.set(node.runId, node.remote.state);
+        const held = runAttempts.get(node.runId);
+        if (!held?.old.has(node.attemptId)) {
+          const old = new Set(held?.old);
+          if (held && held.current !== node.attemptId) old.add(held.current);
+          runAttempts.set(node.runId, { current: node.attemptId, old });
+        }
+        if (ended) endedRuns.add(node.runId);
+        for (const send of node.remote.sends)
+          for (const record of (send.asks ?? []).map(rememberRequest))
+            parts.push(requestPart(record, ended));
+        if (shows(node.runId)) {
+          const content = node.remote.artifacts.length
+            ? node.remote.artifacts.flatMap((artifact) => artifact.parts)
+            : node.remote.state === "completed"
+              ? node.remote.fallback
+              : [];
+          const text = content
+            .flatMap((part) => (part.kind === "text" ? [part.text] : []))
+            .join("");
+          // A checkpoint contains the whole current artifact, never a model token delta.
+          // Settled parts already support replacement; no fabricated attempt or revision is needed.
+          if (text) parts.push(textPart(`${node.runId}/remote-output`, text, true, owner));
+        }
+        return;
+      }
       if (node.kind === "workflow") {
         const held = runAttempts.get(node.runId);
         const old = new Set(held?.old);
@@ -1172,8 +1366,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           if (row && (state === "running" || state === "waiting")) {
             running.set(step.id, { runId: node.runId, part: row });
           } else running.delete(step.id);
-          for (const record of step.asks ?? []) {
-            requests.set(record.request.id, record);
+          for (const record of (step.asks ?? []).map(rememberRequest)) {
             parts.push(
               requestPart(record, ended || step.status === "completed" || step.status === "failed"),
             );
@@ -1238,61 +1431,83 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
             ...textPart(model.id, content, true, owner),
             ...(attempt > 1 && { attempt }),
           });
-        for (const [index, tool] of model.tools.entries()) {
-          if (ended || tool.status === "completed") running.delete(tool.id);
-          const questions = (tool.asks ?? []).filter(
-            (record) => record.request.ask.type === "question",
-          );
-          for (const record of tool.asks ?? []) {
-            requests.set(record.request.id, record);
-            if (record.request.ask.type !== "question")
-              parts.push(requestPart(record, ended || tool.status === "completed"));
-          }
-          const attemptId = tool.status === "pending" ? tool.previousAttemptId : tool.attemptId;
-          if (attemptId) {
+        for (const [index, outer] of model.tools.entries()) {
+          const entries = [
+            { tool: outer, call: toolCalls[index], parentOperationId: undefined },
+            ...(outer.calls ?? []).map((tool) => ({
+              tool,
+              call: { id: tool.id, name: tool.name, arguments: JSON.stringify(tool.arguments) },
+              parentOperationId: outer.id,
+            })),
+          ];
+          for (const { tool, call, parentOperationId } of entries) {
+            const current = operations.get(tool.id);
+            const attemptId = tool.status === "pending" ? tool.previousAttemptId : tool.attemptId;
             const old = new Set([
               ...tool.interrupted.map((item) => item.attemptId),
               ...tool.retries.map((item) => item.attemptId),
             ]);
-            operations.set(tool.id, {
-              attemptId,
-              // A pending replacement has no new attempt yet. Its next start advances this count.
-              attempt: old.size + (tool.status === "pending" ? 0 : 1),
-              old,
-              completed: tool.status === "completed" || ended,
-            });
+            const savedAttempt = old.size + (tool.status === "pending" ? 0 : 1);
+            const retain =
+              current &&
+              (current.attempt > savedAttempt ||
+                (attemptId !== undefined && current.old.has(attemptId)) ||
+                (current.completed && tool.status !== "completed"));
+            if (!retain && (ended || tool.status === "completed")) running.delete(tool.id);
+            const asks = (tool.asks ?? []).map(rememberRequest);
+            const questions = asks.filter((record) => record.request.ask.type === "question");
+            for (const record of asks) {
+              if (record.request.ask.type !== "question")
+                parts.push(requestPart(record, ended || tool.status === "completed"));
+            }
+            if (attemptId && !retain) {
+              operations.set(tool.id, {
+                attemptId,
+                // A pending replacement has no new attempt yet. Its next start advances this count.
+                attempt: savedAttempt,
+                old,
+                completed: tool.status === "completed" || ended,
+              });
+            }
+            if (call && (tool.status !== "pending" || questions.length || parentOperationId)) {
+              const activity = activityOf({
+                operationId: tool.id,
+                parentOperationId,
+                runId: node.runId,
+                agentId: node.agentId,
+                call,
+              });
+              const row =
+                tool.status === "completed"
+                  ? toolPart(
+                      { ...activity, result: tool.result },
+                      owner,
+                      tool.result.ok ? "done" : "failed",
+                      savedAttempt,
+                    )
+                  : toolPart(
+                      activity,
+                      owner,
+                      ended
+                        ? "failed"
+                        : tool.status === "pending" ||
+                            asks.some((record) => !record.decision && !record.closed)
+                          ? "waiting"
+                          : "running",
+                      savedAttempt,
+                    );
+              if (row) {
+                parts.push(row);
+                if (!retain && (row.state === "running" || row.state === "waiting"))
+                  running.set(row.id, { runId: node.runId, part: row });
+              }
+            }
+            for (const record of questions)
+              parts.push(requestPart(record, ended || tool.status === "completed"));
           }
-          const call = toolCalls[index];
-          if (call && (tool.status !== "pending" || questions.length)) {
-            const activity = activityOf({
-              operationId: tool.id,
-              runId: node.runId,
-              agentId: node.agentId,
-              call,
-            });
-            const row =
-              tool.status === "completed"
-                ? toolPart(
-                    { ...activity, result: tool.result },
-                    owner,
-                    tool.result.ok ? "done" : "failed",
-                  )
-                : toolPart(
-                    activity,
-                    owner,
-                    ended
-                      ? "failed"
-                      : questions.some((record) => !record.decision && !record.closed)
-                        ? "waiting"
-                        : "running",
-                  );
-            if (row) parts.push(row);
-          }
-          for (const record of questions)
-            parts.push(requestPart(record, ended || tool.status === "completed"));
-          const journal = node.delegations.find((entry) => entry.operationId === tool.id);
+          const journal = node.delegations.find((entry) => entry.operationId === outer.id);
           for (const child of journal?.children ?? [])
-            visitChild(child.snapshot, node.runId, owner, ended, tool.id, journal?.kind);
+            visitChild(child.snapshot, node.runId, owner, ended, outer.id, journal?.kind);
         }
       }
     }
@@ -1349,10 +1564,15 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     gap,
     snapshot,
     inputs,
-    run: (saved: TreeNode) => ({
-      ...runInfo(saved.runId, saved.state),
-      owner: savedOwner(saved),
-      ...(saved.state.status === "suspended" && savedWaiting(saved)),
-    }),
+    run(saved: TreeNode) {
+      rootRemote = saved.kind === "remote";
+      if (saved.kind === "remote" && saved.remote.state !== undefined)
+        remoteStates.set(saved.runId, saved.remote.state);
+      return {
+        ...runInfo(saved.runId, saved.state),
+        owner: savedOwner(saved),
+        ...(saved.state.status === "suspended" && savedWaiting(saved)),
+      };
+    },
   });
 }

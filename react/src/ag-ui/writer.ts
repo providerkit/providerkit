@@ -6,6 +6,7 @@ import {
   type DisplayMessage,
   type RequestPart,
 } from "../protocol.ts";
+import { REMOTE_STATUS_UNKNOWN } from "../protocol.ts";
 import type { ChatView } from "../state.ts";
 import {
   checkOptions,
@@ -37,6 +38,13 @@ function nativeToolId(message: DisplayMessage, id: string | undefined): string |
 }
 
 /** Snapshots contain public text and tool labels/summaries only, never call arguments. */
+function nativeAgentId(message: DisplayMessage, id: string | undefined): string | undefined {
+  const part = message.parts.find((item) => item.id === id);
+  return part?.type === "agent" && (part.kind === "workflow" || part.kind === "remote")
+    ? undefined
+    : id;
+}
+
 function messages(view: ChatView): AgUiMessage[] {
   const output: AgUiMessage[] = [];
   for (const message of view.messages) {
@@ -47,7 +55,7 @@ function messages(view: ChatView): AgUiMessage[] {
           id: textId(message.id, part.id),
           role: message.role,
           content: part.text,
-          ...(part.agentId && { subagentRunId: part.agentId }),
+          ...(nativeAgentId(message, part.agentId) && { subagentRunId: part.agentId }),
         };
         output.push(parent);
       } else if (part.type === "tool" && part.kind !== "step") {
@@ -97,9 +105,8 @@ function interrupts(view: ChatView): AgUiInterrupt[] {
         metadata: { kind: part.type },
       };
       if (toolCallId) request.toolCallId = toolCallId;
-      const parent = message.parts.find((item) => item.id === part.agentId);
-      if (part.agentId && !(parent?.type === "agent" && parent.kind === "workflow"))
-        request.subagentRunId = part.agentId;
+      const agentId = nativeAgentId(message, part.agentId);
+      if (agentId) request.subagentRunId = agentId;
       if (part.expiresAt !== undefined && Math.abs(part.expiresAt) <= 8.64e15)
         request.expiresAt = new Date(part.expiresAt).toISOString();
       if (part.type === "question" && part.schema) request.responseSchema = { ...part.schema };
@@ -156,6 +163,16 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
       // A numbered replay is discarded before opening or closing any native lane.
       const next = reduceChat(view, event);
       if (next === view) return { events: output, issues };
+      if (
+        next.run.remoteState !== undefined &&
+        (event.type === "snapshot" || next.run.remoteState !== view.run.remoteState)
+      )
+        issues.push(
+          issue(
+            "unsupported",
+            "Native run outcomes do not preserve remote status. The display extension keeps it.",
+          ),
+        );
       if (!withinView(next, options))
         return {
           events: output,
@@ -222,6 +239,8 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
         if (message.role === "user" && !equal(message, held)) replace = true;
         for (const part of message.parts) {
           const prior = held?.parts.find((item) => item.id === part.id);
+          if (part.type === "tool" && prior?.type === "tool" && part.attempt !== prior.attempt)
+            replace = true;
           if (
             part.type === "text" &&
             prior?.type === "text" &&
@@ -240,6 +259,13 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
         for (const part of message.parts) {
           const prior = held?.parts.find((item) => item.id === part.id);
           if (equal(part, prior) || before.finished) continue;
+          if (part.type === "tool" && (part.parentOperationId || (part.attempt ?? 1) > 1))
+            issues.push(
+              issue(
+                "unsupported",
+                "Native tool calls lack program parents and operation attempts. The display extension preserves them.",
+              ),
+            );
           if (part.type === "text" && !replace && message.role === "assistant") {
             const messageId = textId(message.id, part.id);
             const agent = part.agentId
@@ -247,7 +273,8 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                   .flatMap((item) => item.parts)
                   .find((item) => item.type === "agent" && item.id === part.agentId)
               : undefined;
-            const scope = part.agentId ? { subagentRunId: part.agentId } : {};
+            const nativeId = nativeAgentId(message, part.agentId);
+            const scope = nativeId ? { subagentRunId: nativeId } : {};
             if (!prior) {
               output.push({
                 type: "TEXT_MESSAGE_START",
@@ -299,7 +326,7 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                   toolCallId: callId,
                   toolCallName: part.name ?? part.label,
                   parentMessageId: ensureAnchor(message),
-                  ...(part.agentId && { subagentRunId: part.agentId }),
+                  ...(nativeAgentId(message, part.agentId) && { subagentRunId: part.agentId }),
                 },
                 { type: "TOOL_CALL_END", toolCallId: callId },
               );
@@ -316,16 +343,16 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                 }),
               });
           } else if (part.type === "agent") {
-            if (part.kind === "workflow") {
+            if (part.kind === "workflow" || part.kind === "remote") {
               issues.push(
                 issue(
                   "unsupported",
-                  "Native child events describe agents, not workflows. Workflow rows use the display extension.",
+                  "Native child events do not preserve workflow or remote status. These rows use the display extension.",
                 ),
               );
               continue;
             }
-            const parent = message.parts.find((item) => item.id === part.parentId);
+            const parentId = nativeAgentId(message, part.parentId);
             const parentToolCallId = nativeToolId(message, part.toolId);
             const child = { subagentRunId: part.id };
             if (!prior)
@@ -334,10 +361,7 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                 ...child,
                 name: part.label,
                 parentMessageId: replace ? undefined : ensureAnchor(message),
-                ...(part.parentId &&
-                  !(parent?.type === "agent" && parent.kind === "workflow") && {
-                    parentSubagentRunId: part.parentId,
-                  }),
+                ...(parentId && { parentSubagentRunId: parentId }),
                 ...(parentToolCallId && { parentToolCallId }),
               });
             if (part.state === "failed" || part.state === "limited")
@@ -394,13 +418,18 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
               "Native run outcomes have no saved wake time. The display extension preserves it.",
             ),
           );
-        if (run.status === "failed" || run.status === "limited")
+        const remoteUnconfirmed =
+          run.remoteState !== undefined &&
+          run.status === "stopped" &&
+          !["completed", "failed", "canceled", "rejected"].includes(run.remoteState);
+        if (run.status === "failed" || run.status === "limited" || remoteUnconfirmed)
           output.push({
             type: "RUN_ERROR",
-            code: run.error?.code ?? run.status,
-            message:
-              run.error?.message ??
-              "The run could not finish. Check its saved state before trying again.",
+            code: remoteUnconfirmed ? "remote_status_unknown" : (run.error?.code ?? run.status),
+            message: remoteUnconfirmed
+              ? REMOTE_STATUS_UNKNOWN
+              : (run.error?.message ??
+                "The run could not finish. Check its saved state before trying again."),
           });
         else
           output.push({

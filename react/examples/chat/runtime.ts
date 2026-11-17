@@ -173,6 +173,7 @@ export class DemoRun {
 
   private nodes(snapshot = this.saved): TreeNode[] {
     if (!snapshot) return [];
+    if (snapshot.kind === "remote") return [snapshot];
     const journals = snapshot.kind === "workflow" ? snapshot.steps : snapshot.delegations;
     return [
       snapshot,
@@ -184,9 +185,11 @@ export class DemoRun {
     return this.nodes().flatMap((node) =>
       node.kind === "workflow"
         ? node.steps.flatMap((step) => step.asks ?? [])
-        : node.models.flatMap((model) =>
-            model.status === "completed" ? model.tools.flatMap((tool) => tool.asks ?? []) : [],
-          ),
+        : node.kind === "remote"
+          ? node.remote.sends.flatMap((send) => send.asks ?? [])
+          : node.models.flatMap((model) =>
+              model.status === "completed" ? model.tools.flatMap((tool) => tool.asks ?? []) : [],
+            ),
     );
   }
 

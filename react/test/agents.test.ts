@@ -35,6 +35,7 @@ import {
   type DisplayMessage,
   type DisplayPart,
   type RunStatus,
+  type AgentState,
 } from "../src/protocol.ts";
 
 const usage = { inputTokens: 5, cachedInputTokens: 0, outputTokens: 2 };
@@ -130,12 +131,19 @@ function evidenceFor(snapshot: TreeNode, evidence: unknown): Record<string, unkn
   const executions =
     snapshot.kind === "workflow"
       ? snapshot.steps
-      : snapshot.models.flatMap((model) => (model.status === "completed" ? model.tools : []));
+      : snapshot.kind === "remote"
+        ? snapshot.remote.sends
+        : snapshot.models.flatMap((model) => (model.status === "completed" ? model.tools : []));
   for (const execution of executions)
     for (const record of execution.asks ?? [])
       if (execution.status !== "completed" && !record.closed && !record.decision)
         return { [record.request.id]: evidence };
-  const journals = snapshot.kind === "workflow" ? snapshot.steps : snapshot.delegations;
+  const journals =
+    snapshot.kind === "workflow"
+      ? snapshot.steps
+      : snapshot.kind === "remote"
+        ? []
+        : snapshot.delegations;
   for (const delegation of journals)
     for (const child of delegation.children) {
       const found = evidenceFor(child.snapshot, evidence);
@@ -263,7 +271,7 @@ function settled(part: DisplayPart): boolean {
 
 /** How far a run or a specialist has come inside one segment. Going from waiting back to
  * running is an approval continuing, and that always starts a new segment. */
-function stage(status: RunStatus): number {
+function stage(status: RunStatus | AgentState): number {
   if (status === "idle") return 0;
   if (status === "running") return 1;
   return status === "waiting" ? 2 : 3;
@@ -1521,7 +1529,15 @@ describe("createAgentProjector", () => {
       code: "execution_failed",
       message: "The run could not finish. Check its saved result before trying again.",
     });
-    expect(sketch(clerkView.snapshot(pending.snapshot))).toEqual(["approval file pending"]);
+    // This projector already saw approval; an older pending read cannot erase that decision.
+    expect(sketch(clerkView.snapshot(pending.snapshot))).toEqual(["approval file approved"]);
+    expect(
+      sketch(
+        createAgentProjector({ messageId: "second", runId: pending.runId }).snapshot(
+          pending.snapshot,
+        ),
+      ),
+    ).toEqual(["approval file pending"]);
     // The checked result is a tool call too, and it is never a row.
     expect(sketch(clerkView.snapshot(done.snapshot))).toEqual([
       "approval file approved",

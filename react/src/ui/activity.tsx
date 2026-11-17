@@ -44,6 +44,7 @@ export function ToolCall({
       data-kind={tool.kind}
       data-state={tool.state}
       data-tool-id={tool.id}
+      data-parent-operation-id={tool.parentOperationId}
       data-agent-id={tool.agentId}
     >
       <div className="pk-activity-heading" data-part="activity-heading">
@@ -51,7 +52,7 @@ export function ToolCall({
           {title}
         </span>
         <span className="pk-activity-state" data-part="activity-state">
-          {tool.kind === "step" && tool.state === "waiting"
+          {(tool.kind === "step" || tool.parentOperationId) && tool.state === "waiting"
             ? labels.activityWaiting
             : labels.tool[tool.state]}
         </span>
@@ -125,6 +126,10 @@ export function SpecialistActivity({
     specialistLabels && Object.hasOwn(specialistLabels, agent.id)
       ? specialistLabels[agent.id]
       : definitionLabel;
+  let stateLabel: string;
+  if (agent.state === "unknown") stateLabel = labels.activityUnknown;
+  else if (agent.state === "waiting") stateLabel = labels.activityWaiting;
+  else stateLabel = labels.run[agent.state];
   return (
     <section
       aria-labelledby={headingId}
@@ -141,9 +146,14 @@ export function SpecialistActivity({
           {label ?? namedLabel ?? agent.label}
         </span>
         <span className="pk-activity-state" data-part="activity-state">
-          {agent.state === "waiting" ? labels.activityWaiting : labels.run[agent.state]}
+          {stateLabel}
         </span>
       </div>
+      {agent.summary && (
+        <p className="pk-activity-summary" data-part="activity-summary">
+          {agent.summary}
+        </p>
+      )}
       {agent.kind === "handoff" && (
         <p className="pk-activity-summary" data-part="handoff">
           {labels.handoff}

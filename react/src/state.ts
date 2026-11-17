@@ -43,7 +43,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Equality for plain JSON-shaped values. A missing key equals an undefined one. */
-function sameData(left: unknown, right: unknown): boolean {
+export function sameData(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (Array.isArray(left) && Array.isArray(right))
     return (
@@ -106,7 +106,7 @@ function isSettled(part: DisplayPart): boolean {
     case "tool":
       return part.state !== "running" && part.state !== "waiting";
     case "agent":
-      return !isActive(part.state);
+      return part.state !== "running" && part.state !== "waiting";
     case "approval":
     case "question":
     case "client-tool":
@@ -131,12 +131,14 @@ function upsertPart(parts: readonly DisplayPart[], part: DisplayPart): readonly 
     if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
     if (held.incomplete && !part.incomplete) return parts;
   }
-  if (
-    held.type === "tool" &&
-    part.type === "tool" &&
-    held.kind === "step" &&
-    part.kind === "step"
-  ) {
+  if (held.type === "tool" && part.type === "tool") {
+    // Operation ownership is fixed, even when an attempt restarts.
+    if (
+      held.kind !== part.kind ||
+      held.agentId !== part.agentId ||
+      held.parentOperationId !== part.parentOperationId
+    )
+      return parts;
     if ((part.attempt ?? 1) < (held.attempt ?? 1)) return parts;
     if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
   }
@@ -153,8 +155,9 @@ function isAhead(held: DisplayPart, incoming: DisplayPart): boolean {
   if (
     held.type === "tool" &&
     incoming.type === "tool" &&
-    held.kind === "step" &&
-    incoming.kind === "step"
+    held.kind === incoming.kind &&
+    held.agentId === incoming.agentId &&
+    held.parentOperationId === incoming.parentOperationId
   )
     return (
       (held.attempt ?? 1) > (incoming.attempt ?? 1) ||

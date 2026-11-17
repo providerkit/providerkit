@@ -23,7 +23,7 @@ import { Sources } from "./sources.tsx";
 export interface PartRenderContext {
   message: DisplayMessage;
   sources: readonly SourcePart[];
-  /** A specialist's children, grouped by the explicit parent and agent ids. */
+  /** Nested activity, grouped by explicit operation and agent ids. */
   children?: ReactNode;
 }
 
@@ -81,12 +81,28 @@ export function Message({
   const agents = new Set(
     message.parts.filter((part) => part.type === "agent").map((part) => part.id),
   );
+  const tools = new Map(
+    message.parts.filter((part) => part.type === "tool").map((part) => [part.id, part]),
+  );
   const children = new Map<string, DisplayPart[]>();
   const roots: DisplayPart[] = [];
   for (const part of message.parts) {
-    const parent =
+    let parent =
       part.type === "agent" ? part.parentId : "agentId" in part ? part.agentId : undefined;
-    if (parent && parent !== part.id && agents.has(parent)) {
+    const operation =
+      part.type === "tool"
+        ? tools.get(part.parentOperationId ?? "")
+        : "toolId" in part
+          ? tools.get(part.toolId ?? "")
+          : undefined;
+    // A hidden or malformed parent falls back to the run. Never cross specialist ownership.
+    const nestedUnderTool =
+      operation &&
+      operation.kind !== "step" &&
+      operation.agentId === parent &&
+      (part.type === "tool" || operation.parentOperationId);
+    if (nestedUnderTool) parent = operation.id;
+    if (parent && parent !== part.id && (nestedUnderTool || agents.has(parent))) {
       const group = children.get(parent) ?? [];
       group.push(part);
       children.set(parent, group);
@@ -117,7 +133,15 @@ export function Message({
           );
           break;
         case "tool":
-          content = <ToolCall tool={part} toolLabels={toolLabels} labels={overrides} />;
+          content = (
+            <ToolCall tool={part} toolLabels={toolLabels} labels={overrides}>
+              {nested && (
+                <div className="pk-activity-children" data-part="activity-children">
+                  {nested}
+                </div>
+              )}
+            </ToolCall>
+          );
           break;
         case "agent":
           content = (

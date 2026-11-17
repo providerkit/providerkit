@@ -58,6 +58,7 @@ export interface ConversationLabels {
   message: Record<MessageState, string>;
   run: Record<RunStatus, string>;
   activityWaiting: string;
+  activityUnknown: string;
   waitingContinuation: string;
   waitingUntil: (time: number) => string;
   tool: Record<ToolState, string>;
@@ -137,6 +138,7 @@ export const defaultConversationLabels: ConversationLabels = {
     failed: "Failed",
   },
   activityWaiting: "Paused",
+  activityUnknown: "Status unknown",
   waitingContinuation: "Waiting to continue",
   waitingUntil: (time) => `Scheduled to continue after ${new Date(time).toLocaleString()}.`,
   tool: {

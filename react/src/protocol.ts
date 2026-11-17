@@ -43,8 +43,11 @@ export type RunStatus =
   | "limited"
   | "failed";
 
+export const REMOTE_STATUS_UNKNOWN =
+  "This remote agent may still be working. Check its status before starting again.";
+
 /** A specialist's row follows its own run, so it uses the run's words. */
-export type AgentState = Exclude<RunStatus, "idle">;
+export type AgentState = Exclude<RunStatus, "idle"> | "unknown";
 
 // Every part has an `id` that is stable and unique inside its message. Replay, snapshots and
 // React keys all match on it, so a host must give the same part the same id every time.
@@ -96,6 +99,8 @@ export interface ToolPart {
   id: string;
   /** A workflow step uses the same activity row, but is not a model tool call. */
   kind?: "step";
+  /** The program tool operation that admitted this call. Never an agent or permission. */
+  parentOperationId?: string;
   /** Monotone operation attempt, independent of the run's model attempt. */
   attempt?: number;
   /** The tool's own name, when the host chooses to show it. Two calls of one tool still differ
@@ -125,7 +130,19 @@ export interface AgentPart {
   parentId?: string;
   label: string;
   state: AgentState;
-  kind?: "delegation" | "handoff" | "workflow";
+  kind?: "delegation" | "handoff" | "workflow" | "remote";
+  /** Last confirmed peer state. A local stop does not cancel remote work. */
+  remoteState?:
+    | "unknown"
+    | "submitted"
+    | "working"
+    | "input_required"
+    | "auth_required"
+    | "completed"
+    | "failed"
+    | "canceled"
+    | "rejected";
+  summary?: string;
   /** Present for a workflow specialist instead of a registered agentId. */
   workflowId?: string;
   toolId?: string;
@@ -256,6 +273,8 @@ export interface RunInfo {
   owner?: ConversationOwner;
   /** A paused run may need no human answer. No client timer starts or resumes execution. */
   waitingFor?: "response" | "continuation";
+  /** Last confirmed peer state when the root itself is remote. */
+  remoteState?: AgentPart["remoteState"];
   /** Earliest saved wake time, when the host supplies an authoritative snapshot. */
   wakeAt?: number;
   error?: DisplayError;
@@ -393,8 +412,19 @@ const isRunStatus = oneOf<RunStatus>({
 });
 
 function isAgentState(value: unknown): value is AgentState {
-  return isRunStatus(value) && value !== "idle";
+  return value === "unknown" || (isRunStatus(value) && value !== "idle");
 }
+const isRemoteState = oneOf<NonNullable<AgentPart["remoteState"]>>({
+  unknown: true,
+  submitted: true,
+  working: true,
+  input_required: true,
+  auth_required: true,
+  completed: true,
+  failed: true,
+  canceled: true,
+  rejected: true,
+});
 
 /** Copies one optional field onto `target` when the host sent it. False when it came with the
  * wrong type. `null` counts as absent, because hosts not written in JavaScript serialize a
@@ -454,7 +484,13 @@ function readTool(id: string, fields: Fields): ToolPart | null {
   const part: ToolPart = { type: "tool", id, label: fields.label, state: fields.state };
   // The one field with no shape of its own: whatever JSON the host wrote, `null` included.
   if (fields.data !== undefined) part.data = fields.data;
+  if (
+    fields.parentOperationId === id ||
+    (fields.kind === "step" && fields.parentOperationId != null)
+  )
+    return null;
   return optional(part, "kind", fields.kind, oneOf({ step: true })) &&
+    optional(part, "parentOperationId", fields.parentOperationId, isId) &&
     optional(part, "attempt", fields.attempt, isAttempt) &&
     optional(part, "name", fields.name, isText) &&
     optional(part, "summary", fields.summary, isText) &&
@@ -470,11 +506,21 @@ function readAgent(id: string, fields: Fields): AgentPart | null {
   if (fields.kind === "workflow" && (fields.agentId != null || !isId(fields.workflowId)))
     return null;
   if (fields.workflowId != null && fields.kind !== "workflow") return null;
+  if ((fields.remoteState != null || fields.state === "unknown") && fields.kind !== "remote")
+    return null;
+  if (fields.kind === "remote" && !isId(fields.agentId)) return null;
   return optional(part, "parentId", fields.parentId, isId) &&
+    optional(part, "remoteState", fields.remoteState, isRemoteState) &&
+    optional(part, "summary", fields.summary, isText) &&
     optional(part, "agentId", fields.agentId, isId) &&
     optional(part, "workflowId", fields.workflowId, isId) &&
     optional(part, "toolId", fields.toolId, isId) &&
-    optional(part, "kind", fields.kind, oneOf({ delegation: true, handoff: true, workflow: true }))
+    optional(
+      part,
+      "kind",
+      fields.kind,
+      oneOf({ delegation: true, handoff: true, workflow: true, remote: true }),
+    )
     ? part
     : null;
 }
@@ -664,7 +710,8 @@ function readRun(value: unknown): RunInfo | null {
     !optional(run, "id", value.id, isId) ||
     !optional(run, "messageId", value.messageId, isId) ||
     !optional(run, "waitingFor", value.waitingFor, oneOf({ response: true, continuation: true })) ||
-    !optional(run, "wakeAt", value.wakeAt, isTime)
+    !optional(run, "wakeAt", value.wakeAt, isTime) ||
+    !optional(run, "remoteState", value.remoteState, isRemoteState)
   )
     return null;
   if (value.owner != null) {

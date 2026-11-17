@@ -17,6 +17,7 @@
  */
 import {
   PROTOCOL_VERSION,
+  REMOTE_STATUS_UNKNOWN,
   parseChatEvent,
   isRequestPart,
   type RequestPart,
@@ -484,7 +485,10 @@ function seal(part: DisplayPart): DisplayPart {
         ? { ...part, state: "failed" }
         : part;
     case "agent":
-      return isActive(part.state) ? { ...part, state: "stopped" } : part;
+      if (part.state !== "running" && part.state !== "waiting") return part;
+      if (part.kind === "remote")
+        return { ...part, state: "unknown", summary: REMOTE_STATUS_UNKNOWN };
+      return { ...part, state: "stopped" };
     case "approval":
     case "question":
     case "client-tool":
@@ -1239,7 +1243,16 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       v: PROTOCOL_VERSION,
       type: "run",
       // Before the first run event, the held id may belong to the previous answer.
-      run: isActive(run.status) ? { ...run, status: "stopped" } : { status: "stopped" },
+      run: isActive(run.status)
+        ? {
+            ...run,
+            status: "stopped",
+            ...(run.remoteState !== undefined &&
+              !["completed", "failed", "canceled", "rejected"].includes(run.remoteState) && {
+                error: { code: "remote_status_unknown", message: REMOTE_STATUS_UNKNOWN },
+              }),
+          }
+        : { status: "stopped" },
     });
     now();
   }
