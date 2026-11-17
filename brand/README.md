@@ -53,5 +53,24 @@ is open source and `brew install` is a barrier for a contributor on Linux or Win
 one exception is the `.jpg`, which resvg can't emit. That step shells out to ImageMagick
 and skips with a note when it isn't installed. The `.png` works everywhere the `.jpg` does.
 
-Upload `providerkit-avatar-1024.png` (or the `.jpg`) as the GitHub org avatar. It wants at
-least 400×400.
+## GitHub organization profile
+
+Edit the [English](profile/README.md), [Portuguese](profile/README.pt-BR.md) and
+[Spanish](profile/README.es.md) pages here. They link directly to the generated `providerkit-mark-128.png`.
+GitHub only displays the organization profile from `providerkit/.github`, so that repository holds
+published copies, not another set of brand sources.
+
+After the text changes merge into `providerkit/providerkit`'s `main`, run:
+
+```sh
+bun run profile:pr
+```
+
+The command opens a draft PR in `providerkit/.github` with just the three pages. Review and merge it
+to publish. Use `bun run profile:pr --check` to list unpublished changes without pushing anything.
+You need Git and `gh` signed in with write access to the profile repository. You do not need to keep
+a second checkout. An image-only change needs no profile PR.
+
+The **organization avatar** is a separate upload under Organization settings → General → Profile picture.
+Use `brand/providerkit-avatar-1024.png`. If you set a **repository social preview**, use `site/public/og.png`
+under Repository settings → General → Social preview. Neither setting changes when you push a README.
