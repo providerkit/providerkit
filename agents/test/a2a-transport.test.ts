@@ -277,6 +277,39 @@ describe.each(dialects)("A2A $version $binding", (d) => {
     expect(send.canceled()).toBe(1);
   });
 
+  it("preserves protocol refusals returned before an SSE stream opens", async () => {
+    for (const method of ["SubscribeToTask", "SendStreamingMessage"] as const) {
+      const refused = encodeA2AError(-32001, d, "rpc-1");
+      const response = json(refused.body, refused.status);
+      const fetcher = vi.fn(async () => response);
+      const client = createA2AClient({ ...d, endpoint, policy, fetch: fetcher });
+      const observation =
+        method === "SubscribeToTask"
+          ? client.observe(method, { id: "missing" }, { requestId: "rpc-1" })
+          : client.observe(method, { message: user }, { requestId: "rpc-1" });
+      await expect(observation.next()).rejects.toMatchObject({
+        kind: "protocol",
+        code: -32001,
+        retryable: false,
+        outcome: method === "SubscribeToTask" ? "read" : "unknown",
+      });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(response.body?.locked).toBe(false);
+    }
+    if (d.binding === "JSONRPC") {
+      const client = createA2AClient({
+        ...d,
+        endpoint,
+        policy,
+        fetch: async () =>
+          json({ jsonrpc: "2.0", id: "rpc-1", result: encodeA2AEvent(working, d) }),
+      });
+      await expect(
+        client.observe("SubscribeToTask", { id: working.id }, { requestId: "rpc-1" }).next(),
+      ).rejects.toMatchObject({ kind: "invalid" });
+    }
+  });
+
   it("encodes errors in the selected wire dialect", () => {
     const encoded = encodeA2AError(-32001, d, "rpc-1");
     if (d.binding === "JSONRPC") {

@@ -657,6 +657,15 @@ export function createA2AClient(options: A2AClientOptions): A2AClient {
             response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !==
               "text/event-stream"
           ) {
+            if (d.binding === "JSONRPC" && response.body) {
+              // A refused streaming method may return an ordinary JSON-RPC error with HTTP200.
+              // Decode its bounded envelope first; a non-stream success is still invalid here.
+              decodeA2ARpcResponse(
+                await readA2AJson(response, { signal, limits }),
+                requestId,
+                limits,
+              );
+            }
             void response.body?.cancel().catch(() => {});
             throw new A2AError("invalid");
           }
