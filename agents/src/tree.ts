@@ -125,6 +125,8 @@ export function* requestRecords(
     if (model.status !== "completed") continue;
     for (const execution of model.tools) {
       for (const record of execution.asks ?? []) yield { record, execution, snapshot: root };
+      for (const call of execution.calls ?? [])
+        for (const record of call.asks ?? []) yield { record, execution: call, snapshot: root };
       const delegation = root.delegations.find((journal) => journal.operationId === execution.id);
       for (const child of delegation?.children ?? []) yield* requestRecords(child.snapshot);
     }
@@ -138,6 +140,7 @@ export function openRequests(root: TreeNode) {
       ({ record, execution, snapshot }) =>
         (snapshot.state.status === "running" || snapshot.state.status === "suspended") &&
         execution.status !== "completed" &&
+        !record.request.call?.parentOperationId &&
         !record.decision &&
         !record.closed,
     )

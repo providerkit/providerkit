@@ -22,6 +22,12 @@ import type {
 } from "./types.ts";
 
 const INPUT_REQUIRED = Symbol.for("@providerkit/agents/InputRequired");
+const QUESTION_TOOL = Symbol.for("@providerkit/agents/questionTool");
+
+/** @internal Known asking tools cannot be installed in a non-suspending guest program. */
+export function isQuestionTool(tool: Tool): boolean {
+  return QUESTION_TOOL in tool;
+}
 
 /** A replay-safe pre-effect boundary, not a saved JavaScript stack. The entire tool runs
  * again with context.answers. Never throw this after an external effect, even a read that
@@ -255,7 +261,7 @@ export function answerOf(context: ToolContext, key: string): Answer | undefined 
 /** The model can ask for text, one choice or several choices. For typed forms use a
  * host-defined InputRequired question or a coordinator's ask with a runtime validator. */
 export function questionTool(options: { name?: string; description?: string } = {}): Tool {
-  return defineTool({
+  const tool = defineTool({
     name: options.name ?? "ask_question",
     description: options.description ?? "Ask the person a question and wait for their answer.",
     inputSchema: {
@@ -297,6 +303,7 @@ export function questionTool(options: { name?: string; description?: string } = 
       throw new InputRequired(ask);
     },
   });
+  return Object.assign(tool, { [QUESTION_TOOL]: true });
 }
 
 /** One call's request receipts. No second store or independent continuation engine. */
@@ -414,8 +421,9 @@ export class RequestJournal<C extends ToolRequest | StepRequest = ToolRequest> {
   }
 
   async refresh(record: AskRecord): Promise<AskRecord> {
-    const expired = record.request.scope.expiresAt <= Date.now();
     const stale = record.request.definitionHash !== (await this.identity());
+    // Identity checks may await host policy. Measure expiry after that callback, not before it.
+    const expired = record.request.scope.expiresAt <= Date.now();
     if (!expired && !stale) return record;
     // Exposing a client request can start an external effect. Expiry or definition drift is
     // not proof that the receiver did nothing, so never issue a replacement automatically.

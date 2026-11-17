@@ -3,7 +3,8 @@ import {
   checkWorkflowSnapshot,
   checkWorkflowProgress,
 } from "./workflow-snapshot.ts";
-import type { TreeNode, WorkflowSnapshot, StepRequest } from "./types.ts";
+import { programJson, textBytes, type CodeTool } from "./code.ts";
+import type { TreeNode, WorkflowSnapshot, StepRequest, ProgramCall } from "./types.ts";
 import {
   HOSTED_TOOL_TYPES,
   isEffort,
@@ -632,12 +633,18 @@ export function isScope(value: unknown): value is RequestScope {
   );
 }
 
-export function completeArguments(raw: string): boolean {
+/** Code and guest inputs are exact JSON, not prose whose escapes may be repaired. */
+export function jsonArguments(raw: string): Record<string, unknown> | undefined {
   try {
-    return isRecord(JSON.parse(raw));
+    const value: unknown = JSON.parse(raw);
+    return isRecord(value) ? value : undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+export function completeArguments(raw: string): boolean {
+  return jsonArguments(raw) !== undefined;
 }
 
 function isCall(value: unknown): value is ToolCall {
@@ -656,6 +663,7 @@ function isRequest(value: unknown): value is ToolRequest {
     [value.agentId, value.version, value.runId, value.attemptId, value.operationId].every(isId) &&
     isCall(value.call) &&
     optional(value.subagent, isId) &&
+    optional(value.parentOperationId, isId) &&
     isRecord(value.arguments)
   );
 }
@@ -774,6 +782,7 @@ function isToolResult(value: unknown): value is ToolResult {
           "unknown_tool",
           "disabled_tool",
           "invalid_output",
+          "interrupted",
         ].some((kind) => kind === value.kind))
   );
 }
@@ -798,6 +807,28 @@ function isRetriedAttempt(value: unknown): value is RetriedToolAttempt {
   );
 }
 
+function isProgramCall(value: unknown): value is ProgramCall {
+  return (
+    isRecord(value) &&
+    value.calls === undefined &&
+    isToolExecution(value) &&
+    value.status !== "delegating" &&
+    (value.status === "completed" || !("result" in value)) &&
+    "attemptId" in value &&
+    isId(value.attemptId) &&
+    "programAttemptId" in value &&
+    isId(value.programAttemptId) &&
+    "name" in value &&
+    isId(value.name) &&
+    "arguments" in value &&
+    isRecord(value.arguments) &&
+    "started" in value &&
+    typeof value.started === "boolean" &&
+    (!("bytes" in value) ||
+      optional(value.bytes, (bytes) => finite(bytes) && Number.isSafeInteger(bytes)))
+  );
+}
+
 function isToolExecution(value: unknown): value is ToolExecution {
   if (
     !isRecord(value) ||
@@ -809,6 +840,7 @@ function isToolExecution(value: unknown): value is ToolExecution {
     [...value.interrupted, ...value.retries].some(
       (attempt) => attempt.attemptId === value.attemptId,
     ) ||
+    !optional(value.calls, (calls) => Array.isArray(calls) && calls.every(isProgramCall)) ||
     !optional(value.asks, (v) => Array.isArray(v) && v.every(isAskRecord))
   )
     return false;
@@ -1132,7 +1164,10 @@ export function checkTree(root: TreeNode): void {
     for (const model of node.models) {
       if (model.status === "completed" && root.runId === root.tree.runId)
         for (const tool of model.tools)
-          for (const record of tool.asks ?? [])
+          for (const record of [
+            ...(tool.asks ?? []),
+            ...(tool.calls ?? []).flatMap((call) => call.asks ?? []),
+          ])
             if (!equalData(record.request.path, path))
               throw new TypeError("The request path does not match its owning call.");
       if (
@@ -1298,6 +1333,46 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
         (tool.status === "running" && restored.status === "delegating")
       )
         throw new TypeError("The child host replaced a tool receipt.");
+      for (const [callIndex, call] of (tool.calls ?? []).entries()) {
+        const nextCall = restored?.calls?.[callIndex];
+        if (
+          !nextCall ||
+          call.id !== nextCall.id ||
+          call.programAttemptId !== nextCall.programAttemptId ||
+          call.name !== nextCall.name ||
+          !equalData(call.arguments, nextCall.arguments) ||
+          (call.started && !nextCall.started) ||
+          (call.attemptId === nextCall.attemptId &&
+            call.bytes !== undefined &&
+            call.bytes !== nextCall.bytes) ||
+          call.interrupted.some((entry, i) => !equalData(entry, nextCall.interrupted[i])) ||
+          call.retries.some((entry, i) => !equalData(entry, nextCall.retries[i])) ||
+          (call.status === "running" &&
+            nextCall.status === "pending" &&
+            nextCall.retries.length === call.retries.length) ||
+          (call.status === "completed" &&
+            !equalData(call, nextCall) &&
+            !nextCall.retries
+              .slice(call.retries.length)
+              .some(
+                (entry) =>
+                  entry.attemptId === call.attemptId && equalData(entry.result, call.result),
+              )) ||
+          (call.attemptId !== nextCall.attemptId &&
+            !nextCall.retries.some((entry) => entry.attemptId === call.attemptId))
+        )
+          throw new TypeError("The child host erased, replaced or rolled back a program call.");
+        for (const [askIndex, ask] of (call.asks ?? []).entries()) {
+          const nextAsk = nextCall.asks?.[askIndex];
+          if (
+            !nextAsk ||
+            !equalData(ask.request, nextAsk.request) ||
+            (ask.decision && !equalData(ask.decision, nextAsk.decision)) ||
+            (ask.closed && ask.closed !== nextAsk.closed)
+          )
+            throw new TypeError("The child host replaced an inner request receipt.");
+        }
+      }
       const retained =
         tool.status === "pending"
           ? undefined
@@ -1378,7 +1453,12 @@ function checkGuards(snapshot: RunSnapshot): void {
     const model = allModels(snapshot).find(
       (model) =>
         model.id === guard.operationId ||
-        (model.status === "completed" && model.tools.some((tool) => tool.id === guard.operationId)),
+        (model.status === "completed" &&
+          model.tools.some(
+            (tool) =>
+              tool.id === guard.operationId ||
+              tool.calls?.some((call) => call.id === guard.operationId),
+          )),
     );
     if (
       !model &&
@@ -1411,6 +1491,16 @@ function checkGuards(snapshot: RunSnapshot): void {
     if (model.status !== "completed") continue;
     requireGuardVerdict("modelOutput", model.id, model.attemptId);
     for (const tool of model.tools) {
+      for (const call of tool.calls ?? []) {
+        for (const attempt of call.retries) {
+          requireGuardVerdict("toolInput", call.id, attempt.attemptId);
+          requireGuardVerdict("toolOutput", call.id, attempt.attemptId);
+        }
+        if (call.status !== "completed") continue;
+        if (call.result.ok) requireGuardVerdict("toolInput", call.id, call.attemptId);
+        if (call.result.ok || !["aborted", "interrupted"].includes(call.result.kind))
+          requireGuardVerdict("toolOutput", call.id, call.attemptId);
+      }
       for (const attempt of tool.retries) {
         requireGuardVerdict("toolInput", tool.id, attempt.attemptId);
         requireGuardVerdict("toolOutput", tool.id, attempt.attemptId);
@@ -1422,6 +1512,198 @@ function checkGuards(snapshot: RunSnapshot): void {
   }
 }
 
+/** Program receipts are private evidence, never a continuation of the guest VM. */
+function checkProgramJournal(snapshot: RunSnapshot, tool: ToolExecution, code?: CodeTool): number {
+  if (tool.calls === undefined) {
+    if (
+      code &&
+      (tool.status === "running" ||
+        tool.interrupted.length ||
+        (tool.status === "completed" && tool.result.ok))
+    )
+      throw new TypeError("An admitted code program is missing its call journal.");
+    return 0;
+  }
+  if (
+    !code ||
+    !snapshot.definition.enabledTools.includes(code.name) ||
+    tool.status === "delegating" ||
+    (tool.status === "pending" && !tool.interrupted.length)
+  )
+    throw new TypeError("Only an admitted code tool can contain program calls.");
+  if (tool.status === "completed") {
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(tool.result.content);
+    } catch {
+      throw new TypeError("A code result must be a JSON envelope.");
+    }
+    if (
+      !isRecord(envelope) ||
+      envelope.toolCalls !== tool.calls.length ||
+      (tool.result.ok
+        ? envelope.error !== undefined || envelope.calls !== undefined
+        : envelope.error === undefined || envelope.result !== undefined) ||
+      (envelope.result !== undefined &&
+        textBytes(programJson(envelope.result)) > code.limits.resultBytes) ||
+      (envelope.logs !== undefined &&
+        (typeof envelope.logs !== "string" || textBytes(envelope.logs) > code.limits.logBytes)) ||
+      (envelope.droppedLogBytes !== undefined &&
+        (!finite(envelope.droppedLogBytes) || !Number.isSafeInteger(envelope.droppedLogBytes))) ||
+      (envelope.toolCallsLeft !== undefined &&
+        (!finite(envelope.toolCallsLeft) ||
+          !Number.isSafeInteger(envelope.toolCallsLeft) ||
+          envelope.toolCallsLeft > code.limits.calls)) ||
+      (envelope.error !== undefined &&
+        (!isRecord(envelope.error) ||
+          !isId(envelope.error.name) ||
+          envelope.error.name.length > 64 ||
+          typeof envelope.error.message !== "string" ||
+          textBytes(envelope.error.message) > 2048 ||
+          !optional(envelope.error.line, positive))) ||
+      (envelope.calls !== undefined &&
+        (!Array.isArray(envelope.calls) ||
+          envelope.calls.length > 20 ||
+          envelope.calls.some(
+            (note) =>
+              !isRecord(note) ||
+              !isId(note.tool) ||
+              !code.tools.some((tool) => tool.name === note.tool) ||
+              typeof note.note !== "string" ||
+              note.note.length > 200 ||
+              !["returned", "failed", "refused", "stopped", "not started"].includes(
+                String(note.status),
+              ),
+          ))) ||
+      Object.keys(envelope).some(
+        (key) =>
+          ![
+            "result",
+            "logs",
+            "droppedLogBytes",
+            "toolCalls",
+            "toolCallsLeft",
+            "error",
+            "calls",
+          ].includes(key),
+      )
+    )
+      throw new TypeError("The code result exceeds its recorded count or byte limits.");
+  }
+  const attempts = [
+    ...tool.interrupted.map((entry) => entry.attemptId),
+    ...(tool.status !== "pending" ? [tool.attemptId] : []),
+  ];
+  let previousAttempt = -1;
+  let total = 0;
+  const counts = new Map<string, number>();
+  for (const [position, call] of tool.calls.entries()) {
+    const bound = code.tools.find((bound) => bound.name === call.name);
+    const attempt = attempts.indexOf(call.programAttemptId);
+    if (
+      !bound ||
+      !snapshot.definition.enabledTools.includes(call.name) ||
+      call.id !== `${tool.id}/call/${position + 1}` ||
+      call.interrupted.length ||
+      attempt < previousAttempt ||
+      attempt < 0 ||
+      textBytes(programJson(call.arguments)) > code.limits.callInputBytes ||
+      ((call.status === "running" || call.retries.length > 0) && !call.started) ||
+      (call.status === "completed" && call.result.ok && !call.started) ||
+      ((tool.status === "completed" ||
+        attempt < attempts.length - 1 ||
+        tool.status === "pending") &&
+        call.status !== "completed")
+    )
+      throw new TypeError("Invalid code call identity, binding, input, attempt or settlement.");
+    previousAttempt = attempt;
+    const expectedAttempt = (n: number) =>
+      n === 0
+        ? call.programAttemptId
+        : `${call.programAttemptId}/call/${position + 1}/attempt/${n + 1}`;
+    if (
+      call.attemptId !== expectedAttempt(call.retries.length) ||
+      call.retries.some((retry, index) => retry.attemptId !== expectedAttempt(index))
+    )
+      throw new TypeError(
+        "Code tool attempts must keep their original identity and increase in order.",
+      );
+    const retry = retryBudget(snapshot.definition.toolRetries, call.name);
+    if (
+      call.retries.length &&
+      (!retry ||
+        call.asks?.length ||
+        call.retries.length + 1 > retry.maxAttempts ||
+        call.retries.some(
+          (entry) =>
+            !equalData(entry.arguments, call.arguments) ||
+            (retry.replay === "reconcile"
+              ? !isId(entry.reconciliation)
+              : entry.reconciliation !== undefined),
+        ))
+    )
+      throw new TypeError("Code retries do not match the saved retry policy.");
+    const results = [
+      ...call.retries.map((entry) => entry.result),
+      ...(call.status === "completed" ? [call.result] : []),
+    ];
+    if (
+      results.some(
+        (result) =>
+          textBytes(result.content) > 1024 ||
+          (result.ok &&
+            (result.output !== undefined ||
+              result.images !== undefined ||
+              result.final !== undefined)),
+      )
+    )
+      throw new TypeError("Code receipts may retain only bounded result previews.");
+    for (const [index, ask] of (call.asks ?? []).entries()) {
+      const request = ask.request;
+      if (
+        request.ask.type !== "approval" ||
+        !request.call ||
+        request.step !== undefined ||
+        request.id !== `${call.id}/ask/${index + 1}` ||
+        request.call.parentOperationId !== tool.id ||
+        request.call.operationId !== call.id ||
+        request.call.call.id !== call.id ||
+        request.call.call.name !== call.name ||
+        request.call.agentId !== snapshot.agentId ||
+        request.call.runId !== snapshot.runId ||
+        request.call.version !== snapshot.version ||
+        request.call.subagent !== snapshot.subagent?.spec.name ||
+        ![call.attemptId, ...call.retries.map((entry) => entry.attemptId)].includes(
+          request.call.attemptId,
+        ) ||
+        !equalData(jsonArguments(request.call.call.arguments), call.arguments) ||
+        !equalData(request.call.arguments, call.arguments) ||
+        request.createdAt < snapshot.startedAt ||
+        (call.status === "completed" && !ask.closed && !ask.decision) ||
+        (ask.decision?.type === "approve" &&
+          ask.decision.arguments !== undefined &&
+          textBytes(programJson(ask.decision.arguments)) > code.limits.callInputBytes &&
+          call.started)
+      )
+        throw new TypeError("An inner approval does not match its owning code call.");
+    }
+    const count = (counts.get(call.programAttemptId) ?? 0) + 1 + call.retries.length;
+    if (count > code.limits.calls) throw new TypeError("The program exceeds its call limit.");
+    counts.set(call.programAttemptId, count);
+    total += 1 + call.retries.length;
+  }
+  if (
+    tool.interrupted.length &&
+    tool.calls.some(
+      (call) =>
+        call.programAttemptId !== (tool.status !== "pending" ? tool.attemptId : undefined) &&
+        (!code.tools.find((bound) => bound.name === call.name)?.isReadOnly || call.asks?.length),
+    )
+  )
+    throw new TypeError("A restarted program cannot contain an earlier effect or approval.");
+  return total;
+}
+
 /** Validate the journal as well as its fields, so a cursor cannot skip unrecorded work. */
 export function readSnapshot(
   raw: unknown,
@@ -1429,6 +1711,7 @@ export function readSnapshot(
   version: string,
   limits: RunLimits,
   resultTool?: string,
+  codeTools: ReadonlyMap<string, CodeTool> = new Map(),
 ): RunSnapshot {
   if (!serializable(raw) || !isSnapshot(raw)) throw new TypeError("Invalid agent snapshot.");
   if (raw.agentId !== agentId || raw.version !== version)
@@ -1508,7 +1791,10 @@ export function readSnapshot(
           throw new TypeError("A successful stopping tool must record its final result.");
       }
       const keys = new Set<string>();
-      const originalArguments = parseToolArgs(call.arguments);
+      const code = codeTools.get(call.name);
+      const originalArguments = code
+        ? (jsonArguments(call.arguments) ?? {})
+        : parseToolArgs(call.arguments);
       let clientArguments = originalArguments;
       for (const [askIndex, record] of (tool.asks ?? []).entries()) {
         const request = record.request;
@@ -1517,6 +1803,7 @@ export function readSnapshot(
           request.step !== undefined ||
           request.id !== `${tool.id}/ask/${askIndex + 1}` ||
           request.call.operationId !== tool.id ||
+          request.call.parentOperationId !== undefined ||
           request.call.runId !== raw.runId ||
           request.call.agentId !== raw.agentId ||
           request.call.version !== raw.version ||
@@ -1584,7 +1871,25 @@ export function readSnapshot(
         !tool.asks?.length &&
         !tool.interrupted.length &&
         !tool.retries.length;
-      calls += toolAttempts(tool);
+      const approved = [...(tool.asks ?? [])]
+        .reverse()
+        .find((record) => !record.closed && record.decision?.type === "approve")?.decision;
+      const effectiveCode =
+        approved?.type === "approve" && approved.arguments !== undefined
+          ? approved.arguments
+          : originalArguments;
+      if (
+        code &&
+        (tool.calls?.length || (tool.status === "completed" && tool.result.ok)) &&
+        (!completeArguments(call.arguments) ||
+          typeof effectiveCode.code !== "string" ||
+          Object.keys(effectiveCode).length !== 1 ||
+          textBytes(effectiveCode.code) > code.limits.sourceBytes)
+      )
+        throw new TypeError(
+          "The admitted code source does not fit its saved limit or input schema.",
+        );
+      calls += toolAttempts(tool) + checkProgramJournal(raw, tool, code);
     }
     if (
       !last &&

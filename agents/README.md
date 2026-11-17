@@ -732,8 +732,8 @@ See [the offline memory example](examples/memory.ts). It uses no live provider o
 
 Pass core `Tool` instances in `tools`. Their input validation, timeouts and error outcomes remain
 core's responsibility. Unmarked tools run serially. Parallel tool execution requires both the
-core tool's `isConcurrencySafe` flag and the host's permission to batch it. Tools run in your
-process; this package does not provide a sandbox for untrusted code.
+core tool's `isConcurrencySafe` flag and the host's permission to batch it. Host tools run in your
+process. Optional code mode isolates model-written programs, not your tool implementations.
 
 For a checked result, supply `output.schema` and `output.validate`. The schema tells the model what
 to submit; the validator checks the actual value. Return the desired TypeScript value or throw a
@@ -794,6 +794,154 @@ Core tools marked `isTerminal: true` also stop the run this way, but must be cal
 these host tools the final answer comes from the tool's result, not its input. `submit_result`
 still validates its input. Stopping results are recorded in the tool receipt, so resume never
 repeats a finished effect or asks the model to rephrase it.
+
+## Code mode
+
+Let the model write a short program that calls several tools before returning an answer:
+
+```ts
+await reader.run("Add up the prices of the matching records.");
+```
+
+Install the optional QuickJS engine, then bind only the tools the program needs:
+
+```sh
+bun add quickjs-emscripten-core@^0.32.0 @jitl/quickjs-wasmfile-release-sync@^0.32.0
+```
+
+```ts
+import { defineAgent } from "@providerkit/agents";
+import { codeMode } from "@providerkit/agents/code-mode";
+import { createQuickJsDriver } from "@providerkit/agents/code-mode/quickjs";
+
+const program = codeMode({ tools: [lookup], driver: createQuickJsDriver() });
+const reader = defineAgent({
+  id: "reader",
+  version: "1",
+  instructions: "Look up the records and calculate the total. Return only what the person needs.",
+  provider,
+  tools: [program],
+  limits: { toolCalls: 64 },
+});
+```
+
+The model calls `run_code` with `{ code: string }`. The code is an async function body, for
+example `const rows = await tools.lookup({}); return rows.length;`. Every program starts in a
+fresh sandbox. It has no network, files, process, imports or timers. It can pass JSON between
+bound tools without sending every intermediate value back to the model. The host tools still
+have their normal powers: authorize each action in `host.beforeTool`.
+
+The description includes `toolTypings(tools)`, built from input schemas and core's optional
+`outputSchema`. Without an output schema, that tool's return type is `unknown`. These types
+help the model write code; they do not replace input validation or authorization.
+
+### Keep control actions direct
+
+Bindings accept ordinary core tools only. Approval-required, asking, client, terminal, delegation,
+handoff, nested code and helper-creation tools are refused. A tool listed both directly and in
+code must be the same object. A bound-only tool cannot be called directly by the model.
+
+`enabledTools` narrows both the advertised code bindings and execution. Include `run_code` and
+each bound name you want to permit; selecting `run_code` alone grants no inner tool. A
+model-created helper needs the same explicit grants from its creator and host template.
+
+For a dynamic `host.needsApproval` requirement, `prepareRequest`, `answerNow` and `beforeTool`
+must supply a current, authoritative decision immediately. Otherwise the call returns a refusal
+that code can catch; it never suspends inside the sandbox. Approved replacement arguments still
+pass the tool input guard and current authorization. A stale or expired decision permits no effect.
+Set `needsApproval: true` on `codeMode` to ask before the whole program starts instead.
+
+### Limits and receipts
+
+`codeMode({ limits })` overrides these defaults. KiB is 1,024 bytes; MiB is 1,024 KiB.
+
+| Setting           | Default | What it bounds                                              |
+| ----------------- | ------: | ----------------------------------------------------------- |
+| `calls`           |      32 | Inner call attempts per program attempt, including retries  |
+| `timeoutMs`       |  30,000 | Wall time, including tool waits                             |
+| `cpuMs`           |   2,000 | Guest JavaScript time, excluding tool waits                 |
+| `memoryBytes`     |  32 MiB | Guest heap                                                  |
+| `stackBytes`      | 256 KiB | Guest stack                                                 |
+| `sourceBytes`     |  64 KiB | UTF-8 program source                                        |
+| `resultBytes`     |  32 KiB | JSON value returned by the program                          |
+| `logBytes`        |   8 KiB | Captured console text; excess bytes are counted and dropped |
+| `callInputBytes`  | 256 KiB | One inner call's JSON arguments                             |
+| `callOutputBytes` |   1 MiB | One tool's JSON reply to the program                        |
+
+The enclosing run's `parallelTools` bounds concurrent calls. Only tools marked concurrency-safe
+and allowed by the host may overlap. Other calls share the tree's serial effect boundary, even
+across specialists. Run and tree deadlines can end the program sooner. The driver admits at most
+four programs at once by default (`maxActive`). QuickJS runs on the host thread; a busy program
+can block that thread up to its CPU allowance. These guest limits do not bound allocations inside
+host tools.
+
+The program call and its inner attempts spend the run's `toolCalls` budget. Inner calls leave one
+slot for a final direct tool such as `submit_result`. Raise the run budget when needed, not just
+`codeMode.limits.calls`.
+
+A successful program returns JSON text containing `result` (when defined), `logs`, `toolCalls`
+and `toolCallsLeft`. A failure also includes `error` and up to 20 call summaries. Tool failures
+throw a catchable `ToolError` with `tool` and `kind`. An oversized or non-JSON tool reply is refused
+without erasing its effect receipt. Returning, throwing or reaching a program limit aborts
+queued and running calls; their recorded outcomes settle before the program result. Queued calls
+never start. Cancellation cannot undo an effect or stop a host tool that ignores its signal.
+
+`ToolExecution.calls` holds private `ProgramCall` records. Each has a stable `id`, an `attemptId`,
+the owning `programAttemptId`, tool name, original arguments and `pending`, `running` or `completed`
+status. `started: false` means it never reached dispatch. Completed results retain at most 1 KiB
+of text, not the full JSON output; `bytes` records the current attempt's original output size.
+Retries keep their failed attempt receipts. Write starts and completions pass the existing
+checkpoint barrier. Durability still requires `host.checkpoint`.
+
+Inner `tool_start`, `tool_result` and retry `operation_restart` events carry `parentOperationId`
+through their request or event. Tool receipts carry it too. Group by that field, not by parsing
+ids; key attempts by `(operationId, attemptId)`. Raw events, code, arguments, logs and returned
+values remain server data. Expose them only through an explicit display policy.
+
+### After a restart
+
+The SDK never resumes a half-run sandbox or replays a recorded write. An unfinished write fails
+closed with `interrupted_operation` naming its inner operation. Reconcile it with the service
+before continuing. Known completed changes stay recorded; the program closes as `interrupted`
+and the model can continue without repeating those changes. Pending calls did not run.
+
+An explicit `recovery.readOnlyTools` entry naming the code tool can restart from the beginning
+only when every recorded inner call was read-only and neither program nor calls have request
+history. It requires `host.beforeTool`, unchanged definitions and remaining attempt/call budgets.
+The new attempt retains old receipts and continues call ids. Read-only calls may still cost money.
+Provider-hosted effects keep their existing no-replay rules.
+
+### TypeScript and Workers
+
+No TypeScript compiler is bundled. Supply a host compiler if you want TypeScript source:
+
+```ts
+import { transform } from "sucrase"; // Install separately if you choose this compiler.
+
+const program = codeMode({
+  tools: [lookup],
+  driver: createQuickJsDriver(),
+  transpile: (source) => transform(source, { transforms: ["typescript"] }).code,
+});
+```
+
+The hook receives an async function expression, not a raw body. Return JavaScript for that
+expression; a trailing semicolon is allowed. Custom transpilers own their source mapping.
+
+On Workers, pass an already compiled module instead of fetching and compiling WebAssembly:
+
+```ts
+import wasmModule from "@jitl/quickjs-wasmfile-release-sync/wasm";
+
+const driver = createQuickJsDriver({ wasmModule });
+```
+
+Browsers and extensions can set `wasmLocation` to their packaged asset. Neither the main agent
+entry nor `/code-mode` imports QuickJS. A custom `CodeDriver` must honor the same fresh-sandbox,
+string-bridge, limit and cleanup contract; it must never invoke host tools itself.
+
+Run [the offline code-mode example](examples/code-mode.ts) with `bun agents/examples/code-mode.ts`.
+It uses the real QuickJS driver and two local tools, with no provider key or network request.
 
 ## Specialists and parallel work
 

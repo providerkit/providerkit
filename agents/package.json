@@ -26,6 +26,10 @@
       "types": "./dist/workflow.d.ts",
       "default": "./dist/workflow.js"
     },
+    "./code-mode": {
+      "types": "./dist/code-mode.d.ts",
+      "default": "./dist/code-mode.js"
+    },
     "./code-mode/quickjs": {
       "types": "./dist/quickjs.d.ts",
       "default": "./dist/quickjs.js"

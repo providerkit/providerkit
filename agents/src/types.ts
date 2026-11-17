@@ -25,6 +25,7 @@ import type {
   MemoryScopes,
 } from "./memory.ts";
 import type { ClientTool } from "./request.ts";
+import type { CodeTool } from "./code.ts";
 import type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
 export type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
 export type TreeNode = RunSnapshot | WorkflowSnapshot;
@@ -351,9 +352,9 @@ export interface AgentConfig<H = unknown> {
   memory?: AgentMemory | true;
   /** Host-only observer. Runs before RunOptions.onLifecycle at each boundary. */
   onLifecycle?: LifecycleHook;
-  /** Core tools, client tools, delegations or handoffs. Terminal tools and handoffs
+  /** Core tools, client tools, code tools, delegations or handoffs. Terminal tools and handoffs
    * must be called alone. H is the union of the registered targets' output types. */
-  tools?: readonly (Tool | Delegation | ClientTool | Handoff<H>)[];
+  tools?: readonly (Tool | Delegation | ClientTool | CodeTool | Handoff<H>)[];
   /** A host policy or allow-list. A run may narrow this list, never widen it. The reserved
    * submit_result tool stays available when there is an output contract. */
   enabledTools?: EnabledTools;
@@ -391,6 +392,8 @@ export interface ToolRequest {
   runId: string;
   attemptId: string;
   operationId: string;
+  /** Present only for a call made by a code program. Never a permission grant. */
+  parentOperationId?: string;
   call: ToolCall;
   arguments: Record<string, unknown>;
 }
@@ -666,7 +669,8 @@ export type ToolResult =
         | "cancelled"
         | "unknown_tool"
         | "disabled_tool"
-        | "invalid_output";
+        | "invalid_output"
+        | "interrupted";
     };
 
 export interface InterruptedAttempt {
@@ -678,8 +682,31 @@ export interface InterruptedModelAttempt extends InterruptedAttempt {
   usage: TokenUsage;
 }
 
+/** Private inner-call journal. IDs increase across program restarts; old calls never replay. */
+export type ProgramCall = {
+  id: string;
+  attemptId: string;
+  /** The outer program attempt which admitted this call. */
+  programAttemptId: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  /** False means dispatch never started, even if this receipt is now completed. */
+  started: boolean;
+  asks?: AskRecord[];
+  interrupted: InterruptedAttempt[];
+  retries: RetriedToolAttempt[];
+  /** Current attempt's JSON output size, or failure text size. Result content is at most 1 KiB. */
+  bytes?: number;
+} & (
+  | { status: "pending"; previousAttemptId?: string }
+  | { status: "running" }
+  | { status: "completed"; result: ToolResult }
+);
+
 export type ToolExecution = {
   asks?: AskRecord[];
+  /** Code tools only. Kept across a read-only program restart. */
+  calls?: ProgramCall[];
   interrupted: InterruptedAttempt[];
   retries: RetriedToolAttempt[];
 } & (
@@ -786,6 +813,7 @@ export type OperationReceipt =
   | {
       kind: "tool" | "delegation" | "handoff";
       id: string;
+      parentOperationId?: string;
       callId: string;
       attemptId: string;
       status: "running" | "completed" | "interrupted";
@@ -855,6 +883,7 @@ export type AgentEvent =
       operationId: string;
       previousAttemptId: string;
       attemptId: string;
+      parentOperationId?: string;
     }
   | {
       type: "model_chunk";

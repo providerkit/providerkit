@@ -6,9 +6,12 @@ block has a short comment that names its source. Their copyright notices and lic
 ## TanStack AI
 
 - Code-mode sources: `packages/ai-code-mode/src/type-generator/json-schema-to-ts.ts`,
-  `packages/ai-code-mode/src/code-wrapper.ts` and `packages/ai-isolate-quickjs`.
-- Used in: `src/schema-to-ts.ts`, `src/code-script.ts`, `src/quickjs.ts` and their tests.
-  Changed: reference aliases are scoped to each tool and schema document; nullable unions are
+  `packages/ai-code-mode/src/code-wrapper.ts`, `create-code-mode-tool.ts`,
+  `bindings/tool-to-binding.ts`, `create-system-prompt.ts` and `packages/ai-isolate-quickjs`.
+- Used in: `src/code.ts`, `src/schema-to-ts.ts`, `src/code-script.ts`, `src/quickjs.ts` and their tests.
+  Changed: code descriptors dispatch through the existing run journal rather than invoking tools
+  from an engine. Control tools stay direct, host decisions are checked immediately before effects,
+  and a program never resumes a half-run VM. Reference aliases are scoped to each tool and schema document; nullable unions are
   deduplicated. Guest programs cannot access raw host bridges. JSON values cross as strings,
   each job gets a fresh runtime, and settled programs cannot start more host calls. CPU time,
   admission and cleanup are bounded; optional engine dependencies load only in the driver.
@@ -389,6 +392,12 @@ as `LICENSE-APACHE-2.0`. No code from `ee/` is used.
   uses Web Crypto, and scoring has no automatic hook wiring or telemetry.
 
 ## Vercel AI SDK
+
+- Code-mode sources: `packages/code-mode/src/run-code-mode.ts`, `tool-prompt.ts` and `types.ts`.
+  Used as policy references for `src/code.ts`, `src/code-script.ts` and `test/code.test.ts`:
+  explicit tool bindings, guest tool errors, source lines and separate byte/time/call limits.
+  Changed: no signed replay continuation. Inner calls use providerkit's shared authorization,
+  retry, tree serialization and checkpoint path; failures retain bounded call receipts.
 
 - The full Apache 2.0 license is included as `LICENSE-APACHE-2.0`.
 - Source: [vercel/ai](https://github.com/vercel/ai/tree/8ba3940d3dd1f3cd3c4365bbaec505c6ef0eb1e3),

@@ -24,6 +24,8 @@ export function codeScript(expression: string, toolNames: readonly string[]): st
   const keys = Reflect.ownKeys;
   const isArray = Array.isArray;
   const finite = Number.isFinite;
+  const number = Number;
+  const matchLine = Function.prototype.call.bind(RegExp.prototype.exec, /<input>:(\\d+)/);
   const PlainObject = Object.prototype;
   const ErrorClass = Error;
   const promise = Promise.resolve.bind(Promise);
@@ -104,7 +106,7 @@ export function codeScript(expression: string, toolNames: readonly string[]): st
     log(join(parts, " "));
   }}) });
 
-  function failure(error) {
+  function failure(error, invalidResult = false) {
     open = false;
     const result = create(null);
     result.name = "ProgramError";
@@ -113,10 +115,16 @@ export function codeScript(expression: string, toolNames: readonly string[]): st
       if (error && error.name === "SyntaxError") result.name = "SyntaxError";
       if (error && typeof error.message === "string") result.message = slice(error.message, 0, 2048);
       else if (typeof error === "string") result.message = slice(error, 0, 2048);
+      if (error && typeof error.stack === "string") {
+        const found = matchLine(error.stack);
+        const line = found && number(found[1]) - 1;
+        if (finite(line) && line > 0) result.line = line;
+      }
     } catch {}
     const envelope = create(null);
     envelope.ok = false;
     envelope.error = result;
+    if (invalidResult) envelope.invalidResult = true;
     return stringify(envelope);
   }
 
@@ -134,7 +142,7 @@ export function codeScript(expression: string, toolNames: readonly string[]): st
           envelope.value = json(value);
         }
         return stringify(envelope);
-      } catch (error) { return failure(error); }
+      } catch (error) { return failure(error, true); }
     }, failure);
   } catch (error) { return failure(error); }
 })()`;
