@@ -1,3 +1,4 @@
+import { isRemoteSnapshot, checkRemoteSnapshot, checkRemoteProgress } from "./a2a/remote.ts";
 import {
   isWorkflowSnapshot,
   checkWorkflowSnapshot,
@@ -679,7 +680,7 @@ function isStepRequest(value: unknown): value is StepRequest {
       value.operationId,
       value.key,
     ].every(isId) &&
-    ["step", "ask", "agent", "workflow", "sleep"].includes(String(value.kind))
+    ["step", "ask", "agent", "remote", "workflow", "sleep"].includes(String(value.kind))
   );
 }
 
@@ -1011,7 +1012,7 @@ export function isTreeInfo(value: unknown): value is RunSnapshot["tree"] {
 }
 
 export function isTreeNode(value: unknown): value is TreeNode {
-  return isSnapshot(value) || isWorkflowSnapshot(value);
+  return isSnapshot(value) || isWorkflowSnapshot(value) || isRemoteSnapshot(value);
 }
 
 export function agentSnapshot(node: TreeNode): RunSnapshot {
@@ -1044,6 +1045,8 @@ export function checkTree(root: TreeNode): void {
   let children = 0;
   let models = 0;
   const inputIds = new Set<string>();
+  const remoteNodes = new Map<string, Extract<TreeNode, { kind: "remote" }>>();
+  const continued = new Set<string>();
   let inputSize = 0;
   function visit(
     node: TreeNode,
@@ -1056,6 +1059,37 @@ export function checkTree(root: TreeNode): void {
     if (!equalData(node.tree, root.tree) || node.startedAt < root.tree.startedAt)
       throw new TypeError("The child belongs to a different tree or deadline.");
     if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
+    if (node.kind === "remote") {
+      checkRemoteSnapshot(node);
+      if (
+        root.runId === root.tree.runId &&
+        node.remote.sends.some((send) =>
+          send.asks?.some((record) => !equalData(record.request.path, path)),
+        )
+      )
+        throw new TypeError("The remote request path is invalid.");
+      if (node.input.continue && root.runId === root.tree.runId) {
+        const source = remoteNodes.get(node.input.continue);
+        if (
+          !source ||
+          source.agentId !== node.agentId ||
+          source.version !== node.version ||
+          !equalData(source.definition, node.definition) ||
+          source.state.status !== "completed" ||
+          source.remote.state !== "input_required" ||
+          source.remote.cancel ||
+          !equalData(source.remote.endpoint, node.remote.endpoint) ||
+          source.remote.taskId !== node.remote.taskId ||
+          source.remote.contextId !== node.remote.contextId ||
+          node.remote.priorTurns !== source.remote.priorTurns + source.remote.sends.length ||
+          continued.has(source.runId)
+        )
+          throw new TypeError("The remote continuation does not match an open task in this tree.");
+        continued.add(source.runId);
+      }
+      remoteNodes.set(node.runId, node);
+      return;
+    }
     if (node.kind === "workflow") {
       checkWorkflowSnapshot(node);
       for (const step of node.steps) {
@@ -1230,6 +1264,10 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
       !equalData(previous.state, next.state))
   )
     throw new TypeError("The child host returned a different or regressed node.");
+  if (previous.kind === "remote" && next.kind === "remote") {
+    checkRemoteProgress(previous, next);
+    return;
+  }
   if (previous.kind === "workflow" && next.kind === "workflow") {
     if (previous.workflowId !== next.workflowId)
       throw new TypeError("The child host changed the workflow.");

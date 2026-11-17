@@ -275,6 +275,11 @@ SOFTWARE.
 
 ## Microsoft Agent Framework
 
+- A2A source: `python/packages/a2a/agent_framework_a2a/_agent.py`, remote input occurrences.
+  Used in `src/a2a/remote.ts`: remote questions become request-keyed local asks. Changed:
+  the existing request journal owns decisions, current host authority checks every answer,
+  and peer approvals or client-tool grants are refused.
+
 - Workflow source: `python/packages/core/agent_framework/_workflows/_functional.py`, explicit
   replay-key uniqueness and incompatible-definition refusal. Used in `src/workflow.ts`.
   Changed: explicit versions and JSON identities replace code hashes and positional keys.
@@ -351,6 +356,13 @@ THE SOFTWARE.
 
 ## Google ADK
 
+- A2A sources: `google/adk-js`, `core/src/a2a/agent_card.ts` and `core/src/a2a/auth.ts`;
+  `google/adk-python`, `src/google/adk/a2a/agent/_remote_a2a_agent.py`.
+  Used in `src/a2a/policy.ts`, `client.ts`, `auth.ts` and the remote runtime: endpoint checks,
+  required authentication and refusal of incomplete streams. Changed: the host owns DNS,
+  credentials and egress; Web Crypto replaces Node-only crypto. Abort detaches observation
+  and never grants permission to cancel a remote task. Mutating requests never retry.
+
 - Workflow sources: `google/adk-js`, `core/src/workflow/dynamic_node_scheduler.ts` and
   `core/src/workflow/node_context.ts`, saved child results and suspension propagation.
   Used in `src/workflow.ts`. Changed: duplicates are refused rather than deduplicated, the
@@ -369,6 +381,12 @@ Copyright 2026 Google LLC. Licensed under Apache 2.0; the full license is includ
   requires explicit provider consent, and mocks never fall through to real tool execution.
 
 ## Mastra
+
+- A2A sources: `packages/core/src/a2a/compat/v1.ts` and `packages/core/src/a2a/a2a-agent.ts`.
+  Used in `src/a2a/wire.ts` and `remote.ts`: version mapping, terminal/interrupted states,
+  artifact replacement and task observation. Changed: messages have pre-send receipts,
+  unknown delivery never replays, and remote nodes share the existing child/run journal.
+  Completed output is validated before reuse. Remote billing stays unknown.
 
 Copyright (c) 2025 Kepler Software, Inc. Licensed under Apache 2.0; the full license is included
 as `LICENSE-APACHE-2.0`. No code from `ee/` is used.
@@ -390,6 +408,38 @@ as `LICENSE-APACHE-2.0`. No code from `ee/` is used.
 - Used in: `src/evals/types.ts` and `runner.ts`, cross-copy skip branding and deterministic
   six-byte SHA-256 sampling. Changed: skips require a reason, the brand is providerkit's, hashing
   uses Web Crypto, and scoring has no automatic hook wiring or telemetry.
+
+## CrewAI
+
+- Source: [crewAIInc/crewAI](https://github.com/crewAIInc/crewAI),
+  `lib/crewai/src/crewai/a2a/wrapper.py` and `a2a/updates/polling/config.py`.
+- Used in `src/a2a/remote.ts`: bounded polling and parent-routed questions. Changed: handles
+  name a completed child in the same root and specialist scope, not a peer task ID. Each
+  follow-up is a new journaled child; message budgets include earlier children in that chain.
+
+```text
+MIT License
+
+Copyright (c) crewAI, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## Vercel AI SDK
 

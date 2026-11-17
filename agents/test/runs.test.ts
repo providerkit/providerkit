@@ -1346,7 +1346,10 @@ describe("background binding on local Postgres", () => {
     const cancelling = await root.start("alice", "Wait with child");
     const active = runs.drive(cancelling.id, root.handlers);
     await childStarted.promise;
-    expect(await root.cancel("alice", cancelling.id)).toBe(true);
+    expect(await root.cancel("alice", cancelling.id)).toEqual({
+      id: cancelling.id,
+      requested: true,
+    });
     expect(await active).toBe("cancelled");
     expect(childSignal?.aborted).toBe(true);
     const rows = await pool.query<{ status: string }>(

@@ -1,4 +1,5 @@
 import { EMPTY_USAGE, addUsage, createGate, messageOf, type TokenUsage } from "@providerkit/core";
+import type { RemoteSend } from "./a2a/remote.ts";
 import { allModels } from "./compaction.ts";
 import { modelUsage } from "./recovery.ts";
 import { copyData, immutableCopy, isRecord } from "./snapshot.ts";
@@ -40,6 +41,13 @@ export function isLocalStop(state: RunState): boolean {
         "empty_output",
         "memory_missing",
         "memory_unavailable",
+        "remote_failed",
+        "remote_invalid_output",
+        "remote_auth_required",
+        "remote_input_required",
+        "remote_request_unsupported",
+        "remote_result_too_large",
+        "remote_cancelled",
       ].includes(state.error.code))
   );
 }
@@ -80,14 +88,16 @@ export async function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Prom
 export function childJournals(root: TreeNode) {
   return root.kind === "agent"
     ? root.delegations
-    : root.steps.map((step) => ({
-        operationId: step.id,
-        children: step.children,
-      }));
+    : root.kind === "remote"
+      ? []
+      : root.steps.map((step) => ({
+          operationId: step.id,
+          children: step.children,
+        }));
 }
 
 export function nodeId(node: TreeNode): string {
-  return node.kind === "agent" ? node.agentId : node.workflowId;
+  return node.kind === "workflow" ? node.workflowId : node.agentId;
 }
 
 export function* snapshots(root: TreeNode): Generator<TreeNode> {
@@ -97,23 +107,31 @@ export function* snapshots(root: TreeNode): Generator<TreeNode> {
 }
 
 export function wakeAt(root: TreeNode): number | undefined {
-  const wakes = [...snapshots(root)].flatMap((node) =>
-    node.kind === "workflow" &&
-    (node.state.status === "running" || node.state.status === "suspended")
+  const wakes = [...snapshots(root)].flatMap((node) => {
+    if (node.state.status !== "running" && node.state.status !== "suspended") return [];
+    if (node.kind === "remote") return node.remote.wakeAt === undefined ? [] : [node.remote.wakeAt];
+    return node.kind === "workflow"
       ? node.steps.flatMap((step) =>
           (step.status === "waiting" || step.status === "retrying") && step.wakeAt !== undefined
             ? [step.wakeAt]
             : [],
         )
-      : [],
-  );
+      : [];
+  });
   return wakes.length ? Math.min(...wakes) : undefined;
 }
 
 /** Requests come from the effect journal, in tool and child admission order. */
-export function* requestRecords(
-  root: TreeNode,
-): Generator<{ record: AskRecord; execution: ToolExecution | StepExecution; snapshot: TreeNode }> {
+export function* requestRecords(root: TreeNode): Generator<{
+  record: AskRecord;
+  execution: ToolExecution | StepExecution | RemoteSend;
+  snapshot: TreeNode;
+}> {
+  if (root.kind === "remote") {
+    for (const execution of root.remote.sends)
+      for (const record of execution.asks ?? []) yield { record, execution, snapshot: root };
+    return;
+  }
   if (root.kind === "workflow") {
     for (const execution of root.steps) {
       for (const record of execution.asks ?? []) yield { record, execution, snapshot: root };

@@ -28,7 +28,8 @@ import type { ClientTool } from "./request.ts";
 import type { CodeTool } from "./code.ts";
 import type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
 export type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
-export type TreeNode = RunSnapshot | WorkflowSnapshot;
+import type { RemoteSnapshot, RemoteReceipt } from "./a2a/remote.ts";
+export type TreeNode = RunSnapshot | WorkflowSnapshot | RemoteSnapshot;
 import type { SubagentRecord } from "./subagents.ts";
 import type { InputInbox, InputReceipt, RunInput } from "./steering.ts";
 import type { Handoff } from "./handoff.ts";
@@ -799,6 +800,7 @@ export interface RunSnapshot {
 /** Stable operation identity; an attempt changes on resume, an operation does not.
  * A model receipt's usage may be partial if the stream failed. */
 export type OperationReceipt =
+  | RemoteReceipt
   | {
       kind: "model";
       purpose?: "compaction";
@@ -859,6 +861,13 @@ export type RunOutcome<T = string> = RunRecord &
   );
 
 export type AgentEvent =
+  | {
+      type: "remote_status";
+      runId: string;
+      attemptId: string;
+      operationId: string;
+      state: import("./a2a/wire.ts").A2AState;
+    }
   | ({ runId: string; attemptId: string; operationId: string; key: string } & (
       | { type: "step_start"; kind: StepKind; attempt: number }
       | { type: "step_progress"; data: unknown }
@@ -913,4 +922,4 @@ export type AgentEvent =
       key: string;
       runId: string;
       version: string;
-    } & ({ kind: "agent"; agentId: string } | { kind: "workflow"; workflowId: string }));
+    } & ({ kind: "agent" | "remote"; agentId: string } | { kind: "workflow"; workflowId: string }));

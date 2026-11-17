@@ -1010,6 +1010,70 @@ A child key becomes part of the child's run ID and of every operation ID under i
 carry those IDs, and a screen that shows the run may send them to a browser. So key children by
 position or by a fixed name, such as `topic-1`, and never by their input.
 
+## Remote specialists over A2A
+
+Run the [offline remote example](examples/a2a-remote.ts):
+
+```sh
+bun agents/examples/a2a-remote.ts
+```
+
+It prints `Done`. The peer is an in-process fetch fixture, not a live service.
+
+`defineRemoteAgent` on `@providerkit/agents/a2a` creates a `kind: "remote"` specialist.
+It has `run`, `resume`, `cancel` and `asTool`. Register it in a delegation's `specialists`
+or a workflow's `agents`. Local agents, workflows and remote children use the same child
+admission, host binding, checkpoints and tree limits. Remote agents are not handoff targets.
+Their snapshots have a remote message journal, not made-up local models or model turns.
+
+Configure the host-owned `id`, `agentVersion`, `card`, `version` (`"1.0"` or `"0.3"`),
+`binding` (`"JSONRPC"` or `"HTTP+JSON"`) and `policy.allow`. Use `updates: "poll"` (default)
+or `"stream"`; streaming requires a card that supports it. The SDK refuses missing required
+extensions and options it cannot represent. No production dependency on the official A2A SDK
+is needed. Credentials, headers, fetch and verification callbacks stay with the host, unsaved.
+Bump `agentVersion` when hidden endpoint, authorization or output policy changes.
+
+`run` accepts one user turn, including host-authorized media, but not a local conversation
+history, session, memory binding or model settings. Children take `{ input }`.
+`host.beforeTool` must authorize every send and explicit cancellation. Its `remote_send`
+request includes the actual outbound message. Card text and model-written helper instructions
+never grant an endpoint or tool. `asTool` uses only the description your code supplies.
+
+Every send and follow-up saves its exact message and identity before dispatch. Cancellation
+has its own receipt. None is resent after a timeout, lost reply, worker restart or model retry.
+A known task can be observed with `GetTask` or a subscription; observing an old task does not
+prove an uncertain follow-up arrived. Repeated read failures suspend with a `wakeAt` time.
+The background binding uses the same due-wake continuation as workflows to reattach; your
+existing host queue schedules it. No message is sent again and no SDK scheduler is added.
+A completed result is reused only from a validated journal. Keep authoritative snapshots private and compare them in `host.authorizeResume`.
+
+`inputRequired: "ask"` maps remote questions to local request IDs. Answers go through
+`prepareRequest`, `resolveRequest` and current `beforeTool` checks. Partial or refused answers
+stay pending. Remote approval and client-tool requests are refused, not converted into grants.
+An authenticated `cancel` decision can request remote cancellation; `stop` ends local work only.
+`inputRequired: "parent"` returns `{ kind: "input_required", handle, question }` to the parent.
+Pass that handle with the next child's `{ input, continue }`. It is valid once in that root and
+specialist scope, never as an arbitrary task ID. This mode accepts one free-text question;
+use `"ask"` for multiple questions, choices or forms. `"fail"` declines input routing.
+
+The default output is text from artifacts, or the final reply when there are no artifacts.
+An `output` contract validates the first data part, or parsed JSON text. Peer metadata, private
+error text and history are not copied into the result. Files become labels and peer URLs are
+never fetched. `includeImages: true` requires an output validator and gives it
+`{ content: [text and inline image parts] }`. Return those content parts to let `asTool` forward
+images through the existing rich tool-result path. Input media references use `host.loadMedia`.
+
+Defaults are 12 outbound messages, 5 minutes, 5,000,000 inline bytes and 1,048,576 result bytes.
+Parent-continuation messages share the message budget. Remote work holds a tree slot and counts
+as a child, not a model call. Every remote receipt has `billing: "unknown"`; `treeUsage` counts
+only local reported model usage. A zero local token count does not mean a free remote task.
+
+An aborted signal, lost worker lease or closed observation stops local work only. It does not
+send `CancelTask` or undo external effects. Use `remote.cancel(snapshot, { host })` for an explicit
+host-authorized request. `snapshot.remote.cancel.state === "canceled"` confirms the peer's reply;
+an accepted command or an unknown reply is not cancellation proof. Repeated cancellation never
+resends an uncertain request. Reconcile it with the remote operator instead.
+
 ## Workflows
 
 A workflow is an ordinary async function with saved steps. Its input and result are typed:
@@ -1163,7 +1227,9 @@ one `kind` per workflow version. `read().wakeAt` and suspended outcomes report t
 At that time, your existing delayed queue or scheduled job calls `resume(owner, id, {})`. An early
 call is refused with the wake time. The SDK supplies no scheduler.
 
-An empty-answer continuation includes `continuation.wakeAt`. Your `claimContinuation` must
+An empty-answer continuation has `kind: "answers"` and includes `continuation.wakeAt`.
+A `kind: "cancel"` continuation has empty answers and no wake time; it cannot approve a tool
+or skip ahead to a scheduled step. For a wake, your `claimContinuation` must
 atomically reserve `(snapshot.runId, wakeAt)` for that claim and physical segment, even though
 there are no answers. Repeating the same claim in recovery may succeed; another segment must
 fail. Otherwise two delayed jobs could repeat future effects. Authentication, claims and fencing
@@ -1868,8 +1934,31 @@ failed agent outcome. Read the latter before treating the answer as complete. `s
 holds the whole conversation: keep it, and every raw event `observe` yields, on the server.
 
 Pass an observer signal to `observe` or `wait` to stop listening. That does not cancel the work.
-`cancel(owner, id)` cancels the whole run tree. Children execute in-process under their root's
-lease; they are not independently owned distributed jobs.
+`cancel(owner, id)` returns `{ id, requested }`. Follow that physical ID: `requested: true`
+means the command was accepted, not that execution stopped. Children run in-process under the
+root's lease. Local cancellation never sends a remote A2A `CancelTask`.
+
+A successful host row can hold a suspended logical run. To cancel it, supply the optional
+`createContinuation` callback. It receives `BackgroundContinuationInput`:
+`{ kind, owner, restart: "resume", input: { format: 1, snapshot, continuation } }` and returns
+`BackgroundContinuationResult`, `{ id }`. In one transaction, authenticate the owner, check the
+current source and create or reconcile `(owner, continuation.sourceId, continuation.id)`.
+Store the exact input and commit before returning the same physical ID. Refuse a changed input
+or competing claim. The cancellation claim is stable; the worker still checks and claims it
+under its lease. Do not replace this transaction with a process-local cache or an idempotency flag.
+
+Without this capability, suspended cancellation refuses before creating or queueing anything.
+Running-row cancellation and users who do not cancel suspensions need no extra setup. When
+supplied, the callback also admits answer/wake continuations. An uncertain callback response
+must reconcile the same claim; do not create a second row. An enqueue failure exposes the saved
+ID through `BackgroundEnqueueError`. A second Stop on the cancellation segment follows it
+without aborting the worker that must save the cancelled outcome.
+
+`start` can take a logical `runId`. The policy context contains that ID and the physical
+`segmentId`. `onSegment` is awaited at start and after the SDK journal settles, with the owner,
+physical ID, logical ID, state, private snapshot and live worker signal. It may repeat after
+worker loss. End is not proof that the host committed its row. A cancellation continuation
+keeps that worker signal live and passes a separate aborted signal to SDK execution.
 
 ### Stored progress
 
@@ -1943,9 +2032,11 @@ server code:
 
 - `authorizeResume` checks stored state and ownership on every attempt.
 - `prepareRequest` supplies the actor, resource version and request expiry.
-- `claimContinuation(snapshot, continuation)` authenticates `continuation.answers` and atomically
-  reserves every named request for `continuation.id` and this host segment. Repeating the exact
-  claim during recovery must succeed; a different claim, segment or resource version must fail.
+- `claimContinuation(snapshot, continuation)` checks its required `kind`. For `"answers"`,
+  authenticate `continuation.answers` and atomically reserve every named request for
+  `continuation.id` and this host segment. For `"cancel"`, claim the current source under the
+  owner without granting any pending request. Repeating the exact claim during recovery must
+  succeed; a different claim, segment or resource version must fail.
 - `resolveRequest` returns each decision only for that claim. `beforeTool` checks current access
   and resource version again immediately before the action.
 

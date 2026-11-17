@@ -1,7 +1,8 @@
+import type { RemoteAgent, RemoteInput, RemoteOutcome } from "./a2a/remote.ts";
 import type { Workflow, WorkflowOutcome } from "./workflow-types.ts";
 import type { TreeNode } from "./types.ts";
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
-import { startChild, childOptions, prepareChild } from "./child.ts";
+import { admitChild, startChild, childOptions, prepareChild } from "./child.ts";
 import { RequestJournal } from "./request.ts";
 import { checkMemoryBinding } from "./memory.ts";
 import { isSubagentTool, type SubagentCreation, type SubagentRecord } from "./subagents.ts";
@@ -57,8 +58,8 @@ export interface RunStart {
   session?: RunSnapshot["session"];
 }
 
-export type Specialist = Agent<unknown> | Workflow<unknown, unknown>;
-export type NodeOutcome<T = unknown> = RunOutcome<T> | WorkflowOutcome<T>;
+export type Specialist = Agent<unknown> | Workflow<unknown, unknown> | RemoteAgent<unknown>;
+export type NodeOutcome<T = unknown> = RunOutcome<T> | WorkflowOutcome<T> | RemoteOutcome<T>;
 export interface NodeRuntime<R extends NodeOutcome = NodeOutcome> {
   restore(raw: unknown, tree?: RunSnapshot["tree"], subagent?: SubagentRecord): TreeNode;
   hydrate(snapshot: TreeNode): R;
@@ -77,6 +78,7 @@ export interface NodeRuntime<R extends NodeOutcome = NodeOutcome> {
   ): Promise<R>;
 }
 export function runtimeOf<T>(node: Agent<T>): NodeRuntime<RunOutcome<T>>;
+export function runtimeOf<T>(node: RemoteAgent<T>): NodeRuntime<RemoteOutcome<T>>;
 export function runtimeOf<I, O>(node: Workflow<I, O>): NodeRuntime<WorkflowOutcome<O>>;
 export function runtimeOf(node: Specialist): NodeRuntime;
 export function runtimeOf(node: Specialist): NodeRuntime {
@@ -162,6 +164,11 @@ export interface DelegationContext {
    * parent's session. */
   child<I, O>(key: string, workflow: Workflow<I, O>, input: I): ChildHandle<O, WorkflowOutcome<O>>;
   child<T>(key: string, agent: Agent<T>, input: AgentInput): ChildHandle<T>;
+  child<T>(
+    key: string,
+    agent: RemoteAgent<T>,
+    input: RemoteInput,
+  ): ChildHandle<T, RemoteOutcome<T>>;
   /** Settles in caller order, not completion order. No child may outlive this barrier. */
   join<const H extends readonly ChildHandle<unknown, NodeOutcome>[]>(
     handles: H,
@@ -381,6 +388,11 @@ export async function executeDelegation(
     agent: Workflow<I, O>,
     input: I,
   ): ChildHandle<O, WorkflowOutcome<O>>;
+  function child<T>(
+    key: string,
+    agent: RemoteAgent<T>,
+    input: RemoteInput,
+  ): ChildHandle<T, RemoteOutcome<T>>;
   function child(
     key: string,
     agent: Specialist,
@@ -398,7 +410,7 @@ export async function executeDelegation(
         journal.operationId,
       );
     const runtime = runtimeOf(agent);
-    const prepared = prepareChild(agent, input, subagent);
+    const prepared = prepareChild(agent, input, subagent, scope.tree.root);
     const start = prepared.input;
     const identity = { agentId: agent.id, version: agent.version, start, subagent };
     const prior = requested.get(key);
@@ -442,9 +454,7 @@ export async function executeDelegation(
         admitted = admissions.then(async () => {
           const snapshot = await prepared.create(runId, parent.tree, { ...inherited, signal });
           active();
-          scope.tree.reserveChild(scope.depth + 1);
-          entry = { key, snapshot };
-          journal.children.push(entry);
+          entry = admitChild(journal.children, { key, snapshot }, scope);
           return entry;
         });
         admissions = admitted.then(
@@ -634,7 +644,9 @@ export async function executeDelegation(
           });
         } else if (agent.kind === "agent")
           child(entry.key, agent, inputOf(agentSnapshot(entry.snapshot)));
-        else child(entry.key, agent, entry.snapshot.input);
+        else if (agent.kind === "remote" && entry.snapshot.kind === "remote")
+          child(entry.key, agent, entry.snapshot.input);
+        else if (agent.kind === "workflow") child(entry.key, agent, entry.snapshot.input);
       }
     } catch (error) {
       failure ??= { error };

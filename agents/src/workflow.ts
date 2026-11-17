@@ -22,7 +22,8 @@ import {
   type NodeOutcome,
   type Specialist,
 } from "./delegation.ts";
-import { startChild, childOptions, prepareChild } from "./child.ts";
+import type { RemoteAgent, RemoteInput, RemoteOutcome } from "./a2a/remote.ts";
+import { admitChild, startChild, childOptions, prepareChild } from "./child.ts";
 import { checkMemoryBinding, memoryScopes, readMemoryBinding } from "./memory.ts";
 import { RequestJournal, isAsk, requestHash } from "./request.ts";
 import {
@@ -802,6 +803,11 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
       value: AgentInput,
       options?: { retry?: ChildRetry },
     ): Promise<RunOutcome<T>>;
+    function child<T>(
+      key: string,
+      node: RemoteAgent<T>,
+      value: RemoteInput,
+    ): Promise<RemoteOutcome<T>>;
     function child<CI, CO>(
       key: string,
       node: Workflow<CI, CO>,
@@ -828,7 +834,11 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
         throw new TypeError(
           "Child retries need bounded attempts and an explicit repeatability policy.",
         );
-      const prepared = prepareChild(node, value);
+      if (retry && node.kind === "remote")
+        throw new TypeError(
+          "Remote messages cannot be replayed by child retries. Resume the saved task.",
+        );
+      const prepared = prepareChild(node, value, undefined, scope.tree.root);
       const normalized = prepared.input;
       return admit(
         key,
@@ -857,9 +867,7 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
               const runId = childRunId(entry.id, childKey);
               const created = await prepared.create(runId, snapshot.tree, childOptions(options));
               active();
-              scope.tree.reserveChild(scope.depth + 1);
-              saved = { key: childKey, snapshot: created };
-              entry.children.push(saved);
+              saved = admitChild(entry.children, { key: childKey, snapshot: created }, scope);
             }
             entry.status = "running";
             try {
@@ -908,13 +916,15 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
               state.error.code !== "content_filtered" &&
               retry &&
               entry.children.length < retry.maxAttempts &&
+              result.snapshot.kind !== "remote" &&
               (retry.retryOn?.(result) ?? true)
             ) {
               if (
                 [...requestRecords(saved.snapshot)].length ||
                 [...snapshots(saved.snapshot)].some(
                   (node) =>
-                    node.kind === "agent" && node.definition.modelSettings.hostedTools?.length,
+                    node.kind === "remote" ||
+                    (node.kind === "agent" && node.definition.modelSettings.hostedTools?.length),
                 )
               )
                 fail(

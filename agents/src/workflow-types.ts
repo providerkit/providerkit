@@ -1,8 +1,10 @@
+import type { RemoteAgent, RemoteInput, RemoteOutcome } from "./a2a/remote.ts";
 import type { TokenUsage, ToolContext } from "@providerkit/core";
 import type {
   AGENT_RUNTIME,
   Delegation,
   NodeRuntime,
+  NodeOutcome,
   SpecialistToolOptions,
 } from "./delegation.ts";
 import type {
@@ -23,7 +25,7 @@ import type {
   TreeLimits,
 } from "./types.ts";
 
-export type StepKind = "step" | "agent" | "workflow" | "ask" | "sleep";
+export type StepKind = "step" | "agent" | "remote" | "workflow" | "ask" | "sleep";
 export interface StepError {
   reason: "failed" | "timeout" | "denied" | "cancelled";
   name: string;
@@ -72,7 +74,7 @@ export interface ChildRetry {
   maxAttempts: number;
   /** Host assertion that the whole child is read-only, or host reconciliation of all its effects. */
   replay: "read-only" | "reconcile";
-  retryOn?: (outcome: RunOutcome<unknown> | WorkflowOutcome<unknown>) => boolean;
+  retryOn?: (outcome: NodeOutcome) => boolean;
 }
 export interface WorkflowSnapshot {
   format: 3;
@@ -150,7 +152,7 @@ export interface WorkflowSpec<I, O> {
   version: string;
   input: ResultSchema<I>;
   output?: ResultSchema<O>;
-  agents?: readonly Agent<unknown>[];
+  agents?: readonly (Agent<unknown> | RemoteAgent<unknown>)[];
   workflows?: readonly Workflow<unknown, unknown>[];
   limits?: Partial<WorkflowLimits>;
   treeLimits?: Partial<TreeLimits>;
@@ -198,6 +200,8 @@ export interface WorkflowContext {
     input: AgentInput,
     options?: { retry?: ChildRetry },
   ): Promise<RunOutcome<T>>;
+  /** Remote sends cannot be retried as a new child. Resume their recorded task instead. */
+  agent<T>(key: string, agent: RemoteAgent<T>, input: RemoteInput): Promise<RemoteOutcome<T>>;
   workflow<I, O>(
     key: string,
     workflow: Workflow<I, O>,

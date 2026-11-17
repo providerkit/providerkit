@@ -78,7 +78,7 @@ function isStep(raw: unknown): raw is StepExecution {
     isId(raw.id) &&
     isId(raw.key) &&
     raw.key.length <= 256 &&
-    ["step", "agent", "workflow", "ask", "sleep"].includes(String(raw.kind)) &&
+    ["step", "agent", "remote", "workflow", "ask", "sleep"].includes(String(raw.kind)) &&
     ["pending", "running", "waiting", "retrying", "completed", "failed"].includes(
       String(raw.status),
     ) &&
@@ -194,10 +194,17 @@ export function checkWorkflowSnapshot(node: WorkflowSnapshot): void {
       if (step.status === "completed" && step.attempts.at(-1)?.status !== "completed")
         throw new TypeError("A completed effect needs a receipt.");
     } else if (step.attempts.length) throw new TypeError("Only host effects have effect attempts.");
-    if (step.kind !== "agent" && step.kind !== "workflow" && step.children.length)
+    if (
+      step.kind !== "agent" &&
+      step.kind !== "workflow" &&
+      step.kind !== "remote" &&
+      step.children.length
+    )
       throw new TypeError("This step cannot own a child.");
-    if (step.kind === "agent" || step.kind === "workflow") {
+    if (step.kind === "agent" || step.kind === "workflow" || step.kind === "remote") {
       const retry = step.definition.retry;
+      if (step.kind === "remote" && retry)
+        throw new TypeError("Remote children cannot be retried.");
       const max = isRecord(retry) && integer(retry.maxAttempts) ? retry.maxAttempts : 1;
       if (
         step.children.length > max ||

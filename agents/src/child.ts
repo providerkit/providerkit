@@ -6,7 +6,20 @@ import { checkChildProgress, checkTree, immutableCopy, isId, isRecord } from "./
 import { emitEvent, fail, untilAbort, type ExecutionScope } from "./tree.ts";
 
 /** Capture input before asynchronous admission so callers cannot change the saved identity. */
-export function prepareChild(node: Specialist, input: unknown, subagent?: SubagentCreation) {
+export function prepareChild(
+  node: Specialist,
+  input: unknown,
+  subagent?: SubagentCreation,
+  root?: TreeNode,
+) {
+  if (node.kind === "remote") {
+    const start = node[AGENT_RUNTIME].prepare(input);
+    return {
+      input: start,
+      create: (runId: string, tree: TreeNode["tree"], options: RunOptions): Promise<TreeNode> =>
+        node[AGENT_RUNTIME].create(start, runId, tree, options, root),
+    };
+  }
   if (node.kind === "agent") {
     const start = node[AGENT_RUNTIME].freeze(readInput(input, "trusted"));
     return {
@@ -21,6 +34,24 @@ export function prepareChild(node: Specialist, input: unknown, subagent?: Subage
     create: (runId: string, tree: TreeNode["tree"], options: RunOptions): Promise<TreeNode> =>
       node[AGENT_RUNTIME].create(start, runId, tree, options),
   };
+}
+
+/** Insert and validate without yielding, so competing coordinators cannot consume one handle.
+ * A refused child must never reach a checkpoint or leave an invalid admission behind. */
+export function admitChild(
+  children: (ChildEnvelope & { key: string })[],
+  child: ChildEnvelope & { key: string },
+  scope: ExecutionScope,
+): ChildEnvelope & { key: string } {
+  scope.tree.reserveChild(scope.depth + 1);
+  children.push(child);
+  try {
+    checkTree(scope.tree.root);
+  } catch (error) {
+    children.pop();
+    throw error;
+  }
+  return child;
 }
 
 /** Shared leased child execution. Admission belongs to the caller's journal, never the host. */
@@ -59,7 +90,9 @@ export async function startChild(
               agentId: saved.snapshot.agentId,
               ...(saved.snapshot.subagent ? { subagent: true as const } : {}),
             }
-          : { kind: "workflow" as const, workflowId: saved.snapshot.workflowId };
+          : saved.snapshot.kind === "remote"
+            ? { kind: "remote" as const, agentId: saved.snapshot.agentId }
+            : { kind: "workflow" as const, workflowId: saved.snapshot.workflowId };
       emitEvent(options, {
         type: "child",
         parentRunId: parent.runId,

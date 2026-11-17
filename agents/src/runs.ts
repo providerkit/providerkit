@@ -9,6 +9,8 @@ import type {
 import { createProgress, type EventDurability } from "./progress.ts";
 export type { EventDurability, ProgressGap } from "./progress.ts";
 import { checkMemoryBinding, readMemoryBinding, type MemoryBinding } from "./memory.ts";
+import type { RemoteAgent, RemoteOutcome } from "./a2a/remote.ts";
+import { requestHash } from "./request.ts";
 import type { NodeOutcome } from "./delegation.ts";
 import type { Workflow, WorkflowOutcome } from "./workflow-types.ts";
 import { AGENT_RUNTIME } from "./delegation.ts";
@@ -16,6 +18,7 @@ import {
   checkOptions,
   checkChildProgress,
   copyData,
+  equalData,
   immutableCopy,
   isId,
   isRecord,
@@ -58,12 +61,18 @@ export interface BackgroundWorker extends Pick<
 }
 
 import type {
+  BackgroundCancelResult,
+  BackgroundContinuationInput,
+  BackgroundContinuationResult,
   BackgroundContext,
   BackgroundPolicy,
   Continuation,
   SegmentHook,
 } from "./background-types.ts";
 export type {
+  BackgroundCancelResult,
+  BackgroundContinuationInput,
+  BackgroundContinuationResult,
   BackgroundContext,
   BackgroundPolicy,
   Continuation,
@@ -72,6 +81,12 @@ export type {
 
 export interface BackgroundOptions<T> extends BackgroundBase {
   agent: Agent<T>;
+}
+export interface BackgroundRemoteOptions<T> extends Omit<
+  BackgroundBase,
+  "session" | "historyLimit" | "prepareHistory" | "memory"
+> {
+  agent: RemoteAgent<T>;
 }
 export interface BackgroundWorkflowOptions<I, O> extends Omit<
   BackgroundBase,
@@ -84,6 +99,12 @@ interface BackgroundBase {
   kind: string;
   /** Injected create must resolve after its transaction commits. Only then is enqueue called. */
   runs: BackgroundRuns;
+  /** Optional durable, owner-scoped create-or-reconcile capability. Required only to cancel
+   * a suspended logical run. Also used for answers when supplied. Never substitute a local
+   * cache or an idempotency flag for atomic host storage. See BackgroundContinuationInput. */
+  createContinuation?: (
+    input: BackgroundContinuationInput,
+  ) => Promise<BackgroundContinuationResult>;
   /** Coalesced progress uses emit by default. Awaited mode needs Run.append (server 0.21+). */
   events?: EventDurability;
   /** Await durable queue acceptance. A worker calls runs.drive(id, background.handlers).
@@ -162,11 +183,14 @@ function settled(raw: unknown): Settled {
 export function createBackgroundAgent<T>(
   options: BackgroundOptions<T>,
 ): ReturnType<typeof bindBackground<AgentInput, RunOutcome<T>>>;
+export function createBackgroundAgent<T>(
+  options: BackgroundRemoteOptions<T>,
+): ReturnType<typeof bindBackground<AgentInput, RemoteOutcome<T>>>;
 export function createBackgroundAgent<I, O>(
   options: BackgroundWorkflowOptions<I, O>,
 ): ReturnType<typeof bindBackground<I, WorkflowOutcome<O>>>;
 export function createBackgroundAgent<I, O>(
-  options: BackgroundOptions<O> | BackgroundWorkflowOptions<I, O>,
+  options: BackgroundOptions<O> | BackgroundRemoteOptions<O> | BackgroundWorkflowOptions<I, O>,
 ) {
   if ("workflow" in options) {
     const workflow = options.workflow;
@@ -176,6 +200,11 @@ export function createBackgroundAgent<I, O>(
     });
   }
   const agent = options.agent;
+  if (agent.kind === "remote")
+    return bindBackground<AgentInput, RemoteOutcome<O>>(options, {
+      ...agent[AGENT_RUNTIME],
+      resume: (raw, opts) => agent.resume(raw, opts),
+    });
   const runtime = agent[AGENT_RUNTIME];
   return bindBackground<AgentInput, RunOutcome<O>>(options, {
     open: (input, opts, id) => runtime.open(input, opts, id),
@@ -199,6 +228,10 @@ function bindBackground<I, R extends NodeOutcome>(
   if (!isId(kind) || typeof enqueue !== "function" || typeof options.policy !== "function")
     throw new TypeError(
       "Provide a run kind, a durable enqueue callback and a trusted policy factory.",
+    );
+  if (options.createContinuation !== undefined && typeof options.createContinuation !== "function")
+    throw new TypeError(
+      "createContinuation must atomically create or reconcile a saved continuation.",
     );
   if (options.onSegment !== undefined && typeof options.onSegment !== "function")
     throw new TypeError("onSegment must be a function.");
@@ -246,9 +279,22 @@ function bindBackground<I, R extends NodeOutcome>(
     const continuation = raw.continuation;
     if (
       !isRecord(continuation) ||
+      snapshot.state.status !== "suspended" ||
       !isId(continuation.id) ||
       !isId(continuation.sourceId) ||
       !isRecord(continuation.answers) ||
+      !["answers", "cancel"].includes(String(continuation.kind)) ||
+      Object.keys(continuation).some(
+        (key) => !["id", "sourceId", "kind", "answers", "wakeAt"].includes(key),
+      ) ||
+      (continuation.kind === "cancel" &&
+        (Object.keys(continuation.answers).length !== 0 ||
+          continuation.wakeAt !== undefined ||
+          continuation.id !== `cancel/${continuation.sourceId}`)) ||
+      (continuation.kind === "answers" &&
+        (Object.keys(continuation.answers).length === 0
+          ? continuation.wakeAt === undefined
+          : continuation.wakeAt !== undefined)) ||
       (continuation.wakeAt !== undefined &&
         (typeof continuation.wakeAt !== "number" || continuation.wakeAt !== wakeAt(snapshot)))
     )
@@ -256,12 +302,21 @@ function bindBackground<I, R extends NodeOutcome>(
     return {
       format: 1,
       snapshot,
-      continuation: {
-        id: continuation.id,
-        sourceId: continuation.sourceId,
-        ...(typeof continuation.wakeAt === "number" ? { wakeAt: continuation.wakeAt } : {}),
-        answers: readAnswers(snapshot, continuation.answers),
-      },
+      continuation:
+        continuation.kind === "cancel"
+          ? {
+              kind: "cancel",
+              id: continuation.id,
+              sourceId: continuation.sourceId,
+              answers: {},
+            }
+          : {
+              kind: "answers",
+              id: continuation.id,
+              sourceId: continuation.sourceId,
+              ...(typeof continuation.wakeAt === "number" ? { wakeAt: continuation.wakeAt } : {}),
+              answers: readAnswers(snapshot, continuation.answers),
+            },
     };
   }
 
@@ -305,7 +360,25 @@ function bindBackground<I, R extends NodeOutcome>(
 
   async function create(owner: string, initial: Segment): Promise<{ id: string }> {
     // Input is stored in the create transaction, before any id is acknowledged or queued.
-    const created = await runs.create({ kind, owner, restart: "resume", input: copyData(initial) });
+    const spec = { kind, owner, restart: "resume" as const, input: copyData(initial) };
+    const created =
+      options.createContinuation && initial.continuation
+        ? await options.createContinuation(
+            immutableCopy({ ...spec, input: { ...initial, continuation: initial.continuation } }),
+          )
+        : await runs.create(spec);
+    if (options.createContinuation && initial.continuation) {
+      const saved = await runs.read(created.id, owner);
+      if (
+        !saved ||
+        saved.owner !== owner ||
+        saved.kind !== kind ||
+        !equalData(saved.input, initial)
+      )
+        throw new Error(
+          "The continuation host must commit the exact input before returning its id.",
+        );
+    }
     try {
       await enqueue(created.id);
     } catch (cause) {
@@ -356,7 +429,8 @@ function bindBackground<I, R extends NodeOutcome>(
     run.signal.throwIfAborted();
     if (initial.continuation?.wakeAt !== undefined && Date.now() < initial.continuation.wakeAt)
       throw new Error("The saved workflow wake is not due yet.");
-    if (initial.continuation)
+    if (initial.continuation) {
+      await untilAbort(Promise.resolve(trusted.authorizeResume(immutableCopy(snapshot))), signal);
       await untilAbort(
         Promise.resolve(
           trusted.claimContinuation(
@@ -366,6 +440,7 @@ function bindBackground<I, R extends NodeOutcome>(
         ),
         run.signal,
       );
+    }
     if (run.resumed) await progress.resync(run.crashes);
     const parents = new Map<string, BackgroundWorker>([[snapshot.runId, run]]);
     const host: AgentHost & { authorizeResume: BackgroundPolicy["authorizeResume"] } = {
@@ -458,7 +533,12 @@ function bindBackground<I, R extends NodeOutcome>(
     }
     await notifySegment("start", snapshot);
     const result = await runtime.resume(snapshot, {
-      signal,
+      // The host lease remains live so authorization, checkpoints and segment end still run.
+      // This signal stops local execution only; it does not grant a remote CancelTask.
+      signal:
+        initial.continuation?.kind === "cancel"
+          ? AbortSignal.any([signal, AbortSignal.abort()])
+          : signal,
       context: trusted.context,
       onEvent: trusted.onEvent,
       onLifecycle: trusted.onLifecycle,
@@ -547,9 +627,28 @@ function bindBackground<I, R extends NodeOutcome>(
       signal?.throwIfAborted();
       return read(owner, id);
     },
-    async cancel(owner: string, id: string): Promise<boolean> {
-      await load(owner, id);
-      return runs.cancel(id);
+    async cancel(owner: string, id: string): Promise<BackgroundCancelResult> {
+      const { row, snapshot, initial } = await load(owner, id);
+      // A second Stop must not abort the worker that still needs to save logical cancellation.
+      if (initial.continuation?.kind === "cancel") return { id, requested: true };
+      if (row.status === "succeeded" && snapshot.state.status === "suspended") {
+        if (!options.createContinuation)
+          throw new TypeError(
+            "Cancelling a suspended run requires the host's durable createContinuation capability. No segment was created.",
+          );
+        const continuation: Continuation = {
+          id: `cancel/${id}`,
+          sourceId: id,
+          kind: "cancel",
+          answers: {},
+        };
+        // The new worker must claim the current logical segment under its owner's policy.
+        // A repeated command has the same claim; a different worker cannot consume it again.
+        const created = await create(owner, { format: 1, snapshot, continuation });
+        return { id: created.id, requested: true };
+      }
+      if (row.status !== "queued" && row.status !== "running") return { id, requested: false };
+      return { id, requested: await runs.cancel(id) };
     },
     /** Queues decision evidence, not permission. The leased worker claims it; read or wait
      * for that segment's outcome to learn whether the host accepted it. */
@@ -578,12 +677,19 @@ function bindBackground<I, R extends NodeOutcome>(
         )
       )
         throw new Error("A request expired. Ask the host to renew it before continuing.");
-      const continuation = copyData({
-        id: crypto.randomUUID(),
+      const evidence = {
         sourceId: id,
         answers: submitted,
         ...(!Object.keys(submitted).length ? { wakeAt: wakeAt(snapshot) } : {}),
-      });
+      };
+      const continuation: Continuation = {
+        kind: "answers",
+        // With durable admission an uncertain response must reconcile the same exact claim.
+        id: options.createContinuation
+          ? await requestHash({ owner, ...evidence })
+          : crypto.randomUUID(),
+        ...evidence,
+      };
       return create(owner, { format: 1, snapshot, continuation });
     },
   });
