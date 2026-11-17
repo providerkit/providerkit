@@ -6,9 +6,19 @@ import {
   parseToolArgs,
   type TokenUsage,
 } from "@providerkit/core";
-import { RESULT_TOOL_NAME, type RunSnapshot } from "../index.ts";
+import { RESULT_TOOL_NAME, type AskRecord, type RunSnapshot, type TreeNode } from "../index.ts";
+import { allModels } from "../compaction.ts";
 import { inputOf, readInput } from "../input.ts";
-import { copyData, isId, isRecord, isUsage, readLimits, readSnapshot } from "../snapshot.ts";
+import {
+  agentSnapshot,
+  copyData,
+  isId,
+  isRecord,
+  isUsage,
+  readLimits,
+  readSnapshot,
+} from "../snapshot.ts";
+import { snapshots } from "../tree.ts";
 import { checkExpectation } from "./trajectory.ts";
 import type {
   EvalCase,
@@ -22,25 +32,12 @@ import type {
   TrajectoryStep,
 } from "./types.ts";
 
-export function* nodes(root: RunSnapshot): Generator<RunSnapshot> {
-  yield root;
-  for (const journal of root.delegations)
-    for (const child of journal.children) yield* nodes(child.snapshot);
-}
-
-function modelsOf(node: RunSnapshot) {
-  return [
-    ...node.models,
-    ...node.compactions.flatMap((entry) => (entry.model ? [entry.model] : [])),
-  ];
-}
-
 /** Uses the SDK's structural and journal checks, never resume or an output validator. A stored
  * journal is data, not permission to run a tool. Unknown output contracts stay unknown JSON. */
 export function readJournal(raw: unknown): RunSnapshot {
   const value = isRecord(raw) && "snapshot" in raw ? raw.snapshot : raw;
-  if (!isRecord(value) || !isId(value.agentId) || !isId(value.version))
-    throw new TypeError("Provide a format-3 run journal or an SDK run outcome.");
+  if (!isRecord(value) || value.kind !== "agent" || !isId(value.agentId) || !isId(value.version))
+    throw new TypeError("Provide a format-3 agent run journal or an SDK agent outcome.");
   const limits = readLimits(value.limits);
   const definition = value.definition;
   const checkedOutput =
@@ -54,15 +51,23 @@ export function readJournal(raw: unknown): RunSnapshot {
     limits,
     checkedOutput ? RESULT_TOOL_NAME : undefined,
   );
-  // readSnapshot validates the whole tree's shape and root's operations. Validate each child's
-  // operations too: stored data need not have come from our own checkpoint callback.
-  for (const journal of root.delegations)
-    for (const child of journal.children) readJournal(child.snapshot);
-  for (const node of nodes(root))
-    for (const model of modelsOf(node)) {
+  // readSnapshot checks the mixed tree's shape and every workflow's operations. Agent
+  // descendants need their own operation checks, including those below workflow steps.
+  for (const node of snapshots(root)) {
+    if (node.kind !== "agent") continue;
+    if (node !== root)
+      readSnapshot(
+        node,
+        node.agentId,
+        node.version,
+        node.limits,
+        node.definition.enabledTools.includes(RESULT_TOOL_NAME) ? RESULT_TOOL_NAME : undefined,
+      );
+    for (const model of allModels(node)) {
       checkUsage(model.usage);
       for (const attempt of model.interrupted) checkUsage(attempt.usage);
     }
+  }
   return root;
 }
 
@@ -104,11 +109,12 @@ export function combineUsage(values: Iterable<EvalUsage>): EvalUsage {
   return result;
 }
 
-export function usageOf(root: RunSnapshot, price?: EvalPrice): EvalUsage {
+export function usageOf(root: TreeNode, price?: EvalPrice): EvalUsage {
   const totals = emptyUsage();
   const seen = new Set<string>();
-  for (const node of nodes(root)) {
-    for (const model of modelsOf(node)) {
+  for (const node of snapshots(root)) {
+    if (node.kind !== "agent") continue;
+    for (const model of allModels(node)) {
       if (seen.has(model.id)) continue;
       seen.add(model.id);
       const ref: ModelRef = {
@@ -163,66 +169,104 @@ export function usageOf(root: RunSnapshot, price?: EvalPrice): EvalUsage {
   return totals;
 }
 
-/** Call order comes from the journal, never completion time. Hosted provider tools are not
- * local calls and are not represented here. Their reported charges still enter usageOf. */
-export function journalTrajectory(root: RunSnapshot): Trajectory {
+function childTrajectory({
+  key,
+  snapshot,
+}: {
+  key: string;
+  snapshot: TreeNode;
+}): TrajectoryStep["children"][number] {
+  return {
+    key,
+    ...(snapshot.kind === "agent"
+      ? { kind: "agent" as const, agentId: snapshot.agentId }
+      : { kind: "workflow" as const, workflowId: snapshot.workflowId }),
+    runId: snapshot.runId,
+    trajectory: journalTrajectory(snapshot),
+  };
+}
+
+function approvedInput<T>(input: T, asks: readonly AskRecord[] = []): T | Record<string, unknown> {
+  let effective: T | Record<string, unknown> = input;
+  for (const ask of asks) {
+    if (ask.decision?.type === "approve") effective = ask.decision.arguments ?? input;
+  }
+  return effective;
+}
+
+/** Admission order comes from the journal, never completion time. Workflow steps retain their
+ * own kind and input; only agent nodes contribute model/tool calls. Hosted charges enter usageOf. */
+export function journalTrajectory(root: TreeNode): Trajectory {
   const result: Trajectory = {
     steps: [],
     flat: [],
-    modelCalls: root.compactions.reduce(
-      (count, entry) => count + (entry.model ? 1 + entry.model.interrupted.length : 0),
-      0,
-    ),
+    modelCalls:
+      root.kind === "agent"
+        ? allModels(root).reduce((count, model) => count + 1 + model.interrupted.length, 0)
+        : 0,
     toolCalls: 0,
   };
-  for (const [index, model] of root.models.entries()) {
-    result.modelCalls += 1 + model.interrupted.length;
-    if (model.status !== "completed") continue;
-    for (const [position, call] of (model.turn.message.toolCalls ?? []).entries()) {
-      const execution = model.tools[position];
-      if (!execution || call.name === RESULT_TOOL_NAME) continue;
-      const attempts =
-        execution.interrupted.length +
-        execution.retries.length +
-        (execution.status === "pending" ? 0 : 1);
-      if (!attempts) continue;
-      const journal = root.delegations.find((entry) => entry.operationId === execution.id);
-      let args = parseToolArgs(call.arguments);
-      for (const ask of execution.asks ?? [])
-        if (ask.decision?.type === "approve" && ask.decision.arguments)
-          args = ask.decision.arguments;
-      const step: TrajectoryStep = {
-        kind: journal?.kind ?? "tool",
-        name: call.name,
-        arguments: copyData(args),
-        status:
-          execution.status === "completed"
-            ? "completed"
-            : execution.status === "pending"
-              ? "interrupted"
-              : "running",
-        attempts,
-        ...(execution.status === "completed" ? { result: copyData(execution.result) } : {}),
-        asks: copyData(execution.asks ?? []),
-        agentId: root.agentId,
-        runId: root.runId,
-        operationId: execution.id,
-        turn: index + 1,
-        children: (journal?.children ?? []).map(({ key, snapshot }) => ({
-          key,
-          agentId: snapshot.agentId,
-          runId: snapshot.runId,
-          trajectory: journalTrajectory(snapshot),
-        })),
-      };
-      result.steps.push(step);
-      result.flat.push(step);
-      result.toolCalls += attempts;
-      for (const child of step.children) {
-        result.flat.push(...child.trajectory.flat);
-        result.modelCalls += child.trajectory.modelCalls;
-        result.toolCalls += child.trajectory.toolCalls;
+  if (root.kind === "workflow") {
+    result.steps = root.steps.map((step) => ({
+      kind: step.kind,
+      name: step.key,
+      workflowId: root.workflowId,
+      runId: root.runId,
+      operationId: step.id,
+      input: copyData(approvedInput(step.definition.input, step.asks)),
+      ...(step.status === "completed" ? { output: copyData(step.result) } : {}),
+      status: step.status,
+      attempts:
+        step.kind === "step"
+          ? step.attempts.filter((attempt) => attempt.status !== "not_run").length
+          : step.kind === "agent" || step.kind === "workflow"
+            ? step.children.length
+            : 1,
+      asks: copyData(step.asks ?? []),
+      children: step.children.map(childTrajectory),
+    }));
+  } else {
+    for (const [index, model] of root.models.entries()) {
+      if (model.status !== "completed") continue;
+      for (const [position, call] of (model.turn.message.toolCalls ?? []).entries()) {
+        const execution = model.tools[position];
+        if (!execution || call.name === RESULT_TOOL_NAME) continue;
+        const attempts =
+          execution.interrupted.length +
+          execution.retries.length +
+          (execution.status === "pending" ? 0 : 1);
+        if (!attempts) continue;
+        const journal = root.delegations.find((entry) => entry.operationId === execution.id);
+        const args = approvedInput(parseToolArgs(call.arguments), execution.asks);
+        result.steps.push({
+          kind: journal?.kind ?? "tool",
+          name: call.name,
+          arguments: copyData(args),
+          status:
+            execution.status === "completed"
+              ? "completed"
+              : execution.status === "pending"
+                ? "interrupted"
+                : "running",
+          attempts,
+          ...(execution.status === "completed" ? { result: copyData(execution.result) } : {}),
+          asks: copyData(execution.asks ?? []),
+          agentId: root.agentId,
+          runId: root.runId,
+          operationId: execution.id,
+          turn: index + 1,
+          children: (journal?.children ?? []).map(childTrajectory),
+        });
+        result.toolCalls += attempts;
       }
+    }
+  }
+  for (const step of result.steps) {
+    result.flat.push(step);
+    for (const child of step.children) {
+      result.flat.push(...child.trajectory.flat);
+      result.modelCalls += child.trajectory.modelCalls;
+      result.toolCalls += child.trajectory.toolCalls;
     }
   }
   return result;
@@ -240,7 +284,7 @@ export function evalRun(root: RunSnapshot, price?: EvalPrice, durationMs?: numbe
       (entry) => entry.kind === "handoff" && entry.children.length > 0,
     )?.children[0];
     if (!child) break;
-    active = child.snapshot;
+    active = agentSnapshot(child.snapshot);
   }
   const last = active.models.at(-1);
   return {
@@ -268,6 +312,7 @@ export function runResult(
   durationMs?: number,
 ): EvalRunResult {
   const run = evalRun(snapshot, undefined, durationMs);
+  const agents = [...snapshots(snapshot)].filter((node) => node.kind === "agent");
   return {
     runId: snapshot.runId,
     attemptId: snapshot.attemptId,
@@ -280,8 +325,8 @@ export function runResult(
     toolCalls: run.trajectory.toolCalls,
     durationMs,
     ...usage,
-    modelAttempts: [...nodes(snapshot)].flatMap((node) =>
-      modelsOf(node).flatMap((model) => [
+    modelAttempts: agents.flatMap((node) =>
+      allModels(node).flatMap((model) => [
         ...model.interrupted.map((attempt) => ({
           operationId: model.id,
           attemptId: attempt.attemptId,
@@ -298,7 +343,7 @@ export function runResult(
         },
       ]),
     ),
-    toolAttempts: [...nodes(snapshot)].flatMap((node) =>
+    toolAttempts: agents.flatMap((node) =>
       node.models.flatMap((model) =>
         model.status !== "completed"
           ? []
@@ -460,7 +505,7 @@ export function caseFromRun(raw: unknown, options: { id: string }): EvalCase {
     throw new TypeError(
       "Only a completed run can become a golden case. No interrupted work is resumed.",
     );
-  if ([...nodes(snapshot)].some((node) => node.inputs.length > 0))
+  if ([...snapshots(snapshot)].some((node) => node.kind === "agent" && node.inputs.length > 0))
     throw new TypeError(
       "This run received messages while working. Record its input timing in the host instead of replaying it as one case.",
     );

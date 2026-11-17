@@ -19,24 +19,39 @@ export function checkDriver(driver: EvalDriver): void {
     if (
       !isRecord(answer) ||
       Object.keys(answer).some(
-        (key) => !["agentId", "tool", "path", "arguments", "ask", "key", "decision"].includes(key),
+        (key) =>
+          !["path", "ask", "key", "decision"].includes(key) &&
+          !(
+            answer.workflowId !== undefined
+              ? ["workflowId", "step", "input"]
+              : ["agentId", "tool", "arguments"]
+          ).includes(key),
       ) ||
-      !isId(answer.agentId) ||
-      !isId(answer.tool) ||
-      answer.agentId === "*" ||
-      answer.tool === "*" ||
+      (answer.workflowId !== undefined
+        ? !isId(answer.workflowId) ||
+          !isId(answer.step) ||
+          answer.workflowId === "*" ||
+          answer.step === "*"
+        : !isId(answer.agentId) ||
+          !isId(answer.tool) ||
+          answer.agentId === "*" ||
+          answer.tool === "*") ||
       (answer.path !== undefined &&
         (!Array.isArray(answer.path) || !answer.path.every((key) => isId(key) && key !== "*"))) ||
       (answer.arguments !== undefined && !isRecord(answer.arguments)) ||
       typeof answer.ask !== "string" ||
-      !["approval", "question", "client"].includes(answer.ask) ||
+      !(
+        answer.workflowId !== undefined
+          ? ["approval", "question"]
+          : ["approval", "question", "client"]
+      ).includes(answer.ask) ||
       (answer.ask === "question" && (!isId(answer.key) || answer.key === "*")) ||
       !isRecord(answer.decision) ||
       typeof answer.decision.type !== "string" ||
       !["approve", "deny", "answer", "result", "cancel", "stop"].includes(answer.decision.type)
     )
       throw new TypeError(
-        "Each scripted answer needs exact agent, tool and request selectors and a decision.",
+        "Each scripted answer needs an exact agent/tool or workflow/step selector and a decision.",
       );
   }
   if (driver.toolMocks !== undefined && !Array.isArray(driver.toolMocks))
@@ -65,57 +80,75 @@ export function createDriver(caseId: string, driver: EvalDriver = {}, host?: Eva
   const applied = new Set<string>();
   const issued = new Map<string, PendingRequest>();
   const accepted = new Map<string, Decision>();
-  const requestHost: Pick<AgentHost, "prepareRequest" | "answerNow" | "beforeTool"> = {
-    async prepareRequest(draft) {
-      const prepared = (await host?.prepareRequest?.(draft)) ?? {
-        scope: {
-          actorId: "eval",
-          resource: { id: caseId, version: "1" },
-          expiresAt: Date.now() + 900_000,
-        },
-      };
-      issued.set(
-        draft.id,
-        copyData({ ...draft, scope: prepared.scope, ask: prepared.ask ?? draft.ask }),
-      );
-      return prepared;
-    },
-    answerNow(request) {
-      if (!equalData(issued.get(request.id), request) || request.scope.expiresAt <= Date.now())
-        return;
-      const prior = accepted.get(request.id);
-      if (prior) return copyData(prior);
-      const index = answers.findIndex(
-        (answer, index) =>
+  function checkDecision(decided?: { request: PendingRequest; decision: Decision }): void {
+    if (
+      decided &&
+      (!equalData(issued.get(decided.request.id), decided.request) ||
+        !equalData(accepted.get(decided.request.id), decided.decision))
+    )
+      throw new Error("This decision was not issued by the current test driver.");
+  }
+  const requestHost: Pick<AgentHost, "prepareRequest" | "answerNow" | "beforeTool" | "beforeStep"> =
+    {
+      async prepareRequest(draft) {
+        const prepared = (await host?.prepareRequest?.(draft)) ?? {
+          scope: {
+            actorId: "eval",
+            resource: { id: caseId, version: "1" },
+            expiresAt: Date.now() + 900_000,
+          },
+        };
+        issued.set(
+          draft.id,
+          copyData({ ...draft, scope: prepared.scope, ask: prepared.ask ?? draft.ask }),
+        );
+        return prepared;
+      },
+      answerNow(request) {
+        if (!equalData(issued.get(request.id), request) || request.scope.expiresAt <= Date.now())
+          return;
+        const prior = accepted.get(request.id);
+        if (prior) return copyData(prior);
+        const matches = answers.flatMap((answer, index) =>
           !usedAnswers.has(index) &&
-          answer.agentId === request.call.agentId &&
-          answer.tool === request.call.call.name &&
+          (answer.workflowId !== undefined
+            ? request.step !== undefined &&
+              answer.workflowId === request.step.workflowId &&
+              answer.step === request.step.key &&
+              (answer.input === undefined || equalData(answer.input, request.step.input))
+            : request.call !== undefined &&
+              answer.agentId === request.call.agentId &&
+              answer.tool === request.call.call.name &&
+              (answer.arguments === undefined ||
+                equalData(answer.arguments, request.call.arguments))) &&
           answer.ask === request.ask.type &&
           equalData(
             answer.path ?? [],
             request.path.map((step) => step.key),
           ) &&
           (answer.ask !== "question" ||
-            (request.ask.type === "question" && answer.key === request.ask.key)) &&
-          (answer.arguments === undefined || equalData(answer.arguments, request.call.arguments)),
-      );
-      const answer = answers[index];
-      if (!answer) return;
-      usedAnswers.add(index);
-      accepted.set(request.id, copyData(answer.decision));
-      // The SDK validates this against the actual ask and saves it before any effect.
-      return copyData(answer.decision);
-    },
-    async beforeTool(call, decided) {
-      if (
-        decided &&
-        (!equalData(issued.get(decided.request.id), decided.request) ||
-          !equalData(accepted.get(decided.request.id), decided.decision))
-      )
-        throw new Error("This decision was not issued by the current test driver.");
-      await host?.beforeTool?.(call, decided);
-    },
-  };
+            (request.ask.type === "question" && answer.key === request.ask.key))
+            ? [{ answer, index }]
+            : [],
+        );
+        const match = matches[0];
+        // Script order cannot choose between competing grants of authority.
+        if (matches.length !== 1 || !match) return;
+        const { answer, index } = match;
+        usedAnswers.add(index);
+        accepted.set(request.id, copyData(answer.decision));
+        // The SDK validates this against the actual ask and saves it before any effect.
+        return copyData(answer.decision);
+      },
+      async beforeTool(call, decided) {
+        checkDecision(decided);
+        await host?.beforeTool?.(call, decided);
+      },
+      async beforeStep(step, decided) {
+        checkDecision(decided);
+        await host?.beforeStep?.(step, decided);
+      },
+    };
   return {
     host: requestHost,
     stub(tools: EvalTools): EvalTools {

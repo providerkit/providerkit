@@ -282,10 +282,15 @@ export function toolArguments(
   return defineScorer(`arguments:${name}`, (ctx) => {
     const calls = (
       options.scope === "tree" ? ctx.run.trajectory.flat : ctx.run.trajectory.steps
-    ).filter((step) => step.name === name && (options.includeFailed || step.result?.ok));
+    ).filter(
+      (step) =>
+        step.agentId !== undefined &&
+        step.name === name &&
+        (options.includeFailed || step.result?.ok),
+    );
     const call =
       occurrence === "last" ? calls.at(-1) : calls[occurrence === "first" ? 0 : occurrence];
-    return call !== undefined && argumentsMatch(call.arguments, args, options.match);
+    return call?.arguments !== undefined && argumentsMatch(call.arguments, args, options.match);
   });
 }
 

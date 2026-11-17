@@ -5,9 +5,10 @@ import {
   type AgentInput,
   type RunOutcome,
   type RunSnapshot,
+  type TreeNode,
   type UserContent,
 } from "../index.ts";
-import { copyData, immutableCopy, isId, isRecord } from "../snapshot.ts";
+import { agentSnapshot, copyData, immutableCopy, isId, isRecord } from "../snapshot.ts";
 import {
   caseData,
   combineUsage,
@@ -153,8 +154,9 @@ async function score<E>(
       const index = accounting.judgeCount++;
       const began = Date.now();
       let latest: RunSnapshot | undefined;
-      const capture = (snapshot: RunSnapshot) => {
+      const capture = (node: TreeNode) => {
         if (!active) return;
+        const snapshot = agentSnapshot(node);
         latest = snapshot;
         let usage: EvalUsage;
         try {
@@ -278,7 +280,7 @@ function verdict(
     row.status = "failed";
     row.problems.push(
       row.run.status === "suspended"
-        ? "The run is waiting for a request with no valid scripted answer. Add an exact matching answer to this case's trusted driver, or expect suspended status."
+        ? "The run is waiting for an answer or a workflow wake time. Supply a matching scripted answer if needed, or expect suspended status. Evals do not resume waiting runs."
         : `Expected run status ${expected}; received ${row.run.status}.`,
     );
   }
@@ -348,6 +350,7 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
           "prepareRequest",
           "needsApproval",
           "beforeTool",
+          "beforeStep",
           "canRunConcurrently",
         ].includes(key),
     )
@@ -469,8 +472,9 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
         const start = Date.now();
         let latest: RunSnapshot | undefined;
         let closed = false;
-        const capture = (snapshot: RunSnapshot, fallback = false) => {
+        const capture = (node: TreeNode, fallback = false) => {
           if (closed) return;
+          const snapshot = agentSnapshot(node);
           latest = snapshot;
           let usage: EvalUsage;
           try {

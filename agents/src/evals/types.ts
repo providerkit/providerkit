@@ -12,6 +12,8 @@ import type {
   RunOptions,
   RunOutcome,
   RunSnapshot,
+  StepExecution,
+  StepKind,
   ToolResult,
 } from "../index.ts";
 
@@ -44,15 +46,7 @@ export interface EvalCase<E = unknown> {
   scorers?: readonly Scorer<E>[];
 }
 
-/** Trusted test-driver data, never loaded by readCases. Each answer is consumed once.
- * Match exact agent/tool identities and question keys, not model-written prose. */
-export type ScriptedAnswer = {
-  agentId: string;
-  tool: string;
-  /** Child keys from the root. Omitted means root-only, never any delegated child. */
-  path?: readonly string[];
-  arguments?: Record<string, unknown>;
-} & (
+type ScriptedDecision =
   | {
       ask: "approval";
       decision: Extract<Decision, { type: "approve" | "deny" | "cancel" | "stop" }>;
@@ -61,8 +55,35 @@ export type ScriptedAnswer = {
       ask: "question";
       key: string;
       decision: Extract<Decision, { type: "answer" | "cancel" | "stop" }>;
-    }
-  | { ask: "client"; decision: Extract<Decision, { type: "result" | "cancel" | "stop" }> }
+    };
+
+/** Trusted test-driver data, never loaded by readCases. Each answer is consumed once.
+ * Match exact agent/tool or workflow/step identities and question keys, not request prose.
+ * More than one unused match leaves the request pending; script order grants no authority. */
+export type ScriptedAnswer = {
+  /** Child keys from the root. Omitted means root-only, never any delegated child. */
+  path?: readonly string[];
+} & (
+  | ({
+      agentId: string;
+      tool: string;
+      arguments?: Record<string, unknown>;
+      workflowId?: never;
+      step?: never;
+      input?: never;
+    } & (
+      | ScriptedDecision
+      | { ask: "client"; decision: Extract<Decision, { type: "result" | "cancel" | "stop" }> }
+    ))
+  | ({
+      workflowId: string;
+      step: string;
+      /** Exact JSON input recorded for this step, before any approval edits. */
+      input?: unknown;
+      agentId?: never;
+      tool?: never;
+      arguments?: never;
+    } & ScriptedDecision)
 );
 
 export interface ToolMock {
@@ -94,9 +115,12 @@ export interface EvalDataset<E = unknown> {
 }
 
 export interface ExpectedCall {
+  /** Tool name or workflow step key. */
   name: string;
   arguments?: Record<string, unknown>;
   argumentsMatch?: "subset" | "exact" | "ignore";
+  /** Exact workflow step input. Does not match agent tool arguments. */
+  input?: unknown;
   /** At least one child must match. Other children still obey tree-wide prohibitions. */
   inside?: TrajectoryExpectation;
 }
@@ -113,27 +137,50 @@ export interface TrajectoryExpectation {
   includeFailed?: boolean;
 }
 
-export interface TrajectoryStep {
-  kind: "tool" | "delegation" | "handoff";
+export type TrajectoryStep = {
+  /** Tool name or workflow step key. */
   name: string;
-  arguments: Record<string, unknown>;
-  status: "running" | "completed" | "interrupted";
+  /** Admitted effects/children, excluding reconciled not-run attempts. Questions and sleeps count once. */
   attempts: number;
-  result?: ToolResult;
   asks: AskRecord[];
-  agentId: string;
   runId: string;
   operationId: string;
-  turn: number;
-  children: { key: string; agentId: string; runId: string; trajectory: Trajectory }[];
-}
+  children: ({ key: string; runId: string; trajectory: Trajectory } & (
+    | { kind: "agent"; agentId: string }
+    | { kind: "workflow"; workflowId: string }
+  ))[];
+} & (
+  | {
+      kind: "tool" | "delegation" | "handoff";
+      arguments: Record<string, unknown>;
+      status: "running" | "completed" | "interrupted";
+      result?: ToolResult;
+      agentId: string;
+      turn: number;
+      workflowId?: never;
+      input?: never;
+      output?: never;
+    }
+  | {
+      kind: StepKind;
+      workflowId: string;
+      input?: unknown;
+      output?: unknown;
+      status: StepExecution["status"];
+      arguments?: never;
+      result?: never;
+      agentId?: never;
+      turn?: never;
+    }
+);
 
 export interface Trajectory {
   steps: TrajectoryStep[];
   flat: TrajectoryStep[];
   /** SDK admissions, including interrupted attempts, not provider-internal retries. */
   modelCalls: number;
-  /** Local calls and coordination attempts, excluding submit_result. Failed attempts count. */
+  /** Agent tool calls and coordination attempts, excluding submit_result and workflow steps.
+   * Failed attempts count. */
   toolCalls: number;
 }
 
@@ -225,6 +272,7 @@ export type EvalHost = Pick<
   | "prepareRequest"
   | "needsApproval"
   | "beforeTool"
+  | "beforeStep"
   | "canRunConcurrently"
 >;
 
@@ -244,6 +292,7 @@ export interface ScoringOptions<E = unknown> {
 
 export interface EvalOptions<T = string, E = unknown>
   extends EvalDataset<E>, Omit<ScoringOptions<E>, "case"> {
+  /** Cases start from an agent. Its delegated tree may contain workflows. */
   agent: Agent<T> | ((context: AgentFactoryContext<E>) => Agent<T> | Promise<Agent<T>>);
   /** Explicit routing after a handoff, by both id and version. Missing targets stop the case. */
   resolveAgent?: (ref: AgentRef) => Agent<T> | Promise<Agent<T>>;

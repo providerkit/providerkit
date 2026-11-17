@@ -2,6 +2,7 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   collectTurn,
   defineTool,
+  ProviderError,
   type ChatMessage,
   type Provider,
   type ProviderChunk,
@@ -13,7 +14,11 @@ import {
   defineHandoff,
   questionTool,
   RESULT_TOOL_NAME,
+  type RunSnapshot,
 } from "../src/index.ts";
+import { isRecord } from "../src/snapshot.ts";
+import { snapshots } from "../src/tree.ts";
+import { defineWorkflow } from "../src/workflow.ts";
 import {
   assertReport,
   answeredBy,
@@ -647,7 +652,8 @@ describe("journal scorers and validation", () => {
     });
     expect(await check(exact("child answer"), outcome)).toMatchObject({ passed: true });
     const corrupt = structuredClone(outcome.snapshot);
-    const model = corrupt.delegations[0]?.children[0]?.snapshot.models[0];
+    const childSnapshot = corrupt.delegations[0]?.children[0]?.snapshot;
+    const model = childSnapshot?.kind === "agent" ? childSnapshot.models[0] : undefined;
     if (!model) throw new Error("Missing child model.");
     model.id = "bad-child-operation";
     await expect(scoreRun(corrupt, [exact()])).rejects.toThrow();
@@ -669,6 +675,529 @@ describe("journal scorers and validation", () => {
     expect(() =>
       caseFromRun({ ...outcome.snapshot, state: { status: "cancelled" } }, { id: "bad" }),
     ).toThrow("completed");
+  });
+});
+
+describe("mixed workflow evaluations", () => {
+  const input = {
+    schema: { type: "object" as const },
+    validate(value: unknown) {
+      if (!isRecord(value)) throw new TypeError("Pass an object.");
+      return value;
+    },
+  };
+
+  it("keeps workflow steps, nested agent tools and their bills without inventing agent identities", async () => {
+    const effect = vi.fn(async () => "real backend");
+    const price = vi.fn((ref: { agentId: string; model?: string }) =>
+      ref.model === "offline" ? { input: 1, output: 2, cacheRead: 0 } : undefined,
+    );
+    let saved: RunSnapshot | undefined;
+    const report = await runEvals({
+      name: "mixed tree",
+      cases: [{ id: "x", input: "private root input", expected: "done" }],
+      scorers: [exact(), answeredBy(base.id)],
+      price,
+      drivers: { x: { toolMocks: [{ name: "lookup", result: "private mock result" }] } },
+      agent: ({ stub }) => {
+        const measured = { inputTokens: 10, outputTokens: 2, cachedInputTokens: 0 };
+        const child = defineAgent({
+          ...base,
+          id: "child",
+          tools: stub([tool("lookup", effect)]),
+          recovery: { identity: "read-only", inferenceOnly: true, maxAttempts: 2 },
+          provider: scriptedProvider([
+            {
+              toolCalls: [{ name: "lookup", arguments: { query: "private query" } }],
+              usage: measured,
+            },
+            { text: "private child output", usage: measured },
+          ]),
+        });
+        const inner = defineWorkflow({
+          id: "inner",
+          version: "1",
+          input,
+          agents: [child],
+          async run(_input, context) {
+            const result = await context.agent("consult", child, "private child input");
+            if (result.status !== "completed") throw new Error("Child did not complete.");
+            return result.output;
+          },
+        });
+        const outer = defineWorkflow({
+          id: "outer",
+          version: "1",
+          input,
+          workflows: [inner],
+          async run(value, context) {
+            await context.step("prepare", () => "private step output", { input: value });
+            const result = await context.workflow("nested", inner, value);
+            if (result.status !== "completed") throw new Error("Workflow did not complete.");
+            return result.output;
+          },
+        });
+        return defineAgent({
+          ...base,
+          tools: [outer.asTool({ name: "work", description: "Run the workflow" })],
+          provider: scriptedProvider([
+            { toolCalls: [{ name: "work", arguments: { topic: "private topic" } }] },
+            "done",
+          ]),
+        });
+      },
+      host: {
+        checkpoint(node) {
+          if (node.kind === "agent") saved = structuredClone(node);
+        },
+      },
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(report.summary.agentUsage).toMatchObject({
+      unknownCharges: 0,
+      unpricedCalls: 0,
+      usage: { inputTokens: 20 },
+    });
+    expect(report.summary.agentUsage.costUsd).toBeCloseTo(0.000028);
+    expect(report.cases[0]?.run).toMatchObject({ modelCalls: 4, toolCalls: 2 });
+    expect(report.cases[0]?.run?.modelAttempts).toHaveLength(4);
+    expect(report.cases[0]?.run?.toolAttempts).toHaveLength(2);
+    expect(price.mock.calls.every(([ref]) => ref.agentId === "child")).toBe(true);
+    expect(effect).not.toHaveBeenCalled();
+    expect(reportJson(report)).not.toContain("private");
+    if (!saved) throw new Error("Missing saved root.");
+    const path = trajectoryOf(saved);
+    expect(path.flat.map((step) => [step.kind, step.name])).toEqual([
+      ["delegation", "work"],
+      ["step", "prepare"],
+      ["workflow", "nested"],
+      ["agent", "consult"],
+      ["tool", "lookup"],
+    ]);
+    expect(path.steps[0]?.children[0]).toMatchObject({ kind: "workflow", workflowId: "outer" });
+    expect(path.steps[0]?.children[0]).not.toHaveProperty("agentId");
+    expect(path.flat[1]).toMatchObject({
+      workflowId: "outer",
+      input: { topic: "private topic" },
+      output: "private step output",
+    });
+    expect(path.flat[1]).not.toHaveProperty("arguments");
+    expect(
+      await check(
+        trajectory({
+          calls: [
+            {
+              name: "work",
+              inside: {
+                calls: [
+                  { name: "prepare", input: { topic: "private topic" } },
+                  {
+                    name: "nested",
+                    inside: {
+                      calls: [{ name: "consult", inside: { calls: [{ name: "lookup" }] } }],
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        saved,
+      ),
+    ).toMatchObject({ passed: true });
+    expect(await check(trajectory({ forbidden: ["lookup"] }), saved)).toMatchObject({
+      passed: false,
+    });
+    expect(
+      await check(toolArguments("lookup", { query: "private query" }, { scope: "tree" }), saved),
+    ).toMatchObject({ passed: true });
+    expect(
+      await check(toolArguments("prepare", {}, { scope: "tree", includeFailed: true }), saved),
+    ).toMatchObject({ passed: false });
+    expect(caseFromRun(saved, { id: "golden" }).expected).toBe("done");
+
+    const interrupted = structuredClone(saved);
+    const child = [...snapshots(interrupted)].find(
+      (node) => node.kind === "agent" && node.agentId === "child",
+    );
+    if (child?.kind !== "agent" || !child.models[0]) throw new Error("Missing child model.");
+    child.models[0].interrupted.push({
+      attemptId: "lost",
+      usage: { ...usage, reportedCostUsd: 0.1 },
+    });
+    const scored = await scoreRun(interrupted, [maxCost(1)], { price });
+    expect(scored.agentUsage).toMatchObject({
+      unknownCharges: 1,
+      costUsd: null,
+      usage: { inputTokens: 30 },
+    });
+    expect(scored.agentUsage.knownCostUsd).toBeCloseTo(0.100028);
+    expect(scored.scores[0]?.kind).toBe("skipped");
+    expect(trajectoryOf(interrupted).modelCalls).toBe(5);
+    child.models[0].id = "forged-child-model";
+    await expect(scoreRun(interrupted, [exact()])).rejects.toThrow();
+    const workflow = [...snapshots(saved)].find((node) => node.kind === "workflow");
+    if (workflow?.kind !== "workflow" || !workflow.steps[0])
+      throw new Error("Missing workflow step.");
+    await expect(scoreRun(workflow, [exact()])).rejects.toThrow("agent run journal");
+    workflow.steps[0].id = "forged-step";
+    await expect(scoreRun(saved, [exact()])).rejects.toThrow();
+  });
+
+  it("answers workflow and nested agent requests with separate exact selectors and host checks", async () => {
+    let approvalSaved = false;
+    const beforeStep = vi.fn(() => {});
+    const effect = vi.fn(async () => {
+      expect(approvalSaved).toBe(true);
+      expect(beforeStep).toHaveBeenCalled();
+      return "private effect result";
+    });
+    const child = defineAgent({
+      ...base,
+      id: "child",
+      tools: [questionTool()],
+      provider: scriptedProvider([
+        { toolCalls: [{ name: "ask_question", arguments: { message: "private child question" } }] },
+        "child done",
+      ]),
+    });
+    const flow = defineWorkflow({
+      id: "flow",
+      version: "1",
+      input,
+      agents: [child],
+      async run(_input, context) {
+        const answer = await context.ask(
+          { key: "choice", message: "private question" },
+          (answer) => answer.text,
+        );
+        await context.step("write", effect, { input: { answer }, needsApproval: true });
+        const result = await context.agent("child", child, "Go");
+        if (result.status !== "completed") throw new Error("Child did not complete.");
+        return result.output;
+      },
+    });
+    const report = await runEvals({
+      name: "workflow requests",
+      agent: defineAgent({
+        ...base,
+        tools: [flow.asTool({ name: "work", description: "Work" })],
+        provider: scriptedProvider([{ toolCalls: [{ name: "work" }] }, "done"]),
+      }),
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      scorers: [exact()],
+      drivers: {
+        x: {
+          answers: [
+            {
+              workflowId: "flow",
+              step: "choice",
+              path: ["result"],
+              ask: "question",
+              key: "choice",
+              decision: { type: "answer", answer: { text: "private answer" } },
+            },
+            {
+              workflowId: "flow",
+              step: "write",
+              path: ["result"],
+              input: { answer: "private answer" },
+              ask: "approval",
+              decision: { type: "approve" },
+            },
+            {
+              agentId: "child",
+              tool: "ask_question",
+              path: ["result", "1"],
+              ask: "question",
+              key: "answer",
+              decision: { type: "answer", answer: { text: "private child answer" } },
+            },
+          ],
+        },
+      },
+      host: {
+        beforeStep,
+        checkpoint(root) {
+          approvalSaved = [...snapshots(root)].some(
+            (node) =>
+              node.kind === "workflow" &&
+              node.steps.some((step) => step.asks?.some((ask) => ask.decision?.type === "approve")),
+          );
+        },
+      },
+    });
+    expect(report.summary.passed).toBe(1);
+    expect(effect).toHaveBeenCalledTimes(1);
+    expect(beforeStep.mock.calls.length).toBeGreaterThan(0);
+    expect(reportJson(report)).not.toContain("private");
+  });
+
+  it("refuses wrong workflow selectors and consumes a matching answer only once", async () => {
+    const effect = vi.fn(async () => "written");
+    const answers: NonNullable<EvalDriver["answers"]> = [
+      {
+        agentId: "flow",
+        tool: "write",
+        path: ["result"],
+        ask: "approval",
+        decision: { type: "approve" },
+      },
+      { workflowId: "flow", step: "write", ask: "approval", decision: { type: "approve" } },
+      {
+        workflowId: "other",
+        step: "write",
+        path: ["result"],
+        ask: "approval",
+        decision: { type: "approve" },
+      },
+      {
+        workflowId: "flow",
+        step: "other",
+        path: ["result"],
+        ask: "approval",
+        decision: { type: "approve" },
+      },
+      {
+        workflowId: "flow",
+        step: "write",
+        path: ["result"],
+        input: { value: 2 },
+        ask: "approval",
+        decision: { type: "approve" },
+      },
+    ];
+    for (const valid of [false, true]) {
+      const flow = defineWorkflow({
+        id: "flow",
+        version: "1",
+        input,
+        run: (_input, context) =>
+          context.step("write", effect, { input: { value: 1 }, needsApproval: true }),
+      });
+      const report = await runEvals({
+        name: "workflow selectors",
+        agent: defineAgent({
+          ...base,
+          tools: [flow.asTool({ name: "work", description: "Work" })],
+          provider: scriptedProvider([
+            { toolCalls: [{ name: "work" }] },
+            { toolCalls: [{ name: "work" }] },
+          ]),
+        }),
+        cases: [{ id: "x", input: "Go" }],
+        includePrivateData: true,
+        drivers: {
+          x: {
+            answers: [
+              ...answers,
+              ...(valid
+                ? [
+                    {
+                      workflowId: "flow",
+                      step: "write",
+                      path: ["result"],
+                      input: { value: 1 },
+                      ask: "approval" as const,
+                      decision: { type: "approve" as const },
+                    },
+                  ]
+                : []),
+            ],
+          },
+        },
+      });
+      expect(report.cases[0]).toMatchObject({ status: "failed", run: { status: "suspended" } });
+      const pending = trajectoryOf(report.cases[0]?.run?.snapshot).flat.filter(
+        (step) => step.kind === "step" && step.status === "waiting",
+      );
+      expect(pending).toHaveLength(1);
+      expect(pending[0]?.asks[0]?.request.step).toMatchObject({ workflowId: "flow", key: "write" });
+      expect(effect).toHaveBeenCalledTimes(valid ? 1 : 0);
+    }
+  });
+
+  it("refuses ambiguous workflow answers and checks the effective edited input", async () => {
+    for (const ambiguous of [true, false]) {
+      const effect = vi.fn((value: number) => value);
+      const checked = vi.fn();
+      const flow = defineWorkflow({
+        id: "edit",
+        version: "1",
+        input,
+        run: (_input, context) =>
+          context.step("write", ({ input }) => effect(input.value), {
+            input: { value: 1 },
+            needsApproval: true,
+            validateInput(raw) {
+              if (!isRecord(raw) || typeof raw.value !== "number")
+                throw new Error("Expected a number.");
+              return { value: raw.value };
+            },
+          }),
+      });
+      const answer = {
+        workflowId: "edit",
+        step: "write",
+        path: ["result"],
+        ask: "approval" as const,
+        decision: { type: "approve" as const, arguments: { value: 2 } },
+      };
+      const report = await runEvals({
+        name: "edited input",
+        includePrivateData: true,
+        agent: defineAgent({
+          ...base,
+          tools: [flow.asTool({ name: "work", description: "Work" })],
+          provider: scriptedProvider([{ toolCalls: [{ name: "work" }] }, "done"]),
+        }),
+        cases: [{ id: "x", input: "Go", expectStatus: ambiguous ? "suspended" : "completed" }],
+        drivers: {
+          x: {
+            answers: [
+              answer,
+              ...(ambiguous
+                ? [{ ...answer, input: { value: 1 }, decision: { type: "deny" as const } }]
+                : []),
+            ],
+          },
+        },
+        host: {
+          prepareRequest: () => ({
+            scope: {
+              actorId: "eval",
+              resource: { id: "x", version: "1" },
+              expiresAt: Date.now() + 60_000,
+            },
+            ask: { type: "approval", editable: true },
+          }),
+          beforeStep(step, decided) {
+            if (!decided) return;
+            expect(step.input).toEqual({ value: 2 });
+            expect(decided.request.step?.input).toEqual({ value: 1 });
+            checked();
+          },
+        },
+      });
+      expect(report.summary.passed).toBe(1);
+      expect(effect).toHaveBeenCalledTimes(ambiguous ? 0 : 1);
+      if (ambiguous) expect(checked).not.toHaveBeenCalled();
+      else {
+        expect(effect).toHaveBeenCalledWith(2);
+        expect(checked).toHaveBeenCalled();
+        const saved = report.cases[0]?.run?.snapshot;
+        const executed = trajectoryOf(saved).flat.find((step) => step.kind === "step");
+        expect(executed).toMatchObject({ input: { value: 2 }, output: 2 });
+        expect(executed?.asks[0]?.request.step?.input).toEqual({ value: 1 });
+        for (const value of [1, 2]) {
+          expect(
+            await check(
+              trajectory({
+                scope: "tree",
+                calls: [{ name: "write", input: { value } }],
+              }),
+              saved,
+            ),
+          ).toMatchObject({ passed: value === 2 });
+        }
+      }
+    }
+  });
+
+  it("reports workflow waits without requiring a scripted answer", async () => {
+    const report = await runEvals({
+      name: "workflow wait",
+      agent: () => {
+        const flow = defineWorkflow({
+          id: "wait",
+          version: "1",
+          input,
+          async run(_input, context) {
+            await context.sleep("later", 1_000);
+            return "done";
+          },
+        });
+        return defineAgent({
+          ...base,
+          tools: [flow.asTool({ name: "wait", description: "Wait" })],
+          provider: scriptedProvider([{ toolCalls: [{ name: "wait" }] }]),
+        });
+      },
+      cases: [
+        { id: "unexpected", input: "Go" },
+        { id: "expected", input: "Go", expectStatus: "suspended" },
+      ],
+    });
+    expect(report.summary).toMatchObject({ failed: 1, passed: 1 });
+    expect(report.cases.map((row) => row.run?.status)).toEqual(["suspended", "suspended"]);
+    expect(report.cases[0]?.problems[0]).toContain("workflow wake time");
+  });
+
+  it("counts every child retry and keeps a failed child's partial bill unknown", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      id: "offline",
+      model: "retry",
+      async *createStream() {
+        calls++;
+        yield { type: "usage", usage: { ...usage, reportedCostUsd: calls === 1 ? 0.1 : 0.2 } };
+        if (calls === 1)
+          throw new ProviderError(
+            "offline",
+            "network",
+            "Stream ended after reporting partial usage.",
+          );
+        yield { type: "finish", content: "done", finishReason: "stop" };
+      },
+    };
+    const child = defineAgent({ ...base, id: "retry-child", provider });
+    const flow = defineWorkflow({
+      id: "retry-flow",
+      version: "1",
+      input,
+      agents: [child],
+      async run(_input, context) {
+        const result = await context.agent("retry", child, "Go", {
+          retry: { maxAttempts: 2, replay: "read-only" },
+        });
+        if (result.status !== "completed") throw new Error("Child did not complete.");
+        return result.output;
+      },
+    });
+    const report = await runEvals({
+      name: "workflow retries",
+      agent: defineAgent({
+        ...base,
+        tools: [flow.asTool({ name: "work", description: "Work" })],
+        provider: scriptedProvider([{ toolCalls: [{ name: "work" }] }, "done"]),
+      }),
+      cases: [{ id: "x", input: "Go", expected: "done" }],
+      scorers: [exact(), trajectory({ noRepeats: true })],
+      includePrivateData: true,
+    });
+    expect(report.cases[0]?.run?.snapshot?.state).toEqual({
+      status: "completed",
+      candidate: "done",
+    });
+    expect(calls).toBe(2);
+    expect(report.cases[0]).toMatchObject({
+      status: "failed",
+      run: { status: "completed", modelCalls: 4, toolCalls: 1 },
+    });
+    expect(report.cases[0]?.run?.modelAttempts).toHaveLength(4);
+    expect(report.cases[0]?.run?.toolAttempts).toHaveLength(1);
+    expect(report.summary.agentUsage).toMatchObject({
+      unknownCharges: 1,
+      unpricedCalls: 0,
+      costUsd: null,
+      usage: { inputTokens: 20 },
+    });
+    expect(report.summary.agentUsage.knownCostUsd).toBeCloseTo(0.3);
+    const retry = trajectoryOf(report.cases[0]?.run?.snapshot).flat.find(
+      (step) => step.kind === "agent",
+    );
+    expect(retry?.attempts).toBe(2);
+    expect(retry?.children).toHaveLength(2);
   });
 });
 
@@ -742,7 +1271,8 @@ describe("session cases and trusted offline drivers", () => {
       },
       host: {
         checkpoint(snapshot) {
-          if (snapshot.input === "secret second") expect(snapshot.session?.revision).toBe("1");
+          if (snapshot.kind === "agent" && snapshot.input === "secret second")
+            expect(snapshot.session?.revision).toBe("1");
         },
       },
     });
@@ -872,6 +1402,7 @@ describe("session cases and trusted offline drivers", () => {
       }),
       host: {
         checkpoint(snapshot) {
+          if (snapshot.kind !== "agent") throw new Error("Expected an agent root.");
           const model = snapshot.models[0];
           if (
             model?.status === "completed" &&

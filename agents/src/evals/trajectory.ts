@@ -49,7 +49,7 @@ export function checkExpectation(raw: unknown): asserts raw is TrajectoryExpecta
       !isRecord(call) ||
       !isId(call.name) ||
       Object.keys(call).some(
-        (key) => !["name", "arguments", "argumentsMatch", "inside"].includes(key),
+        (key) => !["name", "arguments", "argumentsMatch", "input", "inside"].includes(key),
       ) ||
       (call.arguments !== undefined && !isRecord(call.arguments)) ||
       (call.argumentsMatch !== undefined &&
@@ -79,7 +79,10 @@ function matches(actual: TrajectoryStep, expected: ExpectedCall): boolean {
     actual.name === expected.name &&
     (expected.arguments === undefined ||
       expected.argumentsMatch === "ignore" ||
-      argumentsMatch(actual.arguments, expected.arguments, expected.argumentsMatch)) &&
+      (actual.arguments !== undefined &&
+        argumentsMatch(actual.arguments, expected.arguments, expected.argumentsMatch))) &&
+    (expected.input === undefined ||
+      (actual.workflowId !== undefined && equalData(actual.input, expected.input))) &&
     (!inside || actual.children.some((child) => matchTrajectory(child.trajectory, inside).passed))
   );
 }
@@ -131,7 +134,11 @@ export function matchTrajectory(
   expected: TrajectoryExpectation,
 ): { passed: boolean; score: number; reason?: string } {
   const all = expected.scope === "tree" ? actual.flat : actual.steps;
-  const steps = all.filter((step) => expected.includeFailed || step.result?.ok === true);
+  const steps = all.filter(
+    (step) =>
+      expected.includeFailed ||
+      (step.workflowId !== undefined ? step.status === "completed" : step.result?.ok === true),
+  );
   const calls = expected.calls ?? [];
   const mode = expected.match ?? "inOrder";
   const problems: string[] = [];
@@ -155,7 +162,7 @@ export function matchTrajectory(
   // Prohibitions include failed and interrupted work at every depth, even when positive
   // expectations deliberately inspect only successful root calls.
   if (actual.flat.some((step) => expected.forbidden?.includes(step.name)))
-    problems.push("A forbidden tool was called.");
+    problems.push("A forbidden tool or workflow step was recorded.");
   const runs = new Map<string, TrajectoryStep[]>();
   for (const step of actual.flat) {
     const run = runs.get(step.runId) ?? [];
@@ -168,10 +175,14 @@ export function matchTrajectory(
       (run.some((step) => step.attempts > 1) ||
         run.some((step, index) => {
           const previous = run[index - 1];
-          return previous?.name === step.name && equalData(previous.arguments, step.arguments);
+          return (
+            previous?.name === step.name &&
+            equalData(previous.arguments, step.arguments) &&
+            equalData(previous.input, step.input)
+          );
         }))
     )
-      problems.push("A tool repeated the same arguments.");
+      problems.push("A tool or workflow step repeated the same input.");
     if (
       expected.forbiddenSequences?.some((sequence) =>
         run.some((_step, index) =>
