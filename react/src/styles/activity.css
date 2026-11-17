@@ -181,6 +181,7 @@
   }
 
   :where(
+    .pk-approval:focus-visible,
     .pk-approval-action:focus-visible,
     .pk-status-action:focus-visible,
     .pk-source-link:focus-visible,
@@ -251,6 +252,7 @@
       border-color: ButtonText;
     }
     :where(
+      .pk-approval:focus-visible,
       .pk-approval-action:focus-visible,
       .pk-status-action:focus-visible,
       .pk-source-link:focus-visible,

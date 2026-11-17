@@ -5,7 +5,7 @@ import {
   useMessageScroller,
   useMessageScrollerScrollable,
 } from "@shadcn/react/message-scroller";
-import { type ComponentProps, type ReactNode } from "react";
+import { useSyncExternalStore, type ComponentProps, type ReactNode } from "react";
 import type { DisplayError, DisplayMessage } from "../protocol.ts";
 import {
   ConversationContext,
@@ -69,7 +69,11 @@ export interface MessageListProps
   showJumpToLatest?: boolean;
 }
 
-/** The published scroller owns follow, pause and prepend. No send or run change asks it to jump. */
+// CSS support stays fixed for the page lifetime; the server snapshot keeps hydration consistent.
+const subscribeToEnvironment = () => () => {};
+
+/** Native anchoring keeps leading visible text in place. The published scroller owns follow and
+ * pause, and restores prepends only where native anchoring is unavailable. Sends never jump. */
 export function MessageList({
   messages: suppliedMessages,
   loading: suppliedLoading,
@@ -98,6 +102,11 @@ export function MessageList({
   className,
   ...props
 }: MessageListProps) {
+  const nativeAnchoring = useSyncExternalStore(
+    subscribeToEnvironment,
+    () => globalThis.CSS?.supports?.("overflow-anchor", "auto") ?? false,
+    () => false,
+  );
   const data = useConversationData();
   const labels = useConversationLabels(overrides);
   const messages = suppliedMessages ?? data?.messages ?? [];
@@ -158,7 +167,8 @@ export function MessageList({
           <MessageScroller.Viewport
             aria-label={labels.messages}
             {...viewportProps}
-            preserveScrollOnPrepend
+            preserveScrollOnPrepend={!nativeAnchoring}
+            style={{ ...viewportProps?.style, overflowAnchor: nativeAnchoring ? "auto" : "none" }}
             className={uiClass("pk-scroll-viewport", viewportProps?.className)}
             data-part="scroll-viewport"
           >

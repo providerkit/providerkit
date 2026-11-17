@@ -345,13 +345,32 @@ describe("scroller composition and announcements", () => {
       defaultScrollPosition: "end",
       scrollPreviousItemPeek: 0,
     });
-    expect(scroller.viewport).toHaveBeenLastCalledWith({ preserveScrollOnPrepend: true });
+    expect(scroller.viewport).toHaveBeenLastCalledWith({
+      preserveScrollOnPrepend: !CSS.supports("overflow-anchor", "auto"),
+    });
     expect(scroller.item).toHaveBeenLastCalledWith({ messageId: "answer", scrollAnchor: false });
     expect(container.querySelector(".measured")?.getAttribute("data-scroll-anchor")).toBe("false");
     expect(measure).toHaveBeenCalled();
     expect(container.querySelector(".viewport")).not.toBeNull();
     expect(scroller.jump).not.toHaveBeenCalled();
   });
+
+  it.each([true, false])(
+    "uses exactly one prepend owner (native anchoring: %s)",
+    async (native) => {
+      const supports = vi.fn(() => native);
+      vi.stubGlobal("CSS", { supports });
+      await draw(
+        <MessageList messages={[message()]} viewportProps={{ style: { color: "red" } }} />,
+      );
+      expect(supports).toHaveBeenCalledWith("overflow-anchor", "auto");
+      expect(scroller.viewport).toHaveBeenLastCalledWith({ preserveScrollOnPrepend: !native });
+      const viewport = container.querySelector<HTMLElement>('[data-part="scroll-viewport"]')!;
+      expect(viewport.style.overflowAnchor).toBe(native ? "auto" : "none");
+      expect(viewport.style.color).toBe("red");
+      expect(scroller.jump).not.toHaveBeenCalled();
+    },
+  );
 
   it("only jumps after an explicit press, including when a new message is sent", async () => {
     const messages = [message()];

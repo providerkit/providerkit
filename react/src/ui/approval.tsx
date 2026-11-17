@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
@@ -107,6 +108,8 @@ function RequestContent({
   onValueChange,
   renderForm,
   className,
+  ref,
+  onBlur,
   ...props
 }: RequestCardProps) {
   const data = useConversationData();
@@ -137,6 +140,9 @@ function RequestContent({
     });
   }
   const sending = useRef<Feedback | undefined>(undefined);
+  const region = useRef<HTMLElement>(null);
+  const focusHeld = useRef(false);
+  useImperativeHandle(ref, () => region.current!, []);
   const titleId = useId();
   const summaryId = useId();
   const isExpired = expired ?? (part.expiresAt !== undefined && clock >= part.expiresAt);
@@ -170,6 +176,22 @@ function RequestContent({
     );
     return () => clearTimeout(timer);
   }, [expired, part.state, part.expiresAt, isExpired, clock]);
+
+  useLayoutEffect(() => {
+    if (!focusHeld.current || state === "submitting") return;
+    focusHeld.current = false;
+    const node = region.current;
+    // The region holds focus before controls are disabled. Leaving it cancels restoration;
+    // a keyed scope/request replacement also discards this ref, so late replies cannot steal focus.
+    if (!node || node.ownerDocument.activeElement !== node) return;
+    const field = node.querySelector<HTMLElement>(
+      'input:not(:disabled):not([readonly]):not([type="hidden"]), textarea:not(:disabled):not([readonly]), select:not(:disabled)',
+    );
+    const control = node.querySelector<HTMLElement>(
+      'button:not(:disabled):not([aria-disabled="true"])',
+    );
+    (field ?? control ?? node).focus({ preventScroll: true });
+  }, [state, decision]);
 
   const current = useRef<
     | {
@@ -228,6 +250,9 @@ function RequestContent({
         local: { status: "submitting", response },
       };
       sending.current = attempt;
+      const node = region.current;
+      focusHeld.current = Boolean(node?.contains(node.ownerDocument.activeElement));
+      if (focusHeld.current) node?.focus({ preventScroll: true });
       setFeedback(attempt);
       function finish(
         status: "failed" | "unconfirmed",
@@ -299,7 +324,13 @@ function RequestContent({
     <section
       aria-labelledby={titleId}
       aria-describedby={part.summary ? summaryId : undefined}
+      tabIndex={-1}
       {...props}
+      ref={region}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) focusHeld.current = false;
+        onBlur?.(event);
+      }}
       className={uiClass("pk-approval", className)}
       data-part={part.type}
       data-state={state}

@@ -183,23 +183,21 @@ export function SampleImage({ scope }: { scope: DraftScope }) {
                 ? "Reload image after 3 seconds"
                 : "Load image after 3 seconds"}
         </button>
-        {status === "ready" && (
-          <button
-            className="demo-button"
-            type="button"
-            aria-disabled={resizing}
-            aria-busy={resizing}
-            onClick={() => {
-              if (!resizing) setResizing(true);
-            }}
-          >
-            {resizing
-              ? "Waiting to resize..."
-              : large
-                ? "Shrink after 3 seconds"
-                : "Enlarge after 3 seconds"}
-          </button>
-        )}
+        <button
+          className="demo-button"
+          type="button"
+          aria-disabled={status !== "ready" || resizing}
+          aria-busy={resizing}
+          onClick={() => {
+            if (status === "ready" && !resizing) setResizing(true);
+          }}
+        >
+          {resizing
+            ? "Waiting to resize..."
+            : large
+              ? "Shrink after 3 seconds"
+              : "Enlarge after 3 seconds"}
+        </button>
       </div>
       <p role="status">
         {status === "error"
@@ -212,14 +210,18 @@ export function SampleImage({ scope }: { scope: DraftScope }) {
                 ? `Generated image loaded at ${large ? "large" : "small"} size.`
                 : "The image has not loaded yet."}
       </p>
-      {source && status !== "error" && (
-        <img
-          src={source}
-          alt="Generated drawing of a notebook and pencil"
-          onLoad={() => setStatus("ready")}
-          onError={() => setStatus("error")}
-        />
-      )}
+      <div className="sample-image-frame">
+        {source && status !== "error" && (
+          <img
+            src={source}
+            width={720}
+            height={480}
+            alt="Generated drawing of a notebook and pencil"
+            onLoad={() => setStatus("ready")}
+            onError={() => setStatus("error")}
+          />
+        )}
+      </div>
     </figure>
   );
 }

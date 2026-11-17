@@ -57,6 +57,7 @@ export class DemoRun {
   private expiryScheduled = false;
   private expiredOnce = false;
   private textChunks = 0;
+  private gapEmitted = false;
   done: Promise<void> = Promise.resolve();
 
   constructor(
@@ -68,7 +69,7 @@ export class DemoRun {
     private readonly reconcile: (run: DemoRun) => void,
     private readonly pause: () => void,
     private readonly mode: ApprovalMode = "pending",
-    private readonly syntheticGap = false,
+    private readonly syntheticGap: false | "text" | "tools" = false,
   ) {
     this.projector = createAgentProjector({
       runId: this.id,
@@ -355,18 +356,19 @@ export class DemoRun {
         // Synthetic boundary fixture only: no PostgreSQL or storage-failure claim.
         if (
           this.syntheticGap &&
+          !this.gapEmitted &&
           event.type === "model_chunk" &&
           event.runId === this.id &&
-          event.chunk.content
+          (this.syntheticGap === "tools"
+            ? event.chunk.toolCalls?.length
+            : event.chunk.content && ++this.textChunks === 3)
         ) {
-          this.textChunks++;
-          if (this.textChunks === 3) {
-            this.stats.gaps++;
-            // A real /runs host branches on RunEvent.type, not AgentEvent.type.
-            for (const display of this.projector.gap()) this.publish(display);
-            this.reconcile(this); // read after the retained prefix; running model has no complete text
-            return; // deliberately omitted progress, never omitted execution
-          }
+          this.gapEmitted = true;
+          this.stats.gaps++;
+          // A real /runs host branches on RunEvent.type, not AgentEvent.type.
+          for (const display of this.projector.gap()) this.publish(display);
+          this.reconcile(this); // read after the retained prefix; running model has no complete text
+          return; // deliberately omitted progress, never omitted execution
         }
         for (const display of this.projector.event(event)) this.publish(display);
       },

@@ -361,10 +361,9 @@ function App() {
       )
     )
       return;
-    if (!(await composer.flushDraft()))
-      throw new Error(
-        "Your draft could not be saved. Choose Retry saving before leaving this page.",
-      );
+    // The composer's draft state owns save failures and retry feedback. Do not copy it into
+    // the host's action error, which would outlive a successful retry.
+    if (!(await composer.flushDraft())) return;
     leaving.current = true;
     const url = new URL(location.href);
     if (key && value) url.searchParams.set(key, value);
@@ -535,8 +534,9 @@ function App() {
             Omit part of the next scripted reply
           </label>
           <p className="hint">
-            Synthetic missing-progress fixture, not a database test. Send a normal message. Its
-            valid prefix stays marked incomplete until a saved answer arrives.
+            Synthetic progress loss, not a database crash test. Send a message to see an incomplete
+            text prefix, or choose Try questions, card and handoff to skip a tool update before the
+            two questions appear.
           </p>
           <label className="remember">
             <input
@@ -563,7 +563,7 @@ function App() {
           </label>
           <p className="hint">
             Turn on Save drafts below, then type to try a failed save. Turn this refusal off and
-            choose Retry saving before switching conversations or reloading.
+            choose Try again before switching conversations or reloading.
           </p>
           <div className="actions">
             <button
@@ -597,8 +597,10 @@ function App() {
               onClick={() =>
                 void action(
                   "Starting request example",
-                  () => command(scope, "approval", { mode: approvalMode }),
-                  "The script is preparing two questions in the conversation.",
+                  () => command(scope, "approval", { mode: approvalMode, gap: gap ? "1" : "0" }),
+                  gap
+                    ? "The script will omit a tool update before showing two questions."
+                    : "The script is preparing two questions in the conversation.",
                 )
               }
             >

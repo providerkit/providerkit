@@ -229,7 +229,10 @@ are controlled: pass their values and change callbacks. `RequestCard` keeps draf
 request ID, or accepts controlled `value` and `onValueChange` props. It never clears an answer on
 submission, refusal or closure. Plain-data hosts can report rejection with a new pending `part`
 that includes `problem`; the card restores its controls without requiring `RequestView.local`.
-Keep controlled values in the host if cards can leave the transcript.
+Keep controlled values in the host if cards can leave the transcript. If focus is inside the card
+when submitting, it moves to the labelled region before controls are disabled. After refusal it
+returns to an editable field, or an available control. With no available control, focus stays in
+the region. It does not restore focus if you moved elsewhere or the request or scope was replaced.
 There is no automatic storage. Use a host-owned, principal-and-conversation-scoped draft adapter
 if you need persistence, and disclose what is saved. Replacing a request must not move its old
 answer into the new request.
@@ -488,9 +491,19 @@ there is no automatic localStorage capture. Before navigation that must wait for
 `composer.flushDraft()`. If it returns false, keep the draft open and offer `retryDraft()`.
 
 The transcript uses the published headless scroller with automatic turn anchoring disabled. It
-has an explicit jump-to-latest action instead of forcing someone back to the bottom when new
-output arrives. Real-browser scrolling and layout acceptance checks are still pending before
-release.
+follows live output only while you stay at the bottom. Scrolling away pauses following; sending a
+message does not pull you back. **Jump to latest** explicitly returns to live following.
+
+Where the browser supports CSS scroll anchoring, `MessageList` preserves the **leading visible
+text** when content above it changes size or older messages are prepended. A line below an image
+growing inside the viewport can move with ordinary reflow. It does not pin every visible line or
+infer where you are looking. Host media renderers should reserve known dimensions before loading,
+using `width`/`height` or an `aspect-ratio` container.
+
+The wrapper sets `overflow-anchor` even without the optional stylesheet. It disables the scroller's
+`preserveScrollOnPrepend` when native anchoring is supported, so the two do not compensate twice.
+Browsers without native anchoring keep the published prepend fallback, but cannot promise the same
+resize preservation. Final browser acceptance of these changes remains separate from unit checks.
 
 Replace labels through component props, tool-label maps and specialist-label maps. Use
 `renderPart` for your own cards and `renderApproval` for an approval action that opens a host
@@ -640,8 +653,17 @@ Try these flows:
 - Watch the visit helper take over. Send a message while it prepares; `InputStatusList` shows
   queued, accepted and consumed separately. Recall succeeds only before the host's poll reservation,
   even if a stale view still says queued. Late unused input stays visible and starts no new run.
-- **Omit part of the next scripted reply** marks the retained prefix incomplete and withholds later
-  deltas until its saved text arrives. This is a synthetic host boundary fixture, not a database test.
+- **Omit part of the next scripted reply** marks a normal reply's retained prefix incomplete and
+  withholds later deltas until its saved text arrives. With the same checkbox on, choose **Try
+  questions, card and handoff** to omit a tool update before the two real SDK questions. The run
+  should stay waiting with no assistant text, including after reload. **Synthetic progress gaps**
+  under **Demo counters and limits** increases once. This is synthetic progress loss, not proof of
+  database crash recovery.
+- **Add tool, image and link samples**, then **Load image after 3 seconds**. The known image space
+  is reserved while it loads. Choose **Enlarge after 3 seconds** or **Shrink after 3 seconds**, then
+  scroll so **A line to keep in view** is the leading visible text. It should stay in place when the
+  image above it changes size. Repeat with earlier text and the image still inside the viewport:
+  the lower line may move with ordinary reflow. That is not a promise to pin every visible line.
 
 Conversations, uploads and work live only in server memory. Browser reloads do not restart them;
 restarting the server clears them. Demo profiles are not authentication. This is not a production

@@ -7,7 +7,7 @@ import { useChat, type ChatValue } from "../src/hooks.ts";
 import type { QuestionPart } from "../src/protocol.ts";
 import type { QuestionAnswer } from "../src/requests.ts";
 import { RequestCard, type RequestActions } from "../src/ui/approval.tsx";
-import { formFields } from "../src/ui/schema-form.tsx";
+import { SchemaForm, formFields } from "../src/ui/schema-form.tsx";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let container: HTMLDivElement;
@@ -74,6 +74,156 @@ it("keeps controlled answers and focus after refusal and after the host closes t
   expect(input.value).toBe("Unsent answer");
   expect(input.readOnly).toBe(true);
 });
+
+it.each(["question", "edited approval"])(
+  "holds pending focus and returns a rejected %s to its editable field",
+  async (kind) => {
+    const result = Promise.withResolvers<RespondResult>();
+    const respond = vi.fn(() => result.promise);
+    const approval = kind === "edited approval";
+    const schema = { type: "object", properties: { label: { type: "string" } } };
+    await draw(
+      <RequestCard
+        request={
+          approval
+            ? {
+                messageId: "reply",
+                part: {
+                  type: "approval",
+                  id: "approval",
+                  title: "Approve label",
+                  state: "pending",
+                  edit: { schema, value: { label: "x" } },
+                },
+              }
+            : request()
+        }
+        onRespond={respond}
+        value={approval ? { data: { label: "x" } } : { text: "x" }}
+        renderActions={
+          approval
+            ? (actions) => (
+                <>
+                  <SchemaForm
+                    schema={schema}
+                    value={{ label: "x" }}
+                    onChange={() => {}}
+                    disabled={actions.disabled}
+                    unsupported="Use the host form."
+                    chooseLabel="Choose"
+                    trueLabel="Yes"
+                    falseLabel="No"
+                  />
+                  <button
+                    disabled={actions.disabled}
+                    onClick={() =>
+                      void actions.onRespond?.({ type: "approve", arguments: { label: "x" } })
+                    }
+                  >
+                    Approve label
+                  </button>
+                </>
+              )
+            : undefined
+        }
+      />,
+    );
+    const button = container.querySelector("button")!;
+    button.focus();
+    await act(async () => button.click());
+    const region = container.querySelector("section")!;
+    expect(region.dataset.state).toBe("submitting");
+    expect(button.disabled).toBe(true);
+    expect(document.activeElement).toBe(region);
+    expect(region.hasAttribute("aria-labelledby")).toBe(true);
+    await act(async () =>
+      result.resolve({
+        ok: false,
+        error: { code: "refused", message: "Use at least three letters." },
+      }),
+    );
+    const field = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+      "input, textarea",
+    )!;
+    expect(field.value).toBe("x");
+    expect(document.activeElement).toBe(field);
+    expect(container.textContent).toContain("Use at least three letters.");
+    // A fast retry can fail in one render batch, with the same display state as before.
+    button.focus();
+    await act(async () => button.click());
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(field);
+  },
+);
+
+it("keeps an accepted partial answer focused in its region, without jumping to another request", async () => {
+  const result = Promise.withResolvers<RespondResult>();
+  const respond = vi.fn(() => result.promise);
+  const view = (part: QuestionPart) => (
+    <>
+      <RequestCard
+        request={request(part)}
+        onRespond={respond}
+        value={{ text: "Keep this answer" }}
+      />
+      <RequestCard request={request({ ...question, id: "other" })} onRespond={respond} />
+    </>
+  );
+  await draw(view(question));
+  const button = container.querySelector("button")!;
+  button.focus();
+  await act(async () => button.click());
+  const region = container.querySelector("section")!;
+  await draw(view({ ...question, state: "answered" }));
+  await act(async () => result.resolve({ ok: true, outcome: "accepted" }));
+  expect(document.activeElement).toBe(region);
+  expect(container.querySelector("textarea")?.value).toBe("Keep this answer");
+  expect(container.querySelectorAll("section")[1]?.dataset.state).toBe("pending");
+});
+
+it.each(["elsewhere", "body", "returned", "scope", "replacement", "unmount"])(
+  "does not restore request focus after %s",
+  async (ending) => {
+    const result = Promise.withResolvers<RespondResult>();
+    const respond = vi.fn(() => result.promise);
+    const view = (scope = "first", id = "question", mounted = true) => (
+      <>
+        {mounted && (
+          <RequestCard
+            scopeKey={scope}
+            request={request({ ...question, id })}
+            onRespond={respond}
+            value={{ text: "Draft" }}
+          />
+        )}
+        <input aria-label="Elsewhere" />
+      </>
+    );
+    await draw(view());
+    const button = container.querySelector("button")!;
+    button.focus();
+    await act(async () => button.click());
+    if (ending === "elsewhere" || ending === "body" || ending === "returned") {
+      const other = container.querySelector<HTMLInputElement>('[aria-label="Elsewhere"]')!;
+      other.focus();
+      if (ending === "body") other.blur();
+      if (ending === "returned") container.querySelector("section")?.focus();
+    } else
+      await draw(
+        view(
+          ending === "scope" ? "second" : "first",
+          ending === "replacement" ? "new" : "question",
+          ending !== "unmount",
+        ),
+      );
+    const focused = document.activeElement;
+    await act(async () =>
+      result.resolve({ ok: false, error: { code: "refused", message: "Correct the answer." } }),
+    );
+    expect(document.activeElement).toBe(focused);
+    expect(document.activeElement).not.toBe(container.querySelector("textarea"));
+  },
+);
 
 it("unlocks a plain-data card after authoritative rejection, including the same problem twice", async () => {
   const respond = vi.fn(async (): Promise<RespondResult> => ({ ok: true, outcome: "accepted" }));

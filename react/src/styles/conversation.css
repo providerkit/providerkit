@@ -16,8 +16,7 @@
     flex: 1;
     min-block-size: 0;
     overflow: auto;
-    /* The scroller restores prepended history, rather than competing with native anchoring. */
-    overflow-anchor: none;
+    /* MessageList chooses one owner for resize and prepend anchoring, even without this CSS. */
     scrollbar-gutter: stable;
   }
 

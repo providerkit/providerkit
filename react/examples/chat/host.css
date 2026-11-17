@@ -192,12 +192,18 @@ h3 {
 .sample-image figcaption {
   margin-block-end: 8px;
 }
-.sample-image img {
-  display: block;
+/* Reserve the known 720 x 480 drawing even before the delayed fetch finishes. */
+.sample-image-frame {
   inline-size: min(240px, 60%);
-  block-size: auto;
+  aspect-ratio: 3 / 2;
+  background: var(--wash);
 }
-.sample-image[data-size="large"] img {
+.sample-image-frame img {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+.sample-image[data-size="large"] .sample-image-frame {
   inline-size: 100%;
 }
 .demo-button[aria-disabled="true"] {

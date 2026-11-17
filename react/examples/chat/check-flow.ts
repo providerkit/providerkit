@@ -413,4 +413,36 @@ export async function checkFlow({
       .some((part) => part.type === "text" && part.incomplete),
   );
   assert.equal((await counters()).gaps, 1);
+
+  // The same omission boundary also precedes a tool-only question wait. No extra fake provider.
+  assert.equal((await request(`${path}/approval?gap=1`, {})).status, 204);
+  const gapQuestions = await pending();
+  assert.equal(gapQuestions.length, 2);
+  assert(gapQuestions.every((part) => part.type === "question"));
+  const waiting = await state();
+  const assistant = waiting.messages.find((message) => message.id === waiting.run.messageId);
+  assert(assistant);
+  assert(
+    assistant.parts.every(
+      (part) => part.type !== "text" || (part.text === "" && part.settled && !part.incomplete),
+    ),
+    "The tool-only checkpoint must settle the empty gap placeholder, not leave missing text.",
+  );
+  assert.equal(waiting.run.status, "waiting");
+  assert.equal((await counters()).gaps, 2);
+  const replay = (await events()).reduce(reduceChat, emptyChatView());
+  assert.equal(
+    replay.run.status,
+    "waiting",
+    "Reload cannot turn a tool-only wait back into running.",
+  );
+  assert.deepEqual(
+    replay.messages.find((message) => message.id === assistant.id)?.parts,
+    assistant.parts,
+  );
+  assert.equal((await answer(gapQuestions[0]!.id, { type: "cancel" })).status, 204);
+  assert.equal((await pending()).length, 1, "Partial answers still work after missing progress.");
+  assert.equal((await counters()).gaps, 2, "A continuation must not emit the same gap again.");
+  assert.equal((await request(`${path}/stop`, {})).status, 204);
+  assert.equal((await state()).run.status, "stopped");
 }

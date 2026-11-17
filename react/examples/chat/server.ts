@@ -262,7 +262,7 @@ function startRun(chat: Conversation, input: SendInput, flow?: ApprovalMode, gap
     },
     () => pause(chat),
     flow,
-    gap,
+    gap ? (flow ? "tools" : "text") : false,
   );
   chat.work = work;
   publish(chat, {
@@ -369,7 +369,7 @@ async function loadHistory(chat: Conversation, url: URL): Promise<void> {
     (message) => !chat.view.messages.some((item) => item.id === message.id),
   );
   if (!missing.length) return;
-  // The snapshot keeps every current message and its IDs. The public scroller owns PREPEND.
+  // Keep every current message and its IDs so MessageList can preserve the reading position.
   publish(chat, {
     v: 1,
     type: "snapshot",
@@ -384,7 +384,7 @@ function approvalMode(url: URL): ApprovalMode {
   throw new Refusal(400, "request_mode", "Choose a listed request mode.");
 }
 
-function requestApproval(chat: Conversation, mode: ApprovalMode): void {
+function requestApproval(chat: Conversation, mode: ApprovalMode, gap: boolean): void {
   if (busy(chat)) throw new Refusal(409, "busy", "Finish or stop the current reply first.");
   if (chat.stats.runs >= 20)
     throw new Refusal(409, "run_limit", "Restart the local server to clear its 20 sample replies.");
@@ -392,6 +392,7 @@ function requestApproval(chat: Conversation, mode: ApprovalMode): void {
     chat,
     { clientId: crypto.randomUUID(), text: "Try questions, an approved card and a handoff." },
     mode,
+    gap,
   );
 }
 
@@ -568,7 +569,8 @@ const server = Bun.serve({
             );
         } else {
           if (action === "stop") await stop(chat);
-          else if (action === "approval") requestApproval(chat, approvalMode(url));
+          else if (action === "approval")
+            requestApproval(chat, approvalMode(url), url.searchParams.get("gap") === "1");
           else if (action === "history") await loadHistory(chat, url);
           else if (action === "fixtures") {
             if (!chat.view.messages.some((message) => message.id === fixtureMessageId))
