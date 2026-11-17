@@ -28,19 +28,19 @@ cost more than it saves, so **edit one, edit the other.**
 | Lens + rays out | `#0FA398`            | `#4FD1C5`       |
 | Tile            | -                    | `#101418`       |
 
-The two teals are the site's `--accent` in light and dark (`site/src/styles.css`); the mark's
-`#0FA398` sits between them so one file survives both.
+The mark keeps a middle teal so the same file holds on both site grounds. The site's reading
+palette lives in `site/src/styles/bench.css`; `site/DESIGN.md` defines its roles.
 
 ## The OG card
 
-`og.ts` builds the 1200×630 card as an SVG string: mark + wordmark, one bold tagline, one
-muted subtitle, one meta strip. Copy is the only thing that varies; call `ogCardSvg({ title,
-subtitle })` for a per-page card. It nests the avatar's paths directly, so the mark on the
-card can never drift from the mark everywhere else.
+`og.ts` builds the 1200×630 card from the mark, the landing's purpose and each package's release
+state. It uses the site's dark palette and Archivo. No Core-only dependency claim applies to the
+whole toolkit.
 
-Inter isn't installed system-wide, so resvg falls back to the next face in the stack. That
-only affects the card's text. The mark is pure vector. The card is rendered once and
-committed, so what ships is what you see here, not whatever the CI runner had installed.
+The rasterizer loads `fonts/Archivo.ttf` directly, never a system fallback. This OFL font comes
+from Google Fonts commit `6c70c829f09ea345d3590406693220ea35c6553f`,
+`ofl/archivo/Archivo[wdth,wght].ttf`. Its license is beside it. The site continues to self-host
+its web fonts through Fontsource; this TTF is only the reproducible rasterizer input.
 
 ## Regenerating
 

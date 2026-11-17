@@ -27,7 +27,11 @@ function png(svg: string, width: number, out: string): void {
   const r = new Resvg(svg, {
     fitTo: { mode: "width", value: width },
     // Only the OG card has text; the icons are pure vector.
-    font: { loadSystemFonts: true, defaultFontFamily: "Inter, sans-serif" },
+    font: {
+      loadSystemFonts: false,
+      fontFiles: [`${HERE}/fonts/Archivo.ttf`],
+      defaultFontFamily: "Archivo",
+    },
   });
   writeFileSync(out, r.render().asPng());
   console.log(`  ${out.replace(ROOT, ".")}`);
