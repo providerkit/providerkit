@@ -83,8 +83,10 @@ const tracing = createAgentTracing({ tracer, attributes: () => ({ example: "offl
 try {
   const result = await reader.run("Count the matches.", tracing.options());
   if (result.status !== "completed") throw new Error(`Run ended: ${result.status}`);
-  if (records.length !== 4 || records.some((record) => !record.ended))
-    throw new Error("Expected four closed spans: one run, two models and one tool.");
+  if (records.length !== 6 || records.some((record) => !record.ended))
+    throw new Error(
+      "Expected six closed spans: one run, two model operations, two provider calls and one tool.",
+    );
   console.log(records);
 } finally {
   // Always close when the host scope ends, including errors or missing callbacks.
@@ -92,6 +94,6 @@ try {
 }
 
 // Model/tool spans end before output guards. Their "returned" outcome is not approval.
-// These hooks cannot activate context around HTTP/tool execution; auto-instrumentation
-// needs an around-call hook that the SDK does not expose. Configure context management
-// and exporters in the host. Raw prompts, results and errors never enter these spans.
+// Core activates context around provider iterator calls. Tool hooks remain observers, so
+// HTTP calls inside tools need the host's own instrumentation and context manager.
+// Configure exporters in the host. Raw prompts, results and errors never enter these spans.
