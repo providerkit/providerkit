@@ -74,4 +74,4 @@ console.log("  ./site/src/assets/mark.svg");
 // apple-touch-icon sits on whatever colour the OS puts behind it — the opaque
 // tile, not the transparent mark.
 png(avatar, 180, `${SITE_PUBLIC}/apple-touch-icon.png`);
-png(ogCardSvg(), 1200, `${SITE_PUBLIC}/og.png`);
+png(ogCardSvg(avatar), 1200, `${SITE_PUBLIC}/og.png`);

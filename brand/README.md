@@ -1,11 +1,8 @@
 # Brand
 
-A collimator. Rays arrive at whatever angle they arrive at, the lens is the seam, and what
-leaves is parallel and evenly spaced. Every provider's shape goes in, one shape comes out.
-That's the package, so that's the mark.
-
-Pure geometry: no text, no gradients, no filters. It rasterizes identically in every
-renderer, and there's no font to embed.
+The mark is the initial of **providerkit**. One flat path draws the stem and open bowl of the p.
+The diagonal cut leaves a gap you can still see on a browser tab. Beside it, the lowercase name
+uses Archivo in the same ink as the page title. Only the mark carries the brand color.
 
 ## The two sources
 
@@ -17,25 +14,24 @@ renderer, and there's no font to embed.
 Full bleed is deliberate: GitHub rounds org avatars itself, and a self-rounded tile inside
 that reads as a doubled corner.
 
-Geometry is duplicated across the two files on purpose. A build step for twenty lines would
-cost more than it saves, so **edit one, edit the other.**
+Both SVGs use the same path. If its shape changes, copy the `d` value to both sources before
+regenerating the other assets.
 
 ## Palette
 
-| Token           | Mark (either ground) | Avatar (on ink) |
-| --------------- | -------------------- | --------------- |
-| Rays in         | `#8A94A3`            | `#9AA4B2`       |
-| Lens + rays out | `#0FA398`            | `#4FD1C5`       |
-| Tile            | -                    | `#101418`       |
+| Token       | Mark on either ground | Avatar on graphite |
+| ----------- | --------------------- | ------------------ |
+| Ultramarine | `#666ed7`             | `#a8b1ff`          |
+| Background  | Transparent           | `#16191d`          |
 
-The mark keeps a middle teal so the same file holds on both site grounds. The site's reading
-palette lives in `site/src/styles/bench.css`; `site/DESIGN.md` defines its roles.
+The transparent mark works on both site backgrounds. Links and focus indicators use a darker
+ultramarine on light pages and a lighter one on dark pages. The error colors still name remedies.
+See `site/DESIGN.md` and `site/src/styles/bench.css`.
 
-## The OG card
+## Share card
 
-`og.ts` builds the 1200×630 card from the mark, the landing's purpose and each package's release
-state. It uses the site's dark palette and Archivo. No Core-only dependency claim applies to the
-whole toolkit.
+`og.ts` places the avatar next to the name on a 1200×630 card. It names the three TypeScript
+packages without listing versions, so a release does not date the image.
 
 The rasterizer loads `fonts/Archivo.ttf` directly, never a system fallback. This OFL font comes
 from Google Fonts commit `6c70c829f09ea345d3590406693220ea35c6553f`,
