@@ -7,7 +7,7 @@ description: Run the published offline agent example, then connect a provider of
 await assistant.run("List the tasks.");
 ```
 
-The [complete example](https://github.com/providerkit/providerkit/blob/7891647/agents/examples/basic.ts)
+The [complete example](https://github.com/providerkit/providerkit/blob/340d8af/agents/examples/basic.ts)
 defines `assistant`. A scripted provider asks a tool for two tasks, then returns the tool's answer.
 It makes no model calls and needs no API key.
 
@@ -16,7 +16,7 @@ It makes no model calls and needs no API key.
 Install the released package and its matching Core peer in a new folder:
 
 ```sh
-bun add @providerkit/agents@0.1.0 @providerkit/core@^0.30.0
+bun add @providerkit/agents@0.2.0 @providerkit/core@^0.33.1
 bun node_modules/@providerkit/agents/examples/basic.ts
 ```
 
@@ -26,8 +26,8 @@ Expected output:
 ["Write a release note", "Check the documentation link"]
 ```
 
-Agents 0.1 declares Core `^0.30.0` as its peer. Use that pair for this released example, not the
-newer Core quickstart's version. The next Agents release will update the pair.
+Agents 0.2 uses Core `^0.33.1`. The optional integrations have their own peer dependencies;
+the basic example does not need a server package, MCP, tracing or a code engine.
 
 ## Connect your provider
 

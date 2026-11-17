@@ -13,7 +13,8 @@ describes a result's shape; it is metadata, not a replacement for runtime valida
 
 Agents uses those tools inside its loop. Unmarked tools run serially. Marking a tool read-only or
 safe to run concurrently is a promise your implementation must keep, not a permission check.
-Tools run in your process; neither package provides a sandbox for untrusted code.
+Tools run in your process. [Code mode](/agents/code-mode/) isolates model-written programs,
+not your tool implementations.
 
 ## Tools a provider runs
 
@@ -24,8 +25,8 @@ have its own provider charge.
 
 ## Actions a person approves
 
-In Agents 0.1, a tool marked `needsApproval` requires host policy. Your server authenticates the
-person, checks the resource and decision expiry, consumes the approval and checks current access
+A tool marked `needsApproval` requires host policy. Your server authenticates the
+person, checks the resource and decision expiry, consumes the request-keyed approval and checks current access
 before the tool runs. A saved approval flag cannot bypass those checks.
 
 Browser input is untrusted. Validate it against current server state rather than accepting a

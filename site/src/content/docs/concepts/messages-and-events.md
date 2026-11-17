@@ -17,9 +17,9 @@ tool action happened.
 
 ## Saved execution and progress
 
-Agents records model and tool operations in a snapshot. Its host can save checkpoints to continue
-trusted work later. Progress events let an observer follow a run as it happens. They are not a
-replacement for the saved state.
+Agents records execution in kind-specific journals: model/tool operations for agents, steps for
+workflows and remote receipts for A2A nodes. Its host can save checkpoints to continue trusted
+work later. Progress events follow a live run; they do not replace the saved state.
 
 A completed output is only one possible result. A run can be waiting for approval, stopped by a
 limit, cancelled or failed. [The Agents quickstart](/agents/getting-started/#read-the-result)
@@ -31,5 +31,6 @@ A conversation screen needs the answer, useful activity and actions the person c
 not need raw snapshots, private reasoning or every tool argument. Your server decides which data
 may leave it.
 
-The [React development work](/react/) separates display messages from execution state. Until its
-API is published, these docs make no promise about its wire format.
+[React's display protocol](/react/transport/) separates visible messages from execution state.
+The server validates and projects the allowed fields, then the browser folds those display events
+into its view. Data that describes a request does not authorize its answer.

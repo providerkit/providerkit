@@ -1,35 +1,51 @@
 ---
 title: Agents
-description: Give an agent instructions, a Core provider and tools, then run a task.
+description: Run model-driven tasks and saved workflows while your app keeps control of permissions and storage.
 ---
 
-An agent calls a model, runs the tools it requests and returns an answer. **Agents 0.1.0** is an
-experimental package built on Core. Its API may change before 1.0.
+Give an agent a task:
 
 ```ts
 await assistant.run("List the tasks.");
 ```
 
-[Set up this offline assistant](/agents/getting-started/). Its result contains two example tasks.
-No API key is needed.
+[Set up this offline assistant](/agents/getting-started/). It returns two example tasks without
+calling a live model.
 
-## What you can do
+**Agents 0.2.0** is an experimental package built on Core. It runs tools, coordinates specialists
+and records execution so your host can save and resume work. Its API may change before 1.0.
 
-Keep a provider, instructions and tools in one agent definition. Check a result with your own
-validator. Call a configured specialist as a tool, or coordinate several children with
-`defineDelegation`. Save checkpoints through your host and resume authorized work.
+## Build the execution you need
 
-The main entry has no database, queue or vendor SDK dependency. The optional `/runs` entry binds
-an agent to the host's existing run service. It does not create a worker or queue for you.
+Use an agent when a model should choose the next tool. Use a [workflow](/agents/workflows/) when
+your code chooses the steps. Both share child execution, request handling and tree-wide limits.
+
+- Start with [conversation input and media](/agents/conversations/) and [tools and guards](/agents/tools/).
+- Ask the person a [question or approval](/agents/requests/), then continue from an authorized answer.
+- Add [specialists or model-created helpers](/agents/specialists/), with capabilities your host grants.
+- Keep [memory](/agents/memory/) in a store your app controls.
+- Let a model combine tools in [bounded code mode](/agents/code-mode/), or connect [MCP tools](/agents/mcp/).
+- Call or serve [remote agents through A2A](/agents/a2a/).
+- Check behavior with [evals](/agents/evals/) and observe execution with [tracing](/agents/tracing/).
 
 ## What stays in your app
 
-You decide who may run a tool, who may approve it and who may resume saved work. Snapshots can
-contain prompts, tool arguments and results. Store them privately and keep them out of browser
-responses. A checkpoint cannot prove that an interrupted external action did not happen.
+You decide who may run a tool, approve it or resume saved work. Snapshots contain private input
+and execution data. Keep them out of browser responses and use [React's server projector](/react/transport/)
+for the fields a viewer may see.
 
-Provider routing, deadlines and retry policy stay in [Core](/core/). The agent uses the provider
-you give it without adding another provider retry loop.
+The main entry has no database, queue or vendor SDK dependency. [Background runs](/agents/background-runs/)
+use your existing run service, not an SDK scheduler. A checkpoint or idempotency key alone does
+not prove that an interrupted external action did not happen.
 
-Start with the [quickstart](/agents/getting-started/), look up the
-[0.1 API](/reference/agents/) or run the [published examples](/examples/#agents-examples).
+Core owns provider routing and stream retries. Agents adds explicit policies for
+[execution recovery and tool retries](/agents/recovery/), without silently replaying unknown work.
+
+## Upgrade from 0.1
+
+Use Core `^0.33.1`. Finish old runs before upgrading: format-2 snapshots are not accepted by the
+format-3 runtime. Replace the old single approval decision with the request-keyed host contract.
+Execution trees can contain `agent`, `workflow` and `remote` nodes; check `kind` before reading
+model journals or workflow steps.
+
+[Browse the API](/reference/agents/) or [run a complete example](/examples/#agents-examples).

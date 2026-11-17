@@ -3,15 +3,15 @@ title: Package boundaries
 description: Choose what belongs in provider calls, agent execution, a browser view and your app.
 ---
 
-Use the smallest part you need. Core works without Agents. Agents uses Core. The React package
-is being developed separately for conversation screens.
+Use the smallest part you need. Core works without Agents. Agents uses Core. React can display
+your app's data without owning its agent engine or state store.
 
-| Part                              | What it does                                           | What you supply                                               |
-| --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------- |
-| [Core](/core/)                    | Calls providers, reads streams and classifies failures | Credentials, models, prompts and retry policy                 |
-| [Agents](/agents/)                | Runs the model/tool loop and records its progress      | Instructions, tools, permission checks and checkpoint storage |
-| [React](/react/) (in development) | Shows conversations and sends browser actions          | Authorized display data and an app transport                  |
-| Your app                          | Owns the person, the data and the effects of a task    | Sign-in, authorization, uploads, billing and retention        |
+| Part               | What it does                                           | What you supply                                               |
+| ------------------ | ------------------------------------------------------ | ------------------------------------------------------------- |
+| [Core](/core/)     | Calls providers, reads streams and classifies failures | Credentials, models, prompts and retry policy                 |
+| [Agents](/agents/) | Runs agents and workflows, recording their execution   | Instructions, tools, permission checks and checkpoint storage |
+| [React](/react/)   | Shows conversations and sends browser actions          | Authorized display data and an app transport                  |
+| Your app           | Owns the person, the data and the effects of a task    | Sign-in, authorization, uploads, billing and retention        |
 
 ## Keep trusted work on the server
 

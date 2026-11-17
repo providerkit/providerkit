@@ -1,9 +1,9 @@
 ---
 title: Core API
-description: Import paths and generated signatures for @providerkit/core 0.33.0.
+description: Import paths and generated signatures for @providerkit/core 0.33.1.
 ---
 
-These signatures describe **@providerkit/core 0.33.0**. Start with the
+These signatures describe **@providerkit/core 0.33.1**. Start with the
 [quickstart](/guides/getting-started/) for a working provider call.
 
 | Import path                       | Exports                                                                                                      |
@@ -39,6 +39,6 @@ and content policy. Your app owns the tracer, exporter and retention.
 
 ## Tool result metadata
 
-`ToolDefinition.outputSchema` is optional JSON Schema metadata for a tool's result. Core preserves
-it on definitions but does not validate results with it or send it as a provider function-input
-field. Validate your runtime output where your app needs that guarantee.
+`Tool.outputSchema` is optional JSON Schema metadata for a tool's result. Core keeps it on the
+tool instance, not in the provider's tool definition. It does not validate results with it.
+Validate your runtime output where your app needs that guarantee.

@@ -26,14 +26,16 @@ state, checks its owner and prevents concurrent attempts. Completed operations c
 An operation recorded as running has an unknown outcome after a crash, so the SDK refuses to
 repeat it automatically.
 
-For the 0.1 contract, see [Agents](/agents/) and the
-[resume API](/reference/agents/index/interfaces/agent/).
+For explicit inference-only or read-only recovery policies and host reconciliation, see
+[recovery and retries](/agents/recovery/). Configured hosted tools prevent inference-only replay;
+a running marker or idempotency key alone is not proof that an external action did not happen.
 
 ## Reconnect a reader
 
 A reader losing its connection is not a new task. Reconnect to observe the existing work instead
 of submitting the user's message again. In the released `/runs` binding, aborting an observer
-signal stops listening; `cancel(owner, id)` is the separate action that cancels work.
+signal stops listening; `cancel(owner, id)` separately asks the host to stop work. Follow the
+returned physical segment, and do not treat acceptance as proof that an external task stopped.
 
-Your host owns saved progress and access checks. The [React development work](/react/) will supply
-the browser-facing connection; no released reconnect API is promised here yet.
+Your host owns saved progress and access checks. [React recovery](/react/recovery/) reconnects
+the browser to existing work without automatically replaying a message or answer.
