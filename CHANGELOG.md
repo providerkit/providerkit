@@ -2,6 +2,13 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.33.0] - 2026-11-16
+
+### Added
+
+- Optional `outputSchema` on `ToolSpec` and `Tool`, kept by `defineTool`, lets consumers generate types for tool results. It accepts JSON Schema objects for any result shape, including non-object results.
+- This is metadata only: core does not validate results against it. Tool execution, `ToolDefinition`, `definition()` and provider payloads stay unchanged.
+
 ## [0.32.0] - 2026-11-16
 
 ### Added
