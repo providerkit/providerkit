@@ -25,7 +25,7 @@ import type {
   MemoryScopes,
 } from "./memory.ts";
 import type { ClientTool } from "./request.ts";
-import type { CodeTool } from "./code.ts";
+import type { CodeTool, CodeLimits } from "./code.ts";
 import type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
 export type { WorkflowSnapshot, StepRequest, StepKind, StepError } from "./workflow-types.ts";
 import type { RemoteSnapshot, RemoteReceipt } from "./a2a/remote.ts";
@@ -321,11 +321,20 @@ export type LifecycleHook = (
 
 /** The resolved definition used for every turn, including after a restart. No host context
  * or callbacks: they can contain credentials and process-local services. */
+/** Data needed to validate stored program calls. It contains no driver, tool body or authority. */
+export interface RecordedCodeTool {
+  name: string;
+  limits: CodeLimits;
+  tools: { name: string; isReadOnly: boolean }[];
+}
+
 export interface RunDefinition {
   instructions: string;
   modelSettings: RecordedModelSettings;
   enabledTools: string[];
   stopAtTools: string[];
+  /** Present for registered code tools, including ones disabled for this run. */
+  codeTools?: Record<string, RecordedCodeTool>;
   /** Null refuses interrupted effects. Recorded policy and identities must match on recovery. */
   recovery: RecoveryDefinition | null;
   guardrails: GuardDefinition | null;

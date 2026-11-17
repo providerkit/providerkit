@@ -4,7 +4,7 @@ import {
   checkWorkflowSnapshot,
   checkWorkflowProgress,
 } from "./workflow-snapshot.ts";
-import { programJson, textBytes, type CodeTool } from "./code.ts";
+import { CODE_LIMITS, programJson, textBytes, type CodeTool } from "./code.ts";
 import type { TreeNode, WorkflowSnapshot, StepRequest, ProgramCall } from "./types.ts";
 import {
   HOSTED_TOOL_TYPES,
@@ -49,6 +49,7 @@ import type {
   ModelSettings,
   PendingRequest,
   RecordedModelSettings,
+  RecordedCodeTool,
   RunDefinition,
   RunFailure,
   RunLimits,
@@ -539,6 +540,59 @@ function isGuardRecord(value: unknown): value is GuardRecord {
   );
 }
 
+/** Record only validation data. Reading an archive must not construct executable tools. */
+export function recordCodeTools(
+  tools: ReadonlyMap<string, CodeTool>,
+): Record<string, RecordedCodeTool> {
+  return Object.fromEntries(
+    [...tools].map(([name, code]) => [
+      name,
+      {
+        name,
+        limits: { ...code.limits },
+        tools: code.tools.map((tool) => ({ name: tool.name, isReadOnly: tool.isReadOnly })),
+      },
+    ]),
+  );
+}
+
+function isRecordedCodeTools(value: unknown): value is Record<string, RecordedCodeTool> {
+  if (!isRecord(value)) return false;
+  for (const [name, code] of Object.entries(value)) {
+    if (
+      !isId(name) ||
+      !isRecord(code) ||
+      code.name !== name ||
+      Object.keys(code).some((key) => !["name", "limits", "tools"].includes(key)) ||
+      !isRecord(code.limits) ||
+      !Array.isArray(code.tools) ||
+      !code.tools.length
+    )
+      return false;
+    const limits = code.limits;
+    if (
+      Object.keys(limits).length !== Object.keys(CODE_LIMITS).length ||
+      !Object.keys(CODE_LIMITS).every((key) => positive(limits[key])) ||
+      typeof limits.timeoutMs !== "number" ||
+      limits.timeoutMs > 2_147_483_647
+    )
+      return false;
+    const names = new Set<string>();
+    for (const tool of code.tools) {
+      if (
+        !isRecord(tool) ||
+        !isId(tool.name) ||
+        typeof tool.isReadOnly !== "boolean" ||
+        Object.keys(tool).some((key) => key !== "name" && key !== "isReadOnly") ||
+        names.has(tool.name)
+      )
+        return false;
+      names.add(tool.name);
+    }
+  }
+  return true;
+}
+
 function isRunDefinition(value: unknown): value is RunDefinition {
   return (
     isRecord(value) &&
@@ -546,6 +600,7 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     isRecordedModelSettings(value.modelSettings) &&
     isNames(value.enabledTools) &&
     isNames(value.stopAtTools) &&
+    optional(value.codeTools, isRecordedCodeTools) &&
     isGuardDefinition(value.guardrails) &&
     isCompactionDefinition(value.compaction) &&
     isToolRetryDefinition(value.toolRetries) &&
@@ -1551,7 +1606,11 @@ function checkGuards(snapshot: RunSnapshot): void {
 }
 
 /** Program receipts are private evidence, never a continuation of the guest VM. */
-function checkProgramJournal(snapshot: RunSnapshot, tool: ToolExecution, code?: CodeTool): number {
+function checkProgramJournal(
+  snapshot: RunSnapshot,
+  tool: ToolExecution,
+  code?: RecordedCodeTool,
+): number {
   if (tool.calls === undefined) {
     if (
       code &&
@@ -1742,16 +1801,23 @@ function checkProgramJournal(snapshot: RunSnapshot, tool: ToolExecution, code?: 
   return total;
 }
 
-/** Validate the journal as well as its fields, so a cursor cannot skip unrecorded work. */
+/** Validate data-only journals without live tools. Execution callers supply their actual code
+ * registry, which must match the saved policy. Recorded data never replaces host authorization. */
 export function readSnapshot(
   raw: unknown,
   agentId: string,
   version: string,
   limits: RunLimits,
   resultTool?: string,
-  codeTools: ReadonlyMap<string, CodeTool> = new Map(),
+  codeTools?: ReadonlyMap<string, CodeTool>,
 ): RunSnapshot {
   if (!serializable(raw) || !isSnapshot(raw)) throw new TypeError("Invalid agent snapshot.");
+  const recordedCode = raw.definition.codeTools ?? {};
+  if (codeTools !== undefined && !equalData(recordedCode, recordCodeTools(codeTools))) {
+    throw new TypeError(
+      "The recorded code bindings or limits changed. Restore the same code tools before resuming.",
+    );
+  }
   if (raw.agentId !== agentId || raw.version !== version)
     throw new TypeError("The snapshot belongs to a different agent definition or version.");
   if (!equalData(raw.limits, limits))
@@ -1829,7 +1895,7 @@ export function readSnapshot(
           throw new TypeError("A successful stopping tool must record its final result.");
       }
       const keys = new Set<string>();
-      const code = codeTools.get(call.name);
+      const code = Object.hasOwn(recordedCode, call.name) ? recordedCode[call.name] : undefined;
       const originalArguments = code
         ? (jsonArguments(call.arguments) ?? {})
         : parseToolArgs(call.arguments);
