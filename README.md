@@ -74,6 +74,17 @@ hints, which is all retries and fallbacks read. The
 [errors guide](https://providerkit.dev/guides/errors/#keep-the-providers-words-out) says what
 stays and why.
 
+### Prompt caching on the Anthropic shape
+
+Anthropic caches only the parts of a request that carry a cache marker, and the adapter places
+them. The system prompt always gets one. A request that declares tools or already holds an
+assistant turn gets two more: on its newest message, and on the message the last request ended
+on. Each turn then reads the earlier turns from cache, instead of paying the full input rate for
+the whole conversation again. A one-shot call marks no message, because nothing would read what
+it paid to write. Each system message goes out as its own block, in order. The
+[providers guide](https://providerkit.dev/guides/providers/#prompt-caching-on-the-anthropic-shape)
+has the rules and the costs.
+
 ### Z.ai Coding Plan
 
 `createZaiCodingProvider` uses the Coding Plan endpoint with Bearer authentication.

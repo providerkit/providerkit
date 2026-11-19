@@ -289,6 +289,42 @@ On the OpenAI-shape adapter, `effortDialect` names which spelling of _think this
 accepts: `openai`, `openrouter`, `deepseek`, or `off` for one that rejects the field outright. It
 is inferred from the provider `id` where the name gives it away.
 
+### Prompt caching on the Anthropic shape
+
+Anthropic caches only the parts of a request that carry a cache marker (`cache_control`), and the
+adapter places the markers for you. A request carries up to three:
+
+- On the last system block. Anthropic caches tools first, then the system prompt, so this one
+  marker covers both. Every request carries it.
+- On the newest message. Each request writes a cache entry there.
+- On the message just before the newest assistant message. That is where the previous request
+  ended, so this request reads that entry exactly.
+
+The two message markers go only on a request that another one will follow: one that declares
+tools, or one whose messages already hold an assistant turn. A one-shot call, like a title or a
+summary, marks no message, because nothing would read the entry it paid to write.
+
+One marker on the newest message is not enough on its own. A read looks back at most 20 blocks
+from a marker for an entry an earlier request wrote. On the Claude API a run of tool calls counts
+as one block, and so does a run of tool results, but a turn that adds more than 20 still misses.
+The marker where the previous request ended makes that read exact.
+
+A marker goes on the last block that can carry one. Thinking blocks can't, and neither can text
+that is empty or only spaces and line breaks, so the marker moves back to an earlier block in the
+same message, or that message gets none. Markers sit on blocks only, never on the request's
+top-level `cache_control` field, because the legacy Bedrock integration answers that field with a 400.
+
+Anthropic's [prompt caching page](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+(read 2026-11-19) gives the costs. A 5-minute cache write bills 1.25 times the input rate. A read
+bills a tenth of it, or less on the newest models. A prefix shorter than the model's minimum (512
+tokens on the newest models, up to 4,096 on older ones) is not cached and not billed as a write.
+Other Anthropic-shape endpoints, such as Kimi, Z.ai, Qwen and OpenCode's Claude routes, get the
+same markers. How each of them caches has not been checked.
+
+Each system message becomes its own system block, in order, with the marker on the last. So a line
+you add first stays the first block. A blank system message is left out, because Anthropic refuses
+a block of only spaces and line breaks.
+
 ### OpenRouter sticky routing
 
 OpenRouter's prompt cache lives on the upstream host's account. Default routing hops between hosts
