@@ -63,6 +63,24 @@
         "zod",
       ],
     },
+    "native": {
+      "name": "@providerkit/native",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@providerkit/react": "workspace:*",
+        "react": "^19.2.8",
+        "typescript": "^7.0.2",
+        "vitest": "^4.1.2",
+      },
+      "peerDependencies": {
+        "@providerkit/react": "^0.2.0",
+        "react": "^19",
+        "react-native": ">=0.86",
+      },
+      "optionalPeers": [
+        "react-native",
+      ],
+    },
     "react": {
       "name": "@providerkit/react",
       "version": "0.1.1",
@@ -542,6 +560,8 @@
     "@providerkit/agents": ["@providerkit/agents@workspace:agents"],
 
     "@providerkit/core": ["@providerkit/core@workspace:core"],
+
+    "@providerkit/native": ["@providerkit/native@workspace:native"],
 
     "@providerkit/react": ["@providerkit/react@workspace:react"],
 
