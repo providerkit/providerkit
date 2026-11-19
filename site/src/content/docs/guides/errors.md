@@ -100,6 +100,14 @@ Including `余额不足`, `欠费` and `额度不足`. A Chinese-language balanc
 still a quota failure, and treating it as a bad request sends the caller to fix their code.
 :::
 
+A status can also point at the wrong fix when nothing is about money. Google's
+OpenAI-compatible endpoint answers a bad key with a 400 that says `Please pass a valid API key`.
+That is `auth`, so a key pool tries its next key. A Google model that answers one turn only says
+`Multiturn chat is not enabled`, also as a 400: that is `model`, and a fallback chain moves on to
+the next model. Z.ai answers a model your plan does not include with a 403 and the code `[1311]`
+(`当前订阅套餐暂未开放…权限`). The key works, so that is `entitlement`, not `auth`, and no key
+pool benches it.
+
 ## Failures with no status at all
 
 A dead socket carries no HTTP response. Node wraps the real reason several layers deep, so the

@@ -89,6 +89,10 @@ It returns the same provider interface as the adapters above. The API root is
 `https://api.z.ai/api/anthropic`; the adapter adds `/v1/messages`.
 Usage reports tokens consumed, not the price of your subscription.
 
+If you ask for a model your plan does not include, Z.ai answers with code 1311. That is an
+`entitlement` error, not `auth`. Your key works: pick a model your plan has, or move to a plan
+that has this one.
+
 ### OpenCode Go
 
 One key, several models, and each model has its own monthly limit. The preset
