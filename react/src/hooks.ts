@@ -39,7 +39,7 @@ export interface ChatValue extends ChatState {
 }
 
 /** The same state without what belongs to sending: a panel that watches a run never writes in it. */
-export interface AgentRunValue extends Omit<ChatState, "canSend" | "messageErrors"> {
+export interface AgentRunValue extends Omit<ChatState, "canSend" | "canRetry" | "messageErrors"> {
   scopeKey?: string;
   stop: ChatClient["stop"];
   respond: ChatClient["respond"];
@@ -144,7 +144,12 @@ export function useAgentRun(options: UseAgentRunOptions): AgentRunValue {
   const client = useClient(options);
   const state = useClientState(client);
   return useMemo(() => {
-    const { canSend: _canSend, messageErrors: _messageErrors, ...rest } = state;
+    const {
+      canSend: _canSend,
+      canRetry: _canRetry,
+      messageErrors: _messageErrors,
+      ...rest
+    } = state;
     return {
       ...rest,
       scopeKey: options.id,

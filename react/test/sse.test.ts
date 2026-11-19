@@ -1,6 +1,6 @@
 import type { FetchLike } from "@providerkit/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TransportError, type ChatTransport } from "../src/client.ts";
+import { createChatClient, TransportError, type ChatTransport } from "../src/client.ts";
 import type { ChatEvent } from "../src/protocol.ts";
 import { createSseTransport } from "../src/sse.ts";
 
@@ -313,5 +313,42 @@ describe("createSseTransport", () => {
     vi.stubGlobal("fetch", fetch);
     expect(await collect(need(transport.observe, "observe")({ signal }))).toEqual([]);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads a stream's error frame as a lost connection, never as the run's verdict", async () => {
+    // A host can write `event: error` when its own read of the run fails, and the run keeps going.
+    // So the client reattaches after its cursor, and the run's status stays the host's last word.
+    vi.useFakeTimers();
+    try {
+      const { fetch, sent } = host(
+        () =>
+          sse(
+            body([
+              `data: ${runEvent("running", 1)}\n\n`,
+              'event: error\ndata: {"message":"The read failed."}\n\n',
+            ]),
+          ),
+        () => sse(body([`data: ${runEvent("completed", 2)}\n\n`])),
+      );
+      const client = createChatClient({
+        transport: createSseTransport({
+          observe: (cursor) => `https://host.test/events?after=${cursor?.seq ?? ""}`,
+          fetch,
+        }),
+      });
+      client.attach();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.getState()).toMatchObject({
+        run: { status: "running" },
+        status: "running",
+        connection: "reconnecting",
+      });
+      expect(client.getState().run.error).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sent[1]?.url).toBe("https://host.test/events?after=1");
+      expect(client.getState()).toMatchObject({ run: { status: "completed" }, connection: "idle" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

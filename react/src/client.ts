@@ -247,6 +247,11 @@ export interface ChatState {
    * not have arrived, and `retry` sends it again. */
   messageErrors: Readonly<Record<string, DisplayError>>;
   canSend: boolean;
+  /** `retry` can send a message whose delivery is unknown now. False while a run is going
+   * (unless `allowSendWhileRunning`), even when steering keeps `canSend` true: sending it again
+   * into a running one could ask for the same work twice. Show Retry on a message only when this
+   * is true and `messageErrors` has it. */
+  canRetry: boolean;
   /** A stop can reach the run: the transport has `stop`, or the client can abort its pending
    * command or reply stream. */
   canStop: boolean;
@@ -280,6 +285,12 @@ export interface ChatClientOptions {
   transport: ChatTransport;
   /** What to show before the host says anything, such as a transcript rendered on the server. */
   initialMessages?: readonly DisplayMessage[];
+  /** Where `initialMessages` stand in the host's log: the `segment` and the last `seq` they
+   * include. The first observation then resumes after it. Without it, the first observation asks
+   * for the log from the start, which for a conversation with a past is its whole history. Read
+   * once, when the client is made. The host still answers that observation with the run's state,
+   * as it does any other. */
+  initialCursor?: Cursor;
   /** Permits overlapping ordinary sends and retries. Off by default. A host with `enqueue`
    * can accept steering input during a run without enabling this option. */
   allowSendWhileRunning?: boolean;
@@ -510,6 +521,7 @@ function sameState(left: ChatState, right: ChatState): boolean {
     left.inputs === right.inputs &&
     left.messageErrors === right.messageErrors &&
     left.canSend === right.canSend &&
+    left.canRetry === right.canRetry &&
     left.canStop === right.canStop &&
     left.canReconnect === right.canReconnect
   );
@@ -520,13 +532,39 @@ function segmentKey(segment: string | undefined): string {
   return segment ?? "";
 }
 
+/** A position the app read from the host, copied so a later change to the app's object cannot
+ * move it. One the reducer could never reach fails here, where it was given. */
+function savedCursor({ segment, seq }: Cursor): Cursor {
+  if (!Number.isSafeInteger(seq) || seq < 0 || (segment !== undefined && !segment))
+    throw new TypeError(
+      "A cursor is a whole-number seq, 0 or more, and a segment that is not empty.",
+    );
+  return segment === undefined ? { seq } : { segment, seq };
+}
+
+/** Whether `run` says nothing yet about the run a command asked for, where `before` is the run as
+ * the host took the command: it is still `before`, or, after a message (`fresh`), only `before`
+ * ending. The run that was going when a message went out can report its end after the host took
+ * the message, from a replay or from a read the host made before it saved the new run. That end
+ * says nothing about the run the message started. Without ids nothing tells the two apart. */
+function nothingNew(before: RunInfo, run: RunInfo, fresh: boolean): boolean {
+  return (
+    run === before ||
+    (fresh && before.id !== undefined && run.id === before.id && !isActive(run.status))
+  );
+}
+
 /**
  * Makes the store for one conversation. For another conversation, or another person signed in,
  * make another: nothing a client holds can then reach the next one, however late it arrives.
  */
 export function createChatClient(options: ChatClientOptions): ChatClient {
   let settings = options;
-  let view: ChatView = { ...emptyChatView(), messages: options.initialMessages ?? [] };
+  let view: ChatView = {
+    ...emptyChatView(),
+    messages: options.initialMessages ?? [],
+    ...(options.initialCursor && { cursor: savedCursor(options.initialCursor) }),
+  };
   /** Segments the cursor moved on from. A numbered event from one of them is late: the rest of a
    * stream from before the approval that started the segment the view is in now. */
   const left = new Set<string>();
@@ -549,8 +587,9 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   let attached = 0;
   /** The run as it was when the host took a command, until the host says anything new about it.
    * Until then the run the person asked for has not shown up, and a stream that ends then ended
-   * before its run did. */
-  let starting: RunInfo | undefined;
+   * before its run did. `fresh` after a message, whose run is a new one, so the run before it
+   * reporting its own end is not that news. An answer continues the same run, so its end is. */
+  let starting: { run: RunInfo; fresh: boolean } | undefined;
   let stopping = false;
   let problem: { source: "connection" | "stop"; error: DisplayError } | undefined;
   let stale = false;
@@ -622,6 +661,8 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
           isActive(view.run.status) &&
           Boolean(view.run.id) &&
           transport.enqueue !== undefined),
+      canRetry:
+        canSendOrdinary(status) && [...sends.values()].some((send) => send.phase === "unconfirmed"),
       canStop:
         status !== "ready" &&
         status !== "stopping" &&
@@ -840,7 +881,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
         view.cursor?.segment !== device.segment
       )
         device.controller.abort();
-    if (starting && view.run !== starting) starting = undefined;
+    if (starting && !nothingNew(starting.run, view.run, starting.fresh)) starting = undefined;
     const going = isActive(view.run.status) || starting !== undefined;
     if (!going) stopping = false;
     if (!going && problem?.source === "stop") problem = undefined;
@@ -995,23 +1036,27 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     return controller;
   }
 
-  /** The host took a command. Its reply is the stream it returned, or comes on an observation. */
+  /** The host took a command. Its reply is the stream it returned, or comes on an observation.
+   * An answer continues the run it answers, and the tail is refreshed so the host can find the
+   * run's new physical segment. */
   function accepted(
     before: RunInfo | undefined,
     reply: void | EventReply,
     controller: AbortController,
-    refresh = false,
+    command: "send" | "respond",
   ): void {
     const current = latestCommand === controller && !controller.signal.aborted;
+    const fresh = command === "send";
     if (current) {
-      // A host quick enough to report on the run before the call returned already said its word.
-      if (view.run === before) starting = view.run;
+      // A host quick enough to report on the run before the call returned already said its word,
+      // unless all it said was that the run before the message ended.
+      if (before && nothingNew(before, view.run, fresh)) starting = { run: view.run, fresh };
       if (reply) tries = 0;
     }
     if (reply) void read(reply.events, "command", controller, current);
     else {
       commands.delete(controller);
-      if (current) watch(refresh);
+      if (current) watch(command === "respond");
     }
   }
 
@@ -1204,7 +1249,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       return { ok: true, messageId: id, outcome: "unknown" };
     }
     if (sends.get(id) === entry && !controller.signal.aborted) entry.phase = "accepted";
-    accepted(before, reply, controller);
+    accepted(before, reply, controller, "send");
     now();
     const outcome = sends.get(id) === entry && entry.phase !== "accepted" ? "unknown" : "accepted";
     return { ok: true, messageId: id, outcome };
@@ -1353,7 +1398,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     // The latest command still owns its continuation, but not a different logical run.
     // Request feedback already received must not create a new wait for the run to start.
     if (view.run.id === before.id)
-      accepted(current() ? before : undefined, reply, controller, true);
+      accepted(current() ? before : undefined, reply, controller, "respond");
     else if (reply) void read(reply.events, "command", controller, false);
     else commands.delete(controller);
     now();

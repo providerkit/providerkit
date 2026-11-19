@@ -1986,6 +1986,172 @@ describe("input steering", () => {
   });
 });
 
+// Four rules a phone app learned on its own event stream before it moved to this client. Each one
+// fixed a screen, so every app on this client keeps them.
+describe("stream rules from a phone app", () => {
+  it("resumes a conversation with a past after its saved position, never from the start", async () => {
+    // From the start, a conversation with a past replays its whole log.
+    const host = tail();
+    const client = createChatClient({
+      transport: { observe: host.observe },
+      initialMessages: [user("m0", "Earlier question"), assistant("a0", [], "settled")],
+      initialCursor: { segment: "s0", seq: 41 },
+    });
+    client.attach();
+    expect(host.opened[0]?.cursor).toEqual({ segment: "s0", seq: 41 });
+    // An event the saved position already holds is not taken again.
+    host.latest().push(patch("a0", text("t0", "Replayed", true), at(41, "s0")));
+    await flush();
+    expect(find(client, "a0")?.parts).toEqual([]);
+    host
+      .latest()
+      .push(status(run("running", "run-1"), at(1, "s1")))
+      .end();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(host.opened[1]?.cursor).toEqual({ segment: "s1", seq: 1 });
+  });
+
+  it("refuses a saved position that is not one", () => {
+    for (const initialCursor of [{ seq: -1 }, { seq: 1.5 }, { seq: 1, segment: "" }])
+      expect(() => createChatClient({ transport: {}, initialCursor })).toThrow(TypeError);
+  });
+
+  it("keeps watching for the run a message started when the stream ends on an earlier run's end", async () => {
+    // Only the end of the run a message started ends the watch. A replay can carry the end of the
+    // run before it ahead of the new run's first event.
+    const host = tail();
+    const send = vi.fn<Send>(async () => {});
+    const client = createChatClient({
+      transport: { send, observe: host.observe },
+      allowSendWhileRunning: true,
+    });
+    client.attach();
+    host.latest().push(...writingRun());
+    await flush();
+    expect(await client.send("And then?")).toMatchObject({ ok: true, outcome: "accepted" });
+    // The run before it ends, and the stream closes before the new run says a word.
+    host
+      .latest()
+      .push(status(run("completed"), at(4)))
+      .end();
+    await flush();
+    expect(client.getState()).toMatchObject({ status: "sending", connection: "reconnecting" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(host.opened).toHaveLength(2);
+    host.latest().push(status(run("running", "run-2"), at(1, "s2")));
+    await flush();
+    expect(client.getState()).toMatchObject({ status: "running", run: { id: "run-2" } });
+  });
+
+  it("keeps watching when the first read after a send still holds the earlier run's end", async () => {
+    // The same rule for a host that opens every observation with a snapshot: one read before it
+    // saved the new run reports the earlier run again, here with its owner filled in.
+    const host = tail();
+    const send = vi.fn<Send>(async () => {});
+    const client = createChatClient({ transport: { send, observe: host.observe } });
+    client.attach();
+    host
+      .latest()
+      .push(snapshot([assistant("a0", [], "settled")], run("completed", "run-0")))
+      .end();
+    await flush();
+    await client.send("Next question");
+    const owner = { runId: "run-0", agentId: "writer", label: "Writer" };
+    host
+      .latest()
+      .push(snapshot([assistant("a0", [], "settled")], { ...run("completed", "run-0"), owner }))
+      .end();
+    await flush();
+    expect(client.getState()).toMatchObject({ status: "sending", connection: "reconnecting" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    host.latest().push(status(run("running", "run-1")));
+    await flush();
+    expect(client.getState().status).toBe("running");
+  });
+
+  it("counts a failed read as a lost connection, never as the run's verdict", async () => {
+    // The host's own read failing is not the run failing: the run keeps going, so the client
+    // reattaches and never shows the failure as the run's. A host whose reads keep failing still
+    // runs out of tries.
+    const readFailed = () =>
+      new TransportError("unknown", {
+        code: "read_failed",
+        message: "The server could not read the run's progress.",
+      });
+    const host = tail();
+    const stop = vi.fn(async () => {});
+    const client = createChatClient({ transport: { observe: host.observe, stop } });
+    client.attach();
+    host
+      .latest()
+      .push(...writingRun())
+      .fail(readFailed());
+    await flush();
+    const going = {
+      status: "running",
+      run: run("running"),
+      canStop: true,
+      canSend: false,
+    };
+    expect(client.getState()).toMatchObject({ ...going, connection: "reconnecting" });
+    expect(client.getState().run.error).toBeUndefined();
+    expect(find(client, "a1")?.state).toBe("live");
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) {
+      await vi.advanceTimersByTimeAsync(wait);
+      host
+        .latest()
+        .push(delta("a1", "t1", "lo", at(3)))
+        .fail(readFailed());
+      await flush();
+    }
+    expect(client.getState()).toMatchObject({
+      ...going,
+      connection: "lost",
+      error: { code: "read_failed" },
+    });
+    expect(client.getState().run.error).toBeUndefined();
+    expect(textOf(client, "a1", "t1")).toBe("Hello");
+    expect(host.opened.slice(1).map((item) => item.cursor)).toEqual(
+      Array.from({ length: 5 }, () => ({ segment: "s1", seq: 3 })),
+    );
+  });
+
+  it.each(["running", "waiting"] as const)(
+    "offers Retry for an unconfirmed message only once a %s run ends",
+    async (state) => {
+      // Retry sends the message again, so it waits for the run to end: sent into a running one,
+      // it could ask for the same work twice.
+      const host = tail();
+      const send = vi
+        .fn<Send>()
+        .mockRejectedValueOnce(new Error("Lost reply"))
+        .mockResolvedValue(undefined);
+      const enqueue = vi.fn<NonNullable<ChatTransport["enqueue"]>>(async (input) => ({
+        id: input.clientId,
+        rootRunId: input.rootRunId,
+        status: "queued",
+      }));
+      const client = createChatClient({ transport: { send, enqueue, observe: host.observe } });
+      client.attach();
+      expect(client.getState().canRetry).toBe(false);
+      const first = await client.send("Unconfirmed message");
+      if (!first.ok) throw new Error("An unknown outcome keeps the message.");
+      expect(client.getState().canRetry).toBe(true);
+      host.latest().push(status(run(state, "another-run"), at(1)));
+      await flush();
+      // Steering keeps Send available, and still the unconfirmed message cannot go again.
+      expect(client.getState()).toMatchObject({ canSend: true, canRetry: false });
+      expect(await client.retry(first.messageId)).toMatchObject({ ok: false });
+      host.latest().push(status(run("completed", "another-run"), at(2)));
+      await flush();
+      expect(client.getState().canRetry).toBe(true);
+      expect(await client.retry(first.messageId)).toMatchObject({ ok: true, outcome: "accepted" });
+      expect(send.mock.calls[1]?.[0]).toEqual(send.mock.calls[0]?.[0]);
+      expect(client.getState().canRetry).toBe(false);
+    },
+  );
+});
+
 describe("rendering", () => {
   it("renders on a server, where there is no window or document", () => {
     expect(typeof globalThis.window).toBe("undefined");
