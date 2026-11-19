@@ -1,7 +1,7 @@
 {
   "name": "@providerkit/native",
   "version": "0.1.0",
-  "description": "React Native support for @providerkit/react: a stream transport over your app's own reader, storage for drafts and unsent messages, and reconnects that wait until the app is open and online.",
+  "description": "Chat on React Native: unstyled components, streaming Markdown and a transport that uses your app's stream reader.",
   "type": "module",
   "license": "MIT",
   "author": "Gustavo Salomé",
@@ -13,6 +13,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./markdown": {
+      "types": "./dist/markdown.d.ts",
+      "default": "./dist/markdown.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -43,14 +47,14 @@
     "react": "^19",
     "react-native": ">=0.86"
   },
-  "peerDependenciesMeta": {
-    "react-native": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@providerkit/react": "workspace:*",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "happy-dom": "^20.14.5",
     "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-native": "0.86.2",
     "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   },
