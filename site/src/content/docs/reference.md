@@ -3,7 +3,7 @@ title: API reference
 description: Look up released Core, Agents and React exports by package and import path.
 ---
 
-## Core 0.34.0
+## Core 0.35.0
 
 [Core reference](/reference/core/): provider calls, tools and failures, plus separate entries for
 hosted work, tracing, decisions, speech, transcription and sign-in.

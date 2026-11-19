@@ -489,7 +489,7 @@ output on phones. Controls are underlined and unfilled. The earlier suggestion o
 neutral primary action was not approved and is not part of this direction.
 
 The Core example runs `isTransient`, not a copied classifier. The full demo reuses OpticalBench.
-The package rows explain the next action with accurate release state: Core 0.34.0, Agents 0.2.0
+The package rows explain the next action with accurate release state: Core 0.35.0, Agents 0.2.0
 and React 0.1.0. No invented installs, live model answers or unmaintained test counts.
 
 Agents and React guides/reference now cover the released public entries. Their browser examples

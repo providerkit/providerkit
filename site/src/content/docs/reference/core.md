@@ -1,9 +1,9 @@
 ---
 title: Core API
-description: Import paths and generated signatures for @providerkit/core 0.34.0.
+description: Import paths and generated signatures for @providerkit/core 0.35.0.
 ---
 
-These signatures describe **@providerkit/core 0.34.0**. Start with the
+These signatures describe **@providerkit/core 0.35.0**. Start with the
 [quickstart](/guides/getting-started/) for a working provider call.
 
 | Import path                       | Exports                                                                                                      |

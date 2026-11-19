@@ -42,7 +42,7 @@ export default defineConfig({
           projectName: "providerkit",
           description: DESCRIPTION,
           details: [
-            "- Core 0.34.0 calls providers and handles their failures. Its main entry is fetch-only with no runtime dependencies.",
+            "- Core 0.35.0 calls providers and handles their failures. Its main entry is fetch-only with no runtime dependencies.",
             "- Agents 0.2.0 runs agents and workflows using Core. The host owns authorization, storage and retention.",
             "- React 0.1.0 provides chat hooks and optional components. Its portable protocol works with an app's own state owner.",
             "- Start at https://providerkit.dev/start/ to choose a package.",
