@@ -33,6 +33,8 @@ export type ToolOutcome<O> =
        *  a reader who cannot see our stack trace. */
       error: string;
       durationMs: number;
+      /** What was thrown, for your logs. When a `zodTool` check fails, its `cause` is zod's
+       *  error, or what threw in its place: a refine, a transform or `describeIssues`. */
       cause?: unknown;
     };
 

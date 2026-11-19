@@ -67,6 +67,23 @@ export interface ZodToolSpec<I, O, R = O> {
    * Off by default: an ordinary tool can simply be called again.
    */
   clampOverflow?: boolean;
+  /**
+   * Writes the problems zod found in your words instead of zod's, for the input check and the
+   * `output` check. zod's sentence can list every value a field accepts and quote the caller's
+   * key names, and an app that saves tool replies keeps that text: an adopter shows each reply
+   * again in its studio for a week, so it words a problem from its path and code alone. That
+   * tells the model less. A bare `invalid_type` at `sheets` once sent a model back to resend
+   * the same call, which is why the default keeps zod's sentence.
+   *
+   * It gets zod's error, with every issue, and `checked`: `input` for the model's arguments,
+   * `result` for what `run` returned. On input it words the same parse `invoke` and `accepts`
+   * decide by, after the repairs. Only the default stops at five issues. A check that throws
+   * reads as its own message, and so does a `describeIssues` that throws. On both checks, the
+   * error the tool throws keeps zod's error as its `cause`, or what was thrown in its place, so
+   * your logs find it at `ToolOutcome.cause.cause`. Defaults to zod's message for each issue,
+   * after its path.
+   */
+  describeIssues?: (error: z.ZodError, checked: "input" | "result") => string;
 }
 
 /** How many problems the model reads back: a 1,000-row sheet can fail on every cell. */
@@ -78,7 +95,7 @@ const MAX_ISSUES = 5;
  * call. The rest are counted, so a model that fixes five does not take them for all of it.
  * `root` names a problem with the whole value: the model's arguments, or the tool's result.
  */
-function describeIssues(issues: Issues, root: "input" | "result"): string {
+function describeIssues({ issues }: z.ZodError, root: "input" | "result"): string {
   const lines = issues
     .slice(0, MAX_ISSUES)
     .map((issue) => `${issue.path.map(String).join(".") || root}: ${issue.message}`);
@@ -165,18 +182,23 @@ function repairSlips(raw: unknown, issues: Issues): unknown {
 function checkedRun<I, O>(
   spec: ZodToolSpec<I, O, unknown>,
   output: z.ZodType<O>,
+  describe: typeof describeIssues,
 ): (input: I, ctx: ToolContext) => Promise<O> {
   return async (input, ctx) => {
     const result = await spec.run(input, ctx);
     let problems: string;
+    let cause: unknown;
     try {
       // Async, because the sync parse throws on an async refine or transform.
       const parsed = await output.safeParseAsync(result);
       if (parsed.success) return parsed.data;
-      problems = describeIssues(parsed.error.issues, "result");
+      cause = parsed.error;
+      // Inside the try, so a wording that throws still tells the model the call ran.
+      problems = describe(parsed.error, "result");
     } catch (err) {
       // zod does not catch a refine or transform that throws (`new URL` on a bad link). The
       // call ran all the same, and that is what the model must read.
+      cause = err;
       problems = messageOf(err);
     }
     // The call ran, so a write may already have happened. The model decides whether to
@@ -184,6 +206,7 @@ function checkedRun<I, O>(
     const effect = spec.isReadOnly ? "" : " Check its effect before calling it again.";
     throw new Error(
       `${spec.name} ran, but its result does not match its output schema.${effect} Problems: ${problems}`,
+      { cause },
     );
   };
 }
@@ -209,6 +232,7 @@ export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O>;
 export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O> {
   const inputSchema = toJsonObjectSchema(spec.input, `Tool "${spec.name}" input`);
   const { output } = spec;
+  const describe = spec.describeIssues ?? describeIssues;
 
   function clamp(value: unknown): unknown {
     return spec.clampOverflow ? clampToSchema(value, inputSchema) : value;
@@ -218,13 +242,27 @@ export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O> {
   // a decoded string, or beside a fixed wrapper, still reaches the model. The repaired
   // value is clamped too, since a string unwrapped from `{ text }` can be the one too long.
   function parseInput(raw: unknown): I {
-    const candidate = clamp(raw);
-    const first = spec.input.safeParse(candidate);
-    if (first.success) return first.data;
-    const repaired = repairSlips(candidate, first.error.issues);
-    const parsed = repaired === candidate ? first : spec.input.safeParse(clamp(repaired));
-    if (parsed.success) return parsed.data;
-    throw new Error(describeIssues(parsed.error.issues, "input"));
+    let problems: string;
+    let cause: unknown;
+    try {
+      const candidate = clamp(raw);
+      const first = spec.input.safeParse(candidate);
+      if (first.success) return first.data;
+      const repaired = repairSlips(candidate, first.error.issues);
+      const parsed = repaired === candidate ? first : spec.input.safeParse(clamp(repaired));
+      if (parsed.success) return parsed.data;
+      cause = parsed.error;
+      problems = describe(parsed.error, "input");
+    } catch (err) {
+      // A refine or transform that throws, or a `describeIssues` that does, is wrapped as it is
+      // on a result. Thrown bare, it was `ToolOutcome.cause` itself, so a log reading
+      // `cause.cause`, where zod's error sits, got `undefined`.
+      cause = err;
+      problems = messageOf(err);
+    }
+    // The model reads the message, which may be the app's words. What went wrong stays as the
+    // cause, and `invoke` keeps what was thrown, so logs still have all of it.
+    throw new Error(problems, { cause });
   }
 
   return defineTool<I, O>({
@@ -243,6 +281,6 @@ export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O> {
     ...(spec.isConcurrencySafe !== undefined ? { isConcurrencySafe: spec.isConcurrencySafe } : {}),
     ...(spec.isTerminal !== undefined ? { isTerminal: spec.isTerminal } : {}),
     validate: parseInput,
-    run: output ? checkedRun(spec, output) : spec.run,
+    run: output ? checkedRun(spec, output, describe) : spec.run,
   });
 }

@@ -520,6 +520,164 @@ describe("zodTool", () => {
       expect(dated.outputSchema).toMatchObject({ properties: { at: {} } });
     });
   });
+
+  // An adopter saves every tool reply and shows it again in its studio for a week. zod's
+  // sentence lists every value a field accepts, so that adopter words a problem from its path
+  // and code alone, and must not need a second parse that could disagree after the repairs.
+  describe("describeIssues", () => {
+    const pathAndCode = () =>
+      vi.fn((error: z.ZodError, checked: "input" | "result") =>
+        error.issues.map((issue) => `${issue.path.join(".") || checked} ${issue.code}`).join("; "),
+      );
+    const draft = (describeIssues?: ReturnType<typeof pathAndCode>) =>
+      zodTool({
+        name: "create_draft",
+        description: "create a draft",
+        input: z.object({
+          format: z.enum(["post", "carousel", "story"]),
+          rows: z.array(z.object({ qty: z.number() })).optional(),
+        }),
+        describeIssues,
+        run: async (input) => input,
+      });
+
+    it("replaces zod's words in a rejected call, and keeps zod's error for logs", async () => {
+      const words = pathAndCode();
+      const outcome = await draft(words).invoke({ format: "reel_probe" });
+      expect(outcome).toMatchObject({
+        ok: false,
+        kind: "invalid_input",
+        error: "Invalid arguments for create_draft: format invalid_value",
+      });
+      if (outcome.ok || !(outcome.cause instanceof Error)) throw new Error("expected a cause");
+      expect(outcome.cause.cause).toBeInstanceOf(z.ZodError);
+      expect(words.mock.lastCall?.[0]).toBe(outcome.cause.cause);
+      expect(words.mock.lastCall?.[1]).toBe("input");
+      // Without it, the bytes are today's.
+      expect(await draft().invoke({ format: "reel_probe" })).toMatchObject({
+        error:
+          'Invalid arguments for create_draft: format: Invalid option: expected one of "post"|"carousel"|"story"',
+      });
+    });
+
+    it("words the parse invoke and accepts decide by, after the repairs", async () => {
+      // `rows` sent as a JSON string: the repair decodes it, and the problem inside is the one.
+      const outcome = await draft(pathAndCode()).invoke({
+        format: "post",
+        rows: '[{"qty":"two"}]',
+      });
+      expect(!outcome.ok && outcome.error).toBe(
+        "Invalid arguments for create_draft: rows.0.qty invalid_type",
+      );
+      const cases = [
+        { format: "post" },
+        { format: "post", rows: '[{"qty":2}]' },
+        { format: "reel_probe" },
+        { format: "post", rows: '[{"qty":"two"}]' },
+      ];
+      const worded = draft(pathAndCode());
+      expect(cases.map((args) => worded.accepts(args))).toEqual([true, true, false, false]);
+      expect(cases.map((args) => draft().accepts(args))).toEqual([true, true, false, false]);
+      expect(await worded.invoke(cases[1])).toMatchObject({
+        ok: true,
+        output: { format: "post", rows: [{ qty: 2 }] },
+      });
+    });
+
+    it("replaces zod's words in a failed result check, with `result` for the whole value", async () => {
+      let reply: unknown = { status: "refunded" };
+      const order = (describeIssues?: ReturnType<typeof pathAndCode>) =>
+        zodTool({
+          name: "order",
+          description: "order",
+          isReadOnly: true,
+          input: z.object({}),
+          output: z.object({ status: z.enum(["open", "paid"]) }),
+          describeIssues,
+          run: async (): Promise<unknown> => reply,
+        });
+      const words = pathAndCode();
+      const outcome = await order(words).invoke({});
+      const problem = "order ran, but its result does not match its output schema. Problems:";
+      expect(outcome).toMatchObject({
+        ok: false,
+        kind: "failed",
+        error: `${problem} status invalid_value`,
+      });
+      if (outcome.ok || !(outcome.cause instanceof Error)) throw new Error("expected a cause");
+      expect(words.mock.lastCall?.[0]).toBe(outcome.cause.cause);
+      expect(words.mock.lastCall?.[1]).toBe("result");
+      // Without it, the bytes are today's.
+      expect(await order().invoke({})).toMatchObject({
+        error: `${problem} status: Invalid option: expected one of "open"|"paid"`,
+      });
+      reply = "refunded";
+      expect(await order(words).invoke({})).toMatchObject({
+        error: `${problem} result invalid_type`,
+      });
+    });
+
+    // Nothing in a thrown check is zod's sentence, so it reads as thrown, and stays for logs at
+    // `cause.cause` on both checks. Thrown bare on input, it was `cause` itself, and a log of
+    // `cause.cause` got `undefined` for every bad link.
+    it("leaves a check that throws in its own words, on both checks", async () => {
+      const words = pathAndCode();
+      const link = z.string().transform((s) => new URL(s).href);
+      const save = zodTool({
+        name: "save",
+        description: "save",
+        isReadOnly: true,
+        input: z.object({ link: link.optional() }),
+        output: z.object({ link }),
+        describeIssues: words,
+        run: async () => ({ link: "not a url" }),
+      });
+      const rejected = await save.invoke({ link: "not a url" });
+      const failed = await save.invoke({});
+      expect([rejected, failed]).toMatchObject([
+        { kind: "invalid_input", error: "Invalid arguments for save: Invalid URL" },
+        {
+          kind: "failed",
+          error: "save ran, but its result does not match its output schema. Problems: Invalid URL",
+        },
+      ]);
+      expect(words).not.toHaveBeenCalled();
+      for (const outcome of [rejected, failed]) {
+        if (outcome.ok || !(outcome.cause instanceof Error)) throw new Error("expected a cause");
+        expect(outcome.cause.cause).toBeInstanceOf(TypeError);
+      }
+    });
+
+    // A wording that throws is the app's bug, so its error is what logs need, at the same depth.
+    it("keeps what a describeIssues that throws threw, on both checks", async () => {
+      const broken = new Error("describe broke");
+      const count = zodTool({
+        name: "count",
+        description: "count",
+        isReadOnly: true,
+        input: z.object({ n: z.number() }),
+        output: z.object({ n: z.number() }),
+        describeIssues: () => {
+          throw broken;
+        },
+        run: async (): Promise<unknown> => ({ n: "two" }),
+      });
+      const rejected = await count.invoke({ n: "two" });
+      const failed = await count.invoke({ n: 2 });
+      expect([rejected, failed]).toMatchObject([
+        { kind: "invalid_input", error: "Invalid arguments for count: describe broke" },
+        {
+          kind: "failed",
+          error:
+            "count ran, but its result does not match its output schema. Problems: describe broke",
+        },
+      ]);
+      for (const outcome of [rejected, failed]) {
+        if (outcome.ok || !(outcome.cause instanceof Error)) throw new Error("expected a cause");
+        expect(outcome.cause.cause).toBe(broken);
+      }
+    });
+  });
 });
 
 describe("clampToSchema", () => {

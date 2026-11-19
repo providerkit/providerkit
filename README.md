@@ -175,6 +175,8 @@ const outcome = await lookup.invoke(argsFromModel);
 `invoke` never throws. A bad argument, a timeout or a failing tool comes back as an outcome the
 model reads, so it can fix its call. When a model sends an array as a JSON string, or a string as
 `{ text }`, the tool repairs it and checks again. Pass `output` to check results too.
+The model reads zod's message for each problem, which can list every value a field accepts. If you
+save those replies or show them to people, pass `describeIssues` to write the problems yourself.
 `lookup.accepts(args)` runs the same check without running the tool, so nobody is asked to approve
 a call that can't run. The [tools guide](https://providerkit.dev/guides/tools/) covers the rest.
 
