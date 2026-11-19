@@ -883,6 +883,41 @@ these host tools the final answer comes from the tool's result, not its input. `
 still validates its input. Stopping results are recorded in the tool receipt, so resume never
 repeats a finished effect or asks the model to rephrase it.
 
+### End only on a stopping tool
+
+Some agents must never end by talking. A browser agent that writes a question as text has not
+paused, so the person never gets to answer it. Set `stopOnlyAtTools` and the run ends only
+through a stopping tool:
+
+```ts
+const browser = defineAgent({
+  ...config,
+  tools: [snapshot, click, done],
+  stopAtTools: ["done"],
+  stopOnlyAtTools: { nudge: "Respond with a tool call, not plain text. Call done when finished." },
+});
+```
+
+A turn that writes text and calls no tool no longer ends the run. The model reads your `nudge` as
+the next user message and keeps working. The nudge stays in the conversation the run returns,
+right after the turn it answered. A turn with no text and no tool call still fails with
+`empty_output`.
+
+A stopping tool may share its turn with other calls. The calls before it run as usual. Once it
+succeeds, each call after it gets a cancelled result that reads "The run ended earlier this turn
+(`done`). This call did not run." In this mode a stopping tool runs on its own, never in a
+parallel batch, so the calls after it have not started when it succeeds. `submit_result` and
+handoffs still run alone.
+
+An output limit cuts a tool call's arguments first, so the answer is often in the turn's text
+while the stopping tool's summary is empty. When a text agent's stopping tool returns an empty
+summary, the turn's text is the answer. When both are empty, the model gets the empty result
+back and tries again.
+
+The stopping tool can be one named in `stopAtTools`, a tool with `isTerminal: true`, or
+`submit_result` with an output contract. Without one, `defineAgent` throws. The turn limit is a
+hard cap in this mode: there is no tool-free final call, because it could not end the run.
+
 ### Refuse a call before it runs
 
 Your host can look at each call before it runs and answer it with a message instead. The model
@@ -1814,7 +1849,8 @@ through `limits` when configuring an agent. A call your host refuses or cancels 
 does not count as a tool call. Once a text agent uses all its model turns, it gets
 one final call with no tools to answer from what it found. That call still counts against the
 tree's model-call and time budgets. Any tool calls it returns are refused. Checked-output agents
-keep the hard turn cap because a tool-free call cannot submit their result.
+keep the hard turn cap because a tool-free call cannot submit their result. So do agents with
+`stopOnlyAtTools`, whose run a tool-free call cannot end.
 
 The root's `treeLimits` apply across all descendants:
 

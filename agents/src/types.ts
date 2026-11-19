@@ -55,7 +55,8 @@ export interface TreeLimits {
  * an admitted call can still finish or incur a charge after the signal aborts. */
 export interface RunLimits {
   /** Tool-capable model turns. Text agents may make one final tool-free call, still counted
-   * against the tree's model-call budget. Checked-output agents keep the hard cap. */
+   * against the tree's model-call budget. Checked-output agents and `stopOnlyAtTools` agents
+   * keep the hard cap: a tool-free call cannot end them. */
   turns: number;
   /** A call `host.screenCall` refused, or one cancelled with the rest of its turn, does not
    * count: it never started. */
@@ -349,6 +350,8 @@ export interface RunDefinition {
   stopAtTools: string[];
   /** `AgentConfig.runFirst`, when the agent names any. */
   runFirst?: string[];
+  /** `AgentConfig.stopOnlyAtTools`, when set. */
+  stopOnlyAtTools?: { nudge: string };
   /** Present for registered code tools, including ones disabled for this run. */
   codeTools?: Record<string, RecordedCodeTool>;
   /** Null refuses interrupted effects. Recorded policy and identities must match on recovery. */
@@ -392,6 +395,14 @@ export interface AgentConfig<H = unknown> {
    * often send a plan with the first step it describes; run in wire order, that step would
    * reach the host's check before the plan it depends on. Results keep the model's order. */
   runFirst?: readonly string[];
+  /** End the run only through a stopping tool: `stopAtTools`, an `isTerminal` tool or
+   * `submit_result`. A turn that answers in text, with no tool call, no longer ends the run:
+   * the model reads `nudge` as the next user message and keeps working. A stopping tool may
+   * share its turn with other calls; once it succeeds, each call after it gets a result that
+   * says it did not run. `submit_result` and handoffs still run alone. When a text agent's
+   * stopping tool returns an empty summary, the turn's text is the answer. The turn limit is a
+   * hard cap, with no tool-free final call. */
+  stopOnlyAtTools?: { nudge: string };
   limits?: Partial<RunLimits>;
   /** Applies when this agent is the root. Descendants share the root's limits. */
   treeLimits?: Partial<TreeLimits>;

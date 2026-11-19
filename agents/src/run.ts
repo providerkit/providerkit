@@ -133,6 +133,7 @@ import {
   isUsage,
   jsonArguments,
   modelId,
+  nudgeAfter,
   recordCodeTools,
   readLimits,
   readModelSettings,
@@ -428,6 +429,19 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       !stopAtTools.includes(tool.name)
     )
       stopAtTools.push(tool.name);
+  const stopOnly = definition.stopOnlyAtTools;
+  if (
+    stopOnly !== undefined &&
+    (!isRecord(stopOnly) || Object.keys(stopOnly).length !== 1 || !isId(stopOnly.nudge))
+  )
+    throw new TypeError(
+      "stopOnlyAtTools needs { nudge }: the text the model reads after a turn with no tool call.",
+    );
+  if (stopOnly && !stopAtTools.length && !output)
+    throw new TypeError(
+      "stopOnlyAtTools needs a tool that can end the run: name one in stopAtTools, mark one isTerminal, or set an output contract.",
+    );
+  const stopOnlyAtTools = stopOnly && { nudge: stopOnly.nudge };
   if (output) {
     tools.push(
       defineTool({
@@ -617,6 +631,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
       ...(runFirst.length ? { runFirst: [...runFirst] } : {}),
+      ...(stopOnlyAtTools ? { stopOnlyAtTools: { ...stopOnlyAtTools } } : {}),
       ...(codeTools.size ? { codeTools: recordCodeTools(codeTools) } : {}),
       guardrails: copyData(guardPolicy),
       compaction: copyData(compaction),
@@ -1232,6 +1247,30 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       return verdict;
     }
 
+    /** A terminal tool runs alone, so the rest of its turn has settled when it ends the run.
+     * Under stopOnlyAtTools a host terminal tool may share its turn: the calls after it are
+     * cancelled once it succeeds. submit_result always runs alone. */
+    function runsAlone(tool: Tool): boolean {
+      return (
+        tool.isTerminal && (tool.name === RESULT_TOOL_NAME || !snapshot.definition.stopOnlyAtTools)
+      );
+    }
+
+    /** Under stopOnlyAtTools, the text for calls a successful stopping tool ran ahead of: read
+     * from the journal, so a restarted run cancels the same calls. Ported from TabRunner's
+     * CANCELLED_RUN_ENDED: the run returns once the turn drains, and nobody is left to watch a
+     * call batched behind it. `before` is the positions ahead of the current one. */
+    function stoppedBy(model: CompletedModel, before: readonly number[]): string | undefined {
+      if (!snapshot.definition.stopOnlyAtTools) return undefined;
+      for (const index of before) {
+        const tool = model.tools[index];
+        const name = model.turn.message.toolCalls?.[index]?.name;
+        if (tool?.status === "completed" && tool.result.ok && tool.result.final && name)
+          return `The run ended earlier this turn (\`${name}\`). This call did not run.`;
+      }
+      return undefined;
+    }
+
     async function checkToolRetry(slot: ToolSlot): Promise<void> {
       const execution = slot.get();
       const recorded = snapshot.definition.toolRetries;
@@ -1439,7 +1478,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           kind: "invalid_input",
           content: "Tool arguments must be one complete JSON object. Send the full object again.",
         };
-      } else if (tool.isTerminal && slot.model?.tools.length !== 1) {
+      } else if (runsAlone(tool) && slot.model?.tools.length !== 1) {
         result = {
           ok: false,
           kind: "invalid_input",
@@ -1603,7 +1642,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           result.final = { candidate: copyData(request.arguments) };
         if (outcome.ok && snapshot.definition.stopAtTools.includes(tool.name)) {
           try {
-            const candidate = output ? copyData(outcome.output) : outcome.summary;
+            let candidate = output ? copyData(outcome.output) : outcome.summary;
+            // Ported from TabRunner's `done`: its summary is the first thing an output cap cuts,
+            // and the answer the model wrote is the turn's text, so a blank summary falls back
+            // to that text before the run ever closes on nothing.
+            if (!output && snapshot.definition.stopOnlyAtTools && !outcome.summary.trim())
+              candidate = slot.model?.turn.message.content ?? "";
             validateResult(candidate);
             result = { ...result, ok: true, final: { candidate } };
           } catch (error) {
@@ -1635,6 +1679,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         !host?.needsApproval &&
         !execution.asks?.length &&
         !tool.isTerminal &&
+        // Under stopOnlyAtTools a stopping tool runs on its own, so the calls after it in its
+        // turn have not started when it succeeds, and can be cancelled.
+        !(
+          snapshot.definition.stopOnlyAtTools && snapshot.definition.stopAtTools.includes(tool.name)
+        ) &&
         host?.canRunConcurrently?.(immutableCopy(request)) === true
       );
     }
@@ -2116,7 +2165,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             !isHandoff(tool) &&
             !isClientTool(tool) &&
             !isCodeTool(tool) &&
-            tool.isTerminal &&
+            runsAlone(tool) &&
             model.tools.length !== 1)
         )
           continue;
@@ -2217,6 +2266,10 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         );
       const calls = message.toolCalls ?? [];
       if (calls.length === 0) {
+        // Under stopOnlyAtTools a text answer does not end the run: the next request answers it
+        // with the nudge. Ported from TabRunner's loop, where a question written as prose
+        // paused nothing and the person never got to answer it.
+        if (nudgeAfter(snapshot.definition, model) !== undefined) return;
         if (output)
           fail(
             "missing_result",
@@ -2252,9 +2305,14 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           continue;
         }
         active();
-        // Calls left after a `cancel` verdict never start, so no budget can hold them up.
-        if (cancelled?.model === model && unstarted(model.tools[index])) {
-          await cancelRest(model, [index], cancelled.content);
+        // Calls left after a `cancel` verdict, or after a stopping tool under stopOnlyAtTools,
+        // never start, so no budget can hold them up.
+        const ended =
+          cancelled?.model === model
+            ? cancelled.content
+            : stoppedBy(model, order.slice(0, position));
+        if (ended !== undefined && unstarted(model.tools[index])) {
+          await cancelRest(model, [index], ended);
           position++;
           continue;
         }
@@ -2348,7 +2406,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         if (
           (tool || descriptor || client || code) &&
           completeArguments(request.call.arguments) &&
-          (!tool?.isTerminal || model.tools.length === 1) &&
+          (!tool || !runsAlone(tool) || model.tools.length === 1) &&
           (await needsApproval(request, options, signal))
         )
           await requests.ensure({ type: "approval" });
@@ -2699,10 +2757,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           previous.id,
         );
       // Ported from Microsoft Agent Framework (MIT), _tools.py: after the iteration
-      // allowance, ask once for a tool-free answer. Checked output needs submit_result,
-      // so that mode retains the hard local turn cap instead of buying an unusable call.
+      // allowance, ask once for a tool-free answer. Checked output needs submit_result, and
+      // stopOnlyAtTools a stopping tool, so those modes keep the hard local turn cap instead of
+      // buying a call that cannot end them.
       const finalTurn = position === limits.turns;
-      if (position > limits.turns || (finalTurn && output))
+      if (position > limits.turns || (finalTurn && (output || snapshot.definition.stopOnlyAtTools)))
         throw new Halt({ status: "limited", limit: "turns" });
       // A steer never changes the input of an already admitted call, including safe replay.
       // Check capacity before polling so a spent budget leaves delivery queued in the host.
@@ -3209,6 +3268,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         output: output?.schema ?? null,
         stopAtTools,
         ...(runFirst.length ? { runFirst } : {}),
+        ...(stopOnlyAtTools ? { stopOnlyAtTools } : {}),
         recovery,
         guardrails: guardPolicy,
         compaction,
@@ -3341,6 +3401,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       if (
         !equalData(snapshot.definition.stopAtTools, stopAtTools) ||
         !equalData(snapshot.definition.runFirst ?? [], runFirst) ||
+        !equalData(snapshot.definition.stopOnlyAtTools, stopOnlyAtTools) ||
         (output && !snapshot.definition.enabledTools.includes(RESULT_TOOL_NAME))
       )
         throw new TypeError("The recorded tool behavior does not match this agent version.");

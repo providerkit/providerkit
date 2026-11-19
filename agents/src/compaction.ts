@@ -10,7 +10,7 @@ import {
   type ChatMessage,
 } from "@providerkit/core";
 import { conversationOf } from "./input.ts";
-import { copyData, isId, isRecord } from "./snapshot.ts";
+import { copyData, isId, isRecord, nudgeAfter } from "./snapshot.ts";
 import type {
   AgentMessage,
   CompactionDefinition,
@@ -96,9 +96,10 @@ export function compactMessages(
   });
 }
 
+/** The next request's view: compaction measures, cuts and checks this one. */
 export function modelConversation(
   snapshot: RunSnapshot,
-  messages = conversationOf(snapshot),
+  messages = conversationOf(snapshot, snapshot.models.length, true),
 ): AgentMessage[] {
   const last = snapshot.compactions.at(-1);
   return last?.status === "completed"
@@ -115,13 +116,17 @@ function cutFor(
   const policy = snapshot.definition.compaction;
   if (!policy) return 0;
   const cut = pickCut(wire(view).messages, policy.keepTokens) + (previousCut ? previousCut - 1 : 0);
-  // A not-yet-delivered steer must reach the model verbatim. These are user boundaries
-  // between whole rounds, so capping core's cut here cannot split a call from its result.
-  const full = conversationOf(snapshot, beforeModel);
+  // A not-yet-delivered steer must reach the model verbatim, and so must the nudge before it.
+  // These are user boundaries between whole rounds, so capping core's cut here cannot split a
+  // call from its result.
+  const full = conversationOf(snapshot, beforeModel, true);
+  const nudged = nudgeAfter(snapshot.definition, snapshot.models[beforeModel - 1]) ? 1 : 0;
   const unread =
     beforeModel === 0
       ? snapshot.history.length
-      : full.length - snapshot.inputs.filter((input) => input.beforeModel === beforeModel).length;
+      : full.length -
+        nudged -
+        snapshot.inputs.filter((input) => input.beforeModel === beforeModel).length;
   return Math.min(cut, unread);
 }
 
@@ -133,7 +138,7 @@ export function compactionPlan(
   const last = snapshot.compactions.at(-1);
   // Once per boundary, including a crash after the summary was saved but before model admission.
   if (last?.beforeModel === snapshot.models.length) return;
-  const full = conversationOf(snapshot);
+  const full = conversationOf(snapshot, snapshot.models.length, true);
   const view = modelConversation(snapshot, full);
   const core = wire(view).messages;
   const previous = snapshot.models.at(-1);
@@ -166,7 +171,8 @@ export function checkCompactions(snapshot: RunSnapshot): void {
   let previous: Extract<CompactionExecution, { status: "completed" }> | undefined;
   for (const [index, entry] of snapshot.compactions.entries()) {
     const policy = snapshot.definition.compaction;
-    const source = conversationOf(snapshot, entry.beforeModel);
+    // Each cut was planned for the request at its boundary, so it is checked against that one.
+    const source = conversationOf(snapshot, entry.beforeModel, true);
     const full = source.slice(0, entry.sourceCount);
     const minimumSource =
       source.length -

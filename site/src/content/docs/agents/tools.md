@@ -60,6 +60,22 @@ does not count as a tool call.
 Models often send a plan with its first step in one turn. `runFirst: ["plan"]` runs plan calls
 before the rest of their turn. Results keep the model's order.
 
+## End only on a stopping tool
+
+```ts
+const browser = defineAgent({
+  ...config,
+  stopAtTools: ["done"],
+  stopOnlyAtTools: { nudge: "Respond with a tool call, not plain text. Call done when finished." },
+});
+```
+
+A turn that writes text and calls no tool no longer ends the run: the model reads the nudge and
+keeps working. A question written as text pauses nothing, so this keeps the model on its tools.
+`done` may share its turn with other calls. Once it succeeds, the calls after it get a result
+that says they did not run. When `done` comes back with an empty summary, the turn's text is the
+answer. The turn limit is a hard cap, with no tool-free final call.
+
 ## Check output
 
 `output.schema` tells the model what result to submit. `output.validate` checks the actual value

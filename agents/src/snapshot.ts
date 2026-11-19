@@ -605,6 +605,10 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     isNames(value.enabledTools) &&
     isNames(value.stopAtTools) &&
     optional(value.runFirst, (names) => isNames(names) && names.length > 0) &&
+    optional(
+      value.stopOnlyAtTools,
+      (mode) => isRecord(mode) && Object.keys(mode).length === 1 && isId(mode.nudge),
+    ) &&
     optional(value.codeTools, isRecordedCodeTools) &&
     isGuardDefinition(value.guardrails) &&
     isCompactionDefinition(value.compaction) &&
@@ -1160,6 +1164,24 @@ export function callOrder(
     else rest.push(index);
   }
   return [...first, ...rest];
+}
+
+/** The nudge that answers a turn under `stopOnlyAtTools`: one that wrote text and called no
+ * tool, so the run goes on. Ported from TabRunner's loop, whose nudge also steers a question
+ * the model wrote as prose back to its question tool: written down, it pauses nothing. */
+export function nudgeAfter(
+  definition: RunDefinition,
+  model: ModelExecution | undefined,
+): string | undefined {
+  if (
+    !definition.stopOnlyAtTools ||
+    model?.status !== "completed" ||
+    model.turn.message.toolCalls?.length ||
+    !model.turn.message.content.trim() ||
+    (model.turn.finishReason !== "stop" && model.turn.finishReason !== "tool_calls")
+  )
+    return undefined;
+  return definition.stopOnlyAtTools.nudge;
 }
 
 export function childRunId(operationId: string, key: string): string {
@@ -1934,6 +1956,12 @@ export function readSnapshot(
     throw new TypeError("The snapshot belongs to a different agent definition or version.");
   if (!equalData(raw.limits, limits))
     throw new TypeError("The snapshot limits do not match this agent version.");
+  // Neither can end on a tool-free answer, so neither gets the extra final turn.
+  const hardCap = !!resultTool || !!raw.definition.stopOnlyAtTools;
+  // A turn the run answered and went on from: with tool results, or with the nudge.
+  const goesOn = (model: ModelExecution) =>
+    (model.status === "completed" && model.tools.length > 0) ||
+    nudgeAfter(raw.definition, model) !== undefined;
   let calls = 0;
   for (const [index, model] of raw.models.entries()) {
     if (model.id !== modelId(raw.runId, index))
@@ -1950,7 +1978,7 @@ export function readSnapshot(
     // counted by the tree. No receipt on that extra turn may claim a tool was executed.
     if (
       index >= limits.turns &&
-      (resultTool ||
+      (hardCap ||
         index !== limits.turns ||
         (model.status === "completed" && model.tools.some((tool) => tool.status !== "pending")))
     )
@@ -2110,7 +2138,7 @@ export function readSnapshot(
     }
     if (
       !last &&
-      (tools.length === 0 ||
+      (!goesOn(model) ||
         model.turn.finishReason === null ||
         model.turn.finishReason === "length" ||
         model.turn.finishReason === "content_filter" ||
@@ -2129,7 +2157,7 @@ export function readSnapshot(
           (model) =>
             model.status !== "completed" ||
             model.tools.some((tool) => tool.status !== "completed") ||
-            !model.tools.length ||
+            !goesOn(model) ||
             model.turn.finishReason === null ||
             model.turn.finishReason === "length" ||
             model.turn.finishReason === "content_filter" ||
@@ -2142,7 +2170,7 @@ export function readSnapshot(
       );
   }
   if (
-    raw.models.length > limits.turns + (resultTool ? 0 : 1) ||
+    raw.models.length > limits.turns + (hardCap ? 0 : 1) ||
     calls > limits.toolCalls ||
     snapshotInlineBytes(raw) > limits.inlineBytes
   )
@@ -2164,7 +2192,7 @@ export function readSnapshot(
       finalToolResult(last, raw.definition.stopAtTools, resultTool);
     const candidate = final
       ? final.candidate
-      : !resultTool && tools.length === 0 && last.turn.message.content.trim()
+      : !hardCap && tools.length === 0 && last.turn.message.content.trim()
         ? last.turn.message.content
         : undefined;
     if (candidate === undefined || !equalData(candidate, raw.state.candidate)) {
@@ -2181,7 +2209,7 @@ export function readSnapshot(
         .some(
           (model) =>
             model.status !== "completed" ||
-            !model.tools.length ||
+            !goesOn(model) ||
             model.tools.some((tool) => tool.status !== "completed") ||
             !["stop", "tool_calls"].includes(model.turn.finishReason ?? "") ||
             finalToolResult(model, raw.definition.stopAtTools, resultTool) ||
