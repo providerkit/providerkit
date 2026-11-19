@@ -36,6 +36,30 @@ another tool, forces `route` again on the next turn, up to the turn limit. After
 chooses its tools. `"required"` asks for any tool and lets the model answer once a turn has
 called one.
 
+## Refuse or cancel a call
+
+```ts
+await agent.run(task, {
+  host: {
+    screenCall(call, { earlier }) {
+      const planned = earlier.some((done) => done.name === "plan" && done.result?.ok);
+      if (call.call.name === "click" && !planned)
+        return { refuse: "Blocked: no plan has been posted yet. Call the plan tool first." };
+    },
+  },
+});
+```
+
+`screenCall` runs once for each call, before its approval and before it runs. `{ refuse }`
+answers that call with your text: the model reads it as the call's result, the tool does not
+run and nobody is asked. `{ cancel }` answers that call and every call left in its turn, for
+example after a failed click. `earlier` lists the run's earlier calls with their results, so a
+policy can count them. Calls batched together share an allowance. A refused or cancelled call
+does not count as a tool call.
+
+Models often send a plan with its first step in one turn. `runFirst: ["plan"]` runs plan calls
+before the rest of their turn. Results keep the model's order.
+
 ## Check output
 
 `output.schema` tells the model what result to submit. `output.validate` checks the actual value

@@ -56,10 +56,43 @@ export function retryBudget(definition: ToolRetryDefinition | null, name: string
 }
 
 export function toolAttempts(tool: ToolExecution): number {
+  if (skipped(tool)) return 0;
   return (
     tool.retries.length +
     tool.interrupted.length +
     (tool.status !== "pending" || tool.asks?.length ? 1 : 0)
+  );
+}
+
+type Journaled = Pick<ToolExecution, "status" | "asks" | "retries" | "interrupted">;
+
+/** Nothing has happened to this call yet: no attempt, no request, no result. */
+export function fresh(tool: Journaled | undefined): boolean {
+  return (
+    tool?.status === "pending" &&
+    !tool.asks?.length &&
+    !tool.retries.length &&
+    !tool.interrupted.length
+  );
+}
+
+/** The call has not started, though a request for it may be open. */
+export function unstarted(tool: Journaled | undefined): boolean {
+  return tool?.status === "pending" && !tool.retries.length && !tool.interrupted.length;
+}
+
+/** `host.screenCall` refused this call, or it was cancelled with the rest of its turn, before
+ * anything else happened to it. It did nothing, so it spends no tool call. Every other cancel
+ * a run writes answers a request, so it carries one. */
+export function skipped(tool: ToolExecution): boolean {
+  return (
+    tool.status === "completed" &&
+    !tool.result.ok &&
+    (tool.result.kind === "refused" || tool.result.kind === "cancelled") &&
+    !tool.asks?.length &&
+    !tool.retries.length &&
+    !tool.interrupted.length &&
+    !tool.calls?.length
   );
 }
 

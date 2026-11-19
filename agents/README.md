@@ -883,6 +883,76 @@ these host tools the final answer comes from the tool's result, not its input. `
 still validates its input. Stopping results are recorded in the tool receipt, so resume never
 repeats a finished effect or asks the model to rephrase it.
 
+### Refuse a call before it runs
+
+Your host can look at each call before it runs and answer it with a message instead. The model
+reads the message as that call's result and works around it:
+
+```ts
+await browser.run("Archive the newsletter.", {
+  host: {
+    screenCall(call, { earlier }) {
+      const planned = earlier.some((done) => done.name === "plan" && done.result?.ok);
+      if (call.call.name === "click" && !planned)
+        return { refuse: "Blocked: no plan has been posted yet. Call the plan tool first." };
+    },
+  },
+});
+```
+
+Return nothing to let the call run. `{ refuse: text }` answers this call only: the tool does not
+run, no approval opens, and the result has kind `refused`. `{ cancel: text }` answers this call
+and every call left in the same model turn, each with kind `cancelled`. Use it when something
+earlier in the turn changed what the rest was written for, such as a failed click:
+
+```ts
+screenCall(call, { turn, earlier }) {
+  const failed = earlier.find(
+    (done) => done.turn === turn && done.name === "click" && done.result?.kind === "failed",
+  );
+  if (failed) return { cancel: "An earlier click in this turn failed. This call did not run." };
+},
+```
+
+`screenCall` runs once for each call, before its approval and before it runs. That includes
+calls a code program makes and calls in a specialist's run. Its second argument holds `turn`,
+the model turn that asked for the call (from 0), and `earlier`: the calls this run handled
+before this one, oldest first. Each has its `name`, `arguments`, `turn`, and a `result` with
+`ok` and `kind` once it has one. Calls let through to run together appear in `earlier` before
+they start, so they share an allowance:
+
+```ts
+screenCall(call, { earlier }) {
+  const searches = earlier.filter(
+    (done) =>
+      done.name === "search" &&
+      done.result?.kind !== "refused" &&
+      done.result?.kind !== "cancelled",
+  );
+  if (call.call.name === "search" && searches.length >= 2)
+    return { refuse: "search is limited to 2 for this request. Work from what you have." };
+},
+```
+
+Decide from `earlier`, not from state your process keeps: after a restart, calls that had not
+started are screened again. A refused or cancelled call sends a `tool_result` event but no
+`tool_start`, and it spends none of `limits.toolCalls`. Inside a code program, every call the
+program makes still counts toward its limits. `screenCall` may return a promise, for example to
+read your own database. Anything other than nothing, `{ refuse }` or `{ cancel }` with text
+fails the run with `invalid_screen`.
+
+### Run a plan before the work
+
+Models often send a plan in the same turn as the first step it describes. Name the plan tool in
+`runFirst` and its calls run before the rest of their turn, so the step comes after the plan:
+
+```ts
+const browser = defineAgent({ ...config, tools: [plan, click], runFirst: ["plan"] });
+```
+
+Results keep the model's order. `submit_result` and handoffs always run alone, so `runFirst`
+cannot name them.
+
 ## Code mode
 
 Let the model write a short program that calls several tools before returning an answer:
@@ -1740,7 +1810,8 @@ raw histories, notes or events to a browser. Project only approved identities, l
 
 Per-run defaults are 12 model turns, 32 tool calls, 5 minutes, at most 3 approved concurrent
 ordinary tools and 5 MB (`inlineBytes: 5_000_000`) of inline images and files. Change these
-through `limits` when configuring an agent. Once a text agent uses all its model turns, it gets
+through `limits` when configuring an agent. A call your host refuses or cancels before it starts
+does not count as a tool call. Once a text agent uses all its model turns, it gets
 one final call with no tools to answer from what it found. That call still counts against the
 tree's model-call and time budgets. Any tool calls it returns are refused. Checked-output agents
 keep the hard turn cap because a tool-free call cannot submit their result.
@@ -1867,6 +1938,9 @@ The host supplies these callbacks:
 - Optional `needsApproval(call)` requires approval even for an unmarked tool. It cannot waive
   a tool's own `needsApproval` flag. Optional `answerNow(request)` returns a standing policy
   decision, or `undefined` to ask the person. This is trusted policy, not model output.
+- Optional `screenCall(call, { turn, earlier })` refuses a call before any approval opens for
+  it, so nobody is asked about work the host would refuse. See
+  [Refuse a call before it runs](#refuse-a-call-before-it-runs).
 
 A `Decision` is one of:
 

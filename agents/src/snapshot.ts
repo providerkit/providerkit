@@ -28,7 +28,7 @@ import {
 } from "./memory.ts";
 import { allModels, checkCompactions, isCompactionDefinition } from "./compaction.ts";
 import { isSubagentRecord } from "./subagents.ts";
-import { isToolRetryDefinition, retryBudget, toolAttempts } from "./tool-retry.ts";
+import { fresh, isToolRetryDefinition, retryBudget, skipped, toolAttempts } from "./tool-retry.ts";
 import { GUARD_STAGES } from "./extensions.ts";
 import { INPUT_LIMITS, inputBytes, readQueuedInput, type RunInput } from "./steering.ts";
 import { isRecoveryDefinition } from "./recovery.ts";
@@ -604,6 +604,7 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     optional(value.providerSessionId, isId) &&
     isNames(value.enabledTools) &&
     isNames(value.stopAtTools) &&
+    optional(value.runFirst, (names) => isNames(names) && names.length > 0) &&
     optional(value.codeTools, isRecordedCodeTools) &&
     isGuardDefinition(value.guardrails) &&
     isCompactionDefinition(value.compaction) &&
@@ -672,6 +673,7 @@ export function checkOptions(
       "prepareRequest",
       "resolveRequest",
       "needsApproval",
+      "screenCall",
       "answerNow",
       "beforeStep",
       "reconcileStep",
@@ -844,6 +846,7 @@ function isToolResult(value: unknown): value is ToolResult {
           "aborted",
           "failed",
           "denied",
+          "refused",
           "cancelled",
           "unknown_tool",
           "disabled_tool",
@@ -1142,6 +1145,21 @@ export function modelId(runId: string, index: number): string {
 
 export function toolId(model: string, index: number): string {
   return `${model}/tool/${index + 1}`;
+}
+
+/** The order a turn's calls run in: calls of `runFirst` tools, then the rest, each part in
+ * the model's order. Ported from TabRunner's planFirst, which another adopter's loop copied. */
+export function callOrder(
+  calls: readonly { name: string }[],
+  runFirst: readonly string[] = [],
+): number[] {
+  const first: number[] = [];
+  const rest: number[] = [];
+  for (const [index, call] of calls.entries()) {
+    if (runFirst.includes(call.name)) first.push(index);
+    else rest.push(index);
+  }
+  return [...first, ...rest];
 }
 
 export function childRunId(operationId: string, key: string): string {
@@ -1950,15 +1968,20 @@ export function readSnapshot(
     if (!equalData(model.usage, model.turn.usage))
       throw new TypeError("The model usage does not match its completed turn.");
     let pending = false;
-    for (const [position, tool] of model.tools.entries()) {
+    // Calls run in this order, so no call may start after one that has not. A call the host
+    // refused or a batch cancelled never started, so it may.
+    for (const position of callOrder(tools, raw.definition.runFirst)) {
+      const tool = model.tools[position];
       if (
+        !tool ||
         tool.id !== toolId(model.id, position) ||
         (!last && tool.status !== "completed") ||
         (pending &&
           tool.status !== "pending" &&
           !tool.asks?.length &&
           !tool.interrupted.length &&
-          !tool.retries.length)
+          !tool.retries.length &&
+          !skipped(tool))
       ) {
         throw new TypeError("Invalid tool operation position.");
       }
@@ -2064,11 +2087,7 @@ export function readSnapshot(
             )))
       )
         throw new TypeError("Tool retries do not match the recorded policy or call.");
-      pending ||=
-        tool.status === "pending" &&
-        !tool.asks?.length &&
-        !tool.interrupted.length &&
-        !tool.retries.length;
+      pending ||= fresh(tool);
       const approved = [...(tool.asks ?? [])]
         .reverse()
         .find((record) => !record.closed && record.decision?.type === "approve")?.decision;
