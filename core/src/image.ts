@@ -22,6 +22,22 @@ export interface ImageLimits {
   maxImages: number;
 }
 
+/** Which images a gate looks at, and what its notes say. Left out, it gates every image. */
+export interface ImageGateOptions {
+  /**
+   * Gate only the images in tool results. The person's own images stay as they are and do not
+   * count toward `maxImages`: they are what the task is about, so a long run that drops them
+   * forgets what it was asked. An old screenshot is the cheapest thing in a run to lose.
+   */
+  toolResultsOnly?: boolean;
+  /**
+   * The reason every note gives, in place of each image's own. For a model that reads no
+   * images, pass `maxImages: 0` and a reason that says so: the cap's own note,
+   * "only the last 0 images are attached per request", tells it nothing true.
+   */
+  reason?: string;
+}
+
 interface Raster {
   width: number;
   height: number;
@@ -155,10 +171,24 @@ function omitted(image: ImagePart, reason: string): string {
  * joins the result's text. Of the images that pass, only the newest
  * `maxImages` stay, so the latest screenshot is the one the model sees.
  */
-export function gateImages(messages: readonly ChatMessage[], limits: ImageLimits): ChatMessage[] {
+export function gateImages(
+  messages: readonly ChatMessage[],
+  limits: ImageLimits,
+  options: ImageGateOptions = {},
+): ChatMessage[] {
+  /** With `toolResultsOnly`, a user turn is never read, counted or rewritten. */
+  function gated(message: ChatMessage): boolean {
+    return !options.toolResultsOnly || message.role !== "user";
+  }
+  function note(image: ImagePart, reason: string): string {
+    return omitted(image, options.reason ?? reason);
+  }
   // One verdict per image, in conversation order: a reason, or undefined to
   // keep it. Past the cap, the oldest images that pass give way.
-  const verdicts = messages.flatMap(imagesOf).map((image) => refusal(image, limits));
+  const verdicts = messages
+    .filter(gated)
+    .flatMap(imagesOf)
+    .map((image) => refusal(image, limits));
   let surplus = verdicts.filter((reason) => reason === undefined).length - limits.maxImages;
   for (let i = 0; surplus > 0; i++) {
     if (verdicts[i] !== undefined) continue;
@@ -168,11 +198,12 @@ export function gateImages(messages: readonly ChatMessage[], limits: ImageLimits
 
   let next = 0;
   return messages.map((message): ChatMessage => {
+    if (!gated(message)) return message;
     if (message.role === "user" && typeof message.content !== "string") {
       const content = message.content.map((part): ContentPart => {
         if (part.type !== "image") return part;
         const reason = verdicts[next++];
-        return reason === undefined ? part : { type: "text", text: omitted(part, reason) };
+        return reason === undefined ? part : { type: "text", text: note(part, reason) };
       });
       return { ...message, content };
     }
@@ -182,7 +213,7 @@ export function gateImages(messages: readonly ChatMessage[], limits: ImageLimits
       for (const image of message.images) {
         const reason = verdicts[next++];
         if (reason === undefined) images.push(image);
-        else notes.push(omitted(image, reason));
+        else notes.push(note(image, reason));
       }
       if (notes.length === 0) return message;
       const content = [message.content, ...notes].filter(Boolean).join("\n");
