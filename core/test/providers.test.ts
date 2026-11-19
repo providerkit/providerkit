@@ -645,6 +645,8 @@ describe("anthropic prompt caching", () => {
       [],
     );
     expect(markers(once)).toEqual(["system.0"]);
+    // With no system message either, it carries no marker at all.
+    expect(markers(await sent([{ role: "user", content: "summarize" }], []))).toEqual([]);
 
     const chat = await sent(
       [
