@@ -36,6 +36,7 @@ import type {
   QuestionAsk,
   ChildEnvelope,
   DelegationExecution,
+  LimitReason,
   RunOptions,
   RunLimits,
   RunOutcome,
@@ -292,6 +293,15 @@ export function specialistTool<T>(agent: Agent<T>, options: SpecialistToolOption
   return specialistFailures(descriptor);
 }
 
+/** The local limits named in a specialist's failed result. Turns read as "model-turn". */
+const LIMIT_WORDS: Partial<Record<LimitReason, string>> = {
+  steps: "step",
+  elapsedMs: "time",
+  outputTokens: "output",
+  toolCalls: "tool-call",
+  costUsd: "cost",
+};
+
 /** Known local failures are tool data. Authority and journal failures still stop the tree. */
 export function specialistFailures(descriptor: Delegation): Delegation {
   return Object.freeze({
@@ -303,7 +313,7 @@ export function specialistFailures(descriptor: Delegation): Delegation {
         if (!(error instanceof Halt) || !isLocalStop(error.state)) throw error;
         const reason =
           error.state.status === "limited"
-            ? `its ${error.state.limit === "steps" ? "step" : error.state.limit === "elapsedMs" ? "time" : error.state.limit === "outputTokens" ? "output" : error.state.limit === "toolCalls" ? "tool-call" : "model-turn"} limit`
+            ? `its ${LIMIT_WORDS[error.state.limit] ?? "model-turn"} limit`
             : error.state.status === "failed" &&
                 ["memory_missing", "memory_unavailable"].includes(error.state.error.code)
               ? "a problem reading saved notes"

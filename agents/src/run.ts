@@ -9,6 +9,7 @@ import {
   parseToolArgs,
   type Provider,
   type ProviderChunk,
+  type TokenUsage,
   type Tool,
 } from "@providerkit/core";
 import {
@@ -90,8 +91,10 @@ import {
   ExecutionTree,
   Halt,
   authorizeTree,
+  checkPricing,
   emitEvent,
   fail,
+  requirePricing,
   treeUsage,
   nodeId,
   wakeAt,
@@ -200,6 +203,7 @@ function recordOf(snapshot: RunSnapshot) {
       status: model.status,
       billing: model.billing,
       usage: model.usage,
+      ...(model.costUsd !== undefined ? { costUsd: model.costUsd } : {}),
       ...(model.status === "completed" && model.turn.source ? { source: model.turn.source } : {}),
     });
     if (model.status !== "completed") continue;
@@ -805,6 +809,23 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     }
 
     const save = () => scope.tree.save();
+
+    /** The host's USD for measured usage, saved with the receipt and never asked again. */
+    function priceOf(
+      usage: TokenUsage,
+      served: { provider: string; model: string },
+      operationId: string,
+    ): number | undefined {
+      if (!host?.priceModelCall) return undefined;
+      const cost = host.priceModelCall(immutableCopy({ usage, ...served }));
+      if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)
+        fail(
+          "invalid_cost",
+          "The host priced a model call at an invalid amount. Return a finite USD amount of 0 or more.",
+          operationId,
+        );
+      return cost;
+    }
     const callbackContext: LifecycleContext = Object.freeze({
       agentId: id,
       version,
@@ -2407,6 +2428,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       // A steer never changes the input of an already admitted call, including safe replay.
       // Check capacity before polling so a spent budget leaves delivery queued in the host.
       scope.tree.reserveModel();
+      scope.tree.reserveCost(scope.path);
       if (!previous) {
         await acceptInputs(snapshot, scope, options, signal);
         await compact();
@@ -2475,6 +2497,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       // The tree check and the receipt stay together, with no await between them, so two
       // children racing for the tree's last model call cannot both take it.
       scope.tree.reserveModel();
+      scope.tree.reserveCost(scope.path);
       const model: ModelExecution = {
         id: operationId,
         attemptId: snapshot.attemptId,
@@ -2484,7 +2507,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         interrupted: previous
           ? [
               ...previous.interrupted,
-              { attemptId: previous.attemptId, usage: copyData(previous.usage) },
+              {
+                attemptId: previous.attemptId,
+                usage: copyData(previous.usage),
+                // The lost attempt keeps the price it was given, never a new one.
+                ...(previous.costUsd !== undefined ? { costUsd: previous.costUsd } : {}),
+              },
             ]
           : [],
       };
@@ -2496,6 +2524,10 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       let bufferedChunks = 0;
       let bufferedBytes = 0;
       const guarded = !!guardrails?.modelOutput;
+      const served = {
+        provider: selectedProvider.id,
+        model: modelSettings.model ?? selectedProvider.model,
+      };
       async function* observed(): AsyncIterable<ProviderChunk> {
         let dispatchProvider = selectedProvider;
         if (options.bindModelProvider) {
@@ -2537,6 +2569,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
               fail("invalid_usage", "The provider returned invalid token usage.", model.id);
             model.usage = copyData(chunk.usage);
             reportedUsage = true;
+            const cost = priceOf(model.usage, served, model.id);
+            if (cost !== undefined) model.costUsd = cost;
             // Preserve measurements before another pull can hang or the worker can disappear.
             // This saves usage, not partial text, and does not claim final billing is known.
             await save();
@@ -2610,11 +2644,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       active();
       await guards.check("modelOutput", model.id, model.attemptId, turn);
       active();
+      // A call that never reported usage keeps no price: its cost is unknown, not zero.
+      const costUsd = reportedUsage
+        ? priceOf(turn.usage, turn.source ?? served, model.id)
+        : undefined;
       const done: CompletedModel = {
         ...model,
         status: "completed",
         billing: reportedUsage ? "reported" : "unknown",
         usage: turn.usage,
+        ...(costUsd !== undefined ? { costUsd } : {}),
         turn,
         tools: (turn.message.toolCalls ?? []).map((_call, index) => ({
           id: toolId(model.id, index),
@@ -2804,6 +2843,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     if (inlineBytes(frozen.history, frozen.input) > childLimits.inlineBytes)
       throw new TypeError("The helper input exceeds its admitted inline byte limit.");
     const { history, input, session } = frozen;
+    requirePricing(childLimits, options.host);
     const startedAt = Date.now();
     return {
       kind: "agent",
@@ -2939,6 +2979,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       options = { ...options, memory: readMemoryBinding(options.memory) };
       if (needsMemory && !options.memory)
         throw new TypeError("This agent needs authenticated memory access in RunOptions.memory.");
+      requirePricing(limits, options.host);
       // Everything before the snapshot exists runs outside the journal: a paid summarizer in
       // prepareHistory can run again if the process dies before the first checkpoint.
       const signal = options.signal ?? new AbortController().signal;
@@ -3183,6 +3224,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       options = { ...options, memory: readMemoryBinding(options.memory) };
       const snapshot = runtime.restore(raw);
       checkMemoryBinding(snapshot, options.memory);
+      checkPricing(snapshot, options.host);
       if (options.session && options.session.id !== snapshot.session?.id)
         throw new TypeError(
           snapshot.session

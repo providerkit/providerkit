@@ -139,10 +139,11 @@ export function readLimits(value: unknown = {}): RunLimits {
     elapsedMs: value.elapsedMs ?? 300_000,
     parallelTools: value.parallelTools ?? 3,
     inlineBytes: value.inlineBytes ?? 5_000_000,
+    ...(value.costUsd !== undefined ? { costUsd: value.costUsd } : {}),
   };
   if (!isLimits(limits)) {
     throw new TypeError(
-      "Agent limits must be positive finite integers (inlineBytes may be 0); elapsedMs must fit a timer.",
+      "Agent limits must be positive finite integers (inlineBytes may be 0, and costUsd is a finite USD amount of 0 or more); elapsedMs must fit a timer.",
     );
   }
   return limits;
@@ -157,7 +158,8 @@ function isLimits(value: unknown): value is RunLimits {
     value.elapsedMs <= 2_147_483_647 &&
     positive(value.parallelTools) &&
     finite(value.inlineBytes) &&
-    Number.isSafeInteger(value.inlineBytes)
+    Number.isSafeInteger(value.inlineBytes) &&
+    optional(value.costUsd, finite)
   );
 }
 
@@ -925,10 +927,14 @@ function isModel(value: unknown): value is ModelExecution {
     !isUsage(value.usage) ||
     (value.billing !== "unknown" && value.billing !== "reported") ||
     (value.status === "running" && value.billing !== "unknown") ||
+    !optional(value.costUsd, finite) ||
     !isInterrupted(value.interrupted) ||
     value.interrupted.some(
       (attempt) =>
-        attempt.attemptId === value.attemptId || !("usage" in attempt) || !isUsage(attempt.usage),
+        attempt.attemptId === value.attemptId ||
+        !("usage" in attempt) ||
+        !isUsage(attempt.usage) ||
+        ("costUsd" in attempt && !finite(attempt.costUsd)),
     )
   )
     return false;
@@ -975,6 +981,7 @@ export function isState(value: unknown): value is RunState {
         "modelCalls",
         "steps",
         "treeElapsedMs",
+        "costUsd",
       ].some((v) => v === value.limit);
     case "failed":
       return isFailure(value.error);
@@ -1283,10 +1290,14 @@ export function checkTree(root: TreeNode): void {
 function checkAttemptProgress(
   previous: {
     attemptId?: string;
-    interrupted: { attemptId: string; usage?: TokenUsage }[];
+    interrupted: { attemptId: string; usage?: TokenUsage; costUsd?: number }[];
     usage?: TokenUsage;
+    costUsd?: number;
   },
-  next: { attemptId?: string; interrupted: { attemptId: string; usage?: TokenUsage }[] },
+  next: {
+    attemptId?: string;
+    interrupted: { attemptId: string; usage?: TokenUsage; costUsd?: number }[];
+  },
 ): void {
   if (previous.interrupted.some((attempt, index) => !equalData(attempt, next.interrupted[index])))
     throw new TypeError("The host erased or replaced interrupted attempts.");
@@ -1298,6 +1309,7 @@ function checkAttemptProgress(
     !equalData(next.interrupted[previous.interrupted.length], {
       attemptId: previous.attemptId,
       ...(previous.usage ? { usage: previous.usage } : {}),
+      ...(previous.costUsd !== undefined ? { costUsd: previous.costUsd } : {}),
     })
   )
     throw new TypeError("The host changed an attempt without retaining its receipt.");
@@ -1401,6 +1413,7 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
       saved.status !== "completed" ||
       saved.attemptId !== model.attemptId ||
       saved.billing !== model.billing ||
+      saved.costUsd !== model.costUsd ||
       !equalData(model.turn, saved.turn)
     )
       throw new TypeError("The child host replaced a completed model receipt.");

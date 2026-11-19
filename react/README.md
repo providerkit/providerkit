@@ -6,7 +6,7 @@ Send a message and keep its streamed answer on screen:
 await chat.send("Summarize this page.");
 ```
 
-This package is under development. Version 0.1.0 has not been released.
+This package is experimental. Version 0.1.1 works with `@providerkit/agents` 0.2 and 0.3.
 
 The hooks manage messages, live updates, connection state and pending actions. Your server runs
 agents, keeps conversations and checks access. Use the hooks with your own components, or use the
