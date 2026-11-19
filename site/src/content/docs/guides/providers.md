@@ -294,15 +294,19 @@ is inferred from the provider `id` where the name gives it away.
 Anthropic caches only the parts of a request that carry a cache marker (`cache_control`), and the
 adapter places the markers for you. A request carries up to three:
 
-- On the last system block. Anthropic caches tools first, then the system prompt, so this one
-  marker covers both. Every request carries it.
+- On your last system message. Anthropic caches tools first, then the system prompt, so this one
+  marker covers both. A request with no system message has nothing to mark here. The schema block
+  that `json` adds never gets this marker, so a schema that changes between calls leaves the
+  cached prompt as it was.
 - On the newest message. Each request writes a cache entry there.
 - On the message just before the newest assistant message. That is where the previous request
-  ended, so this request reads that entry exactly.
+  ended, so this request reads that entry exactly. The first request of a tool loop has no
+  assistant message yet, so it gets the marker on its newest message but not this one.
 
-The two message markers go only on a request that another one will follow: one that declares
-tools, or one whose messages already hold an assistant turn. A one-shot call, like a title or a
-summary, marks no message, because nothing would read the entry it paid to write.
+The message markers go only on a request that another one will follow: one that declares tools,
+or one whose messages already hold an assistant turn. A one-shot call, like a title or a summary,
+marks no message, because nothing would read the entry it paid to write. If it has no system
+message either, it carries no marker at all, and nothing in it is cached.
 
 One marker on the newest message is not enough on its own. A read looks back at most 20 blocks
 from a marker for an entry an earlier request wrote. On the Claude API a run of tool calls counts
