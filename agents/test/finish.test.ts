@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   defineTool,
+  ProviderError,
   repairHistory,
   withWatchdog,
   type ChatMessage,
@@ -79,7 +80,7 @@ const silent: ProviderChunk[] = [
   { type: "finish", finishReason: "stop" },
 ];
 
-function wire(...turns: ProviderChunk[][]) {
+function wire(...turns: (ProviderChunk[] | ProviderError)[]) {
   const requests: { messages: ChatMessage[]; tools: ToolDefinition[]; options: StreamOptions }[] =
     [];
   const provider: Provider = {
@@ -93,6 +94,7 @@ function wire(...turns: ProviderChunk[][]) {
         options,
       });
       if (!chunks) throw new Error("Unexpected model call");
+      if (chunks instanceof ProviderError) throw chunks;
       yield* chunks;
     },
   };
@@ -247,6 +249,29 @@ describe("finish turn at a limit", () => {
       finish: {},
     }).run("go");
     expect(outcome).toMatchObject({ status: "limited", limit: "turns" });
+    expect(source.requests).toHaveLength(2);
+  });
+
+  it.each([
+    ["invalid", { status: "limited", limit: "turns" }],
+    ["network", { status: "limited", limit: "turns" }],
+    ["aborted", { status: "cancelled" }],
+  ] as const)("keeps the run's ending if the finish call fails: %s", async (kind, ending) => {
+    const source = wire(calls("read_file"), new ProviderError("offline", kind, "No answer"));
+    const agent = defineAgent({
+      ...base,
+      provider: source.provider,
+      tools: [read],
+      output: areas,
+      limits: { turns: 1 },
+      finish: {},
+    });
+    const outcome = await agent.run("go");
+    expect(outcome).toMatchObject(ending);
+    expect(outcome.snapshot.models.at(-1)).toMatchObject({ finish: "turns", billing: "unknown" });
+    await expect(
+      agent.resume(outcome.snapshot, { host: { authorizeResume } }),
+    ).resolves.toMatchObject(ending);
     expect(source.requests).toHaveLength(2);
   });
 
@@ -506,6 +531,23 @@ describe("finish turn after an unfinished answer", () => {
     expect(finish.messages.at(-1)).toEqual({ role: "user", content: forcedNote(REPLY_CUT) });
   });
 
+  it.each([
+    ["content_filter", "content_filtered"],
+    [undefined, "incomplete_turn"],
+  ] as const)("does not salvage partial arguments after %s", async (reason, code) => {
+    const partial = cutCall(RESULT_TOOL_NAME, '{"areas":[').slice(0, -1);
+    if (reason) partial.push({ type: "finish", finishReason: reason });
+    const source = wire(partial);
+    const agent = defineAgent({ ...base, provider: source.provider, output: areas, finish: {} });
+    const outcome = await agent.run("go");
+    const ending = { status: "failed", error: { code } };
+    expect(outcome).toMatchObject(ending);
+    await expect(
+      agent.resume(outcome.snapshot, { host: { authorizeResume } }),
+    ).resolves.toMatchObject(ending);
+    expect(source.requests).toHaveLength(1);
+  });
+
   it("never runs a submission the output limit cut", async () => {
     const events: AgentEvent[] = [];
     const source = wire(
@@ -732,6 +774,19 @@ describe("empty turns", () => {
     expect(outcome).toMatchObject({ status: "failed", error: { code: "empty_output" } });
     expect(source.requests).toHaveLength(3);
     expect(source.requests[1]?.messages.at(-1)).toEqual({ role: "user", content: NUDGE });
+  });
+
+  it("does not mistake silence for a checked answer written in prose", async () => {
+    const source = wire(silent, silent);
+    const agent = defineAgent({
+      ...base,
+      provider: source.provider,
+      output: areas,
+      finish: { emptyTurns: 1 },
+    });
+    const outcome = await agent.run("go");
+    expect(outcome).toMatchObject({ status: "failed", error: { code: "empty_output" } });
+    expect(source.requests).toHaveLength(2);
   });
 
   it("counts them in a row: a turn with output starts again", async () => {

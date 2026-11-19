@@ -1232,11 +1232,11 @@ const SALVAGE_REASONS: readonly SalvageReason[] = [
  * leniently, cut arguments become `{}`, which a tool whose schema defaults every field takes as
  * a real, empty submission. An empty argument string is a call with none, not a cut. */
 export function wasCutOff(turn: Turn): boolean {
-  return (
-    turn.finishReason === "length" ||
-    (turn.message.toolCalls ?? []).some(
-      (call) => call.arguments.trim() !== "" && !isCompleteJson(call.arguments),
-    )
+  if (turn.finishReason === "length") return true;
+  // Partial arguments on a blocked or unfinished stream are not permission to ask again.
+  if (turn.finishReason !== "stop" && turn.finishReason !== "tool_calls") return false;
+  return (turn.message.toolCalls ?? []).some(
+    (call) => call.arguments.trim() !== "" && !isCompleteJson(call.arguments),
   );
 }
 
@@ -1291,8 +1291,8 @@ export function finishAfter(
     resultTool &&
     !definition.stopOnlyAtTools &&
     !model.turn.message.toolCalls?.length &&
-    (model.turn.finishReason === "stop" || model.turn.finishReason === "tool_calls") &&
-    !allowedEmpty(snapshot, position)
+    model.turn.message.content.trim() &&
+    (model.turn.finishReason === "stop" || model.turn.finishReason === "tool_calls")
   )
     return "missing_result";
   return undefined;
@@ -2160,9 +2160,9 @@ export function readSnapshot(
     if (!equalData(model.usage, model.turn.usage))
       throw new TypeError("The model usage does not match its completed turn.");
     let pending = false;
+    const cutOff = !!policy && wasCutOff(model.turn);
     const unfinished =
-      (model.turn.finishReason !== "stop" && model.turn.finishReason !== "tool_calls") ||
-      (!!policy && wasCutOff(model.turn));
+      cutOff || (model.turn.finishReason !== "stop" && model.turn.finishReason !== "tool_calls");
     // Calls run in this order, so no call may start after one that has not. A call the host
     // refused or a batch cancelled never started, so it may.
     for (const position of callOrder(tools, raw.definition.runFirst)) {
@@ -2189,7 +2189,11 @@ export function readSnapshot(
       }
       // No call of a cut turn runs. Under a finish policy each one is answered without running,
       // so its finish turn reads a whole history.
-      if (tool.status !== "pending" && unfinished && !(policy && skipped(tool)))
+      if (
+        tool.status !== "pending" &&
+        unfinished &&
+        !(cutOff && model.finish === undefined && skipped(tool))
+      )
         throw new TypeError("An unfinished model turn cannot have executed tools.");
       if (
         model.finish !== undefined &&

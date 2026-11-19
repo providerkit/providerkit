@@ -218,6 +218,13 @@ function finishNote(reason: SalvageReason, tools: readonly string[]): string {
   return `${why} ${ask} from what you have already gathered. Do not request any more tools.`;
 }
 
+/** A finish turn that cannot produce an answer leaves the run's original ending in place. */
+function unsaved(reason: SalvageReason, operationId: string): never {
+  if (reason === "missing_result")
+    fail(reason, `The model did not submit a result through ${RESULT_TOOL_NAME}.`, operationId);
+  throw new Halt({ status: "limited", limit: reason });
+}
+
 /** The finish turn that saved a completed run, for its outcome. */
 function salvagedOf(snapshot: RunSnapshot): { salvaged?: SalvageReason } {
   const reason = snapshot.models.at(-1)?.finish;
@@ -2382,22 +2389,13 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       const modelIndex = snapshot.models.indexOf(model);
       const policy = snapshot.definition.finish;
       const forced = finishTools(snapshot.definition, resultTool).length > 0;
-      /** The end a run gets when its finish turn could not save it: the one it would have had. */
-      function unsaved(reason: SalvageReason): never {
-        if (reason === "missing_result")
-          fail(
-            "missing_result",
-            `The model did not submit a result through ${RESULT_TOOL_NAME}.`,
-            model.id,
-          );
-        throw new Halt({ status: "limited", limit: reason });
-      }
       if (finishReason === "length" || (policy && wasCutOff(model.turn))) {
         // A turn the output limit cut is not the agent's answer, and no call in it runs. Under a
         // finish policy, ported from a private adopter's engine, each call is answered without
         // running and the finish turn follows, reading the cut text: retrying the cut turn would
         // most likely be cut again at the same cap, at full cost each time.
-        if (!policy || model.finish !== undefined) unsaved(model.finish ?? "outputTokens");
+        if (!policy || model.finish !== undefined)
+          unsaved(model.finish ?? "outputTokens", model.id);
         for (const [index, tool] of model.tools.entries())
           if (tool.status === "pending")
             await finishTool(model, index, requestFor(snapshot, model, index), {
@@ -2423,7 +2421,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       if (calls.length === 0) {
         // The finish turn's answer: text, or nothing when it had to call its stopping tool.
         if (model.finish !== undefined) {
-          if (forced || !message.content.trim()) unsaved(model.finish);
+          if (forced || !message.content.trim()) unsaved(model.finish, model.id);
           snapshot.state = { status: "completed", candidate: message.content };
           return;
         }
@@ -2432,29 +2430,22 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         // paused nothing and the person never got to answer it.
         if (nudgeAfter(snapshot, modelIndex) !== undefined) return;
         if (allowedEmpty(snapshot, modelIndex)) return;
-        if (output) {
-          // A finish policy answers a result written as text with a finish turn that asks for it.
-          if (policy) return;
-          fail(
-            "missing_result",
-            `The model did not submit a result through ${RESULT_TOOL_NAME}.`,
-            model.id,
-          );
-        }
+        if (output && !policy) unsaved("missing_result", model.id);
         if (!message.content.trim())
           fail(
             "empty_output",
             "The model returned no answer, only reasoning or an empty turn.",
             model.id,
           );
-        snapshot.state = { status: "completed", candidate: message.content };
+        // A checked answer in prose buys a finish turn. Silence did not produce one.
+        if (!output) snapshot.state = { status: "completed", candidate: message.content };
         return;
       }
 
       // The one extra call at the local turn limit has no tools, even if a provider ignores
       // toolChoice. Never execute calls it returns. The shared tree limit remains a hard cap.
       // A finish turn with no tools ends the same way; one with a stopping tool runs only that.
-      if (model.finish !== undefined && !forced) unsaved(model.finish);
+      if (model.finish !== undefined && !forced) unsaved(model.finish, model.id);
       if (model.finish === undefined && modelIndex >= limits.turns)
         throw new Halt({ status: "limited", limit: "turns" });
 
@@ -2774,7 +2765,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         finalHandoffResult(snapshot, model) ??
         finalToolResult(model, snapshot.definition.stopAtTools, resultTool);
       if (final) snapshot.state = { status: "completed", candidate: final.candidate };
-      else if (model.finish !== undefined) unsaved(model.finish);
+      else if (model.finish !== undefined) unsaved(model.finish, model.id);
     }
 
     // One load per media id per attempt. The bytes live only in the requests built from it,
@@ -3209,6 +3200,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           scope.tree.stop();
           throw new Halt({ status: "cancelled" });
         }
+        if (finish !== undefined) unsaved(finish, model.id);
         fail(
           "model_failed",
           guarded
