@@ -170,10 +170,18 @@ Anthropic-shape it depends on the model id:
   also runs without thinking. On these models, forcing a tool with thinking on is an error, so the
   tool you asked for wins (documented, same page).
 
-`toolChoice` goes out in each wire's own field, with one exception. OpenCode Go's Muse
-Contributor (`muse-spark-1.3-contributor`) accepts only `auto` and answers any other choice with
-a 400, which no retry or backup model gets past. So the adapter says what it can in the tool
-list:
+`toolChoice` goes out in each wire's own field, with two exceptions.
+
+Claude Fable 5.1, Mythos 5.1, Opus 5.5 and Sonnet 5.5, and any Claude model newer than the adapter
+knows, answer a forced tool (`"required"` or `{ name }`) with a 400 on every request (documented,
+Anthropic Thinking page, read 2026-10-01). So the adapter sends them no `tool_choice`, which means
+`auto`, as that page advises. `"required"` goes out with every tool, and `{ name: "save" }` with
+the `save` tool alone, so the model can't call a different one. Either way it can still answer in
+text, so check for the tool call.
+
+OpenCode Go's Muse Contributor (`muse-spark-1.3-contributor`) accepts only `auto` and answers any
+other choice with a 400, which no retry or backup model gets past. So the adapter says what it can
+in the tool list:
 
 - `"none"` is sent as no tools.
 - `{ name: "save" }` is sent as the `save` tool alone, with no `tool_choice`. It is the only call
@@ -181,7 +189,9 @@ list:
   call. If `save` is not in the call's tools, the call fails with an `invalid` error before any
   request.
 - `"required"` can't be said that way, because every tool under `auto` is the request you'd get
-  by leaving the choice out. It is still sent, and Muse refuses it with an `invalid` error.
+  by leaving the choice out. It is still sent, and Muse refuses it with an `invalid` error. The
+  same goes for `{ name: "save" }` when `save` is the only tool you pass. For a structured answer,
+  ask for it with `json` instead.
 
 ## Structured output
 
