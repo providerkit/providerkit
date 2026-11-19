@@ -58,6 +58,7 @@
     },
     {
       "files": ["react/src/**/*.ts", "react/src/**/*.tsx"],
+      "excludeFiles": ["react/src/markdown.tsx", "react/src/ui/**"],
       "rules": {
         "no-restricted-imports": [
           "error",
@@ -73,6 +74,84 @@
                   "@providerkit/agents/dist/**"
                 ],
                 "message": "React uses the public exports of core and agents, never their private files."
+              },
+              {
+                "group": [
+                  "react-markdown",
+                  "react-markdown/**",
+                  "remark-gfm",
+                  "remark-gfm/**",
+                  "@shadcn/react",
+                  "@shadcn/react/**",
+                  "**/markdown",
+                  "**/markdown.tsx",
+                  "**/markdown.js",
+                  "**/ui",
+                  "**/ui/**"
+                ],
+                "message": "An optional peer loads only from its own entry: react-markdown and remark-gfm from /markdown, @shadcn/react from /ui. An app that does not import that entry may not have the peer, and its bundle would fail."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["react/src/ui/**/*.ts", "react/src/ui/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../**/core/**",
+                  "../**/agents/**",
+                  "@providerkit/core/src/**",
+                  "@providerkit/core/dist/**",
+                  "@providerkit/agents/src/**",
+                  "@providerkit/agents/dist/**"
+                ],
+                "message": "React uses the public exports of core and agents, never their private files."
+              },
+              {
+                "group": [
+                  "react-markdown",
+                  "react-markdown/**",
+                  "remark-gfm",
+                  "remark-gfm/**",
+                  "**/markdown",
+                  "**/markdown.tsx",
+                  "**/markdown.js"
+                ],
+                "message": "An optional peer loads only from its own entry: react-markdown and remark-gfm from /markdown, @shadcn/react from /ui. An app that does not import that entry may not have the peer, and its bundle would fail."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["react/src/markdown.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../**/core/**",
+                  "../**/agents/**",
+                  "@providerkit/core/src/**",
+                  "@providerkit/core/dist/**",
+                  "@providerkit/agents/src/**",
+                  "@providerkit/agents/dist/**"
+                ],
+                "message": "React uses the public exports of core and agents, never their private files."
+              },
+              {
+                "group": ["@shadcn/react", "@shadcn/react/**", "**/ui", "**/ui/**"],
+                "message": "An optional peer loads only from its own entry: react-markdown and remark-gfm from /markdown, @shadcn/react from /ui. An app that does not import that entry may not have the peer, and its bundle would fail."
               }
             ]
           }
