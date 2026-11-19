@@ -445,6 +445,41 @@ describe("zodTool", () => {
       );
     });
 
+    // zod's sync parse throws on an async refine, and no parse catches a transform that throws.
+    // The call ran either way, so the model must still read that it did.
+    it("runs an async refine, and reports a check that throws as a result that failed", async () => {
+      const check = zodTool({
+        name: "check",
+        description: "check",
+        isReadOnly: true,
+        input: z.object({ id: z.string() }),
+        output: z.object({ id: z.string() }).refine(async ({ id }) => id !== "", "id is empty"),
+        run: async ({ id }) => ({ id }),
+      });
+      expect(await check.invoke({ id: "a" })).toMatchObject({ ok: true, output: { id: "a" } });
+      expect(await check.invoke({ id: "" })).toMatchObject({
+        ok: false,
+        kind: "failed",
+        error:
+          "check ran, but its result does not match its output schema. Problems: result: id is empty",
+      });
+      const write = vi.fn(async () => ({ link: "not a url" }));
+      const save = zodTool({
+        name: "save",
+        description: "save",
+        input: z.object({}),
+        output: z.object({ link: z.string().transform((s) => new URL(s).href) }),
+        run: write,
+      });
+      expect(await save.invoke({})).toMatchObject({
+        ok: false,
+        kind: "failed",
+        error:
+          "save ran, but its result does not match its output schema. Check its effect before calling it again. Problems: Invalid URL",
+      });
+      expect(write).toHaveBeenCalledOnce();
+    });
+
     it("fills outputSchema as metadata, and refuses no type JSON Schema lacks", () => {
       expect(lookup(true).outputSchema).toEqual({
         type: "object",

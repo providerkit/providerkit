@@ -6,6 +6,7 @@
 import { z } from "zod";
 import { defineTool, type Tool, type ToolContext } from "./tools.ts";
 import { clampToSchema } from "./schema.ts";
+import { messageOf } from "./errors.ts";
 import type { JsonObjectSchema } from "./types.ts";
 
 type Issues = readonly z.core.$ZodIssue[];
@@ -158,13 +159,23 @@ function repairSlips(raw: unknown, issues: Issues): unknown {
 /** `spec.run` with each result checked against `output` before the model or your code reads it. */
 function checkedRun<I, O>(spec: ZodToolSpec<I, O>, output: z.ZodType<O>): ZodToolSpec<I, O>["run"] {
   return async (input, ctx) => {
-    const parsed = output.safeParse(await spec.run(input, ctx));
-    if (parsed.success) return parsed.data;
+    const result = await spec.run(input, ctx);
+    let problems: string;
+    try {
+      // Async, because the sync parse throws on an async refine or transform.
+      const parsed = await output.safeParseAsync(result);
+      if (parsed.success) return parsed.data;
+      problems = describeIssues(parsed.error.issues, "result");
+    } catch (err) {
+      // zod does not catch a refine or transform that throws (`new URL` on a bad link). The
+      // call ran all the same, and that is what the model must read.
+      problems = messageOf(err);
+    }
     // The call ran, so a write may already have happened. The model decides whether to
     // call again from this, as it does from `repairHistory`'s interrupted-call note.
     const effect = spec.isReadOnly ? "" : " Check its effect before calling it again.";
     throw new Error(
-      `${spec.name} ran, but its result does not match its output schema.${effect} Problems: ${describeIssues(parsed.error.issues, "result")}`,
+      `${spec.name} ran, but its result does not match its output schema.${effect} Problems: ${problems}`,
     );
   };
 }

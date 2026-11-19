@@ -211,11 +211,11 @@ const lookup = zodTool({
 });
 ```
 
-A result that fails the check comes back as a `failed` outcome, and the model reads the problems
-like any other failure. `invoke` still never throws. Unless the tool is marked `isReadOnly`, the
-message also tells the model to check the call's effect before calling it again, because the call
-already ran. A result that passes is the parsed value, so keys the schema doesn't list are dropped
-before the model sees them.
+A result that fails the check, or a check that throws, comes back as a `failed` outcome, and the
+model reads the problems like any other failure. `invoke` still never throws. Unless the tool is
+marked `isReadOnly`, the message also tells the model to check the call's effect before calling it
+again, because the call already ran. A result that passes is the parsed value, so keys the schema
+doesn't list are dropped before the model sees them.
 
 `output` also fills `outputSchema`, for code that writes types for tool results. On a tool from
 `defineTool`, `outputSchema` only describes the result: nothing checks it.
