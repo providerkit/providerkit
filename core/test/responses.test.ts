@@ -125,6 +125,41 @@ describe("responses adapter", () => {
     });
   });
 
+  it.each([
+    ["openrouter.ai", "response.completed", { cost: 0.002 }, 0.002],
+    [
+      "openrouter.ai",
+      "response.incomplete",
+      { cost: 0.0001, is_byok: true, cost_details: { upstream_inference_cost: 0.002 } },
+      0.0021,
+    ],
+    ["openrouter.ai", "response.done", { cost: 0 }, 0],
+    ["openrouter.ai", "response.completed", { cost: 0.0001, is_byok: true }, undefined],
+    ["openrouter.ai.example.org", "response.completed", { cost: 1 }, undefined],
+  ] as const)("reads the bill from %s on %s with %j", async (host, type, bill, expected) => {
+    const { fetchImpl } = recorder([
+      j({
+        type,
+        response: {
+          usage: { ...USAGE, ...bill },
+          ...(type === "response.incomplete" && {
+            incomplete_details: { reason: "max_output_tokens" },
+          }),
+        },
+      }),
+    ]);
+    const chunks = await collect(
+      provider({ id: "openrouter", baseUrl: `https://${host}/api`, fetchImpl }).createStream(
+        hi,
+        [],
+      ),
+    );
+    const usage = chunks.find((chunk) => chunk.type === "usage")?.usage;
+    expect(usage).toMatchObject({ inputTokens: 1_000, cachedInputTokens: 800, outputTokens: 20 });
+    if (expected === undefined) expect(usage).not.toHaveProperty("reportedCostUsd");
+    else expect(usage?.reportedCostUsd).toBeCloseTo(expected, 12);
+  });
+
   it("maps both reasoning event names to the same thing", async () => {
     const { fetchImpl } = recorder([
       j({ type: "response.reasoning_summary_text.delta", delta: "summarized" }),

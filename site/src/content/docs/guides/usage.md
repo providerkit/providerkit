@@ -58,8 +58,8 @@ something that needs releasing every time a vendor moves a number. Bring your ow
 
 ### When the provider says what it cost
 
-OpenRouter puts the price of each call in its response. The OpenAI-shape adapter reads it into
-`usage.reportedCostUsd`, in US dollars. `costUsd` and `UsageTracker` bill that number instead of
+On OpenRouter, both Chat Completions and Responses put the bill for a call in
+`usage.reportedCostUsd`, in US dollars. `costUsd` and `UsageTracker` use that amount instead of
 your rate, and a tracker counts it even when you pass no rate at all.
 
 This matters because a rate can be right and still bill the wrong amount. OpenRouter serves one

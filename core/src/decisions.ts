@@ -5,7 +5,7 @@
 // Zen's free model explicitly reports $0.
 import { attributionHeaders, type Attribution } from "./attribution.ts";
 import { ProviderError, streamError } from "./errors.ts";
-import { openRouterCostUsd } from "./providers/openai.ts";
+import { openRouterCostUsd } from "./providers/openrouter-billing.ts";
 import { withRetry, type RetryOptions } from "./retry.ts";
 import { getJson, postJson, type FetchLike } from "./transport.ts";
 import type { TokenUsage } from "./types.ts";

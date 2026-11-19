@@ -55,11 +55,11 @@ export {
   createOpenAIProvider,
   toOpenAIMessages,
   effortParams,
-  openRouterCostUsd,
   openRouterHostFor,
   type OpenAIConfig,
   type EffortDialect,
 } from "./providers/openai.ts";
+export { openRouterCostUsd } from "./providers/openrouter-billing.ts";
 export {
   createResponsesProvider,
   toResponsesInput,

@@ -44,6 +44,11 @@ import { toDataUri } from "../types.ts";
 import { isStrictSchema, withoutPatterns } from "../schema.ts";
 import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import { gateImages, type ImageLimits } from "../image.ts";
+import {
+  isOpenRouterBillingHost,
+  openRouterCostUsd,
+  type OpenRouterBill,
+} from "./openrouter-billing.ts";
 
 export interface ResponsesConfig extends ProviderFallbackConfig {
   apiKey: string;
@@ -285,7 +290,7 @@ export function toResponsesInput(
 
 // ── stream events ─────────────────────────────────────────────────────────
 
-interface ResponsesUsage {
+interface ResponsesUsage extends OpenRouterBill {
   input_tokens?: number;
   input_tokens_details?: { cached_tokens?: number };
   output_tokens?: number;
@@ -418,8 +423,10 @@ function codexHeaders(limits: CodexRateLimits): Headers {
  *  them per call and states no count of its own. */
 function usageChunk(
   usage: ResponsesUsage,
+  reportsCost: boolean,
   hostedCalls?: Partial<Record<HostedToolType, number>>,
 ): ProviderChunk {
+  const reportedCostUsd = reportsCost ? openRouterCostUsd(usage) : undefined;
   return {
     type: "usage",
     usage: {
@@ -432,6 +439,7 @@ function usageChunk(
       ...(usage.output_tokens_details?.reasoning_tokens !== undefined
         ? { reasoningTokens: usage.output_tokens_details.reasoning_tokens }
         : {}),
+      ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
       ...(hostedCalls ? { hostedCalls } : {}),
     },
   };
@@ -463,6 +471,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 /** @internal Shared by the plain and hosted entry points. */
 export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
+  const reportsCost = isOpenRouterBillingHost(baseUrl);
   const id = config.id ?? "openai-responses";
   const instanceSessionId = config.sessionHeader
     ? (config.instanceSessionId ?? crypto.randomUUID())
@@ -828,7 +837,8 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
             }
             if (hostedStream) yield* hostedStream.close();
             yield* reasoningChunk();
-            if (response?.usage) yield usageChunk(response.usage, hostedStream?.counts());
+            if (response?.usage)
+              yield usageChunk(response.usage, reportsCost, hostedStream?.counts());
             yield { type: "finish", finishReason };
             return;
           }
@@ -844,7 +854,7 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
             if (hostedStream) yield* hostedStream.close();
             yield* reasoningChunk();
             const usage = event.response?.usage;
-            if (usage) yield usageChunk(usage, hostedStream?.counts());
+            if (usage) yield usageChunk(usage, reportsCost, hostedStream?.counts());
             yield { type: "finish", finishReason };
             return;
           }
