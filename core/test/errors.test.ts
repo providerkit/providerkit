@@ -641,6 +641,27 @@ describe("retry-after — honouring it beats guessing", () => {
     ]).toEqual([3_366, 3_366]);
   });
 
+  it("uses the same explicit wait on raw and wrapped SDK errors", () => {
+    const message = "Please retry in 1s.";
+    for (const err of [
+      apiError(429, { retry_after_seconds: 8, message }),
+      apiError(429, { message: "Try again in 2s." }, { retryAfterMs: 8_000 }),
+      apiError(429, { message }, { headers: { "x-ratelimit-reset-requests": "8s" } }),
+      apiError(429, {
+        message: "The previous retryDelay=1s expired. Try again in 2s.",
+        details: [{ retryDelay: "8s" }],
+      }),
+    ]) {
+      expect(parseRetryAfterMs(err)).toBe(8_000);
+      expect(ProviderError.from("test", err).retryAfterMs).toBe(8_000);
+    }
+  });
+
+  it("reads an SDK's own message when its error body names no delay", () => {
+    const err = apiError(429, { status: "RESOURCE_EXHAUSTED" }, { message: "Please retry in 1s." });
+    expect(ProviderError.from("test", err).retryAfterMs).toBe(1_000);
+  });
+
   it("Retry-After header in seconds, as a Headers instance", () => {
     const err = apiError(429, {}, { headers: new Headers({ "retry-after": "30" }) });
     expect(parseRetryAfterMs(err)).toBe(30_000);

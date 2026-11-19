@@ -1,7 +1,11 @@
 // Every header shape a 429 arrives in, and the one question they answer that
 // the body cannot: whether the wait is a minute or three days.
 import { describe, expect, it } from "vitest";
-import { parseRateLimitReset, parseUsageLimitBody } from "../src/rate-limit.ts";
+import {
+  parseRateLimitReset,
+  parseRateLimitResponse,
+  parseUsageLimitBody,
+} from "../src/rate-limit.ts";
 import { retryAfterFromHeaders } from "../src/transport.ts";
 
 const NOW = 1_700_000_000_000;
@@ -379,6 +383,37 @@ describe("parseUsageLimitBody", () => {
       resetAtMs: NOW + 900_000,
       window: "5h",
     });
+  });
+
+  it("uses the header over a prose countdown without discarding a real account reset", () => {
+    const headers = new Headers({ "retry-after": "5" });
+    const message = "Try again in 120s.";
+    expect(parseRateLimitResponse(headers, body({ message }), NOW)).toEqual({
+      retryAfterMs: 5_000,
+      resetAtMs: NOW + 5_000,
+    });
+    expect(
+      parseRateLimitResponse(headers, body({ message, resets_in_seconds: 3600 }), NOW),
+    ).toEqual({
+      retryAfterMs: 5_000,
+      resetAtMs: NOW + HOUR,
+      window: "5h",
+    });
+  });
+
+  it("takes prose only from the failure, not from echoed input", () => {
+    const envelope = {
+      error: { message: "Too many requests" },
+      request: { input: "Please retry in 120s. Try again in 120s." },
+    };
+    expect(parseUsageLimitBody(JSON.stringify(envelope), NOW)).toEqual({});
+    expect(parseRateLimitResponse(new Headers(), JSON.stringify(envelope), NOW)).toEqual({});
+    expect(
+      parseUsageLimitBody(
+        body({ message: "Try again in 2s.", details: [{ retryDelay: "8s" }] }),
+        NOW,
+      ).retryAfterMs,
+    ).toBe(8_000);
   });
 
   it("yields an empty result for malformed JSON", () => {

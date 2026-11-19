@@ -11,9 +11,10 @@
 // empty balance, "check your key" for a plan that never included the API).
 
 import {
+  failureReset,
   parseRateLimitReset,
   parseRateLimitResponse,
-  parseUsageLimitBody,
+  type RateLimitReset,
   type RateLimitWindow,
 } from "./rate-limit.ts";
 import type { FilePart } from "./types.ts";
@@ -176,12 +177,11 @@ export class ProviderError extends Error {
     const code = readString(err, "code") ?? readString(err, "type");
     const message = messageOf(err);
     const body = bodyTextOf(err);
-    const resetBody = providerBodyOf(err) ?? body;
-    return new ProviderError(provider, classify(err, status, body), message, {
+    const kind = classify(err, status, body);
+    return new ProviderError(provider, kind, message, {
       status,
       code,
-      retryAfterMs: parseRetryAfterMs(err, resetBody),
-      ...parseUsageLimitBody(resetBody),
+      ...sdkReset(err, kind),
       body: body.slice(0, 2_000) || undefined,
       cause: err,
     });
@@ -666,29 +666,33 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
   return "unknown";
 }
 
-function secondsMatchToMs(match: RegExpMatchArray | null): number | undefined {
-  const ms = Math.round(Number(match?.[1]) * 1000);
-  return Number.isFinite(ms) ? ms : undefined;
+function normalizedWait(err: unknown): number | undefined {
+  const ms = readNumber(err, "retryAfterMs");
+  return ms !== undefined && Number.isFinite(ms) && ms >= 0 ? ms : undefined;
 }
 
-/** How long the provider asked us to wait, in ms. Prefer its explicit reset,
- *  RetryInfo or header over a delay it only mentions in the message. */
-export function parseRetryAfterMs(err: unknown, body?: string): number | undefined {
-  // Adapters already normalized the response headers. Re-parsing only the body
-  // discarded this property and made retries ignore their own Retry-After.
-  const normalized = readNumber(err, "retryAfterMs");
-  if (normalized !== undefined && Number.isFinite(normalized) && normalized >= 0) return normalized;
-  const text = body ?? bodyTextOf(err);
-  const usageLimit = parseUsageLimitBody(text);
-  if (usageLimit.retryAfterMs !== undefined) return usageLimit.retryAfterMs;
-  const retryInfo = secondsMatchToMs(text.match(/"?retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)s"?/i));
-  if (retryInfo !== undefined) return retryInfo;
+function sdkReset(err: unknown, kind: ErrorKind, body?: string): RateLimitReset {
+  const message = typeof err === "string" ? err : readString(err, "message");
+  let payload = body ?? providerBodyOf(err);
+  if (err instanceof ProviderError) payload ??= err.body;
+  if (payload === undefined && typeof err === "object" && !(err instanceof Error)) {
+    payload = providerBodyOf({ error: err });
+  }
   const headers = errorHeaders(err);
-  // A newline before "Please" can be the two characters backslash and n in a JSON body.
-  return (
-    (headers && parseRateLimitReset(headers).retryAfterMs) ??
-    secondsMatchToMs(text.match(/(?:\b|\\[nrtf])please retry in (\d+(?:\.\d+)?)\s*s\b/i))
-  );
+  // Some SDKs repeat the entire JSON reply after a status prefix in Error.message.
+  // Do not search that copy when the real envelope says nothing about a wait.
+  const plainMessage = message && !/[{[]/.test(message) ? message : undefined;
+  return failureReset(payload ?? message ?? "", {
+    headers,
+    accountWindow: kind === "rate" || kind === "quota" || (kind === "unknown" && !headers),
+    normalizedDelay: normalizedWait(err),
+    fallbackMessage: err instanceof ProviderError ? undefined : plainMessage,
+  });
+}
+
+/** How long the provider asked us to wait, in ms. */
+export function parseRetryAfterMs(err: unknown, body?: string): number | undefined {
+  return normalizedWait(err) ?? sdkReset(err, classify(err, undefined, body), body).retryAfterMs;
 }
 
 /** SDK errors and stream envelopes can carry headers as plain objects. */

@@ -8,16 +8,11 @@ import {
   classify,
   classifyHttp,
   parseContextOverflow,
-  parseRetryAfterMs,
   ProviderError,
   type ContextOverflowInfo,
   type ErrorKind,
 } from "./errors.ts";
-import {
-  parseRateLimitReset,
-  parseRateLimitResponse,
-  type RateLimitReading,
-} from "./rate-limit.ts";
+import { failureReset, parseRateLimitReset, type RateLimitReading } from "./rate-limit.ts";
 import type { Provider } from "./types.ts";
 
 /**
@@ -159,11 +154,10 @@ async function errorFor(provider: string, res: Response, redact = false): Promis
   // three days": past every retry budget, and the backup walker benched the
   // model until the weekly window rolled — the overload that most wants another
   // attempt got none. A server's own Retry-After is honoured on any status.
-  const aboutWindow = kind === "rate" || kind === "quota";
-  const reset = aboutWindow ? parseRateLimitResponse(res.headers, text) : {};
-  const asked = aboutWindow
-    ? retryAfterFromHeaders(res.headers)
-    : parseRateLimitReset(res.headers).retryAfterMs;
+  const reset = failureReset(text, {
+    headers: res.headers,
+    accountWindow: kind === "rate" || kind === "quota",
+  });
   const message = redact
     ? `${provider} ${res.status}`
     : text
@@ -176,7 +170,6 @@ async function errorFor(provider: string, res: Response, redact = false): Promis
     status: res.status,
     ...reset,
     shouldRetry,
-    retryAfterMs: asked ?? parseRetryAfterMs({}, text),
     ...(redact ? {} : { body: text.slice(0, 2_000) || undefined }),
   });
 }
