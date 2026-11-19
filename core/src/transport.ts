@@ -659,6 +659,14 @@ export function parseFrame<T>(data: string, provider: string): T {
  * classified error, the retry hints) plus `parseSseStream`.
  */
 export async function* streamSse(opts: RequestInit_): AsyncGenerator<string> {
+  yield* (await openSse(opts)).frames;
+}
+
+/** @internal A stream can fail after HTTP 200. Its adapter needs the response
+ *  headers alongside that error frame to recover the server's retry delay. */
+export async function openSse(
+  opts: RequestInit_,
+): Promise<{ headers: Headers; frames: AsyncGenerator<string> }> {
   const res = await send(opts);
   // Headers are the first sign of life — the idle clock starts here, not at
   // the POST: a backend that withholds them until its first output token (the
@@ -682,5 +690,5 @@ export async function* streamSse(opts: RequestInit_): AsyncGenerator<string> {
       status: res.status,
     });
   }
-  yield* parseSseStream(res.body, opts);
+  return { headers: res.headers, frames: parseSseStream(res.body, opts) };
 }

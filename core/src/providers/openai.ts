@@ -18,7 +18,7 @@ import {
 } from "../errors.ts";
 import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
-import { streamSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
+import { openSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
@@ -683,7 +683,7 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
       // before it goes out, and they are what says the turn called a tool.
       const calls = new Map<number, ToolCallIdentity>();
       const hostedStream = codecs?.openai.stream();
-      for await (const data of streamSse({
+      const stream = await openSse({
         url: apiUrl(baseUrl, config.path ?? defaultPath),
         headers: {
           ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
@@ -709,7 +709,8 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
         // to `[DONE]` (invariant 5). But a read that dies in between costs only
         // the usage frame: the answer is whole once its finish is stated.
         finished: () => ended,
-      })) {
+      });
+      for await (const data of stream.frames) {
         const chunk = parseFrame<OpenAIChunk>(data, id);
 
         // A failure the backend reports after its headers went out. The
@@ -718,7 +719,7 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
         // line, and a frame carrying `error` carries no choices: unread, it
         // falls through both branches below and the turn ends as a successful
         // zero-token completion nobody retries.
-        if (chunk.error) throw streamError(id, chunk);
+        if (chunk.error) throw streamError(id, chunk, stream.headers);
 
         // A usage-only frame carries no choices — this shape sends it last.
         if (chunk.usage) {

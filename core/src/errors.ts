@@ -10,13 +10,7 @@
 // read before the status — status alone gives the wrong advice ("retry" for an
 // empty balance, "check your key" for a plan that never included the API).
 
-import {
-  failureReset,
-  parseRateLimitReset,
-  parseRateLimitResponse,
-  type RateLimitReset,
-  type RateLimitWindow,
-} from "./rate-limit.ts";
+import { failureReset, type RateLimitReset, type RateLimitWindow } from "./rate-limit.ts";
 import type { FilePart } from "./types.ts";
 
 /** What kind of failure this is, named by what actually fixes it. */
@@ -817,18 +811,27 @@ const STATUS_BY_TYPE: ReadonlyMap<string, number> = new Map([
  * body does name keeps its own kind, which is what tells the caller to wait,
  * rotate a key, or compact instead of retrying a failure that will repeat.
  */
-export function streamError(provider: string, envelope: unknown): ProviderError {
+export function streamError(
+  provider: string,
+  envelope: unknown,
+  responseHeaders?: Headers,
+): ProviderError {
   // Only failure data is searchable or logged. A failed Responses object can
   // echo instructions, tool definitions and output alongside its error.
-  const outer =
-    typeof envelope === "object" && envelope !== null ? (envelope as Record<string, unknown>) : {};
-  const error = outer.error ?? outer.errors ?? envelope;
-  const body = JSON.stringify(error ?? {}) ?? "";
+  const outer = recordOf(envelope) ?? {};
+  const response = recordOf(outer.response);
+  let error = response?.error ?? outer.error ?? outer.errors;
+  if (error == null) {
+    error =
+      response || outer.type === "response.failed" ? { message: "response failed" } : envelope;
+  }
+  const body = failureJson(error ?? {});
   const status = [
     readNumber(error, "code"),
     readNumber(error, "status"),
     readNumber(error, "status_code"),
-    readNumber(envelope, "status_code"),
+    readNumber(outer, "status_code"),
+    readNumber(response, "status_code"),
   ].find((value) => value !== undefined && value >= 400 && value < 600);
   const code =
     readString(error, "code") ?? readString(error, "status") ?? readString(error, "type");
@@ -852,28 +855,62 @@ export function streamError(provider: string, envelope: unknown): ProviderError 
     {
       ...(status !== undefined ? { status } : {}),
       ...(code ? { code } : {}),
-      ...readReset(envelope, error, body, kind),
+      ...readReset(outer, response, error, kind, responseHeaders),
       body: body.slice(0, 2_000),
     },
   );
 }
 
-/** Read reset metadata without copying echoed request data into diagnostics.
- *  Mirrored account windows describe only rate/quota failures, not a 503. */
-function readReset(envelope: unknown, error: unknown, body: string, kind: ErrorKind) {
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+// Gateways can mirror request fields or headers even inside a flat error.
+const ECHOED_FIELDS = new Set([
+  "headers",
+  "request",
+  "response",
+  "instructions",
+  "input",
+  "output",
+  "tools",
+]);
+
+function failureJson(value: unknown): string {
+  return (
+    JSON.stringify(value, (key, field: unknown) => (ECHOED_FIELDS.has(key) ? undefined : field)) ??
+    ""
+  );
+}
+
+/** A gateway can put retry hints beside its nested error. Never scan the whole
+ *  event for them: an echoed prompt could name a different failure or delay. */
+function readReset(
+  outer: Record<string, unknown>,
+  response: Record<string, unknown> | undefined,
+  error: unknown,
+  kind: ErrorKind,
+  responseHeaders?: Headers,
+): RateLimitReset {
   const headers = new Headers(errorHeaders(error));
-  errorHeaders(envelope)?.forEach((value, name) => headers.set(name, value));
-  if (kind !== "rate" && kind !== "quota") {
-    return {
-      retryAfterMs: parseRateLimitReset(headers).retryAfterMs ?? parseRetryAfterMs(error, body),
-    };
+  for (const source of [errorHeaders(response), errorHeaders(outer), responseHeaders]) {
+    source?.forEach((value, name) => headers.set(name, value));
   }
-  const metadata =
-    typeof envelope === "object" && envelope !== null && "metadata" in envelope
-      ? envelope.metadata
-      : undefined;
-  const reset = parseRateLimitResponse(headers, JSON.stringify({ error, metadata }));
-  return { ...reset, retryAfterMs: reset.retryAfterMs ?? parseRetryAfterMs(error, body) };
+  const body = failureJson({
+    error,
+    metadata: {
+      resetsAt:
+        readString(outer.metadata, "resetsAt") ?? readString(response?.metadata, "resetsAt"),
+    },
+    retry_after_seconds: outer.retry_after_seconds ?? response?.retry_after_seconds,
+  });
+  // Standing account windows describe a throttle, not an unrelated 503.
+  return failureReset(body, {
+    headers,
+    accountWindow: kind === "rate" || kind === "quota",
+  });
 }
 
 /**

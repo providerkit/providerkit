@@ -86,8 +86,9 @@ function socketBody(body: string): ReadableStream<Uint8Array> {
   });
 }
 
-const serving = (body: string): typeof fetch =>
-  (async () => new Response(socketBody(body), { status: 200 })) as unknown as typeof fetch;
+const serving = (body: string, headers?: HeadersInit): typeof fetch =>
+  // The providers use fetch's call signature, not Bun's preconnect method.
+  (async () => new Response(socketBody(body), { headers })) as unknown as typeof fetch;
 
 /**
  * Delivers the prefix, then the socket dies — the queue must drain BEFORE the
@@ -1323,10 +1324,16 @@ describe.each(VENDORS)("$name", (vendor) => {
     // response is already 200 when the throttle arrives — and an adapter that
     // does not read it ends the turn as a successful zero-token completion:
     // nothing to retry, and a key pool that never rotates off a spent key.
-    const err = await thrownBy(ask(vendor.create(serving(vendor.throttled))));
+    const err = await thrownBy(
+      ask(
+        vendor.create(serving(vendor.throttled, { "Retry-After": "8", "x-private": "do-not-log" })),
+      ),
+    );
     expect(err).toBeInstanceOf(ProviderError);
     const provider = err as ProviderError;
     expect(provider.kind).toBe("rate");
+    expect(provider.retryAfterMs).toBe(8_000);
+    expect(provider.body).not.toContain("do-not-log");
     expect(provider.isTransient).toBe(true);
     // The vendor's own words survive to the log, whichever dialect they were
     // in — a classified kind is what the run branches on, and the body is the
@@ -1337,9 +1344,11 @@ describe.each(VENDORS)("$name", (vendor) => {
   it("reports a refused request that lands after the headers as invalid, never overload", async () => {
     // Its type is the only evidence. Floored to overload, it was retried and
     // walked every backup, cooling each, on a request they all refuse alike.
-    const err = await thrownBy(ask(vendor.create(serving(vendor.refused))));
+    const err = await thrownBy(
+      ask(vendor.create(serving(vendor.refused, { "x-ratelimit-reset": "3600" }))),
+    );
     expect(err).toBeInstanceOf(ProviderError);
-    expect((err as ProviderError).kind).toBe("invalid");
+    expect(err).toMatchObject({ kind: "invalid", retryAfterMs: undefined, resetAtMs: undefined });
   });
 
   it("gives up on a stream that goes quiet, and never on one that is talking", async () => {

@@ -6,6 +6,7 @@ import { createResponsesProvider, toResponsesInput } from "../src/providers/resp
 import { ProviderError } from "../src/errors.ts";
 import type { HostedTool } from "../src/hosted.ts";
 import type { RateLimitReading } from "../src/rate-limit.ts";
+import { withStreamRetry } from "../src/retry.ts";
 import { collectTurn } from "../src/turn.ts";
 import type { ChatMessage, ProviderChunk, ToolDefinition } from "../src/types.ts";
 import { withWatchdog } from "../src/watchdog.ts";
@@ -158,6 +159,29 @@ describe("responses adapter", () => {
     expect(usage).toMatchObject({ inputTokens: 1_000, cachedInputTokens: 800, outputTokens: 20 });
     if (expected === undefined) expect(usage).not.toHaveProperty("reportedCostUsd");
     else expect(usage?.reportedCostUsd).toBeCloseTo(expected, 12);
+  });
+
+  it("keeps the bill when a completed call has no tool name", async () => {
+    const { fetchImpl, seen } = recorder([
+      j({ type: "response.output_item.added", item: { type: "function_call", call_id: "call_1" } }),
+      j({ type: "response.completed", response: { usage: { ...USAGE, cost: 0.002 } } }),
+    ]);
+    const router = provider({ baseUrl: "https://openrouter.ai/api", fetchImpl });
+    const stream = withStreamRetry((signal) => router.createStream(hi, [], { signal }), {
+      maxAttempts: 3,
+      sleep: async () => {},
+    });
+    expect(await stream.next()).toMatchObject({
+      value: { type: "delta", toolCalls: [{ id: "call_1" }] },
+    });
+    expect(await stream.next()).toMatchObject({
+      value: { type: "usage", usage: { reportedCostUsd: 0.002 } },
+    });
+    await expect(stream.next()).rejects.toMatchObject({
+      kind: "overload",
+      message: expect.stringContaining("no name"),
+    });
+    expect(seen).toHaveLength(1);
   });
 
   it("maps both reasoning event names to the same thing", async () => {
@@ -552,6 +576,30 @@ describe("responses finish reasons", () => {
     await expect(collect(provider({ fetchImpl }).createStream(hi, []))).rejects.toMatchObject({
       kind: "quota",
     });
+  });
+
+  it("keeps the gateway's retry hint without reading the prompt or logging mirrored headers", async () => {
+    const error = { code: "rate_limit_exceeded", message: "Please retry in 1s." };
+    for (const [event, wait] of [
+      [
+        {
+          type: "response.failed",
+          status_code: 429,
+          headers: { "Retry-After": "8", "x-private": "do-not-log" },
+          response: { instructions: "context_length_exceeded", error },
+        },
+        8_000,
+      ],
+      [{ type: "error", status_code: 429, retry_after_seconds: 7, error }, 7_000],
+    ] as const) {
+      const { fetchImpl } = recorder([j(event)]);
+      await expect(collect(provider({ fetchImpl }).createStream(hi, []))).rejects.toMatchObject({
+        kind: "rate",
+        status: 429,
+        retryAfterMs: wait,
+        body: j(error),
+      });
+    }
   });
 
   it("reads the outcome a terminal event states, not the one its type implies", async () => {
