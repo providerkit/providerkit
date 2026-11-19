@@ -390,6 +390,11 @@ const ENTITLEMENT_PATTERNS: readonly RegExp[] = [
   // The ChatGPT backend's error code, which arrives with no prose at all.
   /usage_not_included/i,
   /usage not included/i,
+  // Z.ai's plan gate, code 1311: "[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限]", the plan does
+  // not include this model yet. It comes as a 403, so it read as a wrong key, and a key pool
+  // benched a working key for 12 hours. The code is matched with the bracket after it, as Z.ai
+  // writes it, because OpenAI's errors name one message of a long history as `messages[1311]`.
+  /\[1311\]\[|暂未开放/,
 ];
 
 const OPENCODE_FREE_LIMIT = /\bFreeUsageLimitError\b/i;
@@ -470,6 +475,10 @@ const MODEL_PATTERNS: readonly RegExp[] = [
   // requested model." On status alone that is a wrong key, but the key is fine: another model is
   // the fix (its errors page, read 2026-11-11).
   /does not have access to the requested model/i,
+  // Google, for a model that answers one turn only: "Multiturn chat is not enabled for
+  // models/antigravity-preview-latest". A 400, so `invalid` on status alone, and a pool stopped on
+  // it. Every turn after the first is multiturn, so the fix is another model.
+  /multiturn chat is not enabled/i,
 ];
 
 /** An optional model id after the word "model", quoted or not: "model `gpt-4`", "Model mimo-v2.5". */
@@ -497,7 +506,13 @@ const RETIRED_MODEL_PATTERNS: readonly RegExp[] = [
 
 const AUTH_PATTERNS: readonly RegExp[] = [
   /invalid[_\s]?(?:x-api-key|api[ _-]?key|token|credentials?)/i,
-  /api[ _-]?key (?:is )?(?:not valid|invalid|incorrect)/i,
+  // "missing" and "required" come from an adopter's own classifier, with no recorded body: a key
+  // that never arrived is fixed the same way as a wrong one.
+  /api[ _-]?key (?:is )?(?:not valid|invalid|incorrect|missing|required)/i,
+  // Google's OpenAI-compatible endpoint answers a bad key with a 400 that says only "Please pass a
+  // valid API key". On status alone that is `invalid`, so a key pool never tried its next key and
+  // a fallback chain stopped, though the key is the fix.
+  /pass a valid api[ _-]?key/i,
   /unauthorized|UNAUTHENTICATED|PERMISSION_DENIED/i,
   /authentication[_\s](?:failed|invalid|error)/i,
   /account (?:disabled|suspended|deactivated|banned)/i,

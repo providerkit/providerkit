@@ -109,6 +109,20 @@ describe("the body outranks the status for the 4xx family", () => {
     ).toBe("entitlement");
   });
 
+  it("Z.ai's plan gate is entitlement, never auth: the key works", () => {
+    // On status alone a wrong key, so a key pool benched a working key for 12 hours. Inside a
+    // stream its `api_error` type read as an overload, and the gate was retried.
+    const gate =
+      '{"type":"error","error":{"type":"api_error","code":"1311","message":"[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限][20260922193547f2080868bec24d38]"}}';
+    expect(classifyHttp(403, gate)).toBe("entitlement");
+    expect(streamError("zai", JSON.parse(gate)).kind).toBe("entitlement");
+    // The control, written by hand: OpenAI's errors name one message of a long history by its
+    // index, and message 1311 is not Z.ai's code.
+    const indexed =
+      '{"error":{"message":"Invalid \'messages[1311].content\': string too long.","type":"invalid_request_error"}}';
+    expect(classifyHttp(400, indexed)).toBe("invalid");
+  });
+
   it.each([
     ["余额不足", "Moonshot"],
     ["欠费", "Alibaba"],
@@ -510,13 +524,31 @@ describe("the deterministic failures — fail fast, never burn the retry budget"
     "UNAUTHENTICATED",
     "PERMISSION_DENIED",
     "account suspended",
+    "API key is required",
+    "API key is missing",
   ])("auth wording: %s", (message) => {
     expect(kindOf(apiError(400, { message }))).toBe("auth");
+  });
+
+  // Google's answers to a key it refuses, both 400s. As `invalid`, a key pool never tried its
+  // next key and a fallback chain stopped on the first.
+  it.each([
+    ["OpenAI-compatible", '[{"error":{"code":400,"message":"Please pass a valid API key"}}]'],
+    ["native", '[{"error":{"code":400,"message":"API key not valid. Pass a valid API key."}}]'],
+  ])("Google's %s key rejection is `auth`", (_endpoint, body) => {
+    expect(classifyHttp(400, body)).toBe("auth");
   });
 
   it("404 and unknown-model wordings are `model`", () => {
     expect(kindOf(apiError(404, { message: "not found" }))).toBe("model");
     expect(kindOf(apiError(400, { message: "The model `gpt-9` does not exist" }))).toBe("model");
+  });
+
+  it("a Google model that answers one turn only is `model`, not a bad request", () => {
+    // Every turn after the first is multiturn, so the fix is another model, and a pool moves on.
+    const body =
+      '[{"error":{"code":400,"message":"Multiturn chat is not enabled for models/antigravity-preview-latest"}}]';
+    expect(classifyHttp(400, body)).toBe("model");
   });
 
   // Real 400 bodies. Read as `invalid`, a pool's backup that got one was sent

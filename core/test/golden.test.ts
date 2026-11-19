@@ -1246,6 +1246,34 @@ describe.each(VENDORS)("$name", (vendor) => {
     expect(failure(err)).toEqual({ kind: "context", status: 400, retryAfterMs: undefined });
   });
 
+  // Each status points at the wrong fix: a 400 at our request, a 403 at the key.
+  it.each([
+    {
+      said: "Google's key rejection",
+      status: 400,
+      body: '[{"error":{"code":400,"message":"Please pass a valid API key"}}]',
+      kind: "auth",
+    },
+    {
+      said: "Google's one-turn model",
+      status: 400,
+      body: '[{"error":{"code":400,"message":"Multiturn chat is not enabled for models/antigravity-preview-latest"}}]',
+      kind: "model",
+    },
+    {
+      said: "Z.ai's plan gate",
+      status: 403,
+      body: '{"type":"error","error":{"type":"api_error","code":"1311","message":"[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限][20260922193547f2080868bec24d38]"}}',
+      kind: "entitlement",
+    },
+  ] as const)(
+    "classifies $said by what fixes it, not by its status",
+    async ({ status, body, kind }) => {
+      const err = await thrownBy(ask(vendor.create(failing(() => new Response(body, { status })))));
+      expect(failure(err)).toEqual({ kind, status, retryAfterMs: undefined });
+    },
+  );
+
   it("reports a throttle that lands after the headers as a throttle", async () => {
     // The failure with no status line. Every shape has this hole — an SSE
     // response is already 200 when the throttle arrives — and an adapter that
