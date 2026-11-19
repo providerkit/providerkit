@@ -698,6 +698,23 @@ The host handles file upload, access, storage and retention. An attachment shown
 not mean the agent received its bytes. The send endpoint must resolve the uploaded reference into
 an input the selected model can read.
 
+A phone picker returns its own object, not a web `File`. `addFiles` takes it when it has a `name`,
+a `type` and, if the picker knows it, a `size`. Give your `upload` function that type, and the
+composer hands the same object back, so your uploader can read its `uri`:
+
+```ts
+type PickedFile = { uri: string; name: string; type: string; size?: number };
+
+const composer = useComposer({
+  scope,
+  send: chat.send,
+  // Your own upload call. It reads file.uri and returns the server's file reference.
+  attachments: { upload: (file: PickedFile) => uploadToServer(file) },
+});
+```
+
+Without a size, the composer skips the `maxFileBytes` check, and your server's limit decides.
+
 ## Run the local example
 
 From a fresh workspace, run `bun install` and `bun run build` once. The example imports the
