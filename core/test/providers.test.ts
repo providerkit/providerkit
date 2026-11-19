@@ -560,6 +560,150 @@ describe("toAnthropicMessages", () => {
   });
 });
 
+describe("anthropic prompt caching", () => {
+  type Block = Record<string, unknown>;
+  interface Body {
+    system?: Block[];
+    messages: { role: string; content: Block[] }[];
+  }
+  const search: ToolDefinition[] = [
+    { name: "search", description: "search", inputSchema: { type: "object" } },
+  ];
+
+  /** The request body a call sends, as it went out. */
+  async function sent(messages: ChatMessage[], tools = search): Promise<Body> {
+    const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+    const provider = createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", fetchImpl });
+    await collect(provider.createStream(messages, tools));
+    const { system, messages: wire } = seen[0]!.body;
+    return { ...(Array.isArray(system) ? { system } : {}), messages: wire as Body["messages"] };
+  }
+
+  /** Where each cache marker sits: `system.i`, or `messages.i.j` for block j of message i. */
+  const markers = (body: Body): string[] => [
+    ...(body.system ?? []).flatMap((block, i) => ("cache_control" in block ? [`system.${i}`] : [])),
+    ...body.messages.flatMap((message, i) =>
+      message.content.flatMap((block, j) =>
+        "cache_control" in block ? [`messages.${i}.${j}`] : [],
+      ),
+    ),
+  ];
+
+  it("caches a tool loop at its newest message and where the request before it ended", async () => {
+    // Only tools and system came from cache before: every turn billed the
+    // whole conversation again at the full input rate.
+    const call = (id: string): ChatMessage => ({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id, name: "search", arguments: '{"q":"cats"}' }],
+    });
+    const result = (id: string): ChatMessage => ({
+      role: "tool",
+      toolCallId: id,
+      name: "search",
+      content: "3 cats",
+    });
+    const first: ChatMessage[] = [
+      { role: "system", content: "be brief" },
+      { role: "user", content: "find cats" },
+    ];
+    const second = [...first, call("call_1"), result("call_1")];
+    const third = [...second, call("call_2"), result("call_2")];
+    const bodies = [await sent(first), await sent(second), await sent(third)];
+
+    // Each turn's newest marker is where the next turn's second marker goes,
+    // so that turn reads the entry exactly, however much it added.
+    expect(bodies.map(markers)).toEqual([
+      ["system.0", "messages.0.0"],
+      ["system.0", "messages.0.0", "messages.2.0"],
+      ["system.0", "messages.2.0", "messages.4.0"],
+    ]);
+    // The API takes at most four.
+    for (const body of bodies) expect(markers(body).length).toBeLessThanOrEqual(4);
+    // Invariant 14: the longer history sends the shorter one's messages plus
+    // what is new. Only the markers moved, and a moved marker is not a changed
+    // prefix.
+    const unmarked = (body: Body): unknown[] =>
+      JSON.parse(JSON.stringify(body.messages), (key: string, value: unknown) =>
+        key === "cache_control" ? undefined : value,
+      );
+    for (let n = 1; n < bodies.length; n++) {
+      const before = unmarked(bodies[n - 1]!);
+      expect(unmarked(bodies[n]!).slice(0, before.length)).toEqual(before);
+    }
+  });
+
+  it("marks no message on a one-shot, and marks a chat without tools once it has a reply", async () => {
+    // No tools and no assistant turn: a title, a summary, one question. A
+    // marker on its message would pay the 1.25x write for an entry no second
+    // request reads. The system marker stays.
+    const once = await sent(
+      [
+        { role: "system", content: "be brief" },
+        { role: "user", content: "name this chat" },
+      ],
+      [],
+    );
+    expect(markers(once)).toEqual(["system.0"]);
+    // With no system message either, it carries no marker at all.
+    expect(markers(await sent([{ role: "user", content: "summarize" }], []))).toEqual([]);
+
+    const chat = await sent(
+      [
+        { role: "user", content: "my name is Ana" },
+        { role: "assistant", content: "Hello, Ana." },
+        { role: "user", content: "what is my name?" },
+      ],
+      [],
+    );
+    expect(markers(chat)).toEqual(["messages.0.0", "messages.2.0"]);
+  });
+
+  it("walks a marker back past text that can't carry one, or leaves the message unmarked", async () => {
+    // Empty text can't carry a marker, and the API refuses text of only
+    // whitespace, so the marker goes on the last block before it that can.
+    const picture = await sent([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is this?" },
+          { type: "image", mimeType: "image/png", data: "AAA" },
+          { type: "text", text: "" },
+        ],
+      },
+    ]);
+    expect(markers(picture)).toEqual(["messages.0.1"]);
+
+    // Nothing in the newest message can carry one, so it gets none, and the
+    // marker where the last request ended still goes out.
+    const blank = await sent([
+      { role: "user", content: "find cats" },
+      { role: "assistant", content: "On it." },
+      { role: "user", content: " " },
+    ]);
+    expect(markers(blank)).toEqual(["messages.0.0"]);
+  });
+
+  it("sends one system block per system message, in order, the marker on the last", async () => {
+    // A decorator over a Provider can only add a system message. A line it
+    // puts first now reaches the wire as its own first block, not as the start
+    // of one joined block. A blank message gets no block: alone, Anthropic
+    // refuses it.
+    const messages: ChatMessage[] = [
+      { role: "system", content: "First line." },
+      { role: "system", content: "  " },
+      { role: "system", content: "You are terse." },
+      { role: "user", content: "hi" },
+    ];
+    const blocks = [
+      { type: "text", text: "First line." },
+      { type: "text", text: "You are terse.", cache_control: { type: "ephemeral" } },
+    ];
+    expect((await sent(messages, [])).system).toEqual(blocks);
+    expect(toAnthropicMessages(messages).system).toEqual(blocks);
+  });
+});
+
 // ── OpenAI shape ──────────────────────────────────────────────────────────
 
 const OPENAI_TEXT_TURN = [
@@ -2308,9 +2452,17 @@ describe("anthropic hosted tools", () => {
     const turn = await collectTurn(claude(fetchImpl).createStream(QUESTION, [], search));
     expect(seen).toHaveLength(2);
     // The paused blocks as the last assistant message, signature included,
-    // and the container the paused pass ran in.
+    // and the container the paused pass ran in. The second pass is a request
+    // of its own, so it carries the conversation's two cache markers: on the
+    // question, where the first pass ended, and on the paused turn's search
+    // result, the last block that takes one. The thinking block takes none.
     expect(seen[1]!.body.messages).toEqual([
-      { role: "user", content: [{ type: "text", text: "how long do cats sleep" }] },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "how long do cats sleep", cache_control: { type: "ephemeral" } },
+        ],
+      },
       {
         role: "assistant",
         content: [
@@ -2321,7 +2473,12 @@ describe("anthropic hosted tools", () => {
             name: "web_search",
             input: { query: "cats" },
           },
-          { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [RESULT] },
+          {
+            type: "web_search_tool_result",
+            tool_use_id: "srvtoolu_1",
+            content: [RESULT],
+            cache_control: { type: "ephemeral" },
+          },
         ],
       },
     ]);
@@ -2336,6 +2493,25 @@ describe("anthropic hosted tools", () => {
       hostedCalls: { web_search: 1 },
     });
     expect(turn.finishReason).toBe("stop");
+  });
+
+  it("walks the marker back past a paused turn's closing thinking block", async () => {
+    // Thinking reaches this wire only here, in the blocks a paused pass sends
+    // back. A marker on a thinking block is refused, and the turn is lost.
+    const thoughtLast = [
+      PAUSED[0]!, // message_start
+      ...PAUSED.slice(5, 9), // the search and its result
+      ...PAUSED.slice(1, 5), // then the signed thinking
+      ...PAUSED.slice(9), // the pause, and the end of the pass
+    ];
+    const { seen, fetchImpl } = sequence(thoughtLast, ANTHROPIC_TEXT_TURN);
+    await collect(claude(fetchImpl).createStream(QUESTION, [], search));
+    const paused = (seen[1]!.body.messages as { content: Record<string, unknown>[] }[])[1]!;
+    expect(paused.content.map((block) => [block.type, "cache_control" in block])).toEqual([
+      ["server_tool_use", false],
+      ["web_search_tool_result", true],
+      ["thinking", false],
+    ]);
   });
 
   it("gives up after ten pauses in a row, as overload", async () => {

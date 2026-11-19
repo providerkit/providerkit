@@ -393,15 +393,16 @@ export const anthropicHosted = {
       }
     }
     return {
-      payload(request: Record<string, unknown>, body: AnthropicMessage[]) {
+      /** The conversation a pass sends: `body`, then what the paused passes
+       *  wrote, as the turn they continue. */
+      messages(body: AnthropicMessage[]): AnthropicMessage[] {
+        return resumed.length > 0 ? resumeWith(body, resumed) : body;
+      },
+      payload(request: Record<string, unknown>) {
         blocks = [];
         open = undefined;
         servers = undefined;
-        return {
-          ...request,
-          ...(resumed.length > 0 ? { messages: resumeWith(body, resumed) } : {}),
-          ...(container ? { container } : {}),
-        };
+        return { ...request, ...(container ? { container } : {}) };
       },
       *event(event: AnthropicEvent): Generator<ProviderChunk> {
         const usage = event.type === "message_start" ? event.message?.usage : event.usage;
