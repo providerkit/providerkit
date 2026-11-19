@@ -261,6 +261,9 @@ export async function* requireContent<T extends ProviderChunk>(
     return;
   }
   if (finish === "length") {
+    // This failure is not retried. A caller that handles the cut needs its finish and billed
+    // usage even on a provider that streams no reasoning. Other empty failures stay uncommitted.
+    yield* held;
     const spent = usage?.reasoningTokens
       ? ` (${usage.reasoningTokens} of ${usage.outputTokens} output tokens went to reasoning)`
       : "";
@@ -268,6 +271,7 @@ export async function* requireContent<T extends ProviderChunk>(
       provider,
       "invalid",
       `${provider}: the output cap ran out before any answer${spent}. Raise maxTokens or lower effort.`,
+      { code: "output_cap_before_answer" },
     );
   }
   throw new ProviderError(provider, "overload", `${provider}: completed with no content`);

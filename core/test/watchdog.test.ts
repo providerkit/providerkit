@@ -299,7 +299,7 @@ describe("requireContent", () => {
           { sleep: async () => undefined },
         ),
       ),
-    ).rejects.toMatchObject({ kind: "invalid" });
+    ).rejects.toMatchObject({ kind: "invalid", code: "output_cap_before_answer" });
     expect(attempt).toBe(1);
   });
 

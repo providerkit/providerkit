@@ -520,32 +520,40 @@ describe("finish turn after an unfinished answer", () => {
     expect(source.requests).toHaveLength(2);
   });
 
-  it("finishes a turn the cap cut while the model was still thinking", async () => {
-    const source = wire(
-      [
-        { type: "delta", reasoning: "Let me weigh every area before I" },
-        { type: "finish", finishReason: "length" },
-      ],
-      cutCall(RESULT_TOOL_NAME, '{"value":1'),
-    );
-    // Core's watchdog, as production wraps a model: it throws `invalid` on the first turn, since
-    // the cap ran out before any answer. That must still reach the finish turn.
-    const outcome = await defineAgent({
-      ...base,
-      provider: withWatchdog(source.provider),
-      tools: [read],
-      output: scored,
-      finish: {},
-    }).run("go");
-    expect(outcome).toMatchObject({ status: "limited", limit: "outputTokens" });
-    expect(source.requests).toHaveLength(2);
-    const finish = lastRequest(source);
-    expect(finish.options).toMatchObject({
-      toolChoice: { name: RESULT_TOOL_NAME },
-      effort: "none",
-    });
-    expect(finish.messages.at(-1)).toEqual({ role: "user", content: forcedNote(REPLY_CUT) });
-  });
+  it.each([false, true])(
+    "finishes a cut thinking turn (reasoning streamed: %s)",
+    async (streamed) => {
+      const spent = { ...usage, outputTokens: 2_048, reasoningTokens: 2_048 };
+      const cut: ProviderChunk[] = streamed
+        ? [{ type: "delta", reasoning: "Let me weigh every area" }]
+        : [];
+      cut.push({ type: "usage", usage: spent }, { type: "finish", finishReason: "length" });
+      const source = wire(cut, calls([RESULT_TOOL_NAME, { value: 7, label: "billing" }]));
+      // Core's watchdog, as production wraps a model: it throws `invalid` on the first turn, since
+      // the cap ran out before any answer. That must still reach the finish turn.
+      const outcome = await defineAgent({
+        ...base,
+        provider: withWatchdog(source.provider),
+        tools: [read],
+        output: scored,
+        finish: {},
+      }).run("go");
+      expect(outcome).toMatchObject({ status: "completed", salvaged: "outputTokens" });
+      expect(outcome.snapshot.models[0]).toMatchObject({
+        status: "completed",
+        billing: "reported",
+        usage: spent,
+        turn: { finishReason: "length" },
+      });
+      expect(source.requests).toHaveLength(2);
+      const finish = lastRequest(source);
+      expect(finish.options).toMatchObject({
+        toolChoice: { name: RESULT_TOOL_NAME },
+        effort: "none",
+      });
+      expect(finish.messages.at(-1)).toEqual({ role: "user", content: forcedNote(REPLY_CUT) });
+    },
+  );
 
   it.each([
     ["content_filter", "content_filtered"],

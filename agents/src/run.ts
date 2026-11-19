@@ -13,7 +13,6 @@ import {
   type TokenUsage,
   type Tool,
   type ToolChoice,
-  type Turn,
 } from "@providerkit/core";
 import {
   bindMemoryTool,
@@ -216,6 +215,25 @@ function finishNote(reason: SalvageReason, tools: readonly string[]): string {
       ? "Write your final answer again, shorter,"
       : "Write your best final answer now";
   return `${why} ${ask} from what you have already gathered. Do not request any more tools.`;
+}
+
+/** Core reports a length finish and its usage, then throws if no answer fit. The finish policy
+ * handles that turn itself. All other provider errors must still fail the call. */
+async function* allowEmptyLength(
+  stream: AsyncIterable<ProviderChunk>,
+): AsyncGenerator<ProviderChunk> {
+  try {
+    yield* stream;
+  } catch (error) {
+    if (
+      !(
+        error instanceof ProviderError &&
+        error.kind === "invalid" &&
+        error.code === "output_cap_before_answer"
+      )
+    )
+      throw error;
+  }
 }
 
 /** A finish turn that cannot produce an answer leaves the run's original ending in place. */
@@ -3078,10 +3096,6 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       let reportedUsage = false;
       let bufferedChunks = 0;
       let bufferedBytes = 0;
-      // Kept under a finish policy, for a turn the output cap cut while the model was thinking.
-      // ponytail: that holds each chunk until the call ends, so a turn sits in memory twice at
-      // worst. Keeping only the assembled turn would need collectTurn to hand back a partial one.
-      const seen: ProviderChunk[] = [];
       const guarded = !!guardrails?.modelOutput;
       const served = {
         provider: selectedProvider.id,
@@ -3125,9 +3139,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
               snapshot.subagent?.identity.originRunId ??
               snapshot.runId),
         });
-        for await (const chunk of stream) {
+        const chunks = snapshot.definition.finish && !summary ? allowEmptyLength(stream) : stream;
+        for await (const chunk of chunks) {
           active();
-          if (snapshot.definition.finish) seen.push(chunk);
           if (chunk.usage) {
             if (!isUsage(chunk.usage))
               fail("invalid_usage", "The provider returned invalid token usage.", model.id);
@@ -3163,30 +3177,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           yield chunk;
         }
       }
-      // Ported from a private adopter's engine (cutWhileThinking): core's empty-answer guard
-      // throws `invalid` once the output cap ran out while the model was still thinking, after
-      // the `length` finish streamed. That is a cut turn like any other, and the finish turn is
-      // its fix, so under a finish policy it comes back as one instead of failing the run.
-      async function collect(): Promise<Turn> {
-        try {
-          return await untilAbort(collectTurn(observed()), signal);
-        } catch (error) {
-          const cutWhileThinking =
-            error instanceof ProviderError &&
-            error.kind === "invalid" &&
-            seen.some((chunk) => chunk.type === "finish" && chunk.finishReason === "length");
-          if (!cutWhileThinking) throw error;
-          active();
-          return collectTurn(
-            (async function* () {
-              yield* seen;
-            })(),
-          );
-        }
-      }
       let collected;
       try {
-        collected = await collect();
+        collected = await untilAbort(collectTurn(observed()), signal);
       } catch (error) {
         await observe({ type: "model_error", operationId: model.id, attemptId: model.attemptId });
         active();
