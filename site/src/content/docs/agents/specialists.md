@@ -25,7 +25,9 @@ remote A2A targets. `conversationOnly` provides the normal conversation transfer
 copying private execution state.
 
 A specialist's local limit or failure can return a failed tool result to its parent. Root budget
-exhaustion, suspension, cancellation and integrity failures still halt the tree.
+exhaustion, suspension, cancellation and integrity failures still halt the tree. A child's calls
+count toward its parent's cost limit (`limits.costUsd`), and a child stops before its next call
+once that budget is spent.
 
 ## Let the model propose a helper
 

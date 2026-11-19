@@ -16,7 +16,7 @@ It makes no model calls and needs no API key.
 Install the released package and its matching Core peer in a new folder:
 
 ```sh
-bun add @providerkit/agents@0.2.0 @providerkit/core@^0.33.1
+bun add @providerkit/agents@0.3.0 @providerkit/core@^0.33.1
 bun node_modules/@providerkit/agents/examples/basic.ts
 ```
 
@@ -26,7 +26,7 @@ Expected output:
 ["Write a release note", "Check the documentation link"]
 ```
 
-Agents 0.2 uses Core `^0.33.1`. The optional integrations have their own peer dependencies;
+Agents 0.3 uses Core `^0.33.1`. The optional integrations have their own peer dependencies;
 the basic example does not need a server package, MCP, tracing or a code engine.
 
 ## Connect your provider
@@ -63,6 +63,19 @@ if (result.status === "completed") {
 
 A run can also be `suspended` for approval, `cancelled`, `limited` or `failed`. Do not treat those
 as complete answers. A failed result includes an error with a code and message.
+
+## Cap what a run spends
+
+```ts
+const analyst = defineAgent({ ...config, limits: { costUsd: 1.5 } });
+await analyst.run(question, { host: { priceModelCall: ({ usage }) => costUsd(usage, rate) } });
+```
+
+Once the calls this run and its helpers made cost $1.50, no new call starts and the run ends
+`limited` with `limit: "costUsd"`. Your host supplies the prices: Core's `costUsd` turns token
+counts into dollars with your own rates. Calls that were already running can finish above the
+limit. The [cost limit section](https://github.com/providerkit/providerkit/blob/main/agents/README.md#cost-limit)
+covers helpers, workflows and resume.
 
 Change the agent's version when its instructions, tools or result contract change. A saved run
 from another version is refused rather than continued under new rules.
