@@ -353,26 +353,41 @@ describe("finish turn at a limit", () => {
     expect(lastRequest(source).messages.at(-1)).toEqual({ role: "user", content: BUDGET_NOTE });
   });
 
-  it("makes one bounded call past the cost limit, priced and counted like any other", async () => {
-    const source = wire(calls("read_file"), calls("read_file"), text("Best answer so far."));
-    const outcome = await defineAgent({
+  it.each([
+    { price: 0.4, summaries: 0 }, // Two turns already spent the budget. No paid summary starts.
+    { price: 0.2, summaries: 1 }, // The summary itself takes the run past $0.50.
+  ])("saves the last call for the answer at $$price per call", async ({ price, summaries }) => {
+    const longTurn = calls("read_file").map((chunk) =>
+      chunk.usage ? { ...chunk, usage: { ...usage, inputTokens: 9_000 } } : chunk,
+    );
+    const source = wire(calls("read_file"), longTurn, text("Best answer so far."));
+    const summary = wire(text("Earlier facts."));
+    const agent = defineAgent({
       ...base,
       provider: source.provider,
       tools: [read],
       limits: { costUsd: 0.5 },
       finish: {},
-    }).run("go", { host: { priceModelCall: () => 0.4 } });
-    // $0.40 left room for a second call, and $0.80 reached the limit: the third call is the
-    // finish turn, and nothing comes after it.
-    expect(outcome).toMatchObject({
-      status: "completed",
-      output: "Best answer so far.",
-      salvaged: "costUsd",
+      compaction: {
+        identity: "summary-v1",
+        contextWindow: 40_000,
+        keepTokens: 5,
+        summarize: { provider: summary.provider, instructions: "Summarize.", maxTokens: 40 },
+      },
     });
+    const host = { priceModelCall: () => price, authorizeResume };
+    const outcome = await agent.run("go", { host });
+    const ending = { status: "completed", output: "Best answer so far.", salvaged: "costUsd" };
+    expect(outcome).toMatchObject(ending);
+    expect(outcome.snapshot.compactions.map((entry) => entry.status)).toEqual(
+      Array(summaries).fill("completed"),
+    );
+    await expect(agent.resume(outcome.snapshot, { host })).resolves.toMatchObject(ending);
+    expect(summary.requests).toHaveLength(summaries);
     expect(source.requests).toHaveLength(3);
     expect(
       outcome.receipts.flatMap((receipt) => (receipt.kind === "model" ? [receipt.costUsd] : [])),
-    ).toEqual([0.4, 0.4, 0.4]);
+    ).toEqual(Array(3 + summaries).fill(price));
     expect(lastRequest(source).tools).toEqual([]);
   });
 

@@ -103,9 +103,9 @@ import {
   Halt,
   authorizeTree,
   checkPricing,
+  costLimitReached,
   emitEvent,
   fail,
-  knownCostUsd,
   requirePricing,
   treeUsage,
   nodeId,
@@ -2837,6 +2837,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         await save();
         return;
       }
+      // Past the cost cap the finish turn is the only paid call left. Keep the current view
+      // rather than journal a summary that cannot be sent.
+      if (snapshot.definition.finish && costLimitReached(snapshot)) return;
       if (!summarizer) fail("invalid_journal", "The recorded summary provider is missing.");
       // A separate receipt freezes this cut before any paid work. A crash, even before
       // dispatch, fails closed instead of silently purchasing the same summary twice.
@@ -2916,8 +2919,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       // As a private adopter's loop does: answer once the tool calls are used up, rather than
       // wait for the model to ask for one more and be refused.
       if (usedTools() >= limits.toolCalls) return "toolCalls";
-      if (limits.costUsd !== undefined && knownCostUsd(snapshot) >= limits.costUsd)
-        return "costUsd";
+      if (costLimitReached(snapshot)) return "costUsd";
       return undefined;
     }
 
@@ -2948,23 +2950,26 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           "The interrupted model call's tool definitions changed. Restore the same definitions or reconcile the run.",
           previous.id,
         );
-      // A finish policy makes this call the run's finish turn instead of ending it unanswered.
-      const finish = previous ? previous.finish : finishFor(position);
       // Ported from Microsoft Agent Framework (MIT), _tools.py: after the iteration
       // allowance, ask once for a tool-free answer. Checked output needs submit_result, and
       // stopOnlyAtTools a stopping tool, so those modes keep the hard local turn cap instead of
       // buying a call that cannot end them, unless a finish turn makes them call it.
-      const finalTurn = position === limits.turns && finish === undefined;
+      const finalTurn = position === limits.turns && !snapshot.definition.finish;
       if (position > limits.turns || (finalTurn && (output || snapshot.definition.stopOnlyAtTools)))
         throw new Halt({ status: "limited", limit: "turns" });
       // A steer never changes the input of an already admitted call, including safe replay.
       // Check capacity before polling so a spent budget leaves delivery queued in the host.
       scope.tree.reserveModel();
-      scope.tree.reserveCost(scope.path, finish === undefined);
+      scope.tree.reserveCost(
+        scope.path,
+        previous ? previous.finish === undefined : !snapshot.definition.finish,
+      );
       if (!previous) {
         await acceptInputs(snapshot, scope, options, signal);
         await compact();
       }
+      // A summary may just have spent the remaining budget. A replay keeps its recorded reason.
+      const finish = previous ? previous.finish : finishFor(position);
       active();
       // Media is read before the receipt below exists, so a missing loader or file fails the
       // run with no model operation left running and nothing to reconcile.
