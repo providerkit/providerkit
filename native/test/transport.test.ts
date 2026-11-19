@@ -2,102 +2,15 @@ import {
   createChatClient,
   TransportError,
   type ChatClient,
-  type ChatEvent,
   type ChatTransport,
   type Cursor,
   type RequestAnswer,
-  type RunInfo,
-  type RunStatus,
 } from "@providerkit/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createSseTransport,
-  type NativeRequest,
-  type OpenStream,
-  type SendCommand,
-  type StreamHandlers,
-} from "../src/transport.ts";
-
-interface Stream {
-  request: NativeRequest;
-  handlers: StreamHandlers;
-  aborted: boolean;
-}
-
-/** The app's stream reader, driven by hand: every stream it opened, newest last. */
-function reader() {
-  const opened: Stream[] = [];
-  const open = vi.fn<OpenStream>((request, handlers) => {
-    const stream: Stream = { request, handlers, aborted: false };
-    opened.push(stream);
-    return {
-      abort() {
-        stream.aborted = true;
-      },
-    };
-  });
-  function latest(): Stream {
-    const last = opened.at(-1);
-    if (!last) throw new Error("No stream was opened.");
-    return last;
-  }
-  /** One frame per event, on the newest stream. */
-  function push(...events: ChatEvent[]): void {
-    for (const event of events) latest().handlers.onData(JSON.stringify(event));
-  }
-  return { open, opened, latest, push };
-}
-
-const noCommand: SendCommand = async () => {
-  throw new Error("This test sends no command.");
-};
+import { createSseTransport, type SendCommand } from "../src/transport.ts";
+import { at, delta, drain, need, noCommand, reader, run, status, writing } from "./fakes.ts";
 
 const signal = new AbortController().signal;
-
-function need<T>(value: T | undefined, name: string): T {
-  if (value === undefined) throw new Error(`The transport has no ${name}.`);
-  return value;
-}
-
-/** What a stream delivered, and how it ended. */
-async function drain(events: AsyncIterable<ChatEvent>) {
-  const delivered: ChatEvent[] = [];
-  try {
-    for await (const event of events) delivered.push(event);
-  } catch (error) {
-    return { delivered, error };
-  }
-  return { delivered, error: undefined };
-}
-
-type Where = { seq?: number; segment?: string };
-const at = (seq: number, segment = "s1"): Where => ({ seq, segment });
-const run = (status: RunStatus, id = "run-1"): RunInfo => ({ id, status, messageId: "a1" });
-const status = (info: RunInfo, where: Where = {}): ChatEvent => ({
-  v: 1,
-  type: "run",
-  run: info,
-  ...where,
-});
-const writing = (text: string, where: Where = {}): ChatEvent => ({
-  v: 1,
-  type: "message",
-  message: {
-    id: "a1",
-    role: "assistant",
-    state: "live",
-    parts: [{ type: "text", id: "t1", text, settled: false }],
-  },
-  ...where,
-});
-const delta = (value: string, where: Where = {}): ChatEvent => ({
-  v: 1,
-  type: "text",
-  messageId: "a1",
-  partId: "t1",
-  delta: value,
-  ...where,
-});
 
 describe("createSseTransport", () => {
   it("builds each request the way @providerkit/react/sse does", async () => {

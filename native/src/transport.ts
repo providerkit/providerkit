@@ -7,7 +7,8 @@
  * arrive, and a phone app already reads its streams that way, through a reader that holds its
  * session and its token refresh. A second reader here would drift from that one, so the app keeps
  * its reader and its API client, and this file keeps the rules every phone needs the same way:
- * which failure is a refusal, and when a stream ends so the client can pick up from its cursor.
+ * which failure is a refusal, when a stream ends so the client can pick up from its cursor, and
+ * when nothing should go out at all.
  *
  * Because `fetch` waits for the whole response, a command cannot carry the stream. The server
  * answers `send` and `respond` with a short receipt, and the events arrive on `observe`.
@@ -15,15 +16,18 @@
  * No retry loop here: the client already reattaches from its cursor, with backoff, and stops on a
  * refusal. A second loop would retry what the client is already retrying.
  */
-import type {
-  ChatEvent,
-  ChatTransport,
-  Cursor,
-  RequestAnswer,
-  RunInfo,
-  SendInput,
+import {
+  TransportError,
+  type ChatEvent,
+  type ChatTransport,
+  type Cursor,
+  type DisplayError,
+  type RequestAnswer,
+  type RunInfo,
+  type SendInput,
 } from "@providerkit/react";
 import { parseChatEvent } from "@providerkit/react/protocol";
+import type { Device } from "./device.ts";
 
 /** Where a request goes, as a builder returns it: the shapes `@providerkit/react/sse` takes, with
  * headers as a plain object, the form a React Native stream reader takes. An address alone uses
@@ -102,6 +106,16 @@ export interface SseTransportOptions {
    * memory. At this size the stream ends, and while the run goes on the client reconnects from its
    * cursor after its first wait (one second by default). Default 1,000,000, about 1 to 2 MB. */
   maxStreamChars?: number;
+  /** Ends a stream that brings no frame for this many milliseconds, as a lost connection, so the
+   * client reconnects from its cursor: a stream can die without saying so. Every frame counts, a
+   * heartbeat too, so allow a few heartbeats. With a heartbeat every 5 seconds, 30,000 is six
+   * missed. With `device`, only time on screen counts. Off by default. */
+  silenceMs?: number;
+  /** From `watchDevice`. A reconnect waits until the app is on screen and online, so the client
+   * spends no tries on a phone that cannot reach the server. Silence counts only while the app is
+   * on screen, and the window starts again when it comes back. A command is refused while the
+   * phone is offline, before it goes out. */
+  device?: Device;
 }
 
 const EVENT_STREAM = "text/event-stream";
@@ -110,6 +124,22 @@ const EVENT_STREAM = "text/event-stream";
 const RECEIPT = "application/json";
 
 const DEFAULT_MAX_STREAM_CHARS = 1_000_000;
+
+// The client's words for these follow its own: a `code` never changes, so an app can show its own
+// words for it, in its own language.
+const OFFLINE: DisplayError = Object.freeze({
+  code: "offline",
+  message: "You are offline, so nothing was sent. Try again when you are back online.",
+  retryable: true,
+});
+
+function silence(ms: number): DisplayError {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  return Object.freeze({
+    code: "stream_silent",
+    message: `The server sent nothing for ${seconds} ${seconds === 1 ? "second" : "seconds"}, so the connection was closed.`,
+  });
+}
 
 /** The request a builder described, with the defaults of the table filled in. */
 function prepare(spec: SseRequest, fallback: unknown, accept: string): NativeRequest {
@@ -140,6 +170,61 @@ function eventOf(data: string): ChatEvent | undefined {
   }
 }
 
+function reachable(device: Device): boolean {
+  return device.active && !device.offline;
+}
+
+/** Resolves once the app is on screen and online, or once the client stops reading. */
+function untilReachable(device: Device, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    function check(): void {
+      if (!signal.aborted && !reachable(device)) return;
+      off();
+      signal.removeEventListener("abort", check);
+      resolve();
+    }
+    const off = device.subscribe(check);
+    signal.addEventListener("abort", check);
+  });
+}
+
+/**
+ * Calls `onSilence` once no frame came for `ms`, counted from now. In the background the phone may
+ * still hold the socket, so silence there proves nothing: the clock waits, and starts a fresh window
+ * when the app comes back on screen.
+ */
+function silenceClock(
+  ms: number,
+  device: Device | undefined,
+  onSilence: () => void,
+): { heard(): void; stop(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  function arm(): void {
+    if (stopped) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (device && !device.active) arm();
+      else onSilence();
+    }, ms);
+  }
+  let away = device !== undefined && !device.active;
+  const off = device?.subscribe(() => {
+    const back = away && device.active;
+    away = !device.active;
+    if (back) arm();
+  });
+  arm();
+  return {
+    heard: arm,
+    stop() {
+      stopped = true;
+      clearTimeout(timer);
+      off?.();
+    },
+  };
+}
+
 /** A transport that reads streams through the app's `open` and sends commands through its
  * `command`. */
 export function createSseTransport(options: SseTransportOptions): ChatTransport {
@@ -151,10 +236,19 @@ export function createSseTransport(options: SseTransportOptions): ChatTransport 
     open,
     command,
     maxStreamChars = DEFAULT_MAX_STREAM_CHARS,
+    silenceMs,
+    device,
   } = options;
   if (!(maxStreamChars > 0)) throw new RangeError("maxStreamChars must be a number above zero.");
+  // `setTimeout` treats a delay it cannot hold, Infinity included, as zero, which would end every
+  // stream at once.
+  if (silenceMs !== undefined && !(Number.isFinite(silenceMs) && silenceMs > 0))
+    throw new RangeError("silenceMs must be a finite number above zero.");
 
   async function call(spec: SseRequest, fallback: unknown, signal?: AbortSignal): Promise<void> {
+    // Sent offline, a command fails as an unknown outcome, and the client keeps it as unconfirmed
+    // though it never left the phone. Refused here, the client gives it back to the person.
+    if (device?.offline) throw new TransportError("refused", OFFLINE);
     await command(prepare(spec, fallback, RECEIPT), { signal });
   }
 
@@ -162,11 +256,16 @@ export function createSseTransport(options: SseTransportOptions): ChatTransport 
    * and throws what `open` reported when the stream failed. */
   async function* events(build: () => SseRequest, signal: AbortSignal): AsyncGenerator<ChatEvent> {
     if (signal.aborted) return;
+    if (device && !reachable(device)) {
+      await untilReachable(device, signal);
+      if (signal.aborted) return;
+    }
     const request = prepare(build(), undefined, EVENT_STREAM);
     const frames: string[] = [];
-    // Set when the stream said it ended, by closing or failing, and once this side stops reading.
-    // A frame that comes after it is dropped.
-    let ended = false;
+    // `closed`: the reader said the stream ended, by closing or failing, so it needs no abort.
+    // `over`: nothing more is read, for that reason or another, and a frame after it is dropped.
+    let closed = false;
+    let over = false;
     // Boxed, so a reader that fails with `undefined` still counts as a failure, not a clean end.
     let failure: { error: unknown } | undefined;
     let wake: (() => void) | undefined;
@@ -175,29 +274,40 @@ export function createSseTransport(options: SseTransportOptions): ChatTransport 
       wake = undefined;
       resume?.();
     }
-    function end(error?: { error: unknown }): void {
-      if (ended) return;
-      ended = true;
+    function finish(error?: { error: unknown }): void {
+      if (over) return;
+      over = true;
       failure = error;
       nudge();
     }
+    // The clock starts at the request, so a stream that never sends anything counts too.
+    const clock =
+      silenceMs === undefined
+        ? undefined
+        : silenceClock(silenceMs, device, () =>
+            finish({ error: new TransportError("unknown", silence(silenceMs)) }),
+          );
     let stream: { abort(): void } | undefined;
     try {
       stream = open(request, {
         onData(data) {
-          if (ended) return;
+          if (over) return;
           frames.push(data);
+          clock?.heard();
           nudge();
         },
         onError(error) {
-          end({ error });
+          closed = true;
+          finish({ error });
         },
         onClose() {
-          end();
+          closed = true;
+          finish();
         },
       });
     } catch (error) {
-      end({ error });
+      closed = true;
+      finish({ error });
     }
     // React Native's AbortSignal is a polyfill without `reason` or `throwIfAborted`: `aborted` and
     // the abort event are all there is.
@@ -207,7 +317,7 @@ export function createSseTransport(options: SseTransportOptions): ChatTransport 
       while (!signal.aborted) {
         const data = frames.shift();
         if (data === undefined) {
-          if (ended) {
+          if (over) {
             if (failure) throw failure.error;
             return;
           }
@@ -223,10 +333,10 @@ export function createSseTransport(options: SseTransportOptions): ChatTransport 
         if (read >= maxStreamChars) return;
       }
     } finally {
+      over = true;
+      clock?.stop();
       signal.removeEventListener("abort", nudge);
-      const live = !ended;
-      ended = true;
-      if (live) stream?.abort();
+      if (!closed) stream?.abort();
     }
   }
 

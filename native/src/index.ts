@@ -10,3 +10,5 @@ export type {
 } from "./transport.ts";
 export { createDraftStorage, createPendingSendStorage } from "./storage.ts";
 export type { KeyValueStorage, StorageOptions } from "./storage.ts";
+export { watchDevice } from "./device.ts";
+export type { AppStateLike, Device, DeviceOptions, NetInfoLike } from "./device.ts";
