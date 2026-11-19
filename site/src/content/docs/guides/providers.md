@@ -325,26 +325,35 @@ createPresetProvider("openrouter", {
 ### OpenRouter output ceiling
 
 When you set no `maxTokens`, the `openrouter` preset sends `max_tokens: 32000`. Without a ceiling,
-OpenRouter sets aside the cost of its own per-request cap from your balance before the call
-starts, so a low balance answers 402 to a call that would have cost cents
-([OpenRouter's limits](https://openrouter.ai/docs/api-reference/limits)). 32,000 is about twice
-the longest real answers one adopter measured over 60 days (the p99 was 16,389 tokens on GLM 5.3
-Flash).
+OpenRouter prices each paid call before it starts as if the answer could run to a cap of its own,
+and a low balance answers 402. On 2026-09-10 it priced the model's whole window: a call to
+`z-ai/glm-5.3-flash` that needed a few thousand tokens was refused for 131,072.
+[OpenRouter's limits page](https://openrouter.ai/docs/api-reference/limits) now says it counts "a
+fixed per-request cap" when you send no `max_tokens`, and gives no value, so the ceiling lowers
+that estimate only while the cap is above 32,000. It always stops a runaway: one adopter saw a single answer run to 131,072 tokens.
+32,000 is about twice that adopter's p99 over 60 days (16,389 tokens on GLM 5.3 Flash). Its
+longest real answer was 33,429 tokens, which would stop at the ceiling, so give long work a higher
+`maxTokens`.
 
-Set your own `maxTokens` on a model that can't write that much. OpenRouter sends a call only to
-hosts that can write a reply that long
+Set a lower `maxTokens` for a long prompt. The ceiling has to fit in the context window beside the
+prompt, so on a model with a 131,072-token window, a prompt over about 99,000 tokens fails as
+`context`. A `models` chain or a `fallbacks` list doesn't move on to its next model for that kind.
+The preset's own models have windows of 500,000 tokens or more.
+
+Set one too on a model that can't write that much. OpenRouter sends a call only to hosts that can
+write a reply that long
 ([provider routing](https://openrouter.ai/docs/features/provider-routing)), so a model whose
 every host stops sooner can't take the call. On 2026-11-19 that was 57 of the 479 models
-OpenRouter listed, `openai/gpt-4o-mini` (16,384) among them. Every model the preset lists writes
-65,536 or more.
+OpenRouter listed, `openai/gpt-4o-mini` (16,384) among them. Every host of every model the preset
+lists writes 65,536 or more.
 
 ```ts
 createPresetProvider("openrouter", { apiKey, model: "openai/gpt-4o-mini", maxTokens: 16_384 });
 ```
 
-The ceiling also has to fit in the context window beside the prompt, and thinking shares it with
-the answer. With `effort` set, OpenRouter sizes some models' thinking from it: 80% of it at
-`high` on Claude ([reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)).
+Thinking shares the ceiling with the answer. With `effort` set, OpenRouter sizes some models'
+thinking from it: 80% of it at `high` on Claude
+([reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)).
 A `createOpenAIProvider` pointed at OpenRouter sends no ceiling unless you set one.
 
 ### Curated presets and `createPresetProvider`
