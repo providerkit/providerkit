@@ -883,6 +883,123 @@ these host tools the final answer comes from the tool's result, not its input. `
 still validates its input. Stopping results are recorded in the tool receipt, so resume never
 repeats a finished effect or asks the model to rephrase it.
 
+### End only on a stopping tool
+
+Some agents must never end by talking. A browser agent that writes a question as text has not
+paused, so the person never gets to answer it. Set `stopOnlyAtTools` and the run ends only
+through a stopping tool:
+
+```ts
+const browser = defineAgent({
+  ...config,
+  tools: [snapshot, click, done],
+  stopAtTools: ["done"],
+  stopOnlyAtTools: { nudge: "Respond with a tool call, not plain text. Call done when finished." },
+});
+```
+
+A turn that writes text and calls no tool no longer ends the run. The model reads your `nudge` as
+the next user message and keeps working. The nudge stays in the conversation the run returns,
+right after the turn it answered. A turn with no text and no tool call still fails with
+`empty_output`.
+
+A stopping tool may share its turn with other calls. The calls before it run as usual. Once it
+succeeds, each call after it gets a cancelled result that reads "The run ended earlier this turn
+(`done`). This call did not run." In this mode a stopping tool runs on its own, never in a
+parallel batch, so the calls after it have not started when it succeeds. `submit_result` and
+handoffs still run alone.
+
+When a text agent's stopping tool returns an empty summary, the turn's text is the answer. That
+covers a model that writes its answer as text and calls `done` with nothing in it. When both are
+empty, the model gets the empty result back and tries again. A turn cut by the output limit is
+different: it still ends the run with `limited: outputTokens`, before any of its calls run.
+
+The stopping tool can be one named in `stopAtTools`, a tool with `isTerminal: true`, or
+`submit_result` with an output contract. Without one, `defineAgent` throws. So does a run that
+turns off every stopping tool, through `enabledTools` or `toolChoice: "none"`: it could never
+end. The turn limit is a hard cap in this mode: there is no tool-free final call, because it
+could not end the run.
+
+### Refuse a call before it runs
+
+Your host can look at each call before it runs and answer it with a message instead. The model
+reads the message as that call's result and works around it:
+
+```ts
+await browser.run("Archive the newsletter.", {
+  host: {
+    screenCall(call, { earlier }) {
+      const planned = earlier.some((done) => done.name === "plan" && done.result?.ok);
+      if (call.call.name === "click" && !planned)
+        return { refuse: "Blocked: no plan has been posted yet. Call the plan tool first." };
+    },
+  },
+});
+```
+
+Return nothing to let the call run. `{ refuse: text }` answers this call only: the tool does not
+run, no approval opens, and the result has kind `refused`. `{ cancel: text }` answers this call
+and every call after it in the same model turn, each with kind `cancelled`. Use it when something
+earlier in the turn changed what the rest was written for, such as a failed click:
+
+```ts
+screenCall(call, { turn, earlier }) {
+  const failed = earlier.find(
+    (done) => done.turn === turn && done.name === "click" && done.result?.kind === "failed",
+  );
+  if (failed) return { cancel: "An earlier click in this turn failed. This call did not run." };
+},
+```
+
+`screenCall` runs right before each call would start. That includes calls a code program makes
+and calls in a specialist's run. Its second argument holds `turn`, the model turn that asked for
+the call (from 0), and `earlier`: the calls this run handled before this one, turn by turn, each
+turn in the order its calls ran. A `runFirst` call comes before the calls it ran ahead of. Each
+entry has its `name`, `arguments`, `turn`, and a `result` with `ok` and `kind` once it has one.
+Calls let through to run together appear in `earlier` before they start, so they share an
+allowance:
+
+```ts
+screenCall(call, { earlier }) {
+  const searches = earlier.filter(
+    (done) =>
+      done.name === "search" &&
+      done.result?.kind !== "refused" &&
+      done.result?.kind !== "cancelled",
+  );
+  if (call.call.name === "search" && searches.length >= 2)
+    return { refuse: "search is limited to 2 for this request. Work from what you have." };
+},
+```
+
+A call that needs approval is screened before its approval opens, so nobody is asked about a
+call you would refuse. When one turn opens several approvals together, the calls ahead of a call
+have not run yet. A refusal or a cancel at that moment only holds back that call's approval, and
+the call is screened again when its turn comes. An approved call is screened again before it
+runs, after the calls ahead of it ran. That is how a failed click still cancels the approved click
+behind it.
+
+Decide from `earlier`, not from state your process keeps: after a restart, calls that had not
+started are screened again. A `cancel` is saved with its call's result, so the rest of its turn
+stays cancelled after a restart. A refused or cancelled call sends a `tool_result` event but no
+`tool_start`, and it spends none of `limits.toolCalls`, inside a code program too. The program's
+own `limits.calls` still counts it, so a program cannot loop on a refusal. `screenCall` may
+return a promise, for example to read your own database. Anything other than nothing,
+`{ refuse }` or `{ cancel }` with text fails the run with `invalid_screen`.
+
+### Run a plan before the work
+
+Models often send a plan in the same turn as the first step it describes. Name the plan tool in
+`runFirst` and its calls run before the rest of their turn, so the step comes after the plan:
+
+```ts
+const browser = defineAgent({ ...config, tools: [plan, click], runFirst: ["plan"] });
+```
+
+Results keep the model's order. The rest of the turn waits for the plan's result, even when both
+tools may run in parallel, so `screenCall` sees the plan in `earlier` before it decides about the
+step. `submit_result` and handoffs always run alone, so `runFirst` cannot name them.
+
 ## Code mode
 
 Let the model write a short program that calls several tools before returning an answer:
@@ -963,9 +1080,10 @@ four programs at once by default (`maxActive`). QuickJS runs on the host thread;
 can block that thread up to its CPU allowance. These guest limits do not bound allocations inside
 host tools.
 
-The program call and its inner attempts spend the run's `toolCalls` budget. Inner calls leave one
-slot for a final direct tool such as `submit_result`. Raise the run budget when needed, not just
-`codeMode.limits.calls`.
+The program call and its inner attempts spend the run's `toolCalls` budget. An inner call your
+host refuses or cancels spends none of it, though it still counts toward `codeMode.limits.calls`.
+Inner calls leave one slot for a final direct tool such as `submit_result`. Raise the run budget
+when needed, not just `codeMode.limits.calls`.
 
 A successful program returns JSON text containing `result` (when defined), `logs`, `toolCalls`
 and `toolCallsLeft`. A failure also includes `error` and up to 20 call summaries. Tool failures
@@ -1740,10 +1858,12 @@ raw histories, notes or events to a browser. Project only approved identities, l
 
 Per-run defaults are 12 model turns, 32 tool calls, 5 minutes, at most 3 approved concurrent
 ordinary tools and 5 MB (`inlineBytes: 5_000_000`) of inline images and files. Change these
-through `limits` when configuring an agent. Once a text agent uses all its model turns, it gets
+through `limits` when configuring an agent. A call your host refuses or cancels before it starts
+does not count as a tool call. Once a text agent uses all its model turns, it gets
 one final call with no tools to answer from what it found. That call still counts against the
 tree's model-call and time budgets. Any tool calls it returns are refused. Checked-output agents
-keep the hard turn cap because a tool-free call cannot submit their result.
+keep the hard turn cap because a tool-free call cannot submit their result. So do agents with
+`stopOnlyAtTools`, whose run a tool-free call cannot end.
 
 The root's `treeLimits` apply across all descendants:
 
@@ -1867,6 +1987,9 @@ The host supplies these callbacks:
 - Optional `needsApproval(call)` requires approval even for an unmarked tool. It cannot waive
   a tool's own `needsApproval` flag. Optional `answerNow(request)` returns a standing policy
   decision, or `undefined` to ask the person. This is trusted policy, not model output.
+- Optional `screenCall(call, { turn, earlier })` refuses a call before any approval opens for
+  it, so nobody is asked about work the host would refuse. See
+  [Refuse a call before it runs](#refuse-a-call-before-it-runs).
 
 A `Decision` is one of:
 
@@ -2269,6 +2392,9 @@ server code:
 - `resolveRequest` returns each decision only for that claim. `beforeTool` checks current access
   and resource version again immediately before the action.
 
+The optional `screenCall`, `needsApproval`, `answerNow` and `canRunConcurrently` work as they do
+on a direct run's host.
+
 Return database handles or other worker-only tool values through `policy.context`. They are not
 serialized. Do not put secrets or handles in a saved snapshot.
 
@@ -2337,6 +2463,10 @@ match the actual request. Select its agent/tool or workflow/step; question keys,
 and child paths can narrow the match. They do not turn model-written text into permission.
 `stub` replaces both tool execution paths and
 backend validation; it does not prove that the replaced backend checks work.
+
+Give the eval's `host` the same `screenCall`, `needsApproval` and `canRunConcurrently` your app
+uses, so a check runs your agent with its own rules. An eval host cannot answer requests: that is
+what `drivers` are for.
 
 Simulated users need an explicit provider and `allowSimulation: true`. Model judges, including
 `grounded`, need an explicit provider/rubric and `allowJudge: true`. These make extra provider

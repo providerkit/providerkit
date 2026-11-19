@@ -36,6 +36,53 @@ another tool, forces `route` again on the next turn, up to the turn limit. After
 chooses its tools. `"required"` asks for any tool and lets the model answer once a turn has
 called one.
 
+## Refuse or cancel a call
+
+```ts
+await agent.run(task, {
+  host: {
+    screenCall(call, { earlier }) {
+      const planned = earlier.some((done) => done.name === "plan" && done.result?.ok);
+      if (call.call.name === "click" && !planned)
+        return { refuse: "Blocked: no plan has been posted yet. Call the plan tool first." };
+    },
+  },
+});
+```
+
+`screenCall` runs right before each call would start. `{ refuse }` answers that call with your
+text: the model reads it as the call's result, the tool does not run and nobody is asked.
+`{ cancel }` answers that call and every call after it in its turn, for example after a failed
+click. A cancel is saved with the call's result, so it still holds after a restart. `earlier`
+lists the run's earlier calls with their results, in the order they ran, so a policy can count
+them. Calls batched together share an allowance. A refused or cancelled call does not count as a
+tool call, inside a code program too.
+
+A call that needs approval is screened before its approval opens, and again before it runs,
+once the calls ahead of it ran. So a failed click still cancels an approved click behind it.
+
+Models often send a plan with its first step in one turn. `runFirst: ["plan"]` runs plan calls
+before the rest of their turn, and the rest waits for their results, so `screenCall` sees the
+plan before it decides about the step. Results keep the model's order.
+
+## End only on a stopping tool
+
+```ts
+const browser = defineAgent({
+  ...config,
+  stopAtTools: ["done"],
+  stopOnlyAtTools: { nudge: "Respond with a tool call, not plain text. Call done when finished." },
+});
+```
+
+A turn that writes text and calls no tool no longer ends the run: the model reads the nudge and
+keeps working. A question written as text pauses nothing, so this keeps the model on its tools.
+`done` may share its turn with other calls. Once it succeeds, the calls after it get a result
+that says they did not run. When `done` comes back with an empty summary, the turn's text is the
+answer. A turn cut by the output limit still ends the run with `limited: outputTokens`. The turn
+limit is a hard cap, with no tool-free final call. A run that turns off every stopping tool, with
+`enabledTools` or `toolChoice: "none"`, throws before it starts.
+
 ## Check output
 
 `output.schema` tells the model what result to submit. `output.validate` checks the actual value

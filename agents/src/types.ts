@@ -55,8 +55,12 @@ export interface TreeLimits {
  * an admitted call can still finish or incur a charge after the signal aborts. */
 export interface RunLimits {
   /** Tool-capable model turns. Text agents may make one final tool-free call, still counted
-   * against the tree's model-call budget. Checked-output agents keep the hard cap. */
+   * against the tree's model-call budget. Checked-output agents and `stopOnlyAtTools` agents
+   * keep the hard cap: a tool-free call cannot end them. */
   turns: number;
+  /** A call `host.screenCall` refused, or one cancelled with the rest of its turn, does not
+   * count: it never started. That holds inside a code program too, where the program's own
+   * call limit still counts it. */
   toolCalls: number;
   /** Wall time, including time spent waiting for approval. */
   elapsedMs: number;
@@ -345,6 +349,10 @@ export interface RunDefinition {
   providerSessionId?: string;
   enabledTools: string[];
   stopAtTools: string[];
+  /** `AgentConfig.runFirst`, when the agent names any. */
+  runFirst?: string[];
+  /** `AgentConfig.stopOnlyAtTools`, when set. */
+  stopOnlyAtTools?: { nudge: string };
   /** Present for registered code tools, including ones disabled for this run. */
   codeTools?: Record<string, RecordedCodeTool>;
   /** Null refuses interrupted effects. Recorded policy and identities must match on recovery. */
@@ -384,6 +392,19 @@ export interface AgentConfig<H = unknown> {
    * whole batch settles. Text agents return its summary; checked agents validate its raw
    * output. A failed or invalid result goes back to the model. */
   stopAtTools?: readonly string[];
+  /** Calls of these tools run before the rest of their turn, in the model's order, and the
+   * rest waits for their results even when both sides may run in parallel. Models often send a
+   * plan with the first step it describes; run in wire order, that step would reach the host's
+   * check before the plan it depends on. Results keep the model's order. */
+  runFirst?: readonly string[];
+  /** End the run only through a stopping tool: `stopAtTools`, an `isTerminal` tool or
+   * `submit_result`. A turn that answers in text, with no tool call, no longer ends the run:
+   * the model reads `nudge` as the next user message and keeps working. A stopping tool may
+   * share its turn with other calls; once it succeeds, each call after it gets a result that
+   * says it did not run. `submit_result` and handoffs still run alone. When a text agent's
+   * stopping tool returns an empty summary, the turn's text is the answer. The turn limit is a
+   * hard cap, with no tool-free final call. A run that disables every stopping tool throws. */
+  stopOnlyAtTools?: { nudge: string };
   limits?: Partial<RunLimits>;
   /** Applies when this agent is the root. Descendants share the root's limits. */
   treeLimits?: Partial<TreeLimits>;
@@ -544,6 +565,19 @@ export interface AgentHost {
   authorizeResume?: (snapshot: TreeNode) => void | Promise<void>;
   /** May require approval for an unmarked tool, never waive a tool's needsApproval. */
   needsApproval?: (call: ToolRequest) => boolean | Promise<boolean>;
+  /** Runs for each call the model or a code program makes, right before it would start.
+   * Return nothing to let it run. `{ refuse }` answers this call with that text instead, as
+   * the model's result for it: the tool does not run and no request opens. `{ cancel }`
+   * answers this call and every call after it in its turn with that text, and holds after a
+   * restart. A call that needs approval is also screened before its approval opens, so nobody
+   * is asked about a call the host refuses, and again before it runs, since the calls ahead
+   * of it ran in the meantime. Specialists' calls come here too, each with its own run's
+   * `earlier`. Decide from `earlier` rather than process state: after a restart, calls that
+   * had not started are screened again. */
+  screenCall?: (
+    call: ToolRequest,
+    run: ScreenContext,
+  ) => CallVerdict | undefined | Promise<CallVerdict | undefined>;
   /** Required to open a request. Supplies trusted actor, resource version and expiry.
    * Only an approval's presentation/edit policy may be overridden. */
   prepareRequest?: (
@@ -612,6 +646,35 @@ export interface MeasuredModelCall {
   usage: TokenUsage;
   provider: string;
   model: string;
+}
+
+/** What `host.screenCall` decides for one call, as text the model reads as its result. */
+export type CallVerdict = { refuse: string } | { cancel: string };
+
+/** What `host.screenCall` knows besides the call itself. */
+export interface ScreenContext {
+  /** The model turn that asked for this call, counting from 0. */
+  turn: number;
+  /** The calls this run handled before this one, so a policy can count them. Turn by turn,
+   * each turn in run order: `runFirst` calls come before the calls they ran ahead of. */
+  earlier: readonly EarlierCall[];
+}
+
+/** One of this run's calls that came before the one being screened: settled, refused,
+ * running, waiting for a person, or let through earlier in the same batch. */
+export interface EarlierCall {
+  operationId: string;
+  /** The program call that made it, for a call from code mode. */
+  parentOperationId?: string;
+  /** The model turn that asked for it, counting from 0. */
+  turn: number;
+  name: string;
+  /** What the model or the program wrote, before any approved edit. */
+  arguments: Record<string, unknown>;
+  /** Absent until the call has a result. `refused` and `cancelled` calls never ran. */
+  result?:
+    | { ok: true; kind?: never }
+    | { ok: false; kind: Extract<ToolResult, { ok: false }>["kind"] };
 }
 
 export interface RunOptions {
@@ -713,9 +776,11 @@ export type ToolResult =
   | {
       ok: false;
       content: string;
+      /** `refused`: `host.screenCall` refused the call before it started. */
       kind:
         | ToolFailure
         | "denied"
+        | "refused"
         | "cancelled"
         | "unknown_tool"
         | "disabled_tool"

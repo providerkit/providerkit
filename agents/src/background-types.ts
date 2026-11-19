@@ -50,6 +50,7 @@ export interface BackgroundPolicy
       AgentHost,
       | "canRunConcurrently"
       | "needsApproval"
+      | "screenCall"
       | "answerNow"
       | "inbox"
       | "reconcileToolRetry"

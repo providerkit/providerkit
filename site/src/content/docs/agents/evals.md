@@ -52,6 +52,10 @@ needed. Answers remain subject to the host's request policy.
 code-tool identity and output-schema metadata, so a mocked helper keeps the same capability and
 model guidance. A mock does not prove the original backend's validation works.
 
+Give the eval's `host` the same `screenCall`, `needsApproval` and `canRunConcurrently` your app
+uses, so a check runs your agent with its own rules. An eval host cannot answer requests: that is
+what `drivers` are for.
+
 The [offline eval example](https://github.com/providerkit/providerkit/blob/340d8af/agents/examples/evals.ts)
 shows multiple turns, mocks and scripted approvals.
 
