@@ -116,9 +116,11 @@ const provider = createPresetProvider("opencode-go", {
 
 A per-call `model` on a different wire than the provider's own is refused with an
 `invalid` error, before any request. Muse Contributor supports text, images, strict JSON
-Schema and parallel tools, but only automatic tool choice; `toolChoice: "none"` is encoded
-by sending no tools. Contributor requests may be used to improve Meta products and require
-the workspace to allow those endpoints.
+Schema and parallel tools, but only automatic tool choice. `toolChoice: "none"` is sent as no
+tools, and a named tool as that tool alone, so it is the only call the model can make. It can
+still answer in text instead. `"required"` is still sent, and Muse refuses it. Contributor
+requests may be used to improve Meta products and require the workspace to allow those
+endpoints.
 
 Pass `watchdog: { idleMs: 60_000 }` to time each model separately, so a model that opens a
 connection and then goes silent rotates too. Do not wrap the returned pool with

@@ -1,6 +1,8 @@
 import * as hostedProviders from "../src/hosted.ts";
 // Golden transcripts: one turn and five failures on four vendors' wires, and
-// one turn that ran a hosted search, asked the same questions on all four.
+// one turn that ran a hosted search, asked the same questions on all four. One
+// case belongs to a single wire: the refusal OpenCode Go recorded for a forced
+// tool on Muse Contributor, on Responses.
 //
 // Every other suite here asks ONE adapter whether it reads its own vendor
 // correctly. This one asks all four the same question: given the same turn, do
@@ -18,7 +20,7 @@ import * as hostedProviders from "../src/hosted.ts";
 // be SSE at all.
 import { describe, expect, it } from "vitest";
 import { repairHistory } from "../src/context.ts";
-import { ProviderError, classify } from "../src/errors.ts";
+import { ProviderError, classify, isBackupEligible, isRetryable } from "../src/errors.ts";
 import { HOSTED_TOOL_TYPES, type HostedTool, type HostedToolType } from "../src/hosted.ts";
 import { createAnthropicProvider } from "../src/providers/anthropic.ts";
 import { createGeminiProvider } from "../src/providers/gemini.ts";
@@ -1479,5 +1481,61 @@ describe.each(VENDORS)("$name, hosted tools", (vendor) => {
     const [citation] = message.citations ?? [];
     expect(citation?.anchor).toBe(hosted.cited.anchor);
     expect(message.content.slice(citation?.start, citation?.end)).toBe(hosted.cited.text);
+  });
+});
+
+// ── a forced tool on Muse Contributor ─────────────────────────────────────
+//
+// OpenCode Go's answer to any tool_choice but `auto` on Muse Contributor,
+// recorded on 2026-10-16 when a research run forced its last step.
+const MUSE_REFUSED = '{"error":{"message":"only `\\"auto\\"` is supported for `tool_choice`"}}';
+
+describe("responses, a forced tool on Muse Contributor", () => {
+  const responses = VENDORS.find((vendor) => vendor.name === "responses")!;
+
+  /** Go's Responses route as it answered that day: the recorded 400 for a
+   *  request that names a tool_choice, the turn for any other. */
+  function go() {
+    const sent: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as Record<string, unknown>;
+      sent.push(body);
+      return "tool_choice" in body
+        ? new Response(MUSE_REFUSED, { status: 400 })
+        : new Response(socketBody(RESPONSES_TURN), { status: 200 });
+    }) as unknown as typeof fetch;
+    const muse = createResponsesProvider({
+      apiKey: "k",
+      model: "muse-spark-1.3-contributor",
+      baseUrl: "https://opencode.ai/zen/go",
+      fetchImpl,
+    });
+    return { sent, muse };
+  }
+
+  it("gets the named tool called by offering it alone", async () => {
+    const { sent, muse } = go();
+    const turn = await assemble(
+      muse.createStream([{ role: "user", content: "hi" }], TOOLS, {
+        toolChoice: { name: "search" },
+      }),
+    );
+    expect(turn).toEqual(theTurn(responses));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty("tool_choice");
+    expect(toolsOf(sent[0]!).map((tool) => tool.name)).toEqual(["search"]);
+  });
+
+  it("would otherwise meet a refusal that ends the turn, which no retry or backup fixes", async () => {
+    // `required` still goes out as tool_choice, so it meets the recorded 400:
+    // the dead end a named choice reached before it was sent as the tool list.
+    const { sent, muse } = go();
+    const err = await thrownBy(
+      muse.createStream([{ role: "user", content: "hi" }], TOOLS, { toolChoice: "required" }),
+    );
+    expect(failure(err)).toEqual({ kind: "invalid", status: 400, retryAfterMs: undefined });
+    expect(isRetryable(err)).toBe(false);
+    expect(isBackupEligible(classify(err))).toBe(false);
+    expect(sent).toHaveLength(1);
   });
 });

@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- On OpenCode Go's Muse Contributor, a named `toolChoice` is now sent as that tool alone, with no `tool_choice` field. Muse answers any choice but `auto` with a 400 that classifies as `invalid`, so no retry or fallback chain got past it, and a run that forced its last step lost the turn. Offered alone, the tool is the only call the model can make, though it can still answer in text. A named tool that is not in the call's tools now fails with `invalid` before any request. `"required"` is still sent, and Muse still refuses it.
+
 ## [0.33.1] - 2026-11-17
 
 ### Fixed

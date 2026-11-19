@@ -480,7 +480,26 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
       const effort = opts.effort ?? config.effort;
       const model = opts.model ?? config.model;
       const museContributor = isMuseSparkContributor(model);
-      const requestTools = museContributor && opts.toolChoice === "none" ? [] : tools;
+      const named = typeof opts.toolChoice === "object" ? opts.toolChoice.name : undefined;
+      // On Muse Contributor, `none` and a named choice travel as the tool list,
+      // never as tool_choice. See the tool_choice block below for why.
+      let requestTools = tools;
+      if (museContributor && opts.toolChoice === "none") {
+        requestTools = [];
+      } else if (museContributor && named !== undefined) {
+        requestTools = tools.filter((tool) => tool.name === named);
+        // Sent on, this call would carry no tools at all, and the forced call
+        // would quietly become "call nothing". The choice itself is never sent
+        // here, so nothing downstream could refuse it.
+        if (requestTools.length === 0) {
+          throw new ProviderError(
+            id,
+            "invalid",
+            `${id}: toolChoice names "${named}", which is not one of this call's tools. ` +
+              "Pass that tool too, or name one you pass.",
+          );
+        }
+      }
       // Repaired before the images are gated: an orphaned result becomes a user
       // note that keeps its images, and those must meet the limits too.
       const sent = repairHistory(messages).messages;
@@ -552,11 +571,25 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
       if (opts.sessionId) request.prompt_cache_key = opts.sessionId;
       const serviceTier = opts.serviceTier ?? config.serviceTier;
       if (serviceTier) request.service_tier = serviceTier;
-      // Muse Contributor accepts only `auto`. `none` has an exact wire-level
-      // equivalent: send no tools. Required/named choices stay explicit and let
-      // the endpoint refuse a promise it cannot keep.
-      const omitMuseTools = museContributor && opts.toolChoice === "none";
-      if (opts.toolChoice && opts.toolChoice !== "auto" && !omitMuseTools) {
+      // Muse Contributor accepts no tool_choice but `auto`. Go answers any other
+      // with a 400, `only "auto" is supported for tool_choice` (recorded
+      // 2026-10-16), so a choice that can be said in the tool list is said there:
+      // `none` as no tools, a named tool as the only tool offered. `required`
+      // can't be: every tool under `auto` is the request silence sends
+      // (invariant 12), so it stays explicit and the endpoint refuses it.
+      //
+      // A named choice stayed explicit too, until that 400 cost an adopter its
+      // runs. It classifies as `invalid`, which nothing retries and a fallback
+      // chain does not move past by default, so a run that forced its last step
+      // on a chain led by Muse lost everything it had read: on 2026-10-16, three
+      // of its four research runs ended without the brief that step saves.
+      // Offered alone, the named tool is the only call the model can make.
+      // ponytail: Muse can still answer in text instead, as can the Claude
+      // models that refuse a forced choice (anthropic.ts), so a caller that must
+      // have the call says so in the prompt too. The upgrade is Go accepting the
+      // choice.
+      const choiceInTools = museContributor && (opts.toolChoice === "none" || named !== undefined);
+      if (opts.toolChoice && opts.toolChoice !== "auto" && !choiceInTools) {
         request.tool_choice =
           typeof opts.toolChoice === "string"
             ? opts.toolChoice
