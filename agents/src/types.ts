@@ -403,7 +403,7 @@ export interface AgentConfig<H = unknown> {
    * share its turn with other calls; once it succeeds, each call after it gets a result that
    * says it did not run. `submit_result` and handoffs still run alone. When a text agent's
    * stopping tool returns an empty summary, the turn's text is the answer. The turn limit is a
-   * hard cap, with no tool-free final call. */
+   * hard cap, with no tool-free final call. A run that disables every stopping tool throws. */
   stopOnlyAtTools?: { nudge: string };
   limits?: Partial<RunLimits>;
   /** Applies when this agent is the root. Descendants share the root's limits. */

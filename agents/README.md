@@ -909,14 +909,16 @@ succeeds, each call after it gets a cancelled result that reads "The run ended e
 parallel batch, so the calls after it have not started when it succeeds. `submit_result` and
 handoffs still run alone.
 
-An output limit cuts a tool call's arguments first, so the answer is often in the turn's text
-while the stopping tool's summary is empty. When a text agent's stopping tool returns an empty
-summary, the turn's text is the answer. When both are empty, the model gets the empty result
-back and tries again.
+When a text agent's stopping tool returns an empty summary, the turn's text is the answer. That
+covers a model that writes its answer as text and calls `done` with nothing in it. When both are
+empty, the model gets the empty result back and tries again. A turn cut by the output limit is
+different: it still ends the run with `limited: outputTokens`, before any of its calls run.
 
 The stopping tool can be one named in `stopAtTools`, a tool with `isTerminal: true`, or
-`submit_result` with an output contract. Without one, `defineAgent` throws. The turn limit is a
-hard cap in this mode: there is no tool-free final call, because it could not end the run.
+`submit_result` with an output contract. Without one, `defineAgent` throws. So does a run that
+turns off every stopping tool, through `enabledTools` or `toolChoice: "none"`: it could never
+end. The turn limit is a hard cap in this mode: there is no tool-free final call, because it
+could not end the run.
 
 ### Refuse a call before it runs
 

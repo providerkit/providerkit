@@ -79,7 +79,9 @@ A turn that writes text and calls no tool no longer ends the run: the model read
 keeps working. A question written as text pauses nothing, so this keeps the model on its tools.
 `done` may share its turn with other calls. Once it succeeds, the calls after it get a result
 that says they did not run. When `done` comes back with an empty summary, the turn's text is the
-answer. The turn limit is a hard cap, with no tool-free final call.
+answer. A turn cut by the output limit still ends the run with `limited: outputTokens`. The turn
+limit is a hard cap, with no tool-free final call. A run that turns off every stopping tool, with
+`enabledTools` or `toolChoice: "none"`, throws before it starts.
 
 ## Check output
 

@@ -330,4 +330,17 @@ describe("stopOnlyAtTools", () => {
       "stopOnlyAtTools needs { nudge }",
     );
   });
+
+  it("refuses a run that turns off every stopping tool, before any paid call", async () => {
+    const source = wire(text("Here is the answer."));
+    const agent = defineAgent({ ...config, provider: source.provider });
+    // It could never end: every text turn gets the nudge, and done is never offered.
+    await expect(agent.run("Look", { enabledTools: ["snapshot", "click"] })).rejects.toThrow(
+      "this run disables every one",
+    );
+    await expect(agent.run("Look", { modelSettings: { toolChoice: "none" } })).rejects.toThrow(
+      "this run disables every one",
+    );
+    expect(source.requests).toHaveLength(0);
+  });
 });

@@ -602,6 +602,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       throw new TypeError(
         "toolChoice none disables submit_result, which a checked-output run needs to finish.",
       );
+    // The same rule for stopOnlyAtTools, whose text turns only get the nudge: without a stopping
+    // tool the run cannot end, and it pays for every turn before the turn limit stops it.
+    if (
+      stopOnlyAtTools &&
+      !output &&
+      (choice === "none" || !stopAtTools.some((name) => enabled.includes(name)))
+    )
+      throw new TypeError(
+        'stopOnlyAtTools ends a run only through a stopping tool, and this run disables every one. Enable one, or drop toolChoice "none".',
+      );
     if (
       (choice === "required" && enabled.length === 0) ||
       (typeof choice === "object" && !enabled.includes(choice.name))
@@ -1697,9 +1707,10 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         if (outcome.ok && snapshot.definition.stopAtTools.includes(tool.name)) {
           try {
             let candidate = output ? copyData(outcome.output) : outcome.summary;
-            // Ported from TabRunner's `done`: its summary is the first thing an output cap cuts,
-            // and the answer the model wrote is the turn's text, so a blank summary falls back
-            // to that text before the run ever closes on nothing.
+            // Ported from TabRunner's `done`: the answer can be the turn's text, with the summary
+            // left blank, so a blank summary falls back to that text before the run ever closes
+            // on nothing. TabRunner's main case, a turn the output limit cut, never gets here:
+            // it ends `limited: outputTokens` before its calls run.
             if (!output && snapshot.definition.stopOnlyAtTools && !outcome.summary.trim())
               candidate = slot.model?.turn.message.content ?? "";
             validateResult(candidate);
