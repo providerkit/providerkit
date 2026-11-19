@@ -33,6 +33,7 @@ export type ToolOutcome<O> =
        *  a reader who cannot see our stack trace. */
       error: string;
       durationMs: number;
+      /** What was thrown, for your logs. A `zodTool` check keeps zod's error as its `cause`. */
       cause?: unknown;
     };
 
