@@ -313,6 +313,29 @@ describe("createSseTransport with the app's state", () => {
     detach();
   });
 
+  it("stops following a run that waits on the person once its silent stream ends", async () => {
+    // The limit the silenceMs doc names: only a running run reconnects, so a host that holds a
+    // waiting run's stream open needs heartbeats.
+    const host = reader();
+    const client = createChatClient({
+      transport: createSseTransport({
+        observe: events,
+        open: host.open,
+        command: noCommand,
+        silenceMs: 30_000,
+      }),
+    });
+    const detach = client.attach();
+    await flush();
+    host.push(status(run("waiting"), at(1)));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(host.latest().aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(host.opened).toHaveLength(1);
+    expect(client.getState()).toMatchObject({ status: "waiting", connection: "idle" });
+    detach();
+  });
+
   it("refuses a silence limit that is not a finite number above zero", () => {
     for (const silenceMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY])
       expect(() =>

@@ -103,13 +103,18 @@ export interface SseTransportOptions {
   command: SendCommand;
   /** How much frame data, in characters, one stream reads before it ends. XMLHttpRequest keeps the
    * whole response in memory until the request ends, so a long stream keeps growing the app's
-   * memory. At this size the stream ends, and while the run goes on the client reconnects from its
-   * cursor after its first wait (one second by default). Default 1,000,000, about 1 to 2 MB. */
+   * memory. At this size the stream ends, and while the run is `running` the client reconnects
+   * from its cursor after its first wait (one second by default). Default 1,000,000, about 1 to
+   * 2 MB. */
   maxStreamChars?: number;
-  /** Ends a stream that brings no frame for this many milliseconds, as a lost connection, so the
-   * client reconnects from its cursor: a stream can die without saying so. Every frame counts, a
-   * heartbeat too, so allow a few heartbeats. With a heartbeat every 5 seconds, 30,000 is six
-   * missed. With `device`, only time on screen counts. Off by default. */
+  /** Ends a stream that brings no frame for this many milliseconds, as a lost connection: a stream
+   * can die without saying so. While the run is `running`, or a message waits for its run to
+   * start, the client then reconnects from its cursor. While the run is `waiting` on the person,
+   * the client stops following it, as it does when the host closes the stream, until the person
+   * acts or the screen opens again. An answer given on another device shows only then. So use it
+   * with a host that sends heartbeats, waiting runs included. Every frame counts, a heartbeat too,
+   * so allow a few: with a heartbeat every 5 seconds, 30,000 is six missed. With `device`, only
+   * time on screen counts. Off by default. */
   silenceMs?: number;
   /** From `watchDevice`. A reconnect waits until the app is on screen and online, so the client
    * spends no tries on a phone that cannot reach the server. Silence counts only while the app is
