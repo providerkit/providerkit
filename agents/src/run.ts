@@ -51,8 +51,9 @@ import {
   fresh,
   readToolRetryPolicy,
   retryBudget,
+  screenable,
+  skipped,
   toolAttempts,
-  unstarted,
 } from "./tool-retry.ts";
 import {
   GuardChecks,
@@ -148,6 +149,7 @@ import type {
   AgentConfig,
   AgentDefinition,
   AgentEvent,
+  AgentHost,
   CompactionExecution,
   EarlierCall,
   EnabledTools,
@@ -1139,8 +1141,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
                 (total, tool) =>
                   total +
                   toolAttempts(tool) +
+                  // A program's call the host refused or cancelled spends nothing here, as a
+                  // direct one does. The program's own call limit still counts it.
                   (tool.calls ?? []).reduce(
-                    (innerTotal, call) => innerTotal + 1 + call.retries.length,
+                    (innerTotal, call) =>
+                      innerTotal + (skipped(call) ? 0 : 1 + call.retries.length),
                     0,
                   ),
                 0,
@@ -1154,9 +1159,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     // adopter's batch runner (per-request allowances, the failure latch): a host refusal is that
     // call's result, which the model reads and works around, never a request or an error. Calls
     // the screen let through in this attempt count as earlier ones before they start, so calls
-    // batched together share an allowance. A `cancel` verdict holds for the rest of its turn.
+    // batched together share an allowance.
     const screened = new Set<string>();
-    let cancelled: { model: CompletedModel; content: string } | undefined;
+    // A `cancel` verdict by call id, from the moment the host gives it: a program's next call can
+    // be screened before the verdict's result is saved. The saved result is what lasts.
+    const verdicts = new Map<string, string>();
     // One screen at a time: a program's parallel calls must not both take the last allowance.
     let screening: Promise<unknown> = Promise.resolve();
 
@@ -1178,7 +1185,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       };
       for (const [turn, model] of snapshot.models.entries()) {
         if (model.status !== "completed") continue;
-        for (const [index, execution] of model.tools.entries()) {
+        // Run order, so a `runFirst` call is listed before the calls it ran ahead of.
+        const order = callOrder(model.turn.message.toolCalls ?? [], snapshot.definition.runFirst);
+        for (const index of order) {
+          const execution = model.tools[index];
+          if (!execution) continue;
           const { call, arguments: args } = requestFor(snapshot, model, index);
           add(execution, { turn, name: call.name, arguments: args });
           for (const inner of execution.calls ?? [])
@@ -1193,58 +1204,81 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       return immutableCopy(calls);
     }
 
-    /** `host.screenCall` for a call nothing has happened to yet: the result that answers it
+    /** What `host.screenCall` answers for this call, checked: the result that answers it
      * instead of running it, or undefined when it may run. */
+    async function askScreen(
+      check: NonNullable<AgentHost["screenCall"]>,
+      model: CompletedModel,
+      request: ToolRequest,
+      callSignal = signal,
+    ): Promise<Refusal | undefined> {
+      const answer: unknown = await untilAbort(
+        Promise.resolve(
+          check(
+            immutableCopy(request),
+            Object.freeze({
+              turn: snapshot.models.indexOf(model),
+              earlier: earlierCalls(request.operationId),
+            }),
+          ),
+        ),
+        callSignal,
+      );
+      active();
+      callSignal.throwIfAborted();
+      if (answer === undefined) return undefined;
+      // Exactly one of refuse or cancel, holding the text the model reads.
+      const entries = isRecord(answer) ? Object.entries(answer) : [];
+      const [key, content] = entries.length === 1 ? (entries[0] ?? []) : [];
+      if ((key !== "refuse" && key !== "cancel") || typeof content !== "string" || !content.trim())
+        fail(
+          "invalid_screen",
+          "host.screenCall must return nothing, { refuse: text } or { cancel: text }.",
+          request.operationId,
+        );
+      return { ok: false, kind: key === "refuse" ? "refused" : "cancelled", content };
+    }
+
+    /** `host.screenCall` for a call that has not started, right before it would. `ended` reads a
+     * cancel verdict that already holds for the call. It runs in turn with the other screens,
+     * so a program's parallel calls see a verdict one of them just got. */
     async function screen(
       model: CompletedModel,
       execution: ToolExecution | ProgramCall,
       request: ToolRequest,
       callSignal = signal,
+      ended?: () => string | undefined,
     ): Promise<Refusal | undefined> {
       const check = host?.screenCall;
-      if (!check || !fresh(execution) || screened.has(execution.id)) return undefined;
-      const verdict = screening.then(async () => {
-        const answer: unknown = await untilAbort(
-          Promise.resolve(
-            check(
-              immutableCopy(request),
-              Object.freeze({
-                turn: snapshot.models.indexOf(model),
-                earlier: earlierCalls(request.operationId),
-              }),
-            ),
-          ),
-          callSignal,
-        );
-        active();
-        callSignal.throwIfAborted();
-        if (answer === undefined) {
-          screened.add(execution.id);
-          return undefined;
-        }
-        // Exactly one of refuse or cancel, holding the text the model reads.
-        const entries = isRecord(answer) ? Object.entries(answer) : [];
-        const [key, content] = entries.length === 1 ? (entries[0] ?? []) : [];
-        if (
-          (key !== "refuse" && key !== "cancel") ||
-          typeof content !== "string" ||
-          !content.trim()
-        )
-          fail(
-            "invalid_screen",
-            "host.screenCall must return nothing, { refuse: text } or { cancel: text }.",
-            request.operationId,
-          );
-        if (key === "cancel") cancelled = { model, content };
-        const result: Refusal = {
-          ok: false,
-          kind: key === "refuse" ? "refused" : "cancelled",
-          content,
-        };
+      if (!check || !screenable(execution) || screened.has(execution.id)) return undefined;
+      const verdict = screening.then(async (): Promise<Refusal | undefined> => {
+        const inherited = ended?.();
+        if (inherited !== undefined) return { ok: false, kind: "cancelled", content: inherited };
+        const result = await askScreen(check, model, request, callSignal);
+        if (!result) screened.add(execution.id);
+        else if (result.kind === "cancelled") verdicts.set(execution.id, result.content);
         return result;
       });
       screening = verdict.catch(() => {});
       return verdict;
+    }
+
+    /** The text of the `cancel` verdict, or the batch cancel, that answered this call: it ends
+     * the rest of its turn. A person's cancel answers only its own call. */
+    function verdictOf(execution: ToolExecution | ProgramCall | undefined): string | undefined {
+      if (!execution) return undefined;
+      const given = verdicts.get(execution.id);
+      if (given !== undefined) return given;
+      if (execution.status !== "completed" || execution.result.ok) return undefined;
+      return execution.result.kind === "cancelled" && skipped(execution)
+        ? execution.result.content
+        : undefined;
+    }
+
+    /** A cancel verdict among a program's calls. It ends the rest of the turn, the program's own
+     * later calls included. */
+    function programVerdict(calls: readonly ProgramCall[] = []): string | undefined {
+      return calls.map(verdictOf).find((text) => text !== undefined);
     }
 
     /** A terminal tool runs alone, so the rest of its turn has settled when it ends the run.
@@ -1256,16 +1290,25 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
     }
 
-    /** Under stopOnlyAtTools, the text for calls a successful stopping tool ran ahead of: read
-     * from the journal, so a restarted run cancels the same calls. Ported from TabRunner's
-     * CANCELLED_RUN_ENDED: the run returns once the turn drains, and nobody is left to watch a
-     * call batched behind it. `before` is the positions ahead of the current one. */
-    function stoppedBy(model: CompletedModel, before: readonly number[]): string | undefined {
-      if (!snapshot.definition.stopOnlyAtTools) return undefined;
+    /** What answers a call the rest of its turn no longer runs for: a `cancel` verdict ahead of
+     * it, from the host or inside a program, or under stopOnlyAtTools a stopping tool that
+     * succeeded ahead of it. TabRunner's CANCELLED_RUN_ENDED is the second: the run returns once
+     * the turn drains, and nobody is left to watch a call batched behind it. Both are read from
+     * the journal, so a restarted run cancels the same calls. `before` is the positions ahead of
+     * the call in run order. */
+    function turnEnded(model: CompletedModel, before: readonly number[]): string | undefined {
       for (const index of before) {
         const tool = model.tools[index];
+        const verdict = verdictOf(tool) ?? programVerdict(tool?.calls);
+        if (verdict !== undefined) return verdict;
         const name = model.turn.message.toolCalls?.[index]?.name;
-        if (tool?.status === "completed" && tool.result.ok && tool.result.final && name)
+        if (
+          snapshot.definition.stopOnlyAtTools &&
+          tool?.status === "completed" &&
+          tool.result.ok &&
+          tool.result.final &&
+          name
+        )
           return `The run ended earlier this turn (\`${name}\`). This call did not run.`;
       }
       return undefined;
@@ -1376,7 +1419,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       request: ToolRequest,
       result: ToolResult,
     ): Promise<void> {
-      if (!result.ok && (result.kind === "cancelled" || result.kind === "denied")) {
+      // A refused call can have an approval open too: the host screened it out once the calls
+      // ahead of it ran.
+      if (
+        !result.ok &&
+        (result.kind === "cancelled" || result.kind === "denied" || result.kind === "refused")
+      ) {
         for (const record of slot.get().asks ?? [])
           if (!record.decision && !record.closed) record.closed = "stopped";
         // A cancelled coordination call cannot leave suspended children under a completed
@@ -1398,7 +1446,13 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             record.decision?.type === "approve" &&
             record.decision.arguments !== undefined,
         );
-      if (edited && !codeTools.has(request.call.name))
+      // A call the host screened out never used the replaced arguments, and a cancel's text
+      // also answers the rest of its turn, so it stays the host's own words.
+      const screenedOut =
+        !result.ok &&
+        (result.kind === "refused" || result.kind === "cancelled") &&
+        screenable(slot.get());
+      if (edited && !screenedOut && !codeTools.has(request.call.name))
         result = {
           ...result,
           content: `${result.content}\nThe reviewer replaced the tool arguments before this call.`,
@@ -1906,12 +1960,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
               do {
                 invocationActive(inner);
                 let effective = inner.request();
-                // A program's calls are screened like the model's, and a `cancel` verdict
-                // reaches the calls it makes after it.
-                const skip: Refusal | undefined =
-                  cancelled?.model === model && fresh(call)
-                    ? { ok: false, kind: "cancelled", content: cancelled.content }
-                    : await screen(model, call, effective, programSignal);
+                // A program's calls are screened like the model's. A `cancel` verdict for one
+                // of them answers every call screened after it, a parallel call queued beside
+                // it included, without asking the host again.
+                const skip = await screen(model, call, effective, programSignal, () =>
+                  programVerdict(calls),
+                );
                 if (skip) {
                   await finishExecution(inner, effective, skip);
                   break;
@@ -2143,14 +2197,18 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     }
 
     /** Opens the approvals the rest of the turn needs, so a person answers them together.
-     * `remaining` is model positions in run order. */
+     * `order` is the turn's model positions in run order, and `from` the first one left. */
     async function openApprovals(
       model: CompletedModel,
-      remaining: readonly number[],
+      order: readonly number[],
+      from: number,
     ): Promise<void> {
-      for (const [at, index] of remaining.entries()) {
-        const execution = model.tools[index];
-        if (!execution || execution.status === "completed") continue;
+      for (let at = from; at < order.length; at++) {
+        const index = order[at];
+        const execution = index === undefined ? undefined : model.tools[index];
+        if (index === undefined || !execution || execution.status === "completed") continue;
+        // The rest of the turn is cancelled when the loop reaches it. Nobody is asked about it.
+        if (turnEnded(model, order.slice(0, at)) !== undefined) return;
         if (usedTools() >= limits.toolCalls && !execution.asks?.length) break;
         const request = requestFor(snapshot, model, index);
         const tool = tools.find((tool) => tool.name === request.call.name);
@@ -2170,35 +2228,20 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         )
           continue;
         if (!(await needsApproval(request, options, signal))) continue;
-        // Nobody is asked about a call the host refuses.
-        const refusal = await screen(model, execution, request);
-        if (refusal) {
-          await finishTool(model, index, request, refusal);
-          if (refusal.kind === "cancelled") {
-            await cancelRest(model, remaining.slice(at + 1), refusal.content);
-            return;
-          }
-          continue;
+        // Nobody is asked about a call the host refuses. The calls ahead of this one have not
+        // run yet, so the verdict is only a preview and nothing is saved: a refused call gets
+        // no approval now and is screened again when its turn comes, with their results in
+        // `earlier`. A plan gate lets it through then, and a failure ahead of it cancels it.
+        const check = host?.screenCall;
+        if (check && fresh(execution)) {
+          const preview = await askScreen(check, model, request);
+          if (preview?.kind === "cancelled") return;
+          if (preview) continue;
         }
         await journalFor(snapshot, model, index, options, scope, signal).ensure({
           type: "approval",
         });
       }
-    }
-
-    /** One cancelled result for each of these calls that has not started. */
-    async function cancelRest(
-      model: CompletedModel,
-      positions: readonly number[],
-      content: string,
-    ): Promise<void> {
-      for (const index of positions)
-        if (unstarted(model.tools[index]))
-          await finishTool(model, index, requestFor(snapshot, model, index), {
-            ok: false,
-            kind: "cancelled",
-            content,
-          });
     }
 
     async function runClient(
@@ -2305,14 +2348,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           continue;
         }
         active();
-        // Calls left after a `cancel` verdict, or after a stopping tool under stopOnlyAtTools,
-        // never start, so no budget can hold them up.
-        const ended =
-          cancelled?.model === model
-            ? cancelled.content
-            : stoppedBy(model, order.slice(0, position));
-        if (ended !== undefined && unstarted(model.tools[index])) {
-          await cancelRest(model, [index], ended);
+        // A call after a `cancel` verdict, or after a stopping tool under stopOnlyAtTools, never
+        // starts, so no budget can hold it up. Only the calls after it in run order: one ahead of
+        // the verdict that asked a question here keeps its answer.
+        const ended = turnEnded(model, order.slice(0, position));
+        if (ended !== undefined && screenable(model.tools[index])) {
+          await finishTool(model, index, requestFor(snapshot, model, index), {
+            ok: false,
+            kind: "cancelled",
+            content: ended,
+          });
           position++;
           continue;
         }
@@ -2322,7 +2367,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           snapshot.definition.enabledTools.includes(request.call.name) &&
           snapshot.definition.modelSettings.toolChoice !== "none";
         // Before the budget: a refused call spends none of it. Unavailable tools are refused
-        // below without asking the host.
+        // below without asking the host. A call whose approval waited for a person is screened
+        // again here, since the calls ahead of it ran in the meantime.
         const current = model.tools[index];
         const refusal = available && current && (await screen(model, current, request));
         if (refusal) {
@@ -2443,7 +2489,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           continue;
         }
         if (records.some((record) => !record.closed && !record.decision)) {
-          await openApprovals(model, order.slice(position + 1));
+          await openApprovals(model, order, position + 1);
           snapshot.state = { status: "suspended" };
           return;
         }
@@ -2463,7 +2509,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         if (client) {
           await withToolError(request, () => runClient(model, index, request, client));
           if (model.tools[index]?.status !== "completed") {
-            await openApprovals(model, order.slice(position + 1));
+            await openApprovals(model, order, position + 1);
             snapshot.state = { status: "suspended" };
             return;
           }
@@ -2495,6 +2541,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         // where it stands; the batch goes on past it.
         let scanned = position + 1;
         if (concurrent) {
+          // `runFirst` calls run before the rest of their turn, even when they are safe to run
+          // in parallel: a batch one of them leads holds only them, so the rest is screened with
+          // their results in `earlier`.
+          const first = snapshot.definition.runFirst ?? [];
+          const leadsTurn = first.includes(request.call.name);
           for (
             let next = position + 1;
             next < order.length && batch.length < Math.min(limits.parallelTools, capacity);
@@ -2505,13 +2556,14 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             const execution = model.tools[nextIndex];
             if (execution?.status !== "pending") break;
             const nextRequest = requestFor(snapshot, model, nextIndex);
+            if (leadsTurn && !first.includes(nextRequest.call.name)) break;
             const nextTool = registry.get(nextRequest.call.name);
             if (!parallel(nextRequest, nextTool)) break;
             const nextRefusal = await screen(model, execution, nextRequest);
             scanned = next + 1;
             if (nextRefusal) {
               await finishTool(model, nextIndex, nextRequest, nextRefusal);
-              if (cancelled?.model === model) break;
+              if (nextRefusal.kind === "cancelled") break;
               continue;
             }
             batch.push({
@@ -2569,7 +2621,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
               model.tools[job.index]?.asks?.some((record) => !record.closed && !record.decision),
             )
           ) {
-            await openApprovals(model, order.slice(scanned));
+            await openApprovals(model, order, scanned);
             snapshot.state = { status: "suspended" };
             return;
           }

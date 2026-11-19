@@ -1899,7 +1899,9 @@ function checkProgramJournal(
     const count = (counts.get(call.programAttemptId) ?? 0) + 1 + call.retries.length;
     if (count > code.limits.calls) throw new TypeError("The program exceeds its call limit.");
     counts.set(call.programAttemptId, count);
-    total += 1 + call.retries.length;
+    // A call the host refused or cancelled before it started spends none of the run's budget.
+    // It still counts above, so a program cannot loop on a refusal.
+    total += skipped(call) ? 0 : 1 + call.retries.length;
   }
   if (
     tool.interrupted.length &&

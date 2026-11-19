@@ -59,7 +59,8 @@ export interface RunLimits {
    * keep the hard cap: a tool-free call cannot end them. */
   turns: number;
   /** A call `host.screenCall` refused, or one cancelled with the rest of its turn, does not
-   * count: it never started. */
+   * count: it never started. That holds inside a code program too, where the program's own
+   * call limit still counts it. */
   toolCalls: number;
   /** Wall time, including time spent waiting for approval. */
   elapsedMs: number;
@@ -391,9 +392,10 @@ export interface AgentConfig<H = unknown> {
    * whole batch settles. Text agents return its summary; checked agents validate its raw
    * output. A failed or invalid result goes back to the model. */
   stopAtTools?: readonly string[];
-  /** Calls of these tools run before the rest of their turn, in the model's order. Models
-   * often send a plan with the first step it describes; run in wire order, that step would
-   * reach the host's check before the plan it depends on. Results keep the model's order. */
+  /** Calls of these tools run before the rest of their turn, in the model's order, and the
+   * rest waits for their results even when both sides may run in parallel. Models often send a
+   * plan with the first step it describes; run in wire order, that step would reach the host's
+   * check before the plan it depends on. Results keep the model's order. */
   runFirst?: readonly string[];
   /** End the run only through a stopping tool: `stopAtTools`, an `isTerminal` tool or
    * `submit_result`. A turn that answers in text, with no tool call, no longer ends the run:
@@ -563,12 +565,15 @@ export interface AgentHost {
   authorizeResume?: (snapshot: TreeNode) => void | Promise<void>;
   /** May require approval for an unmarked tool, never waive a tool's needsApproval. */
   needsApproval?: (call: ToolRequest) => boolean | Promise<boolean>;
-  /** Runs once for each call the model or a code program makes, before its approval or
-   * dispatch. Return nothing to let it run. `{ refuse }` answers this call with that text
-   * instead, as the model's result for it: the tool does not run and no request opens.
-   * `{ cancel }` answers this call and every call left in its turn with that text.
-   * Specialists' calls come here too, each with its own run's `earlier`. Decide from `earlier`
-   * rather than process state: after a restart, calls that had not started are screened again. */
+  /** Runs for each call the model or a code program makes, right before it would start.
+   * Return nothing to let it run. `{ refuse }` answers this call with that text instead, as
+   * the model's result for it: the tool does not run and no request opens. `{ cancel }`
+   * answers this call and every call after it in its turn with that text, and holds after a
+   * restart. A call that needs approval is also screened before its approval opens, so nobody
+   * is asked about a call the host refuses, and again before it runs, since the calls ahead
+   * of it ran in the meantime. Specialists' calls come here too, each with its own run's
+   * `earlier`. Decide from `earlier` rather than process state: after a restart, calls that
+   * had not started are screened again. */
   screenCall?: (
     call: ToolRequest,
     run: ScreenContext,
@@ -650,7 +655,8 @@ export type CallVerdict = { refuse: string } | { cancel: string };
 export interface ScreenContext {
   /** The model turn that asked for this call, counting from 0. */
   turn: number;
-  /** The calls this run handled before this one, oldest first, so a policy can count them. */
+  /** The calls this run handled before this one, so a policy can count them. Turn by turn,
+   * each turn in run order: `runFirst` calls come before the calls they ran ahead of. */
   earlier: readonly EarlierCall[];
 }
 

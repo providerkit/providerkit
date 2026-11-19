@@ -13,6 +13,7 @@ import {
   type AgentHost,
   type CallVerdict,
   type EarlierCall,
+  type RunOutcome,
   type RunSnapshot,
   type ScreenContext,
   type ToolRequest,
@@ -402,29 +403,118 @@ describe("host.screenCall", () => {
     const prepareRequest = vi.fn(approval.prepareRequest);
     const events: AgentEvent[] = [];
     const gated = (name: string) => tool(name, { needsApproval: true });
-    const source = wire(turn("erase", "publish", "delete"));
-    const waiting = await defineAgent({
+    const agent = defineAgent({
       ...base,
-      provider: source.provider,
+      provider: wire(turn("erase", "publish", "delete"), text()).provider,
       tools: [gated("erase"), gated("publish"), gated("delete")],
-    }).run("Clean up", {
-      host: {
-        ...approval,
-        prepareRequest,
-        screenCall: (call) =>
-          call.call.name === "publish" ? undefined : { refuse: "Only publishing is allowed." },
-      },
+    });
+    const host = {
+      ...approval,
+      prepareRequest,
+      screenCall: (call: ToolRequest): CallVerdict | undefined =>
+        call.call.name === "publish" ? undefined : { refuse: "Only publishing is allowed." },
+    };
+    const waiting = await agent.run("Clean up", {
+      host,
       onEvent: (event) => void events.push(event),
     });
-    // erase is refused before its own approval, delete before the approvals the turn opens
-    // together. Only publish asks.
+    // erase is refused before its own approval. delete gets none of the approvals the turn
+    // opens together: publish had not run yet, so delete waits to be screened at its turn.
     expect(waiting.status).toBe("suspended");
-    expect(prepareRequest).toHaveBeenCalledOnce();
     expect(
       waiting.status === "suspended" && waiting.requests.map((r) => r.call?.call.name),
     ).toEqual(["publish"]);
+    expect(kinds(waiting.snapshot, 0)).toEqual(["refused", "pending", "pending"]);
+    const done = await agent.resume(JSON.parse(JSON.stringify(waiting.snapshot)), {
+      host,
+      answers: evidenceFor(waiting.snapshot, "yes"),
+      onEvent: (event) => void events.push(event),
+    });
+    expect(done.status).toBe("completed");
+    expect(kinds(done.snapshot, 0)).toEqual(["refused", "ok", "refused"]);
+    // Only publish ever asked.
+    expect(prepareRequest).toHaveBeenCalledOnce();
     expect(events.flatMap((event) => (event.type === "request" ? [event] : []))).toHaveLength(1);
-    expect(kinds(waiting.snapshot, 0)).toEqual(["refused", "pending", "refused"]);
+  });
+
+  it("lets a step through once the plan ahead of it ran, when both need approval", async () => {
+    const click = vi.fn(async () => "clicked");
+    const agent = defineAgent({
+      ...base,
+      provider: wire(turn("plan", ["click", { ref: "e1" }]), text()).provider,
+      tools: [
+        tool("plan", { needsApproval: true }),
+        tool("click", { run: click, needsApproval: true }),
+      ],
+    });
+    const host = { ...approval, screenCall: tabRunner() };
+    const asked = (outcome: RunOutcome) =>
+      outcome.status === "suspended"
+        ? outcome.requests.map((request) => request.call?.call.name)
+        : [];
+    const first = await agent.run("Plan, then click", { host });
+    // Before the plan ran, the gate would refuse the click, so only the plan asks.
+    expect(asked(first)).toEqual(["plan"]);
+    const second = await agent.resume(JSON.parse(JSON.stringify(first.snapshot)), {
+      host,
+      answers: evidenceFor(first.snapshot, "yes"),
+    });
+    // The plan ran, so the click gets past the gate and asks for its own approval.
+    expect(asked(second)).toEqual(["click"]);
+    const done = await agent.resume(JSON.parse(JSON.stringify(second.snapshot)), {
+      host,
+      answers: evidenceFor(second.snapshot, "yes"),
+    });
+    expect(done.status).toBe("completed");
+    expect(click).toHaveBeenCalledOnce();
+    expect(kinds(done.snapshot, 0)).toEqual(["ok", "ok"]);
+  });
+
+  it("screens an approved call again before it runs, so a failure ahead of it cancels it", async () => {
+    const clicked: unknown[] = [];
+    const source = wire(
+      turn("plan"),
+      turn(["click", { ref: "e1" }], ["click", { ref: "e2" }], "snapshot"),
+      turn("snapshot"),
+      text(),
+    );
+    const agent = defineAgent({
+      ...base,
+      provider: source.provider,
+      tools: [
+        tool("plan"),
+        tool("click", {
+          needsApproval: true,
+          run: async (input) => {
+            clicked.push(input);
+            if (JSON.stringify(input).includes("e1")) throw new Error("click boom");
+            return "clicked";
+          },
+        }),
+        tool("snapshot"),
+      ],
+      // plan, the failed click and the last snapshot. The cancelled click spends none.
+      limits: { toolCalls: 3 },
+    });
+    const host = { ...approval, screenCall: tabRunner() };
+    const waiting = await agent.run("Click both", { host });
+    // Both approvals open together, before either click ran, and the person approves both.
+    const requests = waiting.status === "suspended" ? waiting.requests : [];
+    expect(requests.map((request) => request.call?.arguments)).toEqual([
+      { ref: "e1" },
+      { ref: "e2" },
+    ]);
+    const done = await agent.resume(JSON.parse(JSON.stringify(waiting.snapshot)), {
+      host,
+      answers: Object.fromEntries(requests.map((request) => [request.id, "yes"])),
+    });
+    expect(done.status).toBe("completed");
+    expect(clicked).toEqual([{ ref: "e1" }]);
+    expect(lastResults(source.requests[2]).slice(1)).toEqual([
+      { name: "click", content: cancelledAfterFailure("click") },
+      { name: "snapshot", content: cancelledAfterFailure("click") },
+    ]);
+    expect(kinds(done.snapshot, 1)).toEqual(["failed", "cancelled", "cancelled"]);
   });
 
   it("screens the calls a program makes, and counts them for the next one", async () => {
@@ -528,6 +618,244 @@ describe("host.screenCall", () => {
     expect(resumed.status).toBe("completed");
     expect(search).toHaveBeenCalledOnce();
     expect(kinds(resumed.snapshot, 0)).toEqual(["ok", "refused"]);
+  });
+
+  it("keeps the answer of a question batched ahead of a call the host cancelled", async () => {
+    const click = vi.fn(async () => "clicked");
+    const source = wire(
+      turn(["ask_user", { message: "Which one?" }], ["click", { ref: "e1" }]),
+      text(),
+    );
+    const outcome = await defineAgent({
+      ...base,
+      provider: source.provider,
+      tools: [
+        questionTool({ name: "ask_user" }),
+        tool("click", { run: click, isConcurrencySafe: true }),
+      ],
+    }).run("Click the right one", {
+      host: {
+        ...approval,
+        canRunConcurrently: () => true,
+        // Nothing runs beside a question still open in its turn.
+        screenCall: (call, { turn, earlier }) =>
+          call.call.name !== "ask_user" &&
+          earlier.some((entry) => entry.turn === turn && entry.name === "ask_user" && !entry.result)
+            ? { cancel: CANCELLED_RUN_PAUSED }
+            : undefined,
+        answerNow: () => ({ type: "answer", answer: { text: "The first one" } }),
+      },
+    });
+    expect(outcome.status).toBe("completed");
+    expect(click).not.toHaveBeenCalled();
+    // The verdict reaches the calls after the one that got it, not the question ahead of it.
+    const results = lastResults(source.requests[1]);
+    expect(results[0]?.content).toContain("The first one");
+    expect(results[1]).toEqual({ name: "click", content: CANCELLED_RUN_PAUSED });
+    expect(kinds(outcome.snapshot, 0)).toEqual(["ok", "cancelled"]);
+  });
+
+  it("opens no approval behind a cancel verdict while a question waits", async () => {
+    const publish = vi.fn(async () => "Published");
+    const agent = defineAgent({
+      ...base,
+      provider: wire(
+        turn(["ask_user", { message: "Which one?" }], ["click", { ref: "e1" }], "publish"),
+        text(),
+      ).provider,
+      tools: [
+        questionTool({ name: "ask_user" }),
+        tool("click", { isConcurrencySafe: true }),
+        tool("publish", { run: publish, needsApproval: true }),
+      ],
+    });
+    const host = {
+      ...approval,
+      canRunConcurrently: () => true,
+      resolveRequest: () => ({ type: "answer", answer: { text: "The first one" } }) as const,
+      // A verdict from a live page census, which nothing in `earlier` could rebuild.
+      screenCall: (call: ToolRequest): CallVerdict | undefined =>
+        call.call.name === "click" ? { cancel: CANCELLED_PAGE_CHANGED } : undefined,
+    };
+    const waiting = await agent.run("Publish the right one", { host });
+    // Only the question asks. publish is cancelled with the rest of the turn.
+    expect(
+      waiting.status === "suspended" && waiting.requests.map((request) => request.ask.type),
+    ).toEqual(["question"]);
+    const done = await agent.resume(JSON.parse(JSON.stringify(waiting.snapshot)), {
+      host,
+      answers: evidenceFor(waiting.snapshot, "first"),
+    });
+    expect(done.status).toBe("completed");
+    expect(publish).not.toHaveBeenCalled();
+    expect(kinds(done.snapshot, 0)).toEqual(["ok", "cancelled", "cancelled"]);
+  });
+
+  it("keeps a cancel verdict after a restart, so the rest of its turn stays cancelled", async () => {
+    let saved: RunSnapshot | undefined;
+    const config = { ...base, tools: [tool("plan"), tool("click"), tool("snapshot")] };
+    await defineAgent({
+      ...config,
+      provider: wire(
+        turn("plan"),
+        turn(["click", { ref: "e1" }], ["click", { ref: "e2" }], "snapshot"),
+      ).provider,
+    }).run("Click both", {
+      host: {
+        screenCall: tabRunner(async () => true),
+        checkpoint(node) {
+          const model = node.kind === "agent" ? node.models[1] : undefined;
+          if (
+            node.kind === "agent" &&
+            model?.status === "completed" &&
+            model.tools[1]?.status === "completed" &&
+            model.tools[2]?.status === "pending"
+          ) {
+            saved = structuredClone(node);
+            throw new Error("Worker stopped");
+          }
+        },
+      },
+    });
+    if (!saved) throw new Error("Expected a checkpoint after the cancel verdict");
+    // A new worker's census has seen nothing move. The saved verdict decides, not the host.
+    const look = vi.fn(async () => "Page");
+    const screen = vi.fn(tabRunner(async () => false));
+    const source = wire(text());
+    const resumed = await defineAgent({
+      ...config,
+      tools: [tool("plan"), tool("click"), tool("snapshot", { run: look })],
+      provider: source.provider,
+    }).resume(JSON.parse(JSON.stringify(saved)), {
+      host: { screenCall: screen, authorizeResume: () => {} },
+    });
+    expect(resumed.status).toBe("completed");
+    expect(look).not.toHaveBeenCalled();
+    expect(screen).not.toHaveBeenCalled();
+    expect(lastResults(source.requests[0])).toEqual([
+      { name: "click", content: "click ok" },
+      { name: "click", content: CANCELLED_PAGE_CHANGED },
+      { name: "snapshot", content: CANCELLED_PAGE_CHANGED },
+    ]);
+  });
+
+  it("runs the plan first even when both may run in parallel", async () => {
+    const order: string[] = [];
+    const step = (name: string) =>
+      tool(name, {
+        isReadOnly: true,
+        isConcurrencySafe: true,
+        run: async () => {
+          order.push(name);
+          return `${name} ok`;
+        },
+      });
+    const source = wire(turn("search", "plan"), text());
+    const outcome = await defineAgent({
+      ...base,
+      provider: source.provider,
+      tools: [step("search"), step("plan")],
+      runFirst: ["plan"],
+    }).run("Plan, then search", {
+      host: {
+        canRunConcurrently: () => true,
+        screenCall: (call, { earlier }) =>
+          call.call.name === "search" &&
+          !earlier.some((entry) => entry.name === "plan" && entry.result?.ok)
+            ? { refuse: PLAN_GATE }
+            : undefined,
+      },
+    });
+    expect(outcome.status).toBe("completed");
+    // The search waited for the plan's result instead of joining its batch.
+    expect(order).toEqual(["plan", "search"]);
+    expect(kinds(outcome.snapshot, 0)).toEqual(["ok", "ok"]);
+  });
+
+  it("lists earlier calls in the order they ran", async () => {
+    const seen: string[] = [];
+    const source = wire(turn("click", "plan", "type"), text());
+    await defineAgent({
+      ...base,
+      provider: source.provider,
+      tools: [tool("click", { run: fails("click boom") }), tool("plan"), tool("type")],
+      runFirst: ["plan"],
+    }).run("Plan, click, type", {
+      host: {
+        screenCall: (call, { earlier }) => {
+          if (call.call.name === "type")
+            seen.push(...earlier.map((entry) => `${entry.name}: ${entry.result?.kind ?? "ok"}`));
+          return undefined;
+        },
+      },
+    });
+    // The plan ran first, so the click that failed after it is the last call before `type`.
+    expect(seen).toEqual(["plan: ok", "click: failed"]);
+  });
+
+  it("cancels a program's parallel call queued beside the one the host cancelled", async () => {
+    const run = vi.fn(async () => "ran");
+    const safe = (name: string) => tool(name, { run, isReadOnly: true, isConcurrencySafe: true });
+    const mode = codeMode({ tools: [safe("a"), safe("b")], driver: createQuickJsDriver() });
+    const code =
+      "const r = await Promise.allSettled([tools.a({}), tools.b({})]); return r.map((x) => x.status === 'fulfilled' ? 'ran' : x.reason.kind + ': ' + x.reason.message);";
+    const screen = vi.fn((call: ToolRequest): CallVerdict | undefined =>
+      call.call.name === "a" ? { cancel: "Stop the turn." } : undefined,
+    );
+    const outcome = await defineAgent({
+      ...base,
+      provider: wire(turn([mode.name, { code }]), text()).provider,
+      tools: [mode],
+    }).run("Run both", {
+      host: { beforeTool: () => {}, canRunConcurrently: () => true, screenCall: screen },
+    });
+    expect(outcome.status).toBe("completed");
+    expect(run).not.toHaveBeenCalled();
+    // The verdict for `a` answers `b` too, so the host is not asked about it.
+    expect(screen.mock.calls.map(([call]) => call.call.name)).toEqual([mode.name, "a"]);
+    const model = outcome.snapshot.models[0];
+    const program = model?.status === "completed" ? model.tools[0] : undefined;
+    if (program?.status !== "completed") throw new Error("Expected the program's result");
+    expect(JSON.parse(program.result.content)).toMatchObject({
+      result: ["cancelled: Stop the turn.", "cancelled: Stop the turn."],
+    });
+  });
+
+  it("charges the run's tool budget nothing for a program's refused calls", async () => {
+    const search = vi.fn(async () => "hits");
+    const mode = codeMode({
+      tools: [tool("search", { run: search, isReadOnly: true })],
+      driver: createQuickJsDriver(),
+    });
+    const code =
+      "const out = []; for (const _ of [1, 2, 3, 4]) { try { await tools.search({}); out.push('ran'); } catch (e) { out.push(e.kind); } } return out;";
+    const agent = defineAgent({
+      ...base,
+      provider: wire(turn([mode.name, { code }]), text()).provider,
+      tools: [mode],
+      limits: { toolCalls: 4 },
+    });
+    const outcome = await agent.run("Search in code", {
+      host: {
+        beforeTool: () => {},
+        screenCall: (call) => (call.call.name === "search" ? { refuse: "No search." } : undefined),
+      },
+    });
+    expect(outcome.status).toBe("completed");
+    expect(search).not.toHaveBeenCalled();
+    const model = outcome.snapshot.models[0];
+    const program = model?.status === "completed" ? model.tools[0] : undefined;
+    if (program?.status !== "completed") throw new Error("Expected the program's result");
+    // Four refusals, not two and then "no tool calls left".
+    expect(JSON.parse(program.result.content)).toMatchObject({
+      result: ["refused", "refused", "refused", "refused"],
+    });
+    // The saved run reads back with the same count: the program call alone.
+    await expect(
+      agent.resume(JSON.parse(JSON.stringify(outcome.snapshot)), {
+        host: { authorizeResume: () => {} },
+      }),
+    ).resolves.toMatchObject({ status: "completed" });
   });
 
   it.each([{}, { refuse: " " }, { refuse: "No", cancel: "No" }, { stop: "No" }, "No"])(

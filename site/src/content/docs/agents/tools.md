@@ -50,15 +50,20 @@ await agent.run(task, {
 });
 ```
 
-`screenCall` runs once for each call, before its approval and before it runs. `{ refuse }`
-answers that call with your text: the model reads it as the call's result, the tool does not
-run and nobody is asked. `{ cancel }` answers that call and every call left in its turn, for
-example after a failed click. `earlier` lists the run's earlier calls with their results, so a
-policy can count them. Calls batched together share an allowance. A refused or cancelled call
-does not count as a tool call.
+`screenCall` runs right before each call would start. `{ refuse }` answers that call with your
+text: the model reads it as the call's result, the tool does not run and nobody is asked.
+`{ cancel }` answers that call and every call after it in its turn, for example after a failed
+click. A cancel is saved with the call's result, so it still holds after a restart. `earlier`
+lists the run's earlier calls with their results, in the order they ran, so a policy can count
+them. Calls batched together share an allowance. A refused or cancelled call does not count as a
+tool call, inside a code program too.
+
+A call that needs approval is screened before its approval opens, and again before it runs,
+once the calls ahead of it ran. So a failed click still cancels an approved click behind it.
 
 Models often send a plan with its first step in one turn. `runFirst: ["plan"]` runs plan calls
-before the rest of their turn. Results keep the model's order.
+before the rest of their turn, and the rest waits for their results, so `screenCall` sees the
+plan before it decides about the step. Results keep the model's order.
 
 ## End only on a stopping tool
 

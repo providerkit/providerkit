@@ -5,7 +5,7 @@ import type { Tool } from "@providerkit/core";
 import { recoveryToolHash } from "./recovery.ts";
 import { copyData, isId, isRecord } from "./snapshot.ts";
 import { fail } from "./tree.ts";
-import type { ToolExecution, ToolRetryDefinition, ToolRetryPolicy } from "./types.ts";
+import type { ProgramCall, ToolExecution, ToolRetryDefinition, ToolRetryPolicy } from "./types.ts";
 
 export function isToolRetryPolicy(value: unknown): value is ToolRetryPolicy {
   return (
@@ -76,23 +76,37 @@ export function fresh(tool: Journaled | undefined): boolean {
   );
 }
 
-/** The call has not started, though a request for it may be open. */
-export function unstarted(tool: Journaled | undefined): boolean {
-  return tool?.status === "pending" && !tool.retries.length && !tool.interrupted.length;
+/** No attempt started, and the only requests are approvals no person turned down. A question or
+ * a client request means the tool ran, or went to the client, already. */
+function untouched(tool: Omit<Journaled, "status">): boolean {
+  return (
+    !tool.retries.length &&
+    !tool.interrupted.length &&
+    (tool.asks ?? []).every(
+      (record) =>
+        record.request.ask.type === "approval" &&
+        (record.closed !== undefined || !record.decision || record.decision.type === "approve"),
+    )
+  );
 }
 
-/** `host.screenCall` refused this call, or it was cancelled with the rest of its turn, before
- * anything else happened to it. It did nothing, so it spends no tool call. Every other cancel
- * a run writes answers a request, so it carries one. */
-export function skipped(tool: ToolExecution): boolean {
+/** The call has not started and no person turned it down, so the host's screen or a cancelled
+ * turn may still answer it. Its approval may be open or granted: the calls ahead of it can have
+ * run since it was last screened. */
+export function screenable(tool: Journaled | undefined): boolean {
+  return tool?.status === "pending" && untouched(tool);
+}
+
+/** `host.screenCall` refused this call, or it was cancelled with the rest of its turn, before it
+ * started. It did nothing, so it spends no tool call. A person's cancel is not one: it answers
+ * the call's own request and holds the person's decision. */
+export function skipped(tool: ToolExecution | ProgramCall): boolean {
   return (
     tool.status === "completed" &&
     !tool.result.ok &&
     (tool.result.kind === "refused" || tool.result.kind === "cancelled") &&
-    !tool.asks?.length &&
-    !tool.retries.length &&
-    !tool.interrupted.length &&
-    !tool.calls?.length
+    untouched(tool) &&
+    !("calls" in tool && tool.calls?.length)
   );
 }
 
