@@ -24,6 +24,9 @@ silently dropped. The official A2A SDK is not a production dependency.
 has no synthetic local model history or token usage. The host owns the card, endpoint policy,
 credentials and output validation. Card text and helper instructions cannot grant an endpoint.
 
+An agent that never uses A2A bundles none of its code. So a process that resumes a run holding a
+remote agent must define that agent first, as it does the run's other agents.
+
 Sends and follow-ups save intent and identity before dispatch. An uncertain send is not repeated
 after a timeout, worker loss or model retry. Known tasks can be observed through polling or a
 subscription. A read of an old task does not prove that an uncertain follow-up arrived.

@@ -207,7 +207,7 @@ export function treeUsage(root: TreeNode): TokenUsage {
 }
 
 /** USD of the known calls under this node, from the prices saved with them, never priced
- * again. Counted the way treeUsage counts usage. */
+ * again, plus what tools reported. Counted the way treeUsage counts usage. */
 export function knownCostUsd(root: TreeNode): number {
   let cost = 0;
   const seen = new Set<string>();
@@ -219,6 +219,7 @@ export function knownCostUsd(root: TreeNode): number {
       cost += model.interrupted.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0);
       cost += model.costUsd ?? 0;
     }
+    for (const entry of snapshot.toolCosts ?? []) cost += entry.costUsd;
   }
   return cost;
 }

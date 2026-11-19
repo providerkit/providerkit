@@ -167,7 +167,9 @@ export async function startChild(
   await scope.tree.save();
 }
 
-/** A child never inherits conversation storage or its parent's resolved provider policy. */
+/** A child never inherits conversation storage or its parent's resolved provider policy. Its
+ * provider session stays its own run id: it has other instructions, so it shares no cached
+ * prefix with its parent. */
 export function childOptions(options: RunOptions): RunOptions {
   const {
     session: _session,
@@ -175,6 +177,7 @@ export function childOptions(options: RunOptions): RunOptions {
     prepareHistory: _prepare,
     modelSettings: _settings,
     enabledTools: _tools,
+    providerSessionId: _providerSession,
     ...inherited
   } = options;
   return inherited;

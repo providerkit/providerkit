@@ -1287,15 +1287,21 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
 }
 function checkWorkflowOptions(options: RunOptions, resume = false): void {
   checkOptions(options, resume ? "resume" : "run");
+  // A workflow makes no model calls, and childOptions drops all of these for its agent steps, so
+  // naming one is refused rather than ignored. Model settings and tool selection belong on the
+  // agent; a session and a provider session have no place in a workflow at all.
+  if (options.modelSettings || options.enabledTools)
+    throw new TypeError(
+      "Workflows do not take modelSettings or enabledTools. Set them on each agent with defineAgent.",
+    );
   if (
     options.session ||
     options.historyLimit !== undefined ||
     options.prepareHistory ||
-    options.modelSettings ||
-    options.enabledTools
+    options.providerSessionId !== undefined
   )
     throw new TypeError(
-      "Workflows use typed input, not sessions, model settings or tool selection. Configure those on their agents.",
+      "Workflows do not take session, historyLimit, prepareHistory or providerSessionId. Each agent step runs on the input the workflow passes it, with no session, and uses its own run id as its provider session.",
     );
 }
 export async function checkReplay<I, O>(

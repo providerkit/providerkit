@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
@@ -283,6 +284,27 @@ describe("mcpTools", () => {
     expect(fake.rpc("initialize")).toHaveLength(1);
     expect(fake.rpc("tools/list")).toHaveLength(1);
     expect(fake.seen.every((seen) => seen.auth === `Bearer ${KEY}`)).toBe(true);
+  });
+
+  it("tells the server this package's own version when it connects", async () => {
+    const fake = fakeServer([search]);
+    const sent: unknown[] = [];
+    const docs = tools(fake, {
+      recorded: [record(search)],
+      allow: { search: {} },
+      fetch: (url, init) => {
+        if (typeof init?.body === "string") sent.push(JSON.parse(init.body));
+        return fake.fetch(url, init);
+      },
+    });
+    await named(docs, "search").invoke({ query: "pricing" });
+    const initialize = sent.find((message) => isRecord(message) && message.method === "initialize");
+    const params = isRecord(initialize) && isRecord(initialize.params) ? initialize.params : {};
+    // Servers log this. It said 0.2.0 for all of 0.3.0, because nothing tied it to the release.
+    const { version } = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    expect(params.clientInfo).toEqual({ name: "@providerkit/agents", version });
   });
 
   it("shows the model only allowed tools, in the recorded words, after the server changes", async () => {

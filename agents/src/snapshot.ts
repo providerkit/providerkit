@@ -1,4 +1,4 @@
-import { isRemoteSnapshot, checkRemoteSnapshot, checkRemoteProgress } from "./a2a/remote.ts";
+import type { RemoteSnapshot } from "./a2a/remote.ts";
 import {
   isWorkflowSnapshot,
   checkWorkflowSnapshot,
@@ -58,6 +58,7 @@ import type {
   RunState,
   Session,
   SessionStatus,
+  ToolCost,
   ToolExecution,
   ToolRequest,
   ToolResult,
@@ -502,7 +503,7 @@ export function isRecordedModelSettings(value: unknown): value is RecordedModelS
 export function readModelSettings(value: unknown = {}): ModelSettings {
   if (!isModelSettings(value))
     throw new TypeError(
-      "Invalid modelSettings. Use core StreamOptions without signal, sessionId or json; the agent owns those fields.",
+      "Invalid modelSettings. Use core StreamOptions without signal, sessionId or json; the agent owns those fields. Name a provider session with the providerSessionId run option.",
     );
   // Undefined means inherit, not erase a lower-precedence value. Keep observers outside the
   // JSON copy: they do not change the request and may close over process-local services.
@@ -600,6 +601,7 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     isRecord(value) &&
     typeof value.instructions === "string" &&
     isRecordedModelSettings(value.modelSettings) &&
+    optional(value.providerSessionId, isId) &&
     isNames(value.enabledTools) &&
     isNames(value.stopAtTools) &&
     optional(value.codeTools, isRecordedCodeTools) &&
@@ -638,16 +640,22 @@ export function checkOptions(
       "enabledTools must be an allow-list of unique tool names, or a function returning one.",
     );
   if (value.modelSettings !== undefined) readModelSettings(value.modelSettings);
+  if (!optional(value.providerSessionId, isId))
+    throw new TypeError("providerSessionId must be a non-empty string.");
   // ResumeOptions leaves these out, but a JavaScript caller can still pass them. Say so,
   // rather than ignore a value someone set.
   if (
     use === "resume" &&
-    [value.historyLimit, value.prepareHistory, value.modelSettings, value.enabledTools].some(
-      (item) => item !== undefined,
-    )
+    [
+      value.historyLimit,
+      value.prepareHistory,
+      value.modelSettings,
+      value.enabledTools,
+      value.providerSessionId,
+    ].some((item) => item !== undefined)
   )
     throw new TypeError(
-      "historyLimit, prepareHistory, modelSettings and enabledTools apply when a run starts. A resumed run keeps its recorded history and definition.",
+      "historyLimit, prepareHistory, modelSettings, enabledTools and providerSessionId apply when a run starts. A resumed run keeps its recorded history and definition.",
     );
   if (value.host !== undefined) {
     if (!isRecord(value.host)) throw new TypeError("The run host must be an object.");
@@ -960,6 +968,16 @@ function isCompaction(value: unknown): value is CompactionExecution {
   );
 }
 
+function isToolCost(value: unknown): value is ToolCost {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 3 &&
+    isId(value.operationId) &&
+    isId(value.attemptId) &&
+    finite(value.costUsd)
+  );
+}
+
 export function isState(value: unknown): value is RunState {
   if (!isRecord(value)) return false;
   switch (value.status) {
@@ -1048,6 +1066,7 @@ function isSnapshot(value: unknown): value is RunSnapshot {
     value.guards.every(isGuardRecord) &&
     Array.isArray(value.compactions) &&
     value.compactions.every(isCompaction) &&
+    optional(value.toolCosts, (costs) => Array.isArray(costs) && costs.every(isToolCost)) &&
     optional(value.session, isSessionRef) &&
     isLimits(value.limits) &&
     Array.isArray(value.models) &&
@@ -1073,8 +1092,35 @@ export function isTreeInfo(value: unknown): value is RunSnapshot["tree"] {
   );
 }
 
+/** How a run tree checks its A2A remote nodes. `defineRemoteAgent` installs them, and a tree
+ * can only hold a remote node made by a remote agent the host defined, so an agent that never
+ * uses A2A refuses one and bundles none of its wire code. That code was about 15 KB of the
+ * 191 KB the main entry minified to at 92f8868 (esbuild). */
+export interface RemoteChecks {
+  isRemoteSnapshot(raw: unknown): raw is RemoteSnapshot;
+  checkRemoteSnapshot(snapshot: RemoteSnapshot): void;
+  checkRemoteProgress(previous: RemoteSnapshot, next: RemoteSnapshot): void;
+}
+let remoteChecks: RemoteChecks | undefined;
+
+export function installRemoteChecks(checks: RemoteChecks): void {
+  remoteChecks = checks;
+}
+
+function remoteNodeChecks(): RemoteChecks {
+  if (!remoteChecks)
+    throw new TypeError(
+      "This run holds an A2A remote agent. Define it with defineRemoteAgent from @providerkit/agents/a2a before you resume the run.",
+    );
+  return remoteChecks;
+}
+
 export function isTreeNode(value: unknown): value is TreeNode {
-  return isSnapshot(value) || isWorkflowSnapshot(value) || isRemoteSnapshot(value);
+  return (
+    isSnapshot(value) ||
+    isWorkflowSnapshot(value) ||
+    (isRecord(value) && value.kind === "remote" && remoteNodeChecks().isRemoteSnapshot(value))
+  );
 }
 
 export function agentSnapshot(node: TreeNode): RunSnapshot {
@@ -1122,7 +1168,7 @@ export function checkTree(root: TreeNode): void {
       throw new TypeError("The child belongs to a different tree or deadline.");
     if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
     if (node.kind === "remote") {
-      checkRemoteSnapshot(node);
+      remoteNodeChecks().checkRemoteSnapshot(node);
       if (
         root.runId === root.tree.runId &&
         node.remote.sends.some((send) =>
@@ -1332,7 +1378,7 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
   )
     throw new TypeError("The child host returned a different or regressed node.");
   if (previous.kind === "remote" && next.kind === "remote") {
-    checkRemoteProgress(previous, next);
+    remoteNodeChecks().checkRemoteProgress(previous, next);
     return;
   }
   if (previous.kind === "workflow" && next.kind === "workflow") {
@@ -1395,6 +1441,19 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
       .some((entry) => entry.beforeModel < previous.models.length)
   )
     throw new TypeError("The child host changed an admitted model's context.");
+  // A charge only grows while its attempt runs, and is never dropped.
+  if (
+    (previous.toolCosts ?? []).some((entry, index) => {
+      const saved = next.toolCosts?.[index];
+      return (
+        !saved ||
+        saved.operationId !== entry.operationId ||
+        saved.attemptId !== entry.attemptId ||
+        saved.costUsd < entry.costUsd
+      );
+    })
+  )
+    throw new TypeError("The child host erased or lowered a reported tool cost.");
   if (previous.models.length > next.models.length)
     throw new TypeError("The child host dropped saved model receipts.");
   if (
@@ -1814,6 +1873,28 @@ function checkProgramJournal(
   return total;
 }
 
+/** Each reported cost belongs to one attempt of a call in this run's journal. */
+function checkToolCosts(snapshot: RunSnapshot): void {
+  const costs = snapshot.toolCosts ?? [];
+  const calls = new Set(
+    snapshot.models.flatMap((model) =>
+      model.status === "completed"
+        ? model.tools.flatMap((tool) => [tool.id, ...(tool.calls ?? []).map((call) => call.id)])
+        : [],
+    ),
+  );
+  if (
+    costs.some(
+      (entry, index) =>
+        !calls.has(entry.operationId) ||
+        costs.findIndex(
+          (other) => other.operationId === entry.operationId && other.attemptId === entry.attemptId,
+        ) !== index,
+    )
+  )
+    throw new TypeError("A reported tool cost names no call in this run, or repeats an attempt.");
+}
+
 /** Validate data-only journals without live tools. Execution callers supply their actual code
  * registry, which must match the saved policy. Recorded data never replaces host authorization. */
 export function readSnapshot(
@@ -2073,6 +2154,7 @@ export function readSnapshot(
   }
   checkMemorySnapshot(raw);
   checkCompactions(raw);
+  checkToolCosts(raw);
   for (const entry of raw.compactions) {
     if (
       raw.models

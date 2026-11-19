@@ -65,13 +65,14 @@ export interface RunLimits {
    * snapshot holds them, and every checkpoint writes the whole snapshot again, so large files
    * belong behind a MediaRef. Zero accepts media references only. */
   inlineBytes: number;
-  /** USD this run may spend: its own model calls, compaction summaries included, and those of
-   * every agent it starts (helpers, specialists, handoff targets). `host.priceModelCall` prices
-   * each call when its usage arrives, and the journal keeps that price. Once the known cost
-   * reaches the limit, no new call starts in the run or under it, and the run ends `limited`
-   * with `costUsd`. It limits starting calls, not the bill: calls already running when the
-   * limit is reached, such as parallel helpers, can finish above it. A call that never reported
-   * usage adds nothing. Absent means no limit. */
+  /** USD this run may spend: its own model calls, compaction summaries included, what its tools
+   * report through `context.reportCost`, and the same for every agent it starts (helpers,
+   * specialists, handoff targets). `host.priceModelCall` prices each call when its usage
+   * arrives, and the journal keeps that price. Once the known cost reaches the limit, no new
+   * model call starts in the run or under it, and the run ends `limited` with `costUsd`. It
+   * limits starting calls, not the bill: calls already running when the limit is reached, such
+   * as parallel helpers or the rest of a tool batch, can finish above it. A call that never
+   * reported usage adds nothing. Absent means no limit. */
   costUsd?: number;
 }
 
@@ -143,7 +144,8 @@ export interface ResultSchema<T> {
 }
 
 /** Core's call settings. Cancellation, conversation identity and checked output stay with
- * the loop. Provider defaults apply first, then agent settings, then run settings. */
+ * the loop: `RunOptions.signal`, `RunOptions.providerSessionId` and `output`. Provider
+ * defaults apply first, then agent settings, then run settings. */
 export type ModelSettings = Omit<StreamOptions, "signal" | "sessionId" | "json">;
 
 /** Observers do not change the request and cannot be saved as JSON. */
@@ -339,6 +341,8 @@ export interface RecordedCodeTool {
 export interface RunDefinition {
   instructions: string;
   modelSettings: RecordedModelSettings;
+  /** `RunOptions.providerSessionId`, when the run named one. */
+  providerSessionId?: string;
   enabledTools: string[];
   stopAtTools: string[];
   /** Present for registered code tools, including ones disabled for this run. */
@@ -615,9 +619,16 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Overrides agent settings for this run. Recorded settings cannot change on resume. */
   modelSettings?: ModelSettings;
+  /** The id this run's model calls send as core's `sessionId`, which some providers route and
+   * cache by: OpenCode Go's session header, the ChatGPT backend's `session-id` and
+   * `prompt_cache_key` on the Responses shape. Defaults to the run id, so each run is its own
+   * session. Pass the conversation id to keep one provider session across a conversation's
+   * turns. Recorded when the run starts; resume keeps it. Never passed to specialists. */
+  providerSessionId?: string;
   /** Narrows the agent's enabled tools for this run. Resolved once, before saving. */
   enabledTools?: EnabledTools;
-  /** Passed to tools with reserved runId, attemptId, operationId, callId and signal supplied by the loop. */
+  /** Passed to tools with reserved runId, attemptId, operationId, callId, signal and reportCost
+   * supplied by the loop. `reportCost(usd)` adds what the call spent outside the model calls. */
   context?: ToolContext;
   /** Trusted binding from authentication. Never select a scope from model arguments. */
   memory?: MemoryBinding;
@@ -642,7 +653,13 @@ export interface RunOptions {
 
 export interface ResumeOptions extends Omit<
   RunOptions,
-  "runId" | "session" | "historyLimit" | "prepareHistory" | "modelSettings" | "enabledTools"
+  | "runId"
+  | "session"
+  | "historyLimit"
+  | "prepareHistory"
+  | "modelSettings"
+  | "enabledTools"
+  | "providerSessionId"
 > {
   host: AgentHost & { authorizeResume: NonNullable<AgentHost["authorizeResume"]> };
   /** The run's own session, so the turn is appended once the run settles. Resume never loads
@@ -715,6 +732,15 @@ export interface InterruptedModelAttempt extends InterruptedAttempt {
   usage: TokenUsage;
   /** The host's price for that usage, kept from the attempt. Never priced again. */
   costUsd?: number;
+}
+
+/** USD one attempt of a tool call reported, the sum of its `reportCost` calls. Kept apart from
+ * the call's own record, so a retry, a restart or a request never drops a charge. */
+export interface ToolCost {
+  /** The call's operation id, or a code program's inner call id. */
+  operationId: string;
+  attemptId: string;
+  costUsd: number;
 }
 
 /** Private inner-call journal. IDs increase across program restarts; old calls never replay. */
@@ -824,6 +850,9 @@ export interface RunSnapshot {
   guards: GuardRecord[];
   /** Completed model-view cuts and any in-flight paid summary. Never session edits. */
   compactions: CompactionExecution[];
+  /** What tools reported spending through `context.reportCost`, one entry per call attempt, in
+   * the order they first reported. Absent until a tool reports. */
+  toolCosts?: ToolCost[];
   /** The session the history came from, and the revision a settled run appends after. */
   session?: { id: string; revision: string | null };
   limits: RunLimits;
@@ -857,8 +886,13 @@ export type OperationReceipt =
       parentOperationId?: string;
       callId: string;
       attemptId: string;
-      status: "running" | "completed" | "interrupted";
+      /** `asked`: the attempt reported a cost, then stopped to ask the person. The answer runs the
+       * tool again as a new attempt with its own receipt, so the charge stays on this one. An
+       * attempt that asked without reporting a cost gets no receipt. */
+      status: "running" | "completed" | "interrupted" | "asked";
       result?: ToolResult;
+      /** What this attempt reported through `context.reportCost`. */
+      costUsd?: number;
     };
 
 interface RunRecord {

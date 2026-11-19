@@ -103,8 +103,9 @@ const MAX_LIST_PAGES = 100;
 // The agents SDK reserves this name for an output contract. Kept here rather than imported from
 // run.ts, so this entry never loads the agent loop.
 const RESULT_TOOL_NAME = "submit_result";
-// Servers log this. Keep the version in step with package.json.
-const CLIENT_INFO = { name: "@providerkit/agents", version: "0.2.0" };
+// Servers log this. Keep the version in step with package.json: a release bumps both, and
+// mcp.test.ts fails while they differ.
+const CLIENT_INFO = { name: "@providerkit/agents", version: "0.3.0" };
 // A runtime that refuses a header quotes the whole value in its error, key included.
 const HEADER_SAFE = /^[\x20-\x7e]+$/;
 // What every provider accepts: OpenAI and Anthropic allow letters, digits, _ and - up to 64, and

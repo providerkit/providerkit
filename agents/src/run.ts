@@ -11,6 +11,7 @@ import {
   type ProviderChunk,
   type TokenUsage,
   type Tool,
+  type ToolChoice,
 } from "@providerkit/core";
 import {
   bindMemoryTool,
@@ -249,6 +250,25 @@ function recordOf(snapshot: RunSnapshot) {
             ...(inner.status === "completed" ? { result: inner.result } : {}),
           });
       }
+      // A call that asks the person keeps no record of that attempt: the answer reruns it under
+      // the next attempt id. Its charge in `toolCosts` still needs a receipt to sit on.
+      const recorded = [
+        ...tool.interrupted,
+        ...tool.retries,
+        ...(tool.status === "pending" ? [] : [tool]),
+      ];
+      for (const cost of saved.toolCosts ?? [])
+        if (
+          cost.operationId === tool.id &&
+          !recorded.some((attempt) => attempt.attemptId === cost.attemptId)
+        )
+          receipts.push({
+            kind: "tool",
+            id: tool.id,
+            callId: call.id,
+            attemptId: cost.attemptId,
+            status: "asked",
+          });
       if (tool.status === "pending") continue;
       receipts.push({
         kind: saved.delegations.find((journal) => journal.operationId === tool.id)?.kind ?? "tool",
@@ -259,6 +279,14 @@ function recordOf(snapshot: RunSnapshot) {
         ...(tool.status === "completed" ? { result: tool.result } : {}),
       });
     }
+  }
+  // Billing is keyed by (id, attemptId), so each tool attempt's receipt says what it reported.
+  for (const receipt of receipts) {
+    if (receipt.kind === "model" || receipt.kind === "remote") continue;
+    const cost = saved.toolCosts?.find(
+      (entry) => entry.operationId === receipt.id && entry.attemptId === receipt.attemptId,
+    );
+    if (cost) receipt.costUsd = cost.costUsd;
   }
   // A root run replaces this with what its append did. Read from a snapshot alone, whether the
   // session has the turn is not known.
@@ -561,6 +589,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       instructions: text,
       ...(memory ? { memory: copyData(memory) } : {}),
       modelSettings,
+      ...(options.providerSessionId !== undefined
+        ? { providerSessionId: options.providerSessionId }
+        : {}),
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
       ...(codeTools.size ? { codeTools: recordCodeTools(codeTools) } : {}),
@@ -825,6 +856,38 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           operationId,
         );
       return cost;
+    }
+
+    /** `context.reportCost` for one call attempt: what the tool spent outside the model calls,
+     * such as a paid API or a model it calls itself. Each amount joins the attempt's entry in
+     * `snapshot.toolCosts`, which the cost limit and the receipts read. While the call runs it
+     * is saved at once, as model usage is, so a worker that dies first keeps what it spent. A
+     * report after the call returned waits for the next checkpoint: the run may have ended. */
+    function costReporter(request: ToolRequest) {
+      let open = true;
+      return {
+        report(usd: number): void {
+          if (typeof usd !== "number" || !Number.isFinite(usd) || usd < 0)
+            throw new TypeError("reportCost takes a finite USD amount of 0 or more.");
+          const costs = (snapshot.toolCosts ??= []);
+          const entry = costs.find(
+            (saved) =>
+              saved.operationId === request.operationId && saved.attemptId === request.attemptId,
+          );
+          if (entry) entry.costUsd += usd;
+          else
+            costs.push({
+              operationId: request.operationId,
+              attemptId: request.attemptId,
+              costUsd: usd,
+            });
+          // A failed write fails the run through the tree, at its next step.
+          if (open) void save().catch(() => {});
+        },
+        close(): void {
+          open = false;
+        },
+      };
     }
     const callbackContext: LifecycleContext = Object.freeze({
       agentId: id,
@@ -1317,6 +1380,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             .reverse()
             .find((record) => !record.closed && record.decision)?.decision;
           if (!tool) throw new TypeError("Missing dispatched tool.");
+          const cost = costReporter(request);
           return untilAbort(
             bindMemoryTool(tool, options.memory, snapshot, request).invoke(
               copyData(request.arguments),
@@ -1330,10 +1394,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
                 parentOperationId: request.parentOperationId,
                 callId: request.call.id,
                 signal: callSignal,
+                reportCost: cost.report,
               },
             ),
             callSignal,
-          );
+          ).finally(cost.close);
         }
         let outcome;
         try {
@@ -2392,6 +2457,28 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
     }
 
+    /** Whether a forced choice has done its job, read from the journal so a resume agrees and
+     * cannot force it a second time. "required" is ported from OpenAI Agents JS (MIT),
+     * runner/modelSettings.ts, maybeResetToolChoice: any tool call frees it, so the model can
+     * answer. A named tool gates work on its own result, such as a router that must run first,
+     * so it holds until a call of that tool succeeds. A failed or refused call, or a call to
+     * another tool, keeps it forced. */
+    function choiceDone(choice: ToolChoice | undefined): boolean {
+      if (choice === "required")
+        return snapshot.models.some(
+          (model) => model.status === "completed" && model.tools.length > 0,
+        );
+      if (typeof choice !== "object") return false;
+      return snapshot.models.some(
+        (model) =>
+          model.status === "completed" &&
+          (model.turn.message.toolCalls ?? []).some((call, index) => {
+            const tool = model.tools[index];
+            return call.name === choice.name && tool?.status === "completed" && tool.result.ok;
+          }),
+      );
+    }
+
     async function nextTurn(
       previous?: Extract<ModelExecution, { status: "running" }>,
     ): Promise<CompletedModel> {
@@ -2443,14 +2530,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
       active();
       const modelSettings = copyData(snapshot.definition.modelSettings);
-      // Ported from OpenAI Agents JS (MIT), runner/modelSettings.ts, maybeResetToolChoice.
-      // Derive usage from the journal so resume cannot force the first tool a second time.
-      const choice = modelSettings.toolChoice;
-      if (
-        (choice === "required" || typeof choice === "object") &&
-        snapshot.models.some((model) => model.status === "completed" && model.tools.length > 0)
-      )
-        modelSettings.toolChoice = "auto";
+      if (choiceDone(modelSettings.toolChoice)) modelSettings.toolChoice = "auto";
       if (finalTurn) modelSettings.toolChoice = "none";
       const operationId = modelId(snapshot.runId, position);
       const modelInput: ModelInput = {
@@ -2558,9 +2638,13 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             ? { onRateLimit: options.modelSettings.onRateLimit }
             : {}),
           signal,
+          // A summary keeps a session of its own: it has its own instructions, so it shares no
+          // cached prefix with the turns.
           sessionId: summary
             ? operationId
-            : (snapshot.subagent?.identity.originRunId ?? snapshot.runId),
+            : (snapshot.definition.providerSessionId ??
+              snapshot.subagent?.identity.originRunId ??
+              snapshot.runId),
         });
         for await (const chunk of stream) {
           active();

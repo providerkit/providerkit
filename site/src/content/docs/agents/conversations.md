@@ -33,6 +33,17 @@ A session lets your app load and append conversation history through one interfa
 `createMemorySession` is process-local; implement `Session` for persistent storage. Revisions
 prevent competing appends, and run IDs make a completed append repeatable without duplicating it.
 
+## One provider session per conversation
+
+```ts
+await writer.run(question, { session: thread, providerSessionId: thread.id });
+```
+
+Some providers route and cache requests by a session id, OpenCode Go among them. Each run sends
+its own run id unless you name one, so pass the conversation's id to let every turn reuse what the
+provider cached. A resumed run keeps the id it started with. Specialists and a workflow's agent
+steps keep their own.
+
 ## Images and files
 
 A new user turn can contain Core content parts:

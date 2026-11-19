@@ -570,7 +570,10 @@ function bindBackground<I, R extends NodeOutcome>(
     async start(
       owner: string,
       input: I,
-      start: Pick<RunOptions, "runId" | "signal" | "context" | "enabledTools"> & {
+      start: Pick<
+        RunOptions,
+        "runId" | "signal" | "context" | "enabledTools" | "providerSessionId"
+      > & {
         sessionId?: string;
         modelSettings?: RecordedModelSettings;
       } = {},

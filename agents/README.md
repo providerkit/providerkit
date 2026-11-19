@@ -67,7 +67,8 @@ await writer.run("Explain database indexes.", { modelSettings: { maxTokens: 512 
 ```
 
 `ModelSettings` is core's `StreamOptions` without `signal`, `sessionId` or `json`. The SDK owns
-those three: use `RunOptions.signal` to stop, and `output` for checked results. Provider defaults
+those three: use `RunOptions.signal` to stop, `RunOptions.providerSessionId` to name the provider
+session (see [Sessions](#sessions)), and `output` for checked results. Provider defaults
 apply first, agent settings override them, and run settings win last. Unset or `undefined` fields
 inherit; `0` and `false` do not. All settings go to every model call. Support still depends on the
 provider, which may refuse a setting.
@@ -78,8 +79,11 @@ rather than in JSON. After a restart, only observers from the rebuilt agent appl
 progress through `onEvent`.
 
 `toolChoice` accepts `"auto"`, `"none"`, `"required"` or `{ name: "lookup" }`. A named tool must
-be enabled. After a tool call, a forced choice becomes `"auto"` for the rest of that run,
-including after resume. `"none"` stays `"none"`: calls a provider returns anyway are refused.
+be enabled. `"required"` becomes `"auto"` once a turn has called any tool. A named tool stays
+forced until a call of it succeeds: a failed or denied call, or a call to another tool, forces it
+again on the next turn, up to the turn limit. Use it for a step the rest of the run depends on,
+such as a router. Both read the journal, so a resumed run keeps the choice where it was.
+`"none"` stays `"none"`: calls a provider returns anyway are refused.
 A checked-output agent refuses `"none"` at creation because it needs `submit_result` to finish.
 
 ## Instructions and tools per run
@@ -452,6 +456,23 @@ it. An append that fails never changes the run's own status.
 Resume never loads a session again. Pass the run's own session to `resume` so the turn is
 appended when the run settles; another session is refused. A specialist never gets its parent's
 session.
+
+Some providers route and cache requests by a session id: OpenCode Go's session header, the ChatGPT
+backend's `session-id` and `prompt_cache_key` on the Responses shape. Each run sends its own run
+id unless you name one, so each turn of a conversation starts a new provider session. Pass the
+conversation's id to keep one session for all its turns:
+
+```ts
+await writer.run("When do they slow down writes?", {
+  session: thread,
+  providerSessionId: thread.id,
+});
+```
+
+The run saves the id with its definition, and resume keeps it. Specialists and helpers keep their
+own run ids, because their instructions differ and they share no cached prompt with the parent.
+Workflows and remote agents make no model calls of their own, so they refuse the option. Inside a
+workflow, each agent step uses its own run id as its provider session.
 
 `createMemorySession` keeps everything in this process and loses it when the process ends. For
 your own store, implement `Session` (`load` and `append`) and check it with
@@ -1163,6 +1184,11 @@ or a workflow's `agents`. Local agents, workflows and remote children use the sa
 admission, host binding, checkpoints and tree limits. Remote agents are not handoff targets.
 Their snapshots have a remote message journal, not made-up local models or model turns.
 
+The main entry checks a remote node only with code that `defineRemoteAgent` hands it, so an
+agent that never uses A2A bundles none of A2A's code (about 15 KB minified). A process that
+resumes a run holding a remote agent must define that agent first, as it defines the run's other
+agents; until then the run is refused with a TypeError that names `defineRemoteAgent`.
+
 Configure the host-owned `id`, `agentVersion`, `card`, `version` (`"1.0"` or `"0.3"`),
 `binding` (`"JSONRPC"` or `"HTTP+JSON"`) and `policy.allow`. Use `updates: "poll"` (default)
 or `"stream"`; streaming requires a card that supports it. The SDK refuses missing required
@@ -1734,10 +1760,11 @@ Resuming does not reset the deadline or give the tree a fresh call budget.
 
 `usage` describes the current agent's model calls. `treeUsage` includes registered descendants
 without counting recorded work twice. Only model usage reported by providers is known; an
-interrupted call may have cost more than its last report. Ordinary tools' external service charges
-are not included. Prices and billing stay with the host, and these counters are not a bill. Use
-SDK delegation rather than calling another model directly inside an ordinary tool when that work
-must share the tree's limits and usage.
+interrupted call may have cost more than its last report. A tool's own charges, such as a paid
+API, count only when the tool reports them in USD (see [Cost limit](#cost-limit)). Prices and
+billing stay with the host, and these counters are not a bill. When a tool calls another model
+itself, those tokens stay out of `usage` and the tree's call limits. Use SDK delegation instead
+when that work must share them.
 
 ### Cost limit
 
@@ -1775,6 +1802,33 @@ without waiting. Anything else fails the run with `invalid_cost`. The journal ke
 run never prices a saved call again, even when your prices change by time of day. A run with
 `costUsd` and no `priceModelCall` is refused with a TypeError before it starts or resumes. A
 helper's `prepare` may give one helper a lower `costUsd`.
+
+A tool that pays for something outside the model calls, such as a paid search or a model it calls
+itself, reports the amount with `reportCost` on its context:
+
+```ts
+const search = defineTool({
+  name: "search",
+  description: "Search the archive.",
+  inputSchema: { type: "object" },
+  run: async (input, context) => {
+    const found = await archive.search(input);
+    if (typeof context.reportCost === "function") context.reportCost(found.costUsd);
+    return found.text;
+  },
+});
+```
+
+The check keeps the tool usable outside an agent run, where the context has no `reportCost`. The
+amount joins the known cost that the limit checks before the next model call, so the rest of the
+batch still runs. The SDK saves it right away in `snapshot.toolCosts`, with the call attempt that
+spent it, and that attempt's receipt carries it as `costUsd`. A retried or replayed call keeps each
+attempt's charge. So does a call that reports a cost and then asks the person: the answer runs the
+tool again as a new attempt, and the attempt that asked gets its own receipt, with status `asked`.
+Report before the tool returns: a later report, say from work that outlived the tool's timeout, is
+saved with the run's next checkpoint, and is lost if the run has ended. An amount that is not a
+finite number of 0 or more throws a TypeError in the tool and is not saved. `reportCost` works
+without a cost limit too, so your ledger can read the charges from the receipts.
 
 ## Asking the person
 
@@ -1960,7 +2014,8 @@ per attempt: key billing by `(id, attemptId)`, not just `id`. Model receipts hav
 `billing: "unknown"` while running or interrupted, and `"reported"` once a stream with a usage
 report completes. A completed stream without usage stays `"unknown"`. Reported is not an audited
 bill. A process can die before saving a new usage report, and an
-interrupted request may cost more than its saved usage. Ordinary tool charges remain unknown.
+interrupted request may cost more than its saved usage. A tool's own charges are known only when
+the tool reports them with `reportCost` (see [Cost limit](#cost-limit)).
 
 Before replacement output, `operation_restart` reports `kind`, `runId`, `operationId`,
 `previousAttemptId` and `attemptId`. A display projector must clear the interrupted attempt's

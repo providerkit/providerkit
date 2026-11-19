@@ -20,6 +20,7 @@ import {
   equalData,
   immutableCopy,
   inlineBytes,
+  installRemoteChecks,
   isAskRecord,
   isId,
   isImageMime,
@@ -28,6 +29,7 @@ import {
   isTreeInfo,
   isTurnContent,
   readTreeLimits,
+  type RemoteChecks,
 } from "../snapshot.ts";
 import {
   authorizeTree,
@@ -276,10 +278,11 @@ function checkRunOptions(options: RunOptions, resume = false): void {
     options.prepareHistory ||
     options.enabledTools ||
     options.modelSettings ||
-    options.memory
+    options.memory ||
+    options.providerSessionId !== undefined
   )
     throw new TypeError(
-      "Remote agents do not accept local sessions, memory, model settings or tool selection.",
+      "Remote agents do not accept local sessions, memory, model settings, provider sessions or tool selection.",
     );
 }
 function safeParts(parts: A2APart[], includeImages = false): A2APart[] {
@@ -743,6 +746,13 @@ export function checkRemoteProgress(previous: RemoteSnapshot, next: RemoteSnapsh
     throw new TypeError("The host changed a completed remote result.");
 }
 
+/** What the main entry's tree checks call for a remote node. */
+export const remoteChecks: RemoteChecks = {
+  isRemoteSnapshot,
+  checkRemoteSnapshot,
+  checkRemoteProgress,
+};
+
 export function defineRemoteAgent<T>(
   options: RemoteAgentOptions<T> & { output: ResultSchema<T> },
 ): RemoteAgent<T>;
@@ -750,6 +760,9 @@ export function defineRemoteAgent(
   options: RemoteAgentOptions<string> & { output?: undefined },
 ): RemoteAgent<string>;
 export function defineRemoteAgent<T>(config: RemoteAgentOptions<T>): RemoteAgent<T | string> {
+  // Only a defined remote agent can make a remote node, so defining one hands the main entry
+  // the checks for them. See installRemoteChecks.
+  installRemoteChecks(remoteChecks);
   if (
     !isId(config.id) ||
     !isId(config.agentVersion) ||
