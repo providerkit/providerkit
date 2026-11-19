@@ -159,7 +159,100 @@
       }
     },
     {
-      "files": ["site/**/*.tsx", "react/**/*.ts", "react/**/*.tsx"],
+      "files": ["native/src/**/*.ts", "native/src/**/*.tsx"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "../**/react/**",
+                  "../**/core/**",
+                  "../**/agents/**",
+                  "@providerkit/react/src/**",
+                  "@providerkit/react/dist/**",
+                  "@providerkit/core",
+                  "@providerkit/core/**",
+                  "@providerkit/agents",
+                  "@providerkit/agents/**"
+                ],
+                "message": "Native uses @providerkit/react's public root entry and /protocol only. It loads nothing from core, and agents cannot run on Hermes."
+              },
+              {
+                "group": [
+                  "@providerkit/react/sse",
+                  "@providerkit/react/ui",
+                  "@providerkit/react/ui/**",
+                  "@providerkit/react/markdown",
+                  "@providerkit/react/agents",
+                  "@providerkit/react/ag-ui",
+                  "@providerkit/react/styles.css"
+                ],
+                "message": "Native imports @providerkit/react's root entry and /protocol only: /sse reads fetch streams React Native lacks, /ui, /markdown and styles.css need the DOM, and /agents and /ag-ui run on the server."
+              },
+              {
+                "group": [
+                  "@gusnips/*",
+                  "@react-native-async-storage/*",
+                  "@react-native-community/netinfo",
+                  "react-native-css",
+                  "react-native-css/**",
+                  "nativewind",
+                  "nativewind/**",
+                  "tailwindcss",
+                  "tailwindcss/**"
+                ],
+                "message": "The app passes in its storage, its network state and its stream reader, and styles parts with its own classes. providerkit never depends on the kit."
+              }
+            ]
+          }
+        ],
+        "no-restricted-globals": [
+          "error",
+          {
+            "name": "window",
+            "message": "React Native has no DOM. This crashes on a phone."
+          },
+          {
+            "name": "document",
+            "message": "React Native has no DOM. This crashes on a phone."
+          },
+          {
+            "name": "location",
+            "message": "React Native has no DOM. This crashes on a phone."
+          },
+          {
+            "name": "localStorage",
+            "message": "React Native has no Web Storage. Take the app's AsyncStorage instead."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "React Native has no Web Storage. Take the app's AsyncStorage instead."
+          },
+          {
+            "name": "EventSource",
+            "message": "React Native has no EventSource. Streams come through the app's open function."
+          },
+          {
+            "name": "TextDecoder",
+            "message": "Hermes has no TextDecoder."
+          },
+          {
+            "name": "structuredClone",
+            "message": "Hermes has no structuredClone."
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "site/**/*.tsx",
+        "react/**/*.ts",
+        "react/**/*.tsx",
+        "native/**/*.ts",
+        "native/**/*.tsx"
+      ],
       "rules": {
         "react/purity": "off",
         "react-hooks-js/purity": "error",

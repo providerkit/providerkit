@@ -14,6 +14,10 @@ provides browser state, React hooks and optional chat components. The display pr
 React-free; the server projector exposes only allowlisted display data. Components receive plain
 data and callbacks, so an app can keep its existing state owner. Tailwind is not required.
 
+`native/` is the separate, experimental `@providerkit/native` package, for React Native apps on
+`@providerkit/react`'s client. The app passes in its stream reader, its API client, its
+AsyncStorage, AppState and NetInfo, so the package depends on none of them.
+
 MIT · open source · `providerkit.dev`
 
 > **Before touching anything under `site/`, read [`site/DESIGN.md`](site/DESIGN.md).**
@@ -49,6 +53,7 @@ providerkit/            ← repo root (this folder), git root
 │   └── test/
 ├── agents/             ← separate experimental `@providerkit/agents`, using core's public API
 ├── react/              ← experimental chat hooks, display protocol and optional components
+├── native/             ← experimental React Native transport, storage and app state, on react's client
 ├── site/               ← providerkit.dev — Astro + Starlight, open source
 │   └── src/content/docs/  ← the docs, as plain markdown (guides/ is hand-written,
 │                             reference/ is TypeDoc output and gitignored)
@@ -121,6 +126,16 @@ TypeScript 7 does not ship. Move it when both do.
   state into that data. Do not send raw execution snapshots, reasoning or tool arguments to a
   browser. The app still owns authorization, uploads, retention and approval decisions. UI CSS
   is scoped and opt-in, with no global reset or required Tailwind setup.
+- **The native layer is separate.** `@providerkit/native` imports `@providerkit/react`'s root
+  entry and `/protocol`, and nothing else from providerkit: `/sse` reads fetch streams React
+  Native lacks, `/ui`, `/markdown` and `styles.css` need the DOM, and agents cannot run on Hermes.
+  It takes no `@gusnips`, AsyncStorage, NetInfo, react-native-css or Tailwind dependency: the app
+  passes in its storage, its network state and its stream reader, and the kit may depend on
+  providerkit, never the reverse. It adds no reconnect loop: the client already reattaches from
+  its cursor. React Native 0.86's `AbortSignal` is a polyfill with `aborted` and the abort event
+  only, so do not use `reason`, `throwIfAborted` or `AbortSignal.any`. A file with tested logic
+  imports no `react-native`, because Node cannot load React Native's Flow source. `.oxlintrc.json`
+  holds the import and global rules.
 - **GitHub: org `providerkit`, repo `providerkit/providerkit`.** An org rather than a personal
   repo, so maintainers can be added later without a transfer.
 - Release scripts match the other packages in `dev/packages`:

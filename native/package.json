@@ -1,0 +1,62 @@
+{
+  "name": "@providerkit/native",
+  "version": "0.1.0",
+  "description": "React Native support for @providerkit/react: a stream transport over your app's own reader, storage for drafts and unsent messages, and reconnects that wait until the app is open and online.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Gustavo Salomé",
+  "homepage": "https://providerkit.dev",
+  "bugs": {
+    "url": "https://github.com/providerkit/providerkit/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc -p test",
+    "lint": "oxlint -c ../.oxlintrc.json src test",
+    "test": "vitest run",
+    "sync:docs": "cp ../LICENSE .",
+    "prepublishOnly": "bun run lint && bun run build && bun run typecheck && bun run sync:docs",
+    "release": "bun publish --access public"
+  },
+  "peerDependencies": {
+    "@providerkit/react": "^0.2.0",
+    "react": "^19",
+    "react-native": ">=0.86"
+  },
+  "peerDependenciesMeta": {
+    "react-native": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@providerkit/react": "workspace:*",
+    "react": "^19.2.8",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/providerkit/providerkit.git",
+    "directory": "native"
+  }
+}
