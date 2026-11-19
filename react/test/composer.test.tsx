@@ -4,14 +4,25 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentItem, AttachmentUploader } from "../src/attachments.ts";
-import type { AttachmentRef, SendResult } from "../src/client.ts";
+import {
+  createChatClient,
+  TransportError,
+  type AttachmentRef,
+  type ChatTransport,
+  type SendResult,
+} from "../src/client.ts";
 import {
   createComposer,
   useComposer,
   type ComposerOptions,
   type ComposerValue,
 } from "../src/composer.ts";
-import { createStoredDraft, type DraftScope, type DraftStorage } from "../src/drafts.ts";
+import {
+  createStoredDraft,
+  type DraftScope,
+  type DraftStorage,
+  type StoredSend,
+} from "../src/drafts.ts";
 import { Composer, type ComposerProps } from "../src/ui/composer.tsx";
 import { AttachmentList } from "../src/ui/attachments.tsx";
 
@@ -179,6 +190,48 @@ describe("composer send revisions", () => {
     reply.resolve(accepted);
     await sending;
     expect(composer.getState().text).toBe("First");
+  });
+
+  it("keeps the words while a saved message is unconfirmed, so a refused retry loses nothing", async () => {
+    // With pendingSend the message also waits in the conversation, saved for a reload. When the
+    // host then refuses its retry, it leaves the conversation, and the words are still here.
+    let saved: StoredSend | null = null;
+    const send = vi
+      .fn<NonNullable<ChatTransport["send"]>>()
+      .mockRejectedValueOnce(new Error("Lost reply"))
+      .mockRejectedValueOnce(
+        new TransportError("refused", { code: "closed", message: "This chat is closed." }),
+      );
+    const chat = createChatClient({
+      transport: { send },
+      pendingSend: {
+        storage: {
+          load: async () => saved,
+          save: async (_scope, value) => {
+            saved = value;
+          },
+        },
+        scope,
+        retentionMs: 60_000,
+      },
+    });
+    const composer = createComposer({
+      scope,
+      send: chat.send,
+      initialText: "Hello",
+      initialAttachments: [reference],
+    });
+    const words = { text: "Hello", attachments: [{ state: "ready", reference }] };
+    const result = await composer.submit();
+    expect(result).toMatchObject({ ok: true, outcome: "unknown" });
+    expect(composer.getState()).toMatchObject({ ...words, error: { code: "unconfirmed" } });
+    if (!result?.ok) throw new Error("An unknown outcome keeps the message.");
+    expect(await chat.retry(result.messageId)).toMatchObject({
+      ok: false,
+      error: { code: "closed" },
+    });
+    expect(chat.getState().messages).toEqual([]);
+    expect(composer.getState()).toMatchObject(words);
   });
 });
 

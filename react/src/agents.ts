@@ -20,6 +20,7 @@ import type {
   InputReceipt,
   RunInput,
   RESULT_TOOL_NAME,
+  RunSnapshot,
   TreeNode,
   StepExecution,
   StepKind,
@@ -27,7 +28,7 @@ import type {
   RunState,
   ToolResult,
 } from "@providerkit/agents";
-import { sameData } from "./state.ts";
+import { isRecord, sameData, type Cursor } from "./state.ts";
 import {
   PROTOCOL_VERSION,
   REMOTE_STATUS_UNKNOWN,
@@ -48,6 +49,7 @@ import {
   type RunInfo,
   type RunStatus,
   type TextPart,
+  type ThinkingPart,
   type ToolPart,
   type ToolState,
 } from "./protocol.ts";
@@ -121,6 +123,14 @@ export type TextSource =
   | { root: true; runId: string }
   | { root: false; runId: string; agentId: string; handoff: boolean };
 
+/** Where an agent event sits in the host's log, and when the host recorded it. */
+export interface EventMeta extends Pick<ChatEnvelope, "seq" | "segment"> {
+  /** Epoch milliseconds, from the host's log. A thinking row takes when it started and how long
+   * it ran from these times, so a replay of the log draws the same numbers the live stream did.
+   * Without them the row says only that the model thought. */
+  at?: number;
+}
+
 export interface AgentProjectorOptions {
   /** The assistant message this run writes into. */
   messageId: string;
@@ -159,6 +169,11 @@ export interface AgentProjectorOptions {
   error?: (state: Extract<RunState, { status: "failed" | "limited" }>) => DisplayError;
   /** Which runs' model text is shown. Defaults to the root and its conversation handoffs only. */
   text?: (source: TextSource) => boolean;
+  /** Which runs' reasoning words are sent, on their thinking rows. Defaults to none. Reasoning can
+   * quote the instructions, a tool's output or private data, so by default a thinking row says
+   * only that the model thought and for how long. A run gets thinking rows only where `text`
+   * shows its text. */
+  reasoning?: (source: TextSource) => boolean;
   /** Viewer-safe text from saved steering input. Never copy raw history or media references. */
   input?: (
     input: RunInput,
@@ -187,7 +202,7 @@ export interface AgentProjector {
    * Sent first, the snapshot would be followed by older events, and a run waiting for a
    * decision would look like it was running again.
    */
-  event(event: AgentEvent, meta?: Pick<ChatEnvelope, "seq" | "segment">): ChatEvent[];
+  event(event: AgentEvent, meta?: EventMeta): ChatEvent[];
   /** Call for host RunEvent records agent.gap or agent.resync, then read the journal.
    * Text remains checkpoint-only for this projector after a gap. Never invent an attempt. */
   gap(meta?: Pick<ChatEnvelope, "seq" | "segment">): ChatEvent[];
@@ -266,6 +281,19 @@ function stepState(status: StepExecution["status"], ended: boolean): ToolState {
 
 function isOver(state: RunState): boolean {
   return state.status !== "running" && state.status !== "suspended";
+}
+
+/** A stretch of thinking open when the run reports this state did not end, it was cut: by a
+ * failure, a stop, a limit, or the run starting again after an interruption. A turn that
+ * finished or paused for an answer ended its thinking first. */
+function cutsThinking(state: RunState): boolean {
+  return state.status !== "completed" && state.status !== "suspended";
+}
+
+/** A model call's thinking row sits beside its text row, whose id is the call's operation id.
+ * SDK operation ids end in `/model/N`, `/tool/N` or `/child/key`, never in this. */
+function thinkingId(operationId: string): string {
+  return `${operationId}/thinking`;
 }
 
 /** A call to a tool the agent does not have, whose name is the model's own text. Only the result
@@ -383,7 +411,8 @@ function speakerOf(event: AgentEvent): string | undefined {
  * By default nothing private is sent: not the input, the instructions, reasoning, tool
  * arguments or results, a specialist's text, a tool name the model made up, a raw failure
  * message or an approval's actor and resource. A tool row is its label and state, a failure is
- * its code and a plain sentence, and the reserved `submit_result` call is never a row.
+ * its code and a plain sentence, a thinking row is when the model thought and for how long, and
+ * the reserved `submit_result` call is never a row.
  */
 export function createAgentProjector(options: AgentProjectorOptions): AgentProjector {
   const { messageId, runId: root } = options;
@@ -639,7 +668,12 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     }
   >();
   const textShown = new Map<string, boolean>();
+  const wordsShown = new Map<string, boolean>();
   const streaming = new Map<string, TextPart>();
+  // A run's thinking row while the model thinks, by run like `streaming`, and each model call's
+  // row as last sent, by row id, so a snapshot draws the same row with the same numbers.
+  const thinking = new Map<string, ThinkingPart>();
+  const thoughts = new Map<string, ThinkingPart>();
   // Progress can seal a turn before its checkpoint. Only the journal removes it from this map.
   const uncheckpointed = new Map<string, TextPart>();
   let checkpointOnly = false;
@@ -651,9 +685,32 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       text.incomplete = true;
       out.push({ v, type: "part", messageId, part: { ...text } });
     }
+    // The missing progress may hold where a stretch of thinking ended, so its length is unknown.
+    for (const runId of [...thinking.keys()])
+      closeThinking(runId, undefined, true, (part) =>
+        out.push({ v, type: "part", messageId, part }),
+      );
     const last = out.at(-1);
     if (last) out[out.length - 1] = { ...last, ...meta };
     return out;
+  }
+
+  /** Ends a run's stretch of thinking at `at`. A stretch that a failure, a stop, a restart or
+   * missing progress cut short keeps no length: it did not end, the turn did, so the number would
+   * measure the failure and not the thinking. */
+  function closeThinking(
+    runId: string,
+    at: number | undefined,
+    cut: boolean,
+    part: (value: DisplayPart) => void,
+  ): void {
+    const row = thinking.get(runId);
+    if (!row) return;
+    thinking.delete(runId);
+    row.settled = true;
+    if (!cut && row.startedAt !== undefined && at !== undefined)
+      row.durationMs = Math.max(0, at - row.startedAt);
+    part({ ...row });
   }
   const running = new Map<string, { runId: string; part: ToolPart }>();
   const closedCalls = new Set<string>();
@@ -723,23 +780,38 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     attemptOf(operationId, attemptId, undefined, Math.max(1, number));
   }
 
+  function sourceOf(runId: string): TextSource {
+    const specialist = specialists.get(runId);
+    return specialist
+      ? {
+          root: false,
+          runId,
+          agentId: specialist.definitionId,
+          handoff: conversationRuns.has(runId),
+        }
+      : { root: true, runId };
+  }
+
   function shows(runId: string): boolean {
     let shown = textShown.get(runId);
     if (shown === undefined) {
       const specialist = specialists.get(runId);
       if (specialist?.kind === "workflow" || (runId === root && rootWorkflowId !== undefined))
         return false;
-      shown = showsText(
-        specialist
-          ? {
-              root: false,
-              runId,
-              agentId: specialist.definitionId,
-              handoff: conversationRuns.has(runId),
-            }
-          : { root: true, runId },
-      );
+      shown = showsText(sourceOf(runId));
       textShown.set(runId, shown);
+    }
+    return shown;
+  }
+
+  /** Whether a run's thinking rows carry its reasoning words. Only where its text shows, and only
+   * when the host said yes in so many words. */
+  function showsWords(runId: string): boolean {
+    if (!options.reasoning || !shows(runId)) return false;
+    let shown = wordsShown.get(runId);
+    if (shown === undefined) {
+      shown = options.reasoning(sourceOf(runId)) === true;
+      wordsShown.set(runId, shown);
     }
     return shown;
   }
@@ -773,6 +845,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       running.delete(id);
       part({ ...entry.part, state: "failed" });
     }
+    for (const runId of [...thinking.keys()])
+      if (within(runId, ended)) closeThinking(runId, undefined, true, part);
     for (const [runId, specialist] of specialists) {
       if (runId === ended || specialist.over || !within(runId, ended)) continue;
       specialist.over = true;
@@ -819,19 +893,26 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     }
   }
 
-  function event(
-    agentEvent: AgentEvent,
-    meta: Pick<ChatEnvelope, "seq" | "segment"> = {},
-  ): ChatEvent[] {
-    const { seq, segment } = meta;
+  function event(agentEvent: AgentEvent, meta: EventMeta = {}): ChatEvent[] {
+    const { seq, segment, at } = meta;
     // A number the client refuses would drop every event silently, so it fails here instead.
     if (seq !== undefined && !(Number.isSafeInteger(seq) && seq >= 0))
       throw new TypeError("A sequence number is a whole number, 0 or more.");
     if (segment !== undefined && (typeof segment !== "string" || !segment))
       throw new TypeError("A segment is a non-empty string.");
+    if (at !== undefined && !Number.isFinite(at))
+      throw new TypeError("A time is a finite number of epoch milliseconds.");
     if (agentEvent.type === "input") {
       if (agentEvent.receipt.rootRunId !== root) return [];
-      return [{ v, type: "input", input: projectInputReceipt(agentEvent.receipt), ...meta }];
+      return [
+        {
+          v,
+          type: "input",
+          input: projectInputReceipt(agentEvent.receipt),
+          ...(seq !== undefined && { seq }),
+          ...(segment !== undefined && { segment }),
+        },
+      ];
     }
     const decidedRequest =
       agentEvent.type === "decision" ? requests.get(agentEvent.requestId)?.request : undefined;
@@ -939,6 +1020,18 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       open.settled = true;
       part({ ...open });
     }
+    // So does its stretch of thinking. Another attempt of the call, a restart or a failure cuts it
+    // short instead.
+    const thought = thinking.get(speaker);
+    const sameCall =
+      agentEvent.type === "model_chunk" &&
+      thought?.id === thinkingId(agentEvent.operationId) &&
+      (thought.attempt ?? 1) === attempt;
+    const cut =
+      agentEvent.type === "model_chunk" ||
+      agentEvent.type === "operation_restart" ||
+      (agentEvent.type === "state" && cutsThinking(agentEvent.state));
+    if (thought && !sameCall) closeThinking(speaker, at, cut, part);
 
     switch (agentEvent.type) {
       case "remote_status": {
@@ -1008,6 +1101,54 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
             ? (agentEvent.chunk.content ?? "")
             : "";
         if (!shows(speaker)) break;
+        if (agentEvent.type === "model_chunk") {
+          const { chunk } = agentEvent;
+          const id = thinkingId(agentEvent.operationId);
+          const number = attempt ?? 1;
+          if (chunk.reasoning) {
+            const stretch = thinking.get(speaker);
+            const held = thoughts.get(id);
+            // The check above closed any other call's row, so an open one is this call's.
+            if (stretch) {
+              if (stretch.text !== undefined && !checkpointOnly) {
+                stretch.text += chunk.reasoning;
+                out.push({
+                  v,
+                  type: "text",
+                  messageId,
+                  partId: id,
+                  delta: chunk.reasoning,
+                  ...(number > 1 && { attempt: number }),
+                });
+              }
+              // ponytail: one row per call attempt, so thinking that resumes after the answer
+              // began shows no second row, and its words arrive with the saved turn. Give the
+              // row an ordinal if a model is ever seen doing that.
+            } else if (!held || (held.attempt ?? 1) < number) {
+              const owner = ownerOf(speaker);
+              const row: ThinkingPart = {
+                type: "thinking",
+                id,
+                settled: false,
+                ...(at !== undefined && { startedAt: at }),
+                ...(showsWords(speaker) && { text: checkpointOnly ? "" : chunk.reasoning }),
+                ...(number > 1 && { attempt: number }),
+                ...(owner !== undefined && { agentId: owner }),
+              };
+              thinking.set(speaker, row);
+              thoughts.set(id, row);
+              part({ ...row });
+            }
+          }
+          // Anything the reader sees, or the call's own end, ends the stretch.
+          if (
+            chunk.content ||
+            chunk.toolCalls?.length ||
+            chunk.hosted?.length ||
+            chunk.type === "finish"
+          )
+            closeThinking(speaker, at, false, part);
+        }
         const current = streaming.get(speaker);
         if (
           current &&
@@ -1144,6 +1285,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           toolId: operationId,
         });
         textShown.delete(childRunId);
+        wordsShown.delete(childRunId);
         part(agentPart(childRunId, to.id, ownerOf(speaker), "running"));
         out.push({ v, type: "run", run: { id: root, status, messageId, owner: owner() } });
         break;
@@ -1196,6 +1338,8 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           part({ ...text });
         }
         streaming.clear();
+        // The root's own row closed above. A specialist still thinking now did not finish.
+        for (const runId of [...thinking.keys()]) closeThinking(runId, at, true, part);
         if (state.status === "running") {
           if (status !== "running") {
             status = "running";
@@ -1224,6 +1368,43 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     return out;
   }
 
+  /** The thinking row a saved model call shows: the row the live stream drew for it, with the
+   * save's words when they are shown, or else a row from the save alone, which has no times to
+   * give. A stretch the save shows is over closes here, short of a length, so no client keeps
+   * showing it as still thinking. */
+  function savedThought(
+    runId: string,
+    model: RunSnapshot["models"][number],
+    attempt: number,
+    ended: boolean,
+    owner: string | undefined,
+    words: boolean,
+  ): ThinkingPart | undefined {
+    const id = thinkingId(model.id);
+    const thought = thoughts.get(id);
+    const current = thought !== undefined && (thought.attempt ?? 1) === attempt;
+    if (
+      thought &&
+      thinking.get(runId) === thought &&
+      (!current || ended || model.status === "completed")
+    ) {
+      thinking.delete(runId);
+      thought.settled = true;
+    }
+    const reasoning = model.status === "completed" ? model.turn.message.reasoning : undefined;
+    let row = thought && { ...thought };
+    if (reasoning && !current)
+      row = {
+        type: "thinking",
+        id,
+        settled: true,
+        ...(attempt > 1 && { attempt }),
+        ...(owner !== undefined && { agentId: owner }),
+      };
+    if (row && words && reasoning !== undefined) row.text = reasoning;
+    return row;
+  }
+
   /** The tree in reading order: each model turn's text, then its calls, and a delegation's
    * specialists right after the call that started them, each followed by its own rows. Live
    * rows arrive in the order things happened, so two specialists that ran at once interleave
@@ -1237,6 +1418,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
     conversationRuns.clear();
     conversationRuns.add(root);
     textShown.clear();
+    wordsShown.clear();
     const parts: DisplayPart[] = [];
     status = STATUS[saved.state.status];
     announced = true;
@@ -1384,7 +1566,7 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       old.delete(node.attemptId);
       runAttempts.set(node.runId, { current: node.attemptId, old });
       if (ended) endedRuns.add(node.runId);
-      const shown = showsText(
+      const source: TextSource =
         owner === undefined
           ? { root: true, runId: node.runId }
           : {
@@ -1392,8 +1574,9 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
               runId: node.runId,
               agentId: node.agentId,
               handoff: conversationRuns.has(node.runId),
-            },
-      );
+            };
+      const shown = showsText(source);
+      const words = shown && options.reasoning?.(source) === true;
       for (const model of node.models) {
         const attempt = model.interrupted.length + 1;
         operations.set(model.id, {
@@ -1402,6 +1585,9 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
           old: new Set(model.interrupted.map((item) => item.attemptId)),
           completed: model.status === "completed" || ended,
         });
+        const thought = savedThought(node.runId, model, attempt, ended, owner, words);
+        // Above the text it came before.
+        if (shown && thought) parts.push(thought);
         if (model.status === "running") {
           // Even empty text names the saved attempt, replacing partial output from an old one.
           if (shown && (attempt > 1 || checkpointOnly)) {
@@ -1575,4 +1761,126 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       };
     },
   });
+}
+
+/** One progress record of a stored run, as the SDK's background `observe` hands it out. */
+export interface RunRecord {
+  seq: number;
+  type: string;
+  data: unknown;
+  /** When the host stored it. `@gusnips/server/runs` gives a `Date`. */
+  at?: Date | number;
+}
+
+/** One stored row of a run, whose `id` numbers its records: a display event's `segment`. */
+export interface RunSegment {
+  id: string;
+  /** Every record of the row from its first, like `background.observe(owner, id, 0, signal)`. */
+  records: AsyncIterable<RunRecord>;
+}
+
+export interface FollowRunOptions {
+  /** A fresh projector is made from these for each viewer, because only one that saw the log
+   * from the run's first record draws the rows after the viewer's cursor as the live stream did. */
+  projector: AgentProjectorOptions;
+  /** The run's rows in order: the first, then one for each approval that continued it. Only the
+   * last can still grow. */
+  segments: readonly RunSegment[];
+  /** The viewer's cursor. Without one, or with one from another run, the viewer gets the run from
+   * its start, opening with a snapshot of the conversation. */
+  cursor?: Cursor;
+  /** The saved run, read after a gap in the log and when the last row ends. It holds private
+   * journals: check that this viewer may see the run before calling `followRun`. */
+  read: () => Promise<TreeNode>;
+  /** The whole conversation for a snapshot: the host's own messages with `reply`, this run's
+   * message as the projector draws it, in its place. A snapshot replaces the whole list. */
+  conversation: (
+    reply: DisplayMessage,
+  ) => readonly DisplayMessage[] | Promise<readonly DisplayMessage[]>;
+}
+
+/** The SDK's own progress sink wrote this into the host's log; a browser never did. Only the type
+ * is checked, because the projector skips a type it does not know. */
+function isAgentEvent(value: unknown): value is AgentEvent {
+  return isRecord(value) && typeof value.type === "string";
+}
+
+/**
+ * The display events for one viewer of a stored run: what the live stream would have sent after
+ * the viewer's cursor, then the saved run once the log ends.
+ *
+ * It replays the run's log from its first record through a fresh projector and sends only what
+ * comes after the cursor. At a gap in the log it sends the projector's marker, then a snapshot of
+ * the saved run read then, while that run is still going in the last row. When the last row ends
+ * it sends that snapshot again, with the final state. A viewer already past the end still gets it,
+ * unnumbered, so its client knows the host answered.
+ *
+ * ```ts
+ * for await (const event of followRun({ projector, segments, cursor, read, conversation }))
+ *   write(`data: ${JSON.stringify(event)}\n\n`);
+ * ```
+ */
+export async function* followRun(options: FollowRunOptions): AsyncGenerator<ChatEvent> {
+  const { segments, cursor, read, conversation } = options;
+  const first = segments[0];
+  if (!first || segments.some((segment) => typeof segment.id !== "string" || !segment.id))
+    throw new TypeError("Give followRun the run's rows, each with its id.");
+  const projector = createAgentProjector(options.projector);
+  const { messageId, runId } = options.projector;
+  const reached = cursor ? segments.findIndex((segment) => segment.id === cursor.segment) : -1;
+  const last = segments.length - 1;
+
+  async function snapshot(
+    reply: DisplayMessage,
+    run: RunInfo,
+    inputs?: readonly DisplayInput[],
+  ): Promise<ChatEvent> {
+    const messages = await conversation(reply);
+    return { v: PROTOCOL_VERSION, type: "snapshot", messages, run, ...(inputs && { inputs }) };
+  }
+
+  function saved(tree: TreeNode): Promise<ChatEvent> {
+    return snapshot(projector.snapshot(tree), projector.run(tree), projector.inputs(tree));
+  }
+
+  // A new viewer has nothing on screen to lose, so it opens with the conversation around an empty
+  // reply. Numbered 0 in the first row, so a viewer that already has it does not take it again.
+  if (reached < 0)
+    yield {
+      ...(await snapshot(
+        { id: messageId, role: "assistant", parts: [], state: "live" },
+        { id: runId, status: "running", messageId },
+      )),
+      segment: first.id,
+      seq: 0,
+    };
+  for (const [index, segment] of segments.entries()) {
+    for await (const record of segment.records) {
+      const where = { segment: segment.id, seq: record.seq };
+      const unseen = index > reached || (index === reached && record.seq > (cursor?.seq ?? 0));
+      if (record.type === "agent" && isAgentEvent(record.data)) {
+        const at = record.at instanceof Date ? record.at.getTime() : record.at;
+        const out = projector.event(record.data, { ...where, ...(at !== undefined && { at }) });
+        if (unseen) yield* out;
+      } else if (record.type === "agent.gap" || record.type === "agent.resync") {
+        const marker = projector.gap();
+        if (!unseen) continue;
+        yield* marker;
+        // The log is fed before the journal is read, never after, or older progress lands on a
+        // newer save: a waiting run would show as running again. A gap the viewer passed, or one in
+        // a row the run moved on from, is replayed without a read, and a save that already paused
+        // or ended the run waits for the end, because every record left is older than it.
+        // ponytail: rows a gap hid can then stay as the viewer last saw them until a later gap or
+        // the end, and a running save read at a gap far back in the log can still be ahead of the
+        // records after it. A log position on each save would end both.
+        if (index < last) continue;
+        const tree = await read();
+        if (tree.state.status === "running") yield { ...(await saved(tree)), ...where };
+      } else if (record.type === "end" && index === last) {
+        const final = await saved(await read());
+        yield unseen ? { ...final, ...where } : final;
+        return;
+      }
+    }
+  }
 }

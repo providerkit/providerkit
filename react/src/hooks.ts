@@ -31,6 +31,7 @@ export interface ChatValue extends ChatState {
   scopeKey?: string;
   send: ChatClient["send"];
   retry: ChatClient["retry"];
+  discard: ChatClient["discard"];
   startClientTool: ChatClient["startClientTool"];
   recallInput: ChatClient["recallInput"];
   stop: ChatClient["stop"];
@@ -39,7 +40,7 @@ export interface ChatValue extends ChatState {
 }
 
 /** The same state without what belongs to sending: a panel that watches a run never writes in it. */
-export interface AgentRunValue extends Omit<ChatState, "canSend" | "messageErrors"> {
+export interface AgentRunValue extends Omit<ChatState, "canSend" | "canRetry" | "messageErrors"> {
   scopeKey?: string;
   stop: ChatClient["stop"];
   respond: ChatClient["respond"];
@@ -94,6 +95,7 @@ function useClient(options: UseChatOptions): ChatClient {
       send: async (input: Parameters<ChatClient["send"]>[0]) =>
         committed.current === client ? client.send(input) : unavailable,
       retry: async (id: string) => (committed.current === client ? client.retry(id) : unavailable),
+      discard: (id: string) => (committed.current === client ? client.discard(id) : unavailable),
       recallInput: async (id: string) =>
         committed.current === client ? client.recallInput(id) : unavailable,
       stop: async () => (committed.current === client ? client.stop() : unavailable),
@@ -125,6 +127,7 @@ export function useChat(options: UseChatOptions): ChatValue {
       scopeKey: options.id,
       send: client.send,
       retry: client.retry,
+      discard: client.discard,
       startClientTool: client.startClientTool,
       recallInput: client.recallInput,
       stop: client.stop,
@@ -144,7 +147,12 @@ export function useAgentRun(options: UseAgentRunOptions): AgentRunValue {
   const client = useClient(options);
   const state = useClientState(client);
   return useMemo(() => {
-    const { canSend: _canSend, messageErrors: _messageErrors, ...rest } = state;
+    const {
+      canSend: _canSend,
+      canRetry: _canRetry,
+      messageErrors: _messageErrors,
+      ...rest
+    } = state;
     return {
       ...rest,
       scopeKey: options.id,

@@ -43,7 +43,7 @@ SDK contracts but does not execute agents, authenticate a request or own a route
 
 By default, the viewer sees text from the root and from the agent that takes over the conversation in a handoff. Text from other specialists is hidden. Set `text: (source) => source.root` to show only root text, or `text: () => false` to show none. The filter applies to live events and saved runs.
 
-Tool arguments and results, reasoning, code logs and raw failure messages stay private. Host callbacks select safe tool details, requests, structured output and other display parts. Do not spread a raw snapshot into JSON.
+Tool arguments and results, reasoning words, code logs and raw failure messages stay private. A thinking part says only that the model thought and for how long, unless the `reasoning` option names runs whose words a viewer may read. Host callbacks select safe tool details, requests, structured output and other display parts. Do not spread a raw snapshot into JSON.
 
 Workflow steps remain steps. Code calls retain `parentOperationId`, and remote nodes retain their
 registered identity and last peer state. A local stop yields an unknown remote outcome when the
@@ -53,7 +53,9 @@ peer has not confirmed completion. A wake time is display data, not permission t
 
 Mounted clients resume after their cursor. A fresh projector can rebuild from retained events,
 then reconcile with a saved snapshot. The SDK does not provide an atomic snapshot-plus-tail
-watermark. A host that only polls can send snapshots without patches.
+watermark. A host that only polls can send snapshots without patches. For a stored background
+run, `followRun` on `/agents` replays the log through a fresh projector and sends what comes after
+the viewer's cursor.
 
 End of stream is not success. Keep received output and offer a reconnect when it can work.
 [Recovery and drafts](/react/recovery/) explains gaps, unconfirmed commands and local state.

@@ -97,6 +97,11 @@ A run can keep working while its connection is lost. `chat.run.status` describes
   `outcome: "accepted" | "unknown"`; a custom composer clears its submitted draft only when
   `result.ok && result.outcome === "accepted"`. `ok` alone means the message remains in the view,
   not that the server confirmed it.
+- Show Retry on an unconfirmed message only while `chat.canRetry` is true. It is false while a run
+  is going, even when you can still steer the run with `enqueue`: sent again into a running run,
+  the message could ask for the same work twice. It is also false until your server says where the
+  run stands, because the lost reply may have started one. Offer Remove beside Retry too:
+  `chat.discard(messageId)` takes the message out without sending it.
 
 For a read-only screen, use `useAgentRun({ id, transport })`. It observes the same display events
 without exposing a send action.
@@ -104,6 +109,66 @@ without exposing a send action.
 A transport can use SSE, a message port or an app-specific connection. Keep commands that start or
 change work separate from observation. `createChatClient` exposes the same state without React
 hooks; call `attach()` to observe and call the returned function to detach.
+
+### Keep an unconfirmed message across a reload
+
+By default an unconfirmed message lives only in memory. After a reload it is gone, and the person
+can only type it again as a new message, which your server cannot tell from the first one. Give
+the client your storage to keep it:
+
+```ts
+const chat = useChat({ id, transport, pendingSend: { storage, scope, retentionMs: 86_400_000 } });
+```
+
+The client saves each message before it goes out. If the reply is lost and the page reloads, the
+message comes back as unconfirmed, and `chat.retry(messageId)` sends that same message again with
+the same `clientId`. Nothing sends it on its own. The saved copy goes once your server takes the
+message, refuses it, or sends back its own copy with the `clientId`. Echo that id on your copy, or
+the client cannot tell the message arrived.
+
+It keeps one message at a time. While one is unconfirmed, `canSend` is false and a new send is
+refused, because two could not both be sent again safely after another reload. The person can send
+it again with Retry, or drop it with `chat.discard(messageId)` if it keeps failing. If the copy
+cannot be saved, the send is refused before it goes out, and its words come back in the result. A
+Stop pressed while the copy saves keeps the message from going out, and its words come back the
+same way.
+
+The composer keeps the words of an unconfirmed message, as it does without `pendingSend`. So when
+your server refuses a retry, or the person drops the message, the words are still there to edit.
+Give the composer draft storage too, so they also come back after a reload.
+
+`storage` has two functions, and `scope` names the person and the conversation, as in drafts:
+
+```ts
+import { draftScopeKey, type PendingSendStorage } from "@providerkit/react";
+
+const storage: PendingSendStorage = {
+  async load(scope) {
+    const saved = sessionStorage.getItem(`unsent:${draftScopeKey(scope)}`);
+    return saved ? JSON.parse(saved) : null;
+  },
+  async save(scope, value) {
+    const key = `unsent:${draftScopeKey(scope)}`;
+    if (value) sessionStorage.setItem(key, JSON.stringify(value));
+    else sessionStorage.removeItem(key);
+  },
+};
+```
+
+The client reads it on the first attach or send, never while a server renders. Steering input sent
+with `enqueue` is not kept.
+
+### Resume where the server rendered the conversation
+
+When the server renders a transcript into `initialMessages`, pass its place in your log too:
+
+```ts
+const chat = useChat({ id, transport, initialMessages, initialCursor: { segment, seq } });
+```
+
+The first observation then resumes after that place. Without it, the first observation asks for the
+log from the start, which for a long conversation is its whole history. Your server still answers
+that observation with the run's state, even when nothing else is new.
 
 ## Display events
 
@@ -116,7 +181,8 @@ data. The SSE parser does not expose `id:` fields, so an SSE ID alone is not eno
 
 `parseChatEvent` validates a received value. `reduceChat` applies a valid event, drops duplicate
 sequence numbers and keeps settled output from becoming live again. Use a new segment when a
-continuation creates a new physical run; do not reuse the old segment's cursor.
+continuation creates a new physical run; do not reuse the old segment's cursor. A `text` event
+appends to a text part, or to a thinking part that came with words.
 
 A snapshot reconciles saved messages with live output. It is not proof that every streamed token
 was stored. A closed stream is not proof that the agent finished.
@@ -138,17 +204,19 @@ Allocate `assistantMessageId` once when the run starts and keep it with the conv
 logical agent run ID stays the same across approval continuations; the physical segment ID can
 change.
 
-Feed the projector the agent events in their recorded order. Pass `{ segment, seq }` to
-`projector.event` for their location in the host's log. One agent event can produce several
-display events; keep their order, including the unnumbered events before the last numbered one.
+Feed the projector the agent events in their recorded order. Pass `{ segment, seq, at }` to
+`projector.event`: where the event sits in the host's log, and when the log recorded it, in epoch
+milliseconds. One agent event can produce several display events; keep their order, including
+the unnumbered events before the last numbered one.
 
 To restore an observer after its cursor, feed a fresh projector the retained log from its start
 and send only the output for entries after the cursor. For a fresh observer, send the retained
 log, then an authoritative snapshot read after that log, then new events. Sending the snapshot
 first and replaying older progress into it can make a waiting run appear active again.
+`followRun` does this for a stored run ([Follow a background run](#follow-a-background-run)).
 
-The projector hides the run input, reasoning, specialist text, tool arguments and results, raw
-failure messages and approval scope by default. Host callbacks opt specific display data in.
+The projector hides the run input, reasoning words, specialist text, tool arguments and results,
+raw failure messages and approval scope by default. Host callbacks opt specific display data in.
 Those callbacks must check what the current viewer may see. Rendering policy never replaces
 server authorization.
 
@@ -158,6 +226,34 @@ result supplied through that callback can become text or a host-rendered data ca
 
 The host's conversation store remains the source of the person's messages. A run input can hold
 private context and must not become a user message on screen.
+
+### Show that the model is thinking
+
+When a model reasons before it answers, the projector sends a thinking part:
+
+```ts
+{ type: "thinking", id: "run/model/1/thinking", settled: true, startedAt: 1_000, durationMs: 2_100 }
+```
+
+It opens at the call's first reasoning chunk and settles at the first thing the reader sees: text,
+a tool call, or the call's end. Its times come from the `at` you pass with each event, so a replay
+of your log draws the same numbers the live stream did. Without `at`, the part says only that the
+model thought. Use `durationMs` for the length, not `Date.now() - startedAt`: the device's clock
+can differ from your server's. When a failure, a stop, a restart or a gap cut the thinking short,
+the part settles without a length, because the number would measure the failure.
+
+The words stay on the server. Reasoning can quote your instructions, a tool's output or private
+data. To send them to a viewer who may read them, name the runs:
+
+```ts
+const projector = createAgentProjector({ messageId, runId, reasoning: (source) => source.root });
+```
+
+Then the part carries `text`, which streams like a text part's. A run gets thinking parts only
+where `text` shows its answer, so a hidden specialist shows none.
+
+The `/ui` components draw nothing for a thinking part yet. Draw your own row with `renderPart`.
+Show whole seconds, never fewer than 1: rounded alone, a length under half a second reads 0.
 
 ## Show workflow steps
 
@@ -435,6 +531,41 @@ must show it too. This does not start an attempt, change a segment or discard a 
 
 The example's missing-progress switch tests this boundary with a synthetic omission. It does not
 exercise PostgreSQL. Checkpoints recover completed work, not every partial token lost in a crash.
+
+### Follow a background run
+
+`followRun` turns a stored run's log into the display events one viewer needs:
+
+```ts
+import { followRun } from "@providerkit/react/agents";
+
+for await (const event of followRun({ projector, segments, cursor, read, conversation }))
+  response.write(`data: ${JSON.stringify(event)}\n\n`);
+```
+
+- `projector`: the options for `createAgentProjector`. The helper makes a fresh projector for each
+  viewer, because only one that saw the log from its first record draws the rows after the
+  viewer's cursor as the live stream did.
+- `segments`: the run's stored rows in order, the first and then one for each approval that
+  continued it. Each is `{ id, records }`, with `records` from `background.observe(owner, id, 0,
+  signal)`. Only the last row can still grow.
+- `cursor`: the cursor the viewer sent, or nothing for a new viewer.
+- `read`: returns the saved run, `(await background.read(owner, id)).snapshot`. Check that the
+  viewer may see the run first: this is where the private journal is read.
+- `conversation`: returns the whole message list for a snapshot, your own messages with the
+  projected reply in its place. A snapshot replaces the whole list.
+
+A new viewer first gets a snapshot of the conversation around an empty reply, numbered 0. Then
+each record after the cursor goes through the projector, with its stored time as `at`. At a gap
+or resync the viewer gets the marker and, while the run is still going in its last row, a snapshot
+of the saved run. When the last row ends, it gets the final snapshot. A viewer already past the end
+still gets that snapshot, unnumbered, so its client knows your server answered.
+
+The log must be fed before the saved run is read, never after: a save is where the run is now, and
+older records sent after it can show a waiting run as running again. So a gap the viewer already
+passed, or one in a row the run has moved on from, is replayed without a read. A save read at a
+gap that already shows the run waiting or ended is not sent there either: the final snapshot
+brings it. Rows that a gap hid can stay as the viewer last saw them until the next gap or the end.
 
 ## Show who answers after a handoff
 
