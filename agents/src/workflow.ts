@@ -40,6 +40,7 @@ import {
 import { readWorkflowLimits, stepData, stepId } from "./workflow-snapshot.ts";
 import {
   authorizeTree,
+  checkPricing,
   emitEvent,
   ExecutionTree,
   fail,
@@ -1255,6 +1256,7 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
       const snapshot = runtime.restore(raw);
       const prepared = { ...options, memory: readMemoryBinding(options.memory) };
       checkMemoryBinding(snapshot, prepared.memory);
+      checkPricing(snapshot, options.host);
       const answers = readAnswers(snapshot, options.answers ?? {});
       await authorizeTree(snapshot, options.host);
       snapshot.attemptId = crypto.randomUUID();

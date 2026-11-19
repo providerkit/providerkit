@@ -65,6 +65,14 @@ export interface RunLimits {
    * snapshot holds them, and every checkpoint writes the whole snapshot again, so large files
    * belong behind a MediaRef. Zero accepts media references only. */
   inlineBytes: number;
+  /** USD this run may spend: its own model calls, compaction summaries included, and those of
+   * every agent it starts (helpers, specialists, handoff targets). `host.priceModelCall` prices
+   * each call when its usage arrives, and the journal keeps that price. Once the known cost
+   * reaches the limit, no new call starts in the run or under it, and the run ends `limited`
+   * with `costUsd`. It limits starting calls, not the bill: calls already running when the
+   * limit is reached, such as parallel helpers, can finish above it. A call that never reported
+   * usage adds nothing. Absent means no limit. */
+  costUsd?: number;
 }
 
 /** Bytes the host keeps under an id. The SDK stores only the reference and asks
@@ -586,6 +594,20 @@ export interface AgentHost {
     ref: MediaRef,
     run: { runId: string; signal: AbortSignal },
   ) => string | Promise<string>;
+  /** USD for one model call's usage, from the host's own rates: no price table ships here, and
+   * core's `costUsd(usage, rate)` does the arithmetic. Required by `limits.costUsd`. Called
+   * when usage arrives and when the call completes, then saved in the journal, so a resumed
+   * run never prices a saved call again, even when the host's prices change by time of day.
+   * Synchronous; return a finite amount of 0 or more. */
+  priceModelCall?: (call: MeasuredModelCall) => number;
+}
+
+/** One model call's usage and the endpoint that served it: the turn's source when a fallback
+ * named it, otherwise the agent's provider. */
+export interface MeasuredModelCall {
+  usage: TokenUsage;
+  provider: string;
+  model: string;
 }
 
 export interface RunOptions {
@@ -645,7 +667,8 @@ export type LimitReason =
   | "maxDepth"
   | "modelCalls"
   | "steps"
-  | "treeElapsedMs";
+  | "treeElapsedMs"
+  | "costUsd";
 
 export type RunState =
   | { status: "running" }
@@ -690,6 +713,8 @@ export interface InterruptedAttempt {
 /** Last measured usage, not a final bill. An interrupted call may have cost more. */
 export interface InterruptedModelAttempt extends InterruptedAttempt {
   usage: TokenUsage;
+  /** The host's price for that usage, kept from the attempt. Never priced again. */
+  costUsd?: number;
 }
 
 /** Private inner-call journal. IDs increase across program restarts; old calls never replay. */
@@ -735,6 +760,9 @@ export type ToolExecution = {
 export type ModelExecution = {
   interrupted: InterruptedModelAttempt[];
   billing: "unknown" | "reported";
+  /** What `host.priceModelCall` returned for this attempt's usage when it arrived. Absent
+   * without a price function or before any usage. */
+  costUsd?: number;
 } & (
   | { id: string; attemptId: string; status: "running"; usage: TokenUsage }
   | {
@@ -819,6 +847,8 @@ export type OperationReceipt =
       /** reported means a stream with usage ended, not that the SDK verified the vendor's bill. */
       billing: "unknown" | "reported";
       usage: TokenUsage;
+      /** The host's price for this usage, saved when it arrived. */
+      costUsd?: number;
       source?: Turn["source"];
     }
   | {

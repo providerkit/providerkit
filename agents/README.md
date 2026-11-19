@@ -165,7 +165,7 @@ already finished is reused and sends nothing.
 | `completed` | The answer passed the configured result validator.                         |
 | `suspended` | An approval, question or client tool needs a reply.                        |
 | `cancelled` | The caller stopped the run. Cancellation does not undo an external action. |
-| `limited`   | A turn, tool-call, time or provider output limit stopped the run.          |
+| `limited`   | A turn, tool-call, time, cost or provider output limit stopped the run.    |
 | `failed`    | Execution could not continue. Read `error.code` and `error.message`.       |
 
 Reasoning without an answer is not success. A provider's length-limited answer is not accepted as
@@ -1735,9 +1735,46 @@ Resuming does not reset the deadline or give the tree a fresh call budget.
 `usage` describes the current agent's model calls. `treeUsage` includes registered descendants
 without counting recorded work twice. Only model usage reported by providers is known; an
 interrupted call may have cost more than its last report. Ordinary tools' external service charges
-are not included. Prices and billing stay with the host, and these counters are not an exact
-spending cap. Use SDK delegation rather than calling another model directly inside an ordinary
-tool when that work must share the tree's limits and usage.
+are not included. Prices and billing stay with the host, and these counters are not a bill. Use
+SDK delegation rather than calling another model directly inside an ordinary tool when that work
+must share the tree's limits and usage.
+
+### Cost limit
+
+`limits.costUsd` stops a run once its known spend reaches an amount in US dollars. No prices ship
+in this package: your host prices each call with `priceModelCall`, and core's `costUsd` does the
+arithmetic.
+
+```ts
+import { costUsd } from "@providerkit/core";
+
+// Your own price sheet, in USD per million tokens.
+const rate = { input: 0.3, output: 1.2, cacheRead: 0.03 };
+const analyst = defineAgent({ ...config, limits: { costUsd: 1.5 } });
+
+const outcome = await analyst.run("Compare the two notices.", {
+  host: { priceModelCall: ({ usage }) => costUsd(usage, rate) },
+});
+// Once $1.50 is spent: outcome.status is "limited" and outcome.limit is "costUsd".
+```
+
+The limit covers the run's own calls, its compaction summaries and every agent it starts:
+helpers, specialists and handoff targets. Before each new call, the SDK adds up the prices saved
+with the calls so far. Once the total reaches the limit, no new call starts in the run or under
+it, and the run ends `limited` with `costUsd`. A helper or specialist stopped this way returns a
+failed tool result to its parent. A workflow's `ctx.agent` returns the `limited` outcome, so the
+next step still runs.
+
+It limits starting calls, not the bill. Calls already running when the limit is reached, such as
+parallel helpers, can finish above it. A call that never reported usage adds nothing.
+
+`priceModelCall` runs when a call's usage arrives and again when the call completes. It gets the
+usage and the provider and model that served it, and must return a finite amount of 0 or more
+without waiting. Anything else fails the run with `invalid_cost`. The journal keeps each price
+(`costUsd` on the model execution, on its interrupted attempts and on its receipt), so a resumed
+run never prices a saved call again, even when your prices change by time of day. A run with
+`costUsd` and no `priceModelCall` is refused with a TypeError before it starts or resumes. A
+helper's `prepare` may give one helper a lower `costUsd`.
 
 ## Asking the person
 
@@ -2265,6 +2302,12 @@ storage and retention.
 unknown billing. Remote requests are not counted as local model or tool calls, and unknown
 charges are not treated as free. Peer endpoints, callbacks and task/context handles stay out of
 these report records. An accepted cancellation request is not proof that the peer stopped.
+
+## Upgrade from 0.2
+
+Version 0.3 adds the [cost limit](#cost-limit). `LimitReason` has a new value, `costUsd`, so a map
+that names every limit reason needs one more entry. Saved 0.2 snapshots stay valid, and nothing
+changes for a host that sets no `costUsd` and no `priceModelCall`.
 
 ## Upgrade from 0.1
 

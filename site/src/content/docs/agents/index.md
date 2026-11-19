@@ -12,7 +12,7 @@ await assistant.run("List the tasks.");
 [Set up this offline assistant](/agents/getting-started/). It returns two example tasks without
 calling a live model.
 
-**Agents 0.2.0** is an experimental package built on Core. It runs tools, coordinates specialists
+**Agents 0.3.0** is an experimental package built on Core. It runs tools, coordinates specialists
 and records execution so your host can save and resume work. Its API may change before 1.0.
 
 ## Build the execution you need

@@ -18,7 +18,7 @@ These signatures match the experimental **@providerkit/react 0.1.0** release.
 | `@providerkit/react/styles.css` | Optional scoped stylesheet                                         |
 
 React `^19` is the required peer. `/sse` uses Core `^0.33.1`. The server projector uses public
-Agents `^0.2.0` contracts, not the execution engine at runtime. Hook-only imports load no UI,
+Agents 0.2 or 0.3 contracts, not the execution engine at runtime. Hook-only imports load no UI,
 Markdown parser or CSS. `/protocol` and `/ag-ui` have no React runtime dependency.
 
 ## Keep your state owner

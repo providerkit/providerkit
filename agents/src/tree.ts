@@ -10,6 +10,7 @@ import type {
   AskRecord,
   ChildPathStep,
   RunOptions,
+  RunLimits,
   TreeNode,
   RunState,
   ToolExecution,
@@ -28,7 +29,9 @@ export class Halt extends Error {
 export function isLocalStop(state: RunState): boolean {
   return (
     (state.status === "limited" &&
-      ["turns", "toolCalls", "elapsedMs", "outputTokens", "steps"].includes(state.limit)) ||
+      ["turns", "toolCalls", "elapsedMs", "outputTokens", "steps", "costUsd"].includes(
+        state.limit,
+      )) ||
     (state.status === "failed" &&
       [
         "model_failed",
@@ -203,6 +206,37 @@ export function treeUsage(root: TreeNode): TokenUsage {
   return usage;
 }
 
+/** USD of the known calls under this node, from the prices saved with them, never priced
+ * again. Counted the way treeUsage counts usage. */
+export function knownCostUsd(root: TreeNode): number {
+  let cost = 0;
+  const seen = new Set<string>();
+  for (const snapshot of snapshots(root)) {
+    if (snapshot.kind !== "agent") continue;
+    for (const model of allModels(snapshot)) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
+      cost += model.interrupted.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0);
+      cost += model.costUsd ?? 0;
+    }
+  }
+  return cost;
+}
+
+/** A cost limit counts prices only the host knows. Without them no call would ever count, so
+ * the limit would never stop anything: refuse it before anything is saved or resumed. */
+export function requirePricing(limits: RunLimits, host: AgentHost | undefined): void {
+  if (limits.costUsd !== undefined && !host?.priceModelCall)
+    throw new TypeError(
+      "limits.costUsd needs host.priceModelCall, which prices each model call in USD.",
+    );
+}
+
+/** requirePricing for every agent in a restored tree. */
+export function checkPricing(root: TreeNode, host: AgentHost | undefined): void {
+  for (const node of snapshots(root)) if (node.kind === "agent") requirePricing(node.limits, host);
+}
+
 export async function authorizeTree(root: TreeNode, host: AgentHost): Promise<void> {
   if (!host.authorizeResume)
     throw new TypeError("Resume requires a trusted host.authorizeResume callback.");
@@ -265,6 +299,31 @@ export class ExecutionTree {
         for (const model of allModels(snapshot)) models += 1 + model.interrupted.length;
     if (models >= this.root.tree.limits.modelCalls)
       throw new Halt({ status: "limited", limit: "modelCalls" });
+  }
+
+  /** Checks the caller and every agent above it, found by the caller's scope path, against
+   * its own cost limit, so a helper stops once its creator's budget is spent. Synchronous like
+   * reserveModel, so the check and the receipt it admits never straddle an await. */
+  reserveCost(path: readonly ChildPathStep[]): void {
+    let node: TreeNode = this.root;
+    const lineage = [node];
+    for (const step of path) {
+      const child = childJournals(node)
+        .find((journal) => journal.operationId === step.operationId)
+        ?.children.find((entry) => entry.key === step.key);
+      if (!child) fail("invalid_journal", "A run's place in its tree is missing from the journal.");
+      node = child.snapshot;
+      lineage.push(node);
+    }
+    // ponytail: each check walks the bounded subtree again, as reserveModel does, so the
+    // saved prices stay the only ledger across resume.
+    for (const holder of lineage)
+      if (
+        holder.kind === "agent" &&
+        holder.limits.costUsd !== undefined &&
+        knownCostUsd(holder) >= holder.limits.costUsd
+      )
+        throw new Halt({ status: "limited", limit: "costUsd" });
   }
 
   /** Preflight only. reserveChild rechecks against the live journal at each admission. */

@@ -12,7 +12,7 @@ be billed. [Hosted tools](/guides/tools/#hosted-tools), [speech](/guides/speech/
 
 ## Agents examples
 
-These files ship in Agents 0.2.0. Start with this offline command:
+These files ship in Agents 0.3.0. Start with this offline command:
 
 ```sh
 bun node_modules/@providerkit/agents/examples/basic.ts
