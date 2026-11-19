@@ -20,11 +20,17 @@ import {
   type StoredSend,
 } from "@providerkit/react";
 
-/** The three AsyncStorage calls this file makes. Versions 1 to 3 of AsyncStorage have all three. */
+/** The three AsyncStorage calls the stores make. Versions 1 to 3 of AsyncStorage have all three. */
 export interface KeyValueStorage {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<unknown>;
   removeItem(key: string): Promise<unknown>;
+}
+
+/** What `removeExpired` needs as well: a list of every key. Versions 1 to 3 of AsyncStorage have
+ * it. */
+export interface ListableStorage extends KeyValueStorage {
+  getAllKeys(): Promise<readonly string[]>;
 }
 
 export interface StorageOptions {
@@ -51,8 +57,13 @@ function inOrder<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/** Where every key of one store starts. */
+function startOf(prefix: string, store: Store): string {
+  return `${prefix}.${store}:`;
+}
+
 function keyOf(prefix: string, store: Store, scope: DraftScope): string {
-  return `${prefix}.${store}:${draftScopeKey(scope)}`;
+  return startOf(prefix, store) + draftScopeKey(scope);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -71,7 +82,8 @@ async function read(storage: KeyValueStorage, key: string, signal?: AbortSignal)
     // Text that is not JSON can never be read back. The next save replaces it.
     return null;
   }
-  // The client never restores a copy past its `expiresAt`, and deleting it is the storage's job.
+  // The client never restores a copy past its `expiresAt`, and deleting it is the storage's job:
+  // here when its conversation reads it, and in `removeExpired` for every other one.
   if (isRecord(value) && typeof value.expiresAt === "number" && value.expiresAt <= Date.now()) {
     await storage.removeItem(key);
     return null;
@@ -128,4 +140,31 @@ export function createPendingSendStorage(
     load: (scope) => inOrder(() => read(storage, keyOf(prefix, "unsent", scope))),
     save: (scope, value) => inOrder(() => write(storage, keyOf(prefix, "unsent", scope), value)),
   };
+}
+
+/**
+ * Deletes every saved draft and unsent message that is past its expiry, in every conversation.
+ * The stores delete an old copy only when its conversation opens again, so a conversation nobody
+ * opens would keep its copy on the phone. Call it once when the app starts.
+ *
+ * ```ts
+ * void removeExpired(AsyncStorage);
+ * ```
+ *
+ * If you gave the stores a `prefix`, pass the same one here.
+ */
+export async function removeExpired(
+  storage: ListableStorage,
+  options: StorageOptions = {},
+): Promise<void> {
+  const { prefix = DEFAULT_PREFIX } = options;
+  const starts = [startOf(prefix, "draft"), startOf(prefix, "unsent")];
+  const keys = await storage.getAllKeys();
+  // Each key is read in its turn in the queue, so a copy saved after the list was made is read
+  // fresh, and kept.
+  await Promise.all(
+    keys
+      .filter((key) => starts.some((start) => key.startsWith(start)))
+      .map((key) => inOrder(() => read(storage, key))),
+  );
 }

@@ -11,7 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDraftStorage,
   createPendingSendStorage,
-  type KeyValueStorage,
+  removeExpired,
+  type ListableStorage,
 } from "../src/storage.ts";
 
 const DAY = 86_400_000;
@@ -29,7 +30,8 @@ function memory() {
     removeItem: vi.fn(async (key: string) => {
       items.delete(key);
     }),
-  } satisfies KeyValueStorage;
+    getAllKeys: vi.fn(async () => [...items.keys()]),
+  } satisfies ListableStorage;
   return { items, storage };
 }
 
@@ -227,5 +229,39 @@ describe("createPendingSendStorage", () => {
     await flush();
     expect(items.size).toBe(0);
     detach();
+  });
+});
+
+describe("removeExpired", () => {
+  it("deletes every copy past its expiry, in conversations nobody opens again", async () => {
+    const { items, storage } = memory();
+    const now = Date.now();
+    const expired = { savedAt: now - 2 * DAY, expiresAt: now - DAY };
+    const unsent: StoredSend = {
+      v: 1,
+      scope,
+      input: { clientId: "c1", text: "Hello" },
+      ...expired,
+    };
+    items.set(
+      'providerkit.draft:["person-1","chat-7"]',
+      JSON.stringify({ ...draft("Old"), ...expired }),
+    );
+    items.set('providerkit.unsent:["person-1","chat-7"]', JSON.stringify(unsent));
+    items.set(
+      'app.ask.draft:["person-1","chat-7"]',
+      JSON.stringify({ ...draft("Ask"), ...expired }),
+    );
+    await createDraftStorage(storage).save(scope, draft("Still typing"), { signal });
+    // A key this package never wrote stays, whatever it holds.
+    items.set("session", JSON.stringify({ expiresAt: now - DAY }));
+    await removeExpired(storage);
+    expect([...items.keys()]).toEqual([
+      'app.ask.draft:["person-1","chat-7"]',
+      'providerkit.draft:["person-1","chat-1"]',
+      "session",
+    ]);
+    await removeExpired(storage, { prefix: "app.ask" });
+    expect(items.has('app.ask.draft:["person-1","chat-7"]')).toBe(false);
   });
 });
