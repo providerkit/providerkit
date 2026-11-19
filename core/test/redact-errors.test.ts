@@ -16,8 +16,10 @@ import {
   createRegistry,
   createResponsesProvider,
   isRetryable,
+  parseContextOverflow,
   parseRetryAfterMs,
   ProviderError,
+  type ContextOverflowInfo,
   type FetchLike,
   type Provider,
 } from "../src/index.ts";
@@ -142,7 +144,7 @@ function exposed(error: unknown): string {
   return parts.join("\n");
 }
 
-/** What retries, pools and logs read off a failure, apart from its words. */
+/** What retries, pools, logs and a context trim read off a failure, apart from its words. */
 function retryFacts(error: unknown) {
   if (!(error instanceof ProviderError)) throw new Error(`expected a ProviderError: ${error}`);
   return {
@@ -156,6 +158,7 @@ function retryFacts(error: unknown) {
     classified: classify(error),
     retryable: isRetryable(error),
     waitMs: parseRetryAfterMs(error),
+    overflow: parseContextOverflow(error),
   };
 }
 
@@ -194,6 +197,40 @@ describe("redactErrors on each wire", () => {
       expectRedacted(bare, redacted, code);
     },
   );
+});
+
+/** A context overflow in each wording `parseContextOverflow` reads, quoting the person after it. */
+const OVERFLOWS: { name: string; make: Make; words: string; overflow: ContextOverflowInfo }[] = [
+  {
+    name: "input plus max_tokens, on anthropic",
+    make: (config) => createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", ...config }),
+    words: "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000",
+    overflow: {
+      inputTokens: 188_059,
+      maxTokens: 20_000,
+      contextLimit: 200_000,
+      excessTokens: 8_059,
+    },
+  },
+  {
+    name: "a prompt too long, on openai",
+    make: (config) => createOpenAIProvider({ apiKey: "k", model: "gpt-5", ...config }),
+    words: "prompt is too long: 137500 tokens > 135000 maximum",
+    overflow: { inputTokens: 137_500, contextLimit: 135_000, excessTokens: 2_500 },
+  },
+];
+
+describe("redactErrors on a context overflow", () => {
+  // An app lowers `maxTokens` or compacts by these numbers. They are counts, not the person's
+  // words, so the copy keeps them where `parseContextOverflow` finds them.
+  it.each(OVERFLOWS)("keeps the token counts of $name", async ({ make, words, overflow }) => {
+    const answer: FetchLike = async () =>
+      Response.json({ error: { message: `${words}. Last turn: ${MARKER}` } }, { status: 400 });
+    const [bare, redacted] = await bothWays(make, answer);
+    expectRedacted(bare, redacted);
+    expect(redacted).toMatchObject({ kind: "context", status: 400 });
+    expect(parseContextOverflow(redacted)).toEqual(overflow);
+  });
 });
 
 describe("redactErrors on a preset", () => {

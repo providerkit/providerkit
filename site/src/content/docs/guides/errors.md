@@ -192,7 +192,8 @@ const provider = createPresetProvider("openrouter", { apiKey, redactErrors: true
 ```
 
 Each error that provider throws keeps its `kind`, `status`, `code` and retry hints, and loses
-the rest:
+the rest. A context overflow also keeps its token counts, so `parseContextOverflow` still reads
+them:
 
 ```ts
 err.message; // "openrouter: the model call failed (rate, HTTP 429). The error text is left out because redactErrors is on."
@@ -203,8 +204,9 @@ err.cause; // undefined
 Retries, fallback pools and key pools read only what stays, so they make the same choices. A
 `code` stays only when it is one short word, like `overloaded_error`, because a vendor that puts a
 sentence there could be quoting you. The package's own wording goes too, for a refused option or
-a stream cut short, so a redacted log says only the kind, the status and the code. Turn it off
-while you debug. It is off by default, because the words usually name the fix.
+a stream cut short, so a redacted log says only the kind, the status, the code and an overflow's
+token counts. Turn it off while you debug. It is off by default, because the words usually name
+the fix.
 
 All four adapters take it, and so do `createPresetProvider` and a
 [registry connection](/guides/registry/#the-providers-words-in-errors). A `models` chain and

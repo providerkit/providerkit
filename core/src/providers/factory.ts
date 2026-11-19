@@ -104,9 +104,10 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    * Leave the provider's words out of every error this provider throws. A vendor's error can
    * quote what you sent, and `message`, `body` and `cause` carry it into your logs and into
    * every run an agent saves. With this on, an error keeps its `kind`, `status`, a `code` that
-   * is one short word, and the retry hints, so retries and fallbacks make the same choices. Off
-   * by default, because the words usually name the fix. A `models` chain and `fallbacks` specs
-   * inherit it; a provider you built yourself keeps its own setting.
+   * is one short word, and the retry hints, so retries and fallbacks make the same choices. A
+   * context overflow keeps its token counts too, for `parseContextOverflow`. Off by default,
+   * because the words usually name the fix. A `models` chain and `fallbacks` specs inherit it; a
+   * provider you built yourself keeps its own setting.
    */
   redactErrors?: boolean;
 }
