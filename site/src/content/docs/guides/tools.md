@@ -78,6 +78,10 @@ the model of the chance to correct itself.
 
 `call(input, ctx)` is the typed, direct path for your own code; it throws normally.
 
+`accepts(rawArgs)` runs the same check as `invoke`, without running the tool, and returns `true`
+or `false`. Ask it before you open an approval, so nobody approves a call that would come back
+`invalid_input`.
+
 ## Arguments the model truncated
 
 Providers stream tool arguments a few characters at a time, and a turn cut off at its output
@@ -169,8 +173,51 @@ const search = zodTool({
 zod is an **optional peer dependency**. The kernel never imports it, so a project without zod
 (a Chrome MV3 extension, say) pays nothing for its existence.
 
+When zod rejects a value for its type, `zodTool` repairs two mistakes models often make, then
+checks the call again:
+
+- an array or object sent as a JSON string: `"rows": "[{\"qty\":2}]"` becomes
+  `"rows": [{ "qty": 2 }]`
+- a string sent as an object with only a `text` key: `"title": { "text": "Q3" }` becomes
+  `"title": "Q3"`
+
+Nothing else changes. A string the schema accepts stays as sent, even when it looks like JSON,
+and `"42"` never becomes a number. If the call still fails, the model reads what the second check
+found, so a mistake inside the decoded JSON still reaches it. It sees at most five problems, each
+with its path, then how many more there are:
+
+```text
+Invalid arguments for sheet: rows.0.qty: Invalid input: expected number, received string; …; and 35 more
+```
+
 `clampOverflow` is worth knowing about for terminal tools: when a model's output exceeds a
 schema's limits, clamping to the limit and submitting beats rejecting and losing the whole turn.
+A value the repairs fixed is clamped too.
+
+### Checking results
+
+Pass `output` to check what `run` returns:
+
+```ts
+const lookup = zodTool({
+  name: "lookup",
+  description: "Look up an order.",
+  input: z.object({ id: z.string() }),
+  output: z.object({ status: z.string(), total: z.number() }),
+  async run({ id }) {
+    return await orders.get(id);
+  },
+});
+```
+
+A result that fails the check comes back as a `failed` outcome, and the model reads the problems
+like any other failure. `invoke` still never throws. Unless the tool is marked `isReadOnly`, the
+message also tells the model to check the call's effect before calling it again, because the call
+already ran. A result that passes is the parsed value, so keys the schema doesn't list are dropped
+before the model sees them.
+
+`output` also fills `outputSchema`, for code that writes types for tool results. On a tool from
+`defineTool`, `outputSchema` only describes the result: nothing checks it.
 
 ## Hosted tools
 
