@@ -37,6 +37,7 @@ export type {
   ComposerValue,
 } from "./composer.ts";
 export type {
+  AttachmentFile,
   AttachmentRules,
   AttachmentUploader,
   AttachmentOptions,

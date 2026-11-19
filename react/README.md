@@ -517,6 +517,24 @@ check, never a local claim that the agent did not see the message.
 
 ## Use the optional components
 
+The components and the Markdown renderer need three packages that the hooks do not:
+
+```sh
+bun add @shadcn/react react-markdown remark-gfm
+```
+
+`/ui` needs `@shadcn/react`, and `/markdown` needs `react-markdown` and `remark-gfm`. They are
+optional peer dependencies: your app installs them itself, and only when it imports one of these
+two entries. Up to version 0.1.1 they came with this package, so an app that imports `/ui` or
+`/markdown` must add them when it upgrades.
+
+An app that uses only the hooks does not need them. But npm still checks their versions when your
+app already has one of them for its own use. This package asks for `@shadcn/react` ^0.3.1,
+`react-markdown` ^10.1.0 and `remark-gfm` ^4.0.1. If your app has a version outside these ranges,
+such as `react-markdown` 9, `npm install` stops with an `ERESOLVE` error. Change that package to a
+version in its range, or run `npm install --legacy-peer-deps`, which turns off peer checks for the
+whole install. Bun installs without this error.
+
 Keep your own header and layout. The components accept the hook values or equivalent data from
 your app's store:
 
@@ -605,16 +623,16 @@ only plain text; the UI entry does not import its parser.
 
 ## Imports
 
-| Import               | Responsibility                                             |
-| -------------------- | ---------------------------------------------------------- |
-| `@providerkit/react` | Client state and React hooks                               |
-| `/protocol`          | Display types, event validation and reduction              |
-| `/sse`               | Fetch-based stream transport; requires `@providerkit/core` |
-| `/agents`            | Server-side projection of agent events and snapshots       |
-| `/markdown`          | Markdown, code blocks and source markers                   |
-| `/ui`                | Chat components                                            |
-| `/ag-ui`             | AG-UI event mapping                                        |
-| `/styles.css`        | Optional default styles                                    |
+| Import               | Responsibility                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| `@providerkit/react` | Client state and React hooks                                                         |
+| `/protocol`          | Display types, event validation and reduction                                        |
+| `/sse`               | Fetch-based stream transport; requires `@providerkit/core`                           |
+| `/agents`            | Server-side projection of agent events and snapshots                                 |
+| `/markdown`          | Markdown, code blocks and source markers; requires `react-markdown` and `remark-gfm` |
+| `/ui`                | Chat components; requires `@shadcn/react`                                            |
+| `/ag-ui`             | AG-UI event mapping                                                                  |
+| `/styles.css`        | Optional default styles                                                              |
 
 Hook-only imports load no CSS, Markdown parser or server
 runtime. The `/agents` entry imports SDK types only; it does not execute an agent.
@@ -697,6 +715,23 @@ model is not a verified citation. A code block stays readable without a syntax h
 The host handles file upload, access, storage and retention. An attachment shown on screen does
 not mean the agent received its bytes. The send endpoint must resolve the uploaded reference into
 an input the selected model can read.
+
+A phone picker returns its own object, not a web `File`. `addFiles` takes it when it has a `name`,
+a `type` and, if the picker knows it, a `size`. Give your `upload` function that type, and the
+composer hands the same object back, so your uploader can read its `uri`:
+
+```ts
+type PickedFile = { uri: string; name: string; type: string; size?: number };
+
+const composer = useComposer({
+  scope,
+  send: chat.send,
+  // Your own upload call. It reads file.uri and returns the server's file reference.
+  attachments: { upload: (file: PickedFile) => uploadToServer(file) },
+});
+```
+
+Without a size, the composer skips the `maxFileBytes` check, and your server's limit decides.
 
 ## Run the local example
 
