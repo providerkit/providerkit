@@ -2,6 +2,13 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `describeIssues` on `zodTool` writes the problems zod found in your own words, for the input check and the `output` check. zod's message can list every value a field accepts (`expected one of "post"|"carousel"|"story"`) and quote key names the caller sent, which an app that saves tool replies or shows them to people may not want to keep. It gets zod's error and which value failed (`input` or `result`). On input it words the same parse `invoke` and `accepts` decide by, after the repairs, so you no longer need a second parse of your own, which could disagree with the tool. Only the default stops at five problems, and a check that throws still reads as its own message. Without `describeIssues`, every message is the same as before.
+- A rejected `zodTool` call keeps zod's error as the `cause` of the error it throws, so `outcome.cause.cause` holds every issue for your logs. A failed `output` check keeps zod's error, or the error the check threw, the same way.
+
 ## [0.34.0] - 2026-11-19
 
 ### Breaking

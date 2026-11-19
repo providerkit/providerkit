@@ -225,6 +225,44 @@ doesn't list are dropped before the model sees them.
 `output` also fills `outputSchema`, for code that writes types for tool results. On a tool from
 `defineTool`, `outputSchema` only describes the result: nothing checks it.
 
+### Problems in your own words
+
+zod's message for a problem can list every value a field accepts, and can quote key names the
+caller sent. If you save the tool's replies or show them to people, pass `describeIssues` and
+write each problem yourself:
+
+```ts
+const createDraft = zodTool({
+  name: "create_draft",
+  description: "Create a draft post.",
+  input: z.object({ format: z.enum(["post", "carousel", "story"]) }),
+  describeIssues: (error, checked) =>
+    error.issues.map((issue) => `${issue.path.join(".") || checked} ${issue.code}`).join("; "),
+  async run({ format }) {
+    return await drafts.create(format);
+  },
+});
+```
+
+A call with `format: "reel"` then reads like this, where zod would have written
+`format: Invalid option: expected one of "post"|"carousel"|"story"`:
+
+```text
+Invalid arguments for create_draft: format invalid_value
+```
+
+`describeIssues` also words a failed `output` check. `checked` says which value failed:
+`"input"` for the model's arguments, `"result"` for what `run` returned. It runs after the
+repairs, on the same check `invoke` and `accepts` decide by. It gets every problem zod found, so
+cap a long list yourself: only the default stops at five. A check that throws, like `new URL` on
+a bad link, still reads as its own message.
+
+Fewer words tell the model less. A code alone, such as `invalid_type`, can send a model back to
+resend the same call, so keep what it needs to fix the call: the path, the code, a limit.
+
+Nothing is lost for your logs: `outcome.cause.cause` holds zod's error, or the error a check
+threw.
+
 ## Hosted tools
 
 Some tools run on the vendor's side, inside the model's own turn: web search, web fetch, code
