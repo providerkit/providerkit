@@ -260,8 +260,8 @@ a bad link, still reads as its own message.
 Fewer words tell the model less. A code alone, such as `invalid_type`, can send a model back to
 resend the same call, so keep what it needs to fix the call: the path, the code, a limit.
 
-Nothing is lost for your logs: `outcome.cause.cause` holds zod's error, or the error a check
-threw.
+For your logs, `outcome.cause.cause` holds zod's error, on both checks. If a check throws, or your
+`describeIssues` does, it holds that error instead.
 
 ## Hosted tools
 

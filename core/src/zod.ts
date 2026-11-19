@@ -78,9 +78,10 @@ export interface ZodToolSpec<I, O, R = O> {
    * It gets zod's error, with every issue, and `checked`: `input` for the model's arguments,
    * `result` for what `run` returned. On input it words the same parse `invoke` and `accepts`
    * decide by, after the repairs. Only the default stops at five issues. A check that throws
-   * reads as its own message. zod's error, or what the check threw, stays as the `cause` of the
-   * error the tool throws, so `ToolOutcome.cause` leads to it in your logs. Defaults to zod's
-   * message for each issue, after its path.
+   * reads as its own message, and so does a `describeIssues` that throws. On both checks, the
+   * error the tool throws keeps zod's error as its `cause`, or what was thrown in its place, so
+   * your logs find it at `ToolOutcome.cause.cause`. Defaults to zod's message for each issue,
+   * after its path.
    */
   describeIssues?: (error: z.ZodError, checked: "input" | "result") => string;
 }
@@ -241,15 +242,27 @@ export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O> {
   // a decoded string, or beside a fixed wrapper, still reaches the model. The repaired
   // value is clamped too, since a string unwrapped from `{ text }` can be the one too long.
   function parseInput(raw: unknown): I {
-    const candidate = clamp(raw);
-    const first = spec.input.safeParse(candidate);
-    if (first.success) return first.data;
-    const repaired = repairSlips(candidate, first.error.issues);
-    const parsed = repaired === candidate ? first : spec.input.safeParse(clamp(repaired));
-    if (parsed.success) return parsed.data;
-    // The model reads the message, which may be the app's words. zod's error stays as the
+    let problems: string;
+    let cause: unknown;
+    try {
+      const candidate = clamp(raw);
+      const first = spec.input.safeParse(candidate);
+      if (first.success) return first.data;
+      const repaired = repairSlips(candidate, first.error.issues);
+      const parsed = repaired === candidate ? first : spec.input.safeParse(clamp(repaired));
+      if (parsed.success) return parsed.data;
+      cause = parsed.error;
+      problems = describe(parsed.error, "input");
+    } catch (err) {
+      // A refine or transform that throws, or a `describeIssues` that does, is wrapped as it is
+      // on a result. Thrown bare, it was `ToolOutcome.cause` itself, so a log reading
+      // `cause.cause`, where zod's error sits, got `undefined`.
+      cause = err;
+      problems = messageOf(err);
+    }
+    // The model reads the message, which may be the app's words. What went wrong stays as the
     // cause, and `invoke` keeps what was thrown, so logs still have all of it.
-    throw new Error(describe(parsed.error, "input"), { cause: parsed.error });
+    throw new Error(problems, { cause });
   }
 
   return defineTool<I, O>({

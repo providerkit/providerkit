@@ -617,25 +617,65 @@ describe("zodTool", () => {
       });
     });
 
-    // Nothing in a thrown check is zod's sentence, so it reads as thrown, and stays for logs.
-    it("leaves a check that throws in its own words", async () => {
+    // Nothing in a thrown check is zod's sentence, so it reads as thrown, and stays for logs at
+    // `cause.cause` on both checks. Thrown bare on input, it was `cause` itself, and a log of
+    // `cause.cause` got `undefined` for every bad link.
+    it("leaves a check that throws in its own words, on both checks", async () => {
       const words = pathAndCode();
+      const link = z.string().transform((s) => new URL(s).href);
       const save = zodTool({
         name: "save",
         description: "save",
         isReadOnly: true,
-        input: z.object({}),
-        output: z.object({ link: z.string().transform((s) => new URL(s).href) }),
+        input: z.object({ link: link.optional() }),
+        output: z.object({ link }),
         describeIssues: words,
         run: async () => ({ link: "not a url" }),
       });
-      const outcome = await save.invoke({});
-      expect(!outcome.ok && outcome.error).toBe(
-        "save ran, but its result does not match its output schema. Problems: Invalid URL",
-      );
+      const rejected = await save.invoke({ link: "not a url" });
+      const failed = await save.invoke({});
+      expect([rejected, failed]).toMatchObject([
+        { kind: "invalid_input", error: "Invalid arguments for save: Invalid URL" },
+        {
+          kind: "failed",
+          error: "save ran, but its result does not match its output schema. Problems: Invalid URL",
+        },
+      ]);
       expect(words).not.toHaveBeenCalled();
-      if (outcome.ok || !(outcome.cause instanceof Error)) throw new Error("expected a cause");
-      expect(outcome.cause.cause).toBeInstanceOf(TypeError);
+      for (const outcome of [rejected, failed]) {
+        if (outcome.ok || !(outcome.cause instanceof Error)) throw new Error("expected a cause");
+        expect(outcome.cause.cause).toBeInstanceOf(TypeError);
+      }
+    });
+
+    // A wording that throws is the app's bug, so its error is what logs need, at the same depth.
+    it("keeps what a describeIssues that throws threw, on both checks", async () => {
+      const broken = new Error("describe broke");
+      const count = zodTool({
+        name: "count",
+        description: "count",
+        isReadOnly: true,
+        input: z.object({ n: z.number() }),
+        output: z.object({ n: z.number() }),
+        describeIssues: () => {
+          throw broken;
+        },
+        run: async (): Promise<unknown> => ({ n: "two" }),
+      });
+      const rejected = await count.invoke({ n: "two" });
+      const failed = await count.invoke({ n: 2 });
+      expect([rejected, failed]).toMatchObject([
+        { kind: "invalid_input", error: "Invalid arguments for count: describe broke" },
+        {
+          kind: "failed",
+          error:
+            "count ran, but its result does not match its output schema. Problems: describe broke",
+        },
+      ]);
+      for (const outcome of [rejected, failed]) {
+        if (outcome.ok || !(outcome.cause instanceof Error)) throw new Error("expected a cause");
+        expect(outcome.cause.cause).toBe(broken);
+      }
     });
   });
 });
