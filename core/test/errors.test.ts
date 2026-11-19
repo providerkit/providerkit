@@ -530,12 +530,11 @@ describe("the deterministic failures — fail fast, never burn the retry budget"
     expect(kindOf(apiError(400, { message }))).toBe("auth");
   });
 
-  // Google's answers to a key it refuses, both 400s. As `invalid`, a key pool never tried its
-  // next key and a fallback chain stopped on the first.
-  it.each([
-    ["OpenAI-compatible", '[{"error":{"code":400,"message":"Please pass a valid API key"}}]'],
-    ["native", '[{"error":{"code":400,"message":"API key not valid. Pass a valid API key."}}]'],
-  ])("Google's %s key rejection is `auth`", (_endpoint, body) => {
+  it("Google's key rejection on its OpenAI-compatible endpoint is `auth`", () => {
+    // A 400 that says "Please pass a valid API key". As `invalid`, a key pool never tried its next
+    // key and a fallback chain stopped on the first. The native endpoint's "API key not valid.
+    // Please pass a valid API key." already read as `auth`, through "API key not valid".
+    const body = '[{"error":{"code":400,"message":"Please pass a valid API key"}}]';
     expect(classifyHttp(400, body)).toBe("auth");
   });
 
