@@ -420,6 +420,22 @@ describe("zodTool", () => {
       await expect(tool.call({ q: "x" })).rejects.toThrow("does not match its output schema");
     });
 
+    // "input" there would send the model to fix its own arguments.
+    it("names a result that is wrong as a whole `result`", async () => {
+      const count = zodTool({
+        name: "count",
+        description: "count",
+        isReadOnly: true,
+        input: z.object({}),
+        output: z.number(),
+        run: async () => JSON.parse('"three"'),
+      });
+      const outcome = await count.invoke({});
+      expect(!outcome.ok && outcome.error).toMatch(
+        /Problems: result: Invalid input: expected number, received string$/,
+      );
+    });
+
     it("fills outputSchema as metadata, and refuses no type JSON Schema lacks", () => {
       expect(lookup(true).outputSchema).toEqual({
         type: "object",

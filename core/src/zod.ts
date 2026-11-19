@@ -73,11 +73,12 @@ const MAX_ISSUES = 5;
  * Where each problem is and what to change, in zod's words. The message names the fix
  * ("expected array, received string"); the bare code sent a model back to resend the same
  * call. The rest are counted, so a model that fixes five does not take them for all of it.
+ * `root` names a problem with the whole value: the model's arguments, or the tool's result.
  */
-function describeIssues(issues: Issues): string {
+function describeIssues(issues: Issues, root: "input" | "result"): string {
   const lines = issues
     .slice(0, MAX_ISSUES)
-    .map((issue) => `${issue.path.map(String).join(".") || "input"}: ${issue.message}`);
+    .map((issue) => `${issue.path.map(String).join(".") || root}: ${issue.message}`);
   if (issues.length > MAX_ISSUES) lines.push(`and ${issues.length - MAX_ISSUES} more`);
   return lines.join("; ");
 }
@@ -147,7 +148,7 @@ function checkedRun<I, O>(spec: ZodToolSpec<I, O>, output: z.ZodType<O>): ZodToo
     // call again from this, as it does from `repairHistory`'s interrupted-call note.
     const effect = spec.isReadOnly ? "" : " Check its effect before calling it again.";
     throw new Error(
-      `${spec.name} ran, but its result does not match its output schema.${effect} Problems: ${describeIssues(parsed.error.issues)}`,
+      `${spec.name} ran, but its result does not match its output schema.${effect} Problems: ${describeIssues(parsed.error.issues, "result")}`,
     );
   };
 }
@@ -175,7 +176,7 @@ export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O> {
     const repaired = repairSlips(candidate, first.error.issues);
     const parsed = repaired === candidate ? first : spec.input.safeParse(clamp(repaired));
     if (parsed.success) return parsed.data;
-    throw new Error(describeIssues(parsed.error.issues));
+    throw new Error(describeIssues(parsed.error.issues, "input"));
   }
 
   return defineTool<I, O>({
