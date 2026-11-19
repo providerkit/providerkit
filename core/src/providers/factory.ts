@@ -100,6 +100,15 @@ export interface PresetProviderConfig extends ProviderFallbackConfig {
    *  each adapter decides by host. See `StreamOptions.hostedTools`. */
   servesHostedTools?: readonly HostedToolType[];
   fetchImpl?: FetchLike;
+  /**
+   * Leave the provider's words out of every error this provider throws. A vendor's error can
+   * quote what you sent, and `message`, `body` and `cause` carry it into your logs and into
+   * every run an agent saves. With this on, an error keeps its `kind`, `status`, a `code` that
+   * is one short word, and the retry hints, so retries and fallbacks make the same choices. Off
+   * by default, because the words usually name the fix. A `models` chain and `fallbacks` specs
+   * inherit it; a provider you built yourself keeps its own setting.
+   */
+  redactErrors?: boolean;
 }
 
 /** What one adapter for one model takes: a `PresetProviderConfig` without the

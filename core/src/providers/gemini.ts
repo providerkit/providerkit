@@ -22,7 +22,7 @@ import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAntigravityToolSchema, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
-import { streamSse, apiUrl, type FetchLike } from "../transport.ts";
+import { streamSse, apiUrl, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   ChatMessage,
@@ -72,6 +72,8 @@ export interface GeminiConfig extends ProviderFallbackConfig {
   jsonWithTools?: JsonWithTools;
   maxTokens?: number;
   fetchImpl?: FetchLike;
+  /** Leave the provider's words out of every error. See `PresetProviderConfig.redactErrors`. */
+  redactErrors?: boolean;
   headers?: Record<string, string>;
   /**
    * For providers imported from `@providerkit/core/hosted`.
@@ -842,5 +844,9 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
     },
   };
 
-  return configuredFallbacks(provider, config, codecs);
+  return configuredFallbacks(
+    config.redactErrors ? withRedactedErrors(provider) : provider,
+    config,
+    codecs,
+  );
 }
