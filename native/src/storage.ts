@@ -28,10 +28,17 @@ export interface KeyValueStorage {
 }
 
 export interface StorageOptions {
-  /** The start of every key, so two parts of an app keep their copies apart. Defaults to
-   * `providerkit.draft` for drafts and `providerkit.unsent` for unsent messages. */
+  /** The start of every key, so two parts of an app keep their copies apart. Default
+   * `providerkit`. Drafts go under `<prefix>.draft` and unsent messages under `<prefix>.unsent`,
+   * so one part of an app can pass the same prefix to both. */
   prefix?: string;
 }
+
+const DEFAULT_PREFIX = "providerkit";
+
+/** Which store a key belongs to. It is always part of the key: under one key, the client's
+ * removal of an unsent message would delete the person's draft. */
+type Store = "draft" | "unsent";
 
 // ponytail: one queue for every key, so a slow write also holds up reads of other conversations.
 // Upgrade: one queue per key, if that wait ever shows.
@@ -44,8 +51,8 @@ function inOrder<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
-function keyOf(prefix: string, scope: DraftScope): string {
-  return `${prefix}:${draftScopeKey(scope)}`;
+function keyOf(prefix: string, store: Store, scope: DraftScope): string {
+  return `${prefix}.${store}:${draftScopeKey(scope)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -95,11 +102,12 @@ export function createDraftStorage(
   storage: KeyValueStorage,
   options: StorageOptions = {},
 ): DraftStorage {
-  const { prefix = "providerkit.draft" } = options;
+  const { prefix = DEFAULT_PREFIX } = options;
   return {
-    load: (scope, { signal }) => inOrder(() => read(storage, keyOf(prefix, scope), signal)),
+    load: (scope, { signal }) =>
+      inOrder(() => read(storage, keyOf(prefix, "draft", scope), signal)),
     save: (scope, draft, { signal }) =>
-      inOrder(() => write(storage, keyOf(prefix, scope), draft, signal)),
+      inOrder(() => write(storage, keyOf(prefix, "draft", scope), draft, signal)),
   };
 }
 
@@ -115,9 +123,9 @@ export function createPendingSendStorage(
   storage: KeyValueStorage,
   options: StorageOptions = {},
 ): PendingSendStorage {
-  const { prefix = "providerkit.unsent" } = options;
+  const { prefix = DEFAULT_PREFIX } = options;
   return {
-    load: (scope) => inOrder(() => read(storage, keyOf(prefix, scope))),
-    save: (scope, value) => inOrder(() => write(storage, keyOf(prefix, scope), value)),
+    load: (scope) => inOrder(() => read(storage, keyOf(prefix, "unsent", scope))),
+    save: (scope, value) => inOrder(() => write(storage, keyOf(prefix, "unsent", scope), value)),
   };
 }

@@ -144,7 +144,7 @@ describe("createDraftStorage", () => {
   it("keeps two parts of an app apart with their own prefix", async () => {
     const { items, storage } = memory();
     await createDraftStorage(storage, { prefix: "app.ask" }).save(scope, draft("Ask"), { signal });
-    expect([...items.keys()]).toEqual(['app.ask:["person-1","chat-1"]']);
+    expect([...items.keys()]).toEqual(['app.ask.draft:["person-1","chat-1"]']);
     expect(await createDraftStorage(storage).load(scope, { signal })).toBeNull();
   });
 
@@ -180,6 +180,27 @@ describe("createPendingSendStorage", () => {
     await unsent.save(scope, null);
     expect(items.size).toBe(0);
     expect(await unsent.load(scope)).toBeNull();
+  });
+
+  it("keeps the unsent message and the draft apart when both use one prefix", async () => {
+    const { items, storage } = memory();
+    const drafts = createDraftStorage(storage, { prefix: "app.ask" });
+    const unsent = createPendingSendStorage(storage, { prefix: "app.ask" });
+    const now = Date.now();
+    const stored: StoredSend = {
+      v: 1,
+      scope,
+      input: { clientId: "c1", text: "Book the 9am flight" },
+      savedAt: now,
+      expiresAt: now + DAY,
+    };
+    await unsent.save(scope, stored);
+    await drafts.save(scope, draft("and a hotel"), { signal });
+    expect(await unsent.load(scope)).toEqual(stored);
+    // The host's copy arrived, so the client removes its own. The draft stays.
+    await unsent.save(scope, null);
+    expect(await drafts.load(scope, { signal })).toMatchObject({ text: "and a hotel" });
+    expect([...items.keys()]).toEqual(['app.ask.draft:["person-1","chat-1"]']);
   });
 
   it("brings a message whose reply was lost back after a restart, for the person to send again", async () => {
