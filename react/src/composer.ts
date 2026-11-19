@@ -19,8 +19,8 @@ import {
 } from "./drafts.ts";
 import type { DisplayError } from "./protocol.ts";
 
-/** `F` is the file type `addFiles` takes: a web `File` by default, or a phone picker's result
- * (see `AttachmentFile`). It is inferred from `attachments.upload`. */
+/** `F` is the file type `addFiles` takes: a web `File` whenever `attachments.upload` can take one,
+ * or else the phone picker's type that `upload` takes (see `AttachmentFile`). */
 export interface ComposerOptions<F extends AttachmentFile = File> {
   /** A change to either id starts an isolated composer, even without persistence. */
   scope: DraftScope;
@@ -102,9 +102,18 @@ function checkOptions<F extends AttachmentFile>(options: ComposerOptions<F>): vo
       throw new Error("Attachment limits must be nonnegative whole numbers.");
 }
 
+// The web signature comes first, and it is the one these functions had before `F` existed, so any
+// call that compiled then keeps a `File`. With only the generic one, an uploader typed for a wider
+// type, like `(file: Blob) => ...`, makes TypeScript infer `F` as `Blob`, which fails the
+// `AttachmentFile` constraint, so `F` falls back to `AttachmentFile` and the call stops compiling.
 /** Local composition only: no transport, conversation store, auth or upload storage. All async
  * acknowledgements belong to this scope and the revision that started them. */
-export function createComposer<F extends AttachmentFile = File>(
+export function createComposer(options: ComposerOptions): ComposerController;
+/** A phone picker's file: `F` is the type `attachments.upload` takes. */
+export function createComposer<F extends AttachmentFile>(
+  options: ComposerOptions<F>,
+): ComposerController<F>;
+export function createComposer<F extends AttachmentFile>(
   options: ComposerOptions<F>,
 ): ComposerController<F> {
   checkOptions(options);
@@ -561,8 +570,14 @@ export function createComposer<F extends AttachmentFile = File>(
   };
 }
 
+// Web signature first, for the same reason as createComposer's.
 /** Optional React ownership. Components can instead receive values and callbacks from any host. */
-export function useComposer<F extends AttachmentFile = File>(
+export function useComposer(options: ComposerOptions): ComposerValue;
+/** A phone picker's file: `F` is the type `attachments.upload` takes. */
+export function useComposer<F extends AttachmentFile>(
+  options: ComposerOptions<F>,
+): ComposerValue<F>;
+export function useComposer<F extends AttachmentFile>(
   options: ComposerOptions<F>,
 ): ComposerValue<F> {
   const [held, setHeld] = useState(() => ({

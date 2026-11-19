@@ -3,7 +3,7 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { validateAttachment, type AttachmentUploader } from "../src/attachments.ts";
 import type { AttachmentRef } from "../src/client.ts";
-import { createComposer, type ComposerOptions } from "../src/composer.ts";
+import { createComposer, useComposer, type ComposerOptions } from "../src/composer.ts";
 import type { DraftScope } from "../src/drafts.ts";
 
 interface PickedFile {
@@ -26,6 +26,10 @@ const microtasks = async () => {
   await Promise.resolve();
   await Promise.resolve();
 };
+
+// Never called. It only lets the type test read what useComposer returns.
+const useBlobComposer = () =>
+  useComposer({ scope, send, attachments: { upload: async (_file: Blob) => reference } });
 
 describe("files from a phone picker", () => {
   it("keeps the picker's object and hands that same object to upload, canRetry and error", async () => {
@@ -87,7 +91,7 @@ describe("files from a phone picker", () => {
     expect(validateAttachment(scan, { maxFileBytes: 0 })).toBeUndefined();
   });
 
-  it("takes the file type from upload, and a web File when there is none", () => {
+  it("takes a picker's type from upload, and keeps a web File when upload can take one", () => {
     const phone = createComposer({
       scope,
       send,
@@ -97,5 +101,15 @@ describe("files from a phone picker", () => {
     expectTypeOf(phone.getState().attachments[0]?.file).toEqualTypeOf<PickedFile | undefined>();
     const web = createComposer({ scope, send });
     expectTypeOf(web.addFiles).parameter(0).toEqualTypeOf<readonly File[]>();
+    // A web uploader that takes any Blob compiled before the file type existed. It still gets a File.
+    const blob = createComposer({
+      scope,
+      send,
+      attachments: { upload: async (_file: Blob) => reference },
+    });
+    expectTypeOf(blob.addFiles).parameter(0).toEqualTypeOf<readonly File[]>();
+    expectTypeOf<ReturnType<typeof useBlobComposer>["addFiles"]>()
+      .parameter(0)
+      .toEqualTypeOf<readonly File[]>();
   });
 });
