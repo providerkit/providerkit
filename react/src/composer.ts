@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } f
 import {
   normalizeAttachmentRef,
   validateAttachment,
+  type AttachmentFile,
   type AttachmentItem,
   type AttachmentOptions,
 } from "./attachments.ts";
@@ -18,20 +19,22 @@ import {
 } from "./drafts.ts";
 import type { DisplayError } from "./protocol.ts";
 
-export interface ComposerOptions {
+/** `F` is the file type `addFiles` takes: a web `File` by default, or a phone picker's result
+ * (see `AttachmentFile`). It is inferred from `attachments.upload`. */
+export interface ComposerOptions<F extends AttachmentFile = File> {
   /** A change to either id starts an isolated composer, even without persistence. */
   scope: DraftScope;
   send: (input: MessageInput) => Promise<SendResult>;
   canSend?: boolean;
   initialText?: string;
   initialAttachments?: readonly AttachmentRef[];
-  attachments?: AttachmentOptions;
+  attachments?: AttachmentOptions<F>;
   draft?: DraftOptions;
 }
 
-export interface ComposerState {
+export interface ComposerState<F extends AttachmentFile = File> {
   text: string;
-  attachments: readonly AttachmentItem[];
+  attachments: readonly AttachmentItem<F>[];
   revision: number;
   submitting: boolean;
   canSubmit: boolean;
@@ -40,16 +43,16 @@ export interface ComposerState {
   draft: DraftState;
 }
 
-export interface ComposerController {
-  getState(): ComposerState;
+export interface ComposerController<F extends AttachmentFile = File> {
+  getState(): ComposerState<F>;
   subscribe(listener: () => void): () => void;
   /** Starts opt-in draft loading. Cleanup cancels uploads and loading, then flushes pending saves.
    * Await flushDraft before navigation or reload when the save must finish first. */
   attach(): () => void;
   /** Same scope only. Make a new controller for another principal or conversation. */
-  setOptions(options: ComposerOptions): void;
+  setOptions(options: ComposerOptions<F>): void;
   setText(text: string): void;
-  addFiles(files: readonly File[]): void;
+  addFiles(files: readonly F[]): void;
   removeAttachment(id: string): void;
   retryAttachment(id: string): void;
   /** No automatic retries. A duplicate call while sending returns undefined. */
@@ -61,15 +64,15 @@ export interface ComposerController {
   dismissMissingFiles(): void;
 }
 
-export interface ComposerValue extends ComposerState {
-  setText: ComposerController["setText"];
-  addFiles: ComposerController["addFiles"];
-  removeAttachment: ComposerController["removeAttachment"];
-  retryAttachment: ComposerController["retryAttachment"];
-  submit: ComposerController["submit"];
-  flushDraft: ComposerController["flushDraft"];
-  retryDraft: ComposerController["retryDraft"];
-  dismissMissingFiles: ComposerController["dismissMissingFiles"];
+export interface ComposerValue<F extends AttachmentFile = File> extends ComposerState<F> {
+  setText: ComposerController<F>["setText"];
+  addFiles: ComposerController<F>["addFiles"];
+  removeAttachment: ComposerController<F>["removeAttachment"];
+  retryAttachment: ComposerController<F>["retryAttachment"];
+  submit: ComposerController<F>["submit"];
+  flushDraft: ComposerController<F>["flushDraft"];
+  retryDraft: ComposerController<F>["retryDraft"];
+  dismissMissingFiles: ComposerController<F>["dismissMissingFiles"];
 }
 
 const unconfirmed: DisplayError = {
@@ -77,7 +80,7 @@ const unconfirmed: DisplayError = {
   message: "Delivery is not confirmed. Check the conversation before sending again.",
 };
 
-function checkOptions(options: ComposerOptions): void {
+function checkOptions<F extends AttachmentFile>(options: ComposerOptions<F>): void {
   draftScopeKey(options.scope);
   if (
     options.draft &&
@@ -101,7 +104,9 @@ function checkOptions(options: ComposerOptions): void {
 
 /** Local composition only: no transport, conversation store, auth or upload storage. All async
  * acknowledgements belong to this scope and the revision that started them. */
-export function createComposer(options: ComposerOptions): ComposerController {
+export function createComposer<F extends AttachmentFile = File>(
+  options: ComposerOptions<F>,
+): ComposerController<F> {
   checkOptions(options);
   const scope = Object.freeze({ ...options.scope });
   let settings = options;
@@ -118,7 +123,7 @@ export function createComposer(options: ComposerOptions): ComposerController {
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let saveWanted = false;
 
-  function ready(reference: AttachmentRef): AttachmentItem {
+  function ready(reference: AttachmentRef): AttachmentItem<F> {
     const normalized = normalizeAttachmentRef(reference);
     if (!normalized) throw new Error("Initial attachments must be confirmed server references.");
     return { ...normalized, id: `attachment-${++nextId}`, state: "ready", reference: normalized };
@@ -130,7 +135,7 @@ export function createComposer(options: ComposerOptions): ComposerController {
     initialAttachments.length
   )
     throw new Error("Initial attachment ids must be unique.");
-  let state: ComposerState = {
+  let state: ComposerState<F> = {
     text: options.initialText ?? "",
     attachments: initialAttachments,
     revision: options.initialText || initialAttachments.length ? 1 : 0,
@@ -149,13 +154,13 @@ export function createComposer(options: ComposerOptions): ComposerController {
     );
   }
 
-  function publish(patch: Partial<ComposerState> = {}): void {
+  function publish(patch: Partial<ComposerState<F>> = {}): void {
     state = { ...state, ...patch };
     state.canSubmit = canSubmit();
     for (const listener of listeners) listener();
   }
 
-  function edit(patch: Partial<ComposerState>): void {
+  function edit(patch: Partial<ComposerState<F>>): void {
     publish({ ...patch, revision: state.revision + 1 });
     scheduleSave();
   }
@@ -308,7 +313,7 @@ export function createComposer(options: ComposerOptions): ComposerController {
     };
   }
 
-  function setOptions(next: ComposerOptions): void {
+  function setOptions(next: ComposerOptions<F>): void {
     checkOptions(next);
     if (draftScopeKey(scope) !== draftScopeKey(next.scope))
       throw new Error("Make a new composer for a new scope.");
@@ -334,13 +339,13 @@ export function createComposer(options: ComposerOptions): ComposerController {
     edit({ text });
   }
 
-  function replaceItem(id: string, item: AttachmentItem, changed = false): void {
+  function replaceItem(id: string, item: AttachmentItem<F>, changed = false): void {
     const attachments = state.attachments.map((current) => (current.id === id ? item : current));
     if (changed) edit({ attachments });
     else publish({ attachments });
   }
 
-  async function upload(item: AttachmentItem, config: AttachmentOptions): Promise<void> {
+  async function upload(item: AttachmentItem<F>, config: AttachmentOptions<F>): Promise<void> {
     if (!item.file || !active) return;
     const file = item.file;
     const controller = new AbortController();
@@ -408,10 +413,10 @@ export function createComposer(options: ComposerOptions): ComposerController {
     }
   }
 
-  function addFiles(files: readonly File[]): void {
+  function addFiles(files: readonly F[]): void {
     if (!active || !files.length) return;
     const config = settings.attachments;
-    const added: AttachmentItem[] = [];
+    const added: AttachmentItem<F>[] = [];
     let count = state.attachments.filter((item) => item.state !== "failed").length;
     for (const file of files) {
       const error = config
@@ -420,7 +425,7 @@ export function createComposer(options: ComposerOptions): ComposerController {
             code: "upload_unsupported",
             message: "This chat cannot upload files. Remove the file and send text instead.",
           };
-      const item: AttachmentItem = {
+      const item: AttachmentItem<F> = {
         id: `attachment-${++nextId}`,
         name: file.name,
         mediaType: file.type,
@@ -557,7 +562,9 @@ export function createComposer(options: ComposerOptions): ComposerController {
 }
 
 /** Optional React ownership. Components can instead receive values and callbacks from any host. */
-export function useComposer(options: ComposerOptions): ComposerValue {
+export function useComposer<F extends AttachmentFile = File>(
+  options: ComposerOptions<F>,
+): ComposerValue<F> {
   const [held, setHeld] = useState(() => ({
     scope: { ...options.scope },
     controller: createComposer(options),

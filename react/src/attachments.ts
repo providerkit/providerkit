@@ -10,31 +10,46 @@ export interface AttachmentRules {
   maxFileBytes?: number;
 }
 
-export type AttachmentUploader = (
-  file: File,
+/** What the composer reads from a file the person picked, before it is uploaded. A web `File`
+ * already fits. A phone picker returns no `File`: pass its own object with these fields added,
+ * like React Native's `{ uri, name, type }`. The composer keeps that object and hands the same one
+ * to `upload`, so the uploader can still read the rest, such as a `uri` or a native handle. */
+export interface AttachmentFile {
+  name: string;
+  /** The media type, like `image/png`. */
+  type: string;
+  /** Bytes, when the picker knows them. Some pickers do not, and then `maxFileBytes` is the
+   * host's to enforce: a guessed size would refuse a file the host accepts, or pass one it
+   * refuses. */
+  size?: number;
+}
+
+/** `F` is the file type the app picks: a web `File` by default, or its picker's result. */
+export type AttachmentUploader<F extends AttachmentFile = File> = (
+  file: F,
   options: { signal: AbortSignal; onProgress: (fraction: number) => void },
 ) => Promise<AttachmentRef>;
 
-export interface AttachmentOptions {
-  upload: AttachmentUploader;
+export interface AttachmentOptions<F extends AttachmentFile = File> {
+  upload: AttachmentUploader<F>;
   rules?: AttachmentRules;
   /** Omitted means no retry. Return true only if repeating this failed upload is safe. */
-  canRetry?: (error: unknown, file: File) => boolean;
+  canRetry?: (error: unknown, file: F) => boolean;
   /** Safe, host-authored words only. The default never exposes a thrown server error. */
-  error?: (error: unknown, file: File) => DisplayError;
+  error?: (error: unknown, file: F) => DisplayError;
 }
 
-interface AttachmentBase {
+interface AttachmentBase<F extends AttachmentFile> {
   /** Local row id, not the server's file id. */
   id: string;
   name: string;
   mediaType: string;
   size?: number;
   /** In-memory only. Never write this to draft storage. */
-  file?: File;
+  file?: F;
 }
 
-export type AttachmentItem = AttachmentBase &
+export type AttachmentItem<F extends AttachmentFile = File> = AttachmentBase<F> &
   (
     | { state: "queued" }
     | { state: "uploading"; progress?: number }
@@ -85,7 +100,7 @@ export function normalizeAttachmentRef(value: unknown): AttachmentRef | null {
 
 /** Checks metadata for quick feedback; it never claims to inspect the file's bytes. */
 export function validateAttachment(
-  file: Pick<File, "name" | "type" | "size">,
+  file: AttachmentFile,
   rules: AttachmentRules = {},
   count = 0,
 ): DisplayError | undefined {
@@ -94,7 +109,7 @@ export function validateAttachment(
       code: "attachment_count",
       message: `You can attach up to ${rules.maxFiles} files. Remove a file before adding another.`,
     };
-  if (rules.maxFileBytes !== undefined && file.size > rules.maxFileBytes)
+  if (rules.maxFileBytes !== undefined && file.size !== undefined && file.size > rules.maxFileBytes)
     return {
       code: "attachment_size",
       message: `This file is ${file.size} bytes. The limit is ${rules.maxFileBytes} bytes. Choose a smaller file.`,
