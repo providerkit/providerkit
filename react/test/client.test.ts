@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
   createChatClient,
   TransportError,
@@ -13,6 +13,12 @@ import {
   type EnqueueInput,
 } from "../src/client.ts";
 import { useChat } from "../src/hooks.ts";
+import {
+  draftScopeKey,
+  type DraftScope,
+  type PendingSendStorage,
+  type StoredSend,
+} from "../src/drafts.ts";
 import type {
   ApprovalPart,
   ChatEvent,
@@ -2150,6 +2156,153 @@ describe("stream rules from a phone app", () => {
       expect(client.getState().canRetry).toBe(false);
     },
   );
+});
+
+// A message whose delivery is unknown used to live only in memory, so a reload lost it, and the
+// person could only type it again as a new message, which the host cannot tell from the first.
+describe("an unconfirmed message across a reload", () => {
+  const scope: DraftScope = { principalId: "person-1", conversationId: "chat-1" };
+
+  /** The app's storage, read and written as JSON, the way AsyncStorage or sessionStorage are. */
+  function device() {
+    const items = new Map<string, string>();
+    const storage = {
+      load: vi.fn(async (at: DraftScope): Promise<unknown> => {
+        const raw = items.get(draftScopeKey(at));
+        return raw === undefined ? null : JSON.parse(raw);
+      }),
+      save: vi.fn(async (at: DraftScope, value: StoredSend | null): Promise<void> => {
+        if (value === null) items.delete(draftScopeKey(at));
+        else items.set(draftScopeKey(at), JSON.stringify(value));
+      }),
+    } satisfies PendingSendStorage;
+    return { storage, saved: () => items.get(draftScopeKey(scope)) };
+  }
+
+  /** Sends one message whose outcome is unknown, then "reloads": a new client on the same storage. */
+  async function reloadAfterLostReply(send: Mock<Send>) {
+    const box = device();
+    const pendingSend = { storage: box.storage, scope, retentionMs: 60_000 };
+    const before = createChatClient({ transport: { send }, pendingSend });
+    const result = await before.send("Hello");
+    const input = send.mock.calls[0]?.[0];
+    if (!input || !result.ok) throw new Error("The send did not go out.");
+    const host = tail();
+    const after = createChatClient({ transport: { send, observe: host.observe }, pendingSend });
+    after.attach();
+    await flush();
+    return { box, before, after, host, input, result };
+  }
+
+  it("brings the message back unconfirmed, and sends it again with the same id only when asked", async () => {
+    const send = vi
+      .fn<Send>()
+      .mockRejectedValueOnce(new Error("socket hang up"))
+      .mockResolvedValue(undefined);
+    const { box, before, after, input, result } = await reloadAfterLostReply(send);
+    expect(result).toMatchObject({ outcome: "unknown", stored: true });
+    expect(find(after, input.clientId)).toMatchObject({
+      role: "user",
+      state: "failed",
+      createdAt: find(before, input.clientId)?.createdAt,
+    });
+    expect(after.getState()).toMatchObject({
+      canSend: false,
+      canRetry: true,
+      messageErrors: { [input.clientId]: { code: "unconfirmed" } },
+    });
+    // One at a time: a second message could not be sent again safely after another reload.
+    expect(await after.send("Something else")).toMatchObject({
+      ok: false,
+      error: { code: "unconfirmed_send" },
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(await after.retry(input.clientId)).toMatchObject({ ok: true, outcome: "accepted" });
+    expect(send.mock.calls[1]?.[0]).toEqual(input);
+    await flush();
+    expect(box.saved()).toBeUndefined();
+  });
+
+  it("lets the saved copy go once the host's copy of the message arrives", async () => {
+    const send = vi.fn<Send>().mockRejectedValueOnce(new Error("timeout"));
+    const { box, after, host, input } = await reloadAfterLostReply(send);
+    host.latest().push(snapshot([user("m1", "Hello", input.clientId)], run("completed")));
+    await flush();
+    expect(after.getState().messages.map((message) => message.id)).toEqual(["m1"]);
+    expect(after.getState()).toMatchObject({ canSend: true, canRetry: false, messageErrors: {} });
+    expect(box.saved()).toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bring it back when the host's copy is already on screen", async () => {
+    const box = device();
+    const send = vi.fn<Send>().mockRejectedValueOnce(new Error("timeout"));
+    const pendingSend = { storage: box.storage, scope, retentionMs: 60_000 };
+    await createChatClient({ transport: { send }, pendingSend }).send("Hello");
+    const clientId = send.mock.calls[0]?.[0].clientId;
+    const after = createChatClient({
+      transport: { send },
+      pendingSend,
+      initialMessages: [user("m1", "Hello", clientId)],
+    });
+    after.attach();
+    await flush();
+    expect(after.getState().messages.map((message) => message.id)).toEqual(["m1"]);
+    expect(box.saved()).toBeUndefined();
+  });
+
+  it("forgets the copy when the host refuses the message, and gives the words back", async () => {
+    const send = vi
+      .fn<Send>()
+      .mockRejectedValueOnce(new Error("timeout"))
+      .mockRejectedValueOnce(
+        new TransportError("refused", { code: "closed", message: "This chat is closed." }),
+      );
+    const { box, after, input } = await reloadAfterLostReply(send);
+    expect(await after.retry(input.clientId)).toEqual({
+      ok: false,
+      error: { code: "closed", message: "This chat is closed." },
+      input,
+    });
+    expect(after.getState().messages).toEqual([]);
+    await flush();
+    expect(box.saved()).toBeUndefined();
+  });
+
+  it("saves the copy before the message goes out, and sends nothing it could not save", async () => {
+    const box = device();
+    const write = deferred<void>();
+    box.storage.save.mockImplementationOnce(() => write.promise);
+    const send = vi.fn<Send>(async () => {});
+    const client = createChatClient({
+      transport: { send },
+      pendingSend: { storage: box.storage, scope, retentionMs: 60_000 },
+    });
+    const pending = client.send("Hello");
+    await flush();
+    // It shows at once, and waits for its copy before it goes.
+    expect(client.getState().messages).toMatchObject([{ role: "user", state: "sending" }]);
+    expect(send).not.toHaveBeenCalled();
+    write.reject(new Error("Quota exceeded"));
+    expect(await pending).toMatchObject({
+      ok: false,
+      error: { code: "not_stored" },
+      input: { text: "Hello" },
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(client.getState().messages).toEqual([]);
+  });
+
+  it("refuses settings it could not keep safely", () => {
+    const { storage } = device();
+    for (const pendingSend of [
+      { storage, scope, retentionMs: 0 },
+      { storage, scope, retentionMs: Number.POSITIVE_INFINITY },
+      { storage, scope: { principalId: " ", conversationId: "chat-1" }, retentionMs: 1 },
+    ])
+      expect(() => createChatClient({ transport: {}, pendingSend })).toThrow();
+  });
 });
 
 describe("rendering", () => {

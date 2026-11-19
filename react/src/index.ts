@@ -52,6 +52,9 @@ export type {
   DraftOptions,
   DraftStatus,
   DraftState,
+  PendingSendOptions,
+  PendingSendStorage,
+  StoredSend,
 } from "./drafts.ts";
 // The display types a hook hands out, so code that reads `chat.messages` needs one import. The
 // parser and the reducer stay on `/protocol`.

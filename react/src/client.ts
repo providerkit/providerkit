@@ -77,6 +77,12 @@ import {
   type RequestAnswer,
   type RequestResponse,
 } from "./requests.ts";
+import {
+  draftScopeKey,
+  parseStoredSend,
+  type PendingSendOptions,
+  type StoredSend,
+} from "./drafts.ts";
 export type { RequestAnswer, RequestResponse, QuestionAnswer } from "./requests.ts";
 
 export interface ClientToolClaimRequest {
@@ -263,9 +269,11 @@ export type CommandResult = { ok: true } | { ok: false; error: DisplayError };
 
 /** `ok` means the message stays in the conversation, not that delivery is confirmed. Clear
  * a submitted draft only when `outcome` is `accepted`. An `unknown` outcome stays visible while
- * observation checks the host. Otherwise `input` is what was taken back, so the draft can keep it. */
+ * observation checks the host. Otherwise `input` is what was taken back, so the draft can keep it.
+ * `stored` comes only with `unknown`, from a client with `pendingSend`: the message is saved for a
+ * reload, so a composer can let go of its own copy, which could only be sent as a new message. */
 export type SendResult =
-  | { ok: true; messageId: string; outcome: "accepted" | "unknown" }
+  | { ok: true; messageId: string; outcome: "accepted" | "unknown"; stored?: true }
   | { ok: false; error: DisplayError; input?: SendInput };
 
 /** How the client reattaches when a stream ends or fails while a run is going. */
@@ -295,6 +303,13 @@ export interface ChatClientOptions {
    * can accept steering input during a run without enabling this option. */
   allowSendWhileRunning?: boolean;
   reconnect?: ReconnectOptions;
+  /** Saves each message in the app's storage before it goes out, and keeps it there while its
+   * delivery is unknown. After a reload the message is back in the conversation as unconfirmed,
+   * and `retry` sends it again with the same `clientId`, only when the person asks. One message
+   * at a time: while one is unconfirmed, a new send is refused, because two could not both be
+   * sent again safely. A send whose copy cannot be saved is refused before it goes out. Off by
+   * default. Steering input (`enqueue`) is not kept. */
+  pendingSend?: PendingSendOptions;
   /** App-owned handlers with an explicit repeat-safety declaration or a durable host claim.
    * All dispatch is manual. Disclosure or a browser key alone never authorizes a write. */
   clientTools?: Readonly<Record<string, ClientToolHandler>>;
@@ -362,6 +377,14 @@ const NOT_WAITING = fixed("not_waiting", "This request is no longer waiting for 
 const ANSWERING = fixed("answering", "Your answer is still on its way.");
 const NOTHING_TO_RETRY = fixed("not_unconfirmed", "This message does not need to be sent again.");
 const UNCONFIRMED_SEND = fixed("unconfirmed", "This message may not have been sent.");
+const UNSENT = fixed(
+  "unconfirmed_send",
+  "Your last message may not have been sent. Send it again, or wait until it arrives, before you send another.",
+);
+const NOT_STORED = fixed(
+  "not_stored",
+  "Your message was not sent, because this device could not save a copy first. Try again. If it keeps failing, check the app's storage.",
+);
 const UNCONFIRMED_ANSWER = fixed("unconfirmed", "Your answer may not have arrived.");
 const STOP_FAILED = fixed("stop_failed", "Could not stop the answer. Try again.");
 const LOST = fixed("connection_lost", "The connection to the server was lost.");
@@ -453,6 +476,33 @@ function attachmentPart(file: AttachmentRef, index: number): AttachmentPart {
   if (file.size !== undefined) part.size = file.size;
   if (file.url !== undefined) part.url = file.url;
   return part;
+}
+
+/** The client's own copy of a message it sent, until the host's copy takes its place. */
+function ownMessage(input: SendInput, createdAt: number): DisplayMessage {
+  return {
+    id: input.clientId,
+    clientId: input.clientId,
+    role: "user",
+    parts: [
+      ...(input.text ? [textPart(input.text)] : []),
+      ...(input.attachments ?? []).map(attachmentPart),
+    ],
+    state: "sending",
+    createdAt,
+  };
+}
+
+function checkPendingSend({ pendingSend }: ChatClientOptions): void {
+  if (!pendingSend) return;
+  draftScopeKey(pendingSend.scope);
+  const { retentionMs } = pendingSend;
+  if (
+    !Number.isFinite(retentionMs) ||
+    retentionMs <= 0 ||
+    !Number.isFinite(Date.now() + retentionMs)
+  )
+    throw new RangeError("pendingSend retentionMs must be a finite number greater than zero.");
 }
 
 /** Whether the client's own copy of a message is still in the view, waiting for the host's. */
@@ -559,6 +609,7 @@ function nothingNew(before: RunInfo, run: RunInfo, fresh: boolean): boolean {
  * make another: nothing a client holds can then reach the next one, however late it arrives.
  */
 export function createChatClient(options: ChatClientOptions): ChatClient {
+  checkPendingSend(options);
   let settings = options;
   let view: ChatView = {
     ...emptyChatView(),
@@ -599,8 +650,74 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   let waiting: readonly RequestView[] = [];
   let inputs: readonly InputView[] = [];
   let failures: Readonly<Record<string, DisplayError>> = {};
+  /** The `clientId` of the message in `pendingSend` storage, as far as this client knows. */
+  let stored: string | undefined;
+  let restoring: Promise<void> | undefined;
+  let writes: Promise<void> = Promise.resolve();
   let state = build(undefined);
   let notified = state;
+
+  /** One write at a time, in order, so an older save never lands after a newer removal. */
+  function writePending(config: PendingSendOptions, value: StoredSend | null): Promise<void> {
+    const write = writes.then(() => config.storage.save(config.scope, value));
+    writes = write.catch(() => {});
+    return write;
+  }
+
+  /** Puts the saved message back in the conversation, once: on the first attach or send, never at
+   * creation, because a server renders with this client and has no storage. */
+  function restore(): Promise<void> {
+    const config = settings.pendingSend;
+    if (!config) return Promise.resolve();
+    restoring ??= (async () => {
+      let saved: StoredSend | null = null;
+      try {
+        const value = await config.storage.load(config.scope);
+        saved = parseStoredSend(value, config.scope, config.retentionMs);
+      } catch {
+        // Unreadable storage restores nothing, and the next send saves before it goes out.
+      }
+      if (!saved || sends.has(saved.input.clientId)) return;
+      const { input } = saved;
+      stored = input.clientId;
+      // The host's copy is already here: the message arrived, and the saved one can go.
+      if (
+        view.messages.some(
+          (message) => message.clientId === input.clientId || message.id === input.clientId,
+        )
+      ) {
+        forget(input.clientId);
+        return;
+      }
+      take({ v: PROTOCOL_VERSION, type: "message", message: ownMessage(input, saved.savedAt) });
+      sends.set(input.clientId, { input, phase: "unconfirmed" });
+      now();
+    })();
+    return restoring;
+  }
+
+  /** The saved message's fate is known: the host took it, refused it, or its copy arrived. */
+  function forget(clientId: string): void {
+    const config = settings.pendingSend;
+    if (!config || stored !== clientId) return;
+    stored = undefined;
+    void writePending(config, null).catch(() => {
+      // A copy left behind comes back after a reload as unconfirmed, until the host's copy of it
+      // arrives. Nothing sends it again on its own.
+    });
+  }
+
+  /** Whether a message this client sent still waits for its outcome, which blocks the next one
+   * when messages are saved: two could not both be sent again safely after a reload. */
+  function holdsUnconfirmed(): boolean {
+    if (!settings.pendingSend) return false;
+    for (const send of sends.values()) if (send.phase !== "accepted") return true;
+    return false;
+  }
+
+  function unknownOutcome(id: string): SendResult {
+    return { ok: true, messageId: id, outcome: "unknown", ...(stored === id && { stored: true }) };
+  }
 
   function getState(): ChatState {
     if (stale) {
@@ -656,7 +773,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       inputs: listInputs(),
       messageErrors: errorsOf(),
       canSend:
-        canSendOrdinary(status) ||
+        (canSendOrdinary(status) && !holdsUnconfirmed()) ||
         (!stopping &&
           isActive(view.run.status) &&
           Boolean(view.run.id) &&
@@ -851,7 +968,11 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     }
     for (const [controller, rootRunId] of inputCommands)
       if (view.run.id !== rootRunId) controller.abort();
-    for (const id of sends.keys()) if (!stillSending(view.messages, id)) sends.delete(id);
+    for (const id of sends.keys())
+      if (!stillSending(view.messages, id)) {
+        sends.delete(id);
+        forget(id);
+      }
     for (const [id, answer] of answers) {
       const part = openRequest(view.messages, id);
       if (!part) {
@@ -1062,6 +1183,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
 
   function attach(): () => void {
     attached += 1;
+    if (attached === 1) void restore();
     if (attached === 1 && !stream) {
       tries = 0;
       openObservation();
@@ -1096,25 +1218,54 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       });
     if (!settings.transport.send) return { ok: false, error: CANNOT_SEND };
     if (!canSendOrdinary()) return { ok: false, error: BUSY };
+    const pending = settings.pendingSend;
+    if (pending) {
+      // An earlier message may still be unconfirmed, in storage from before a reload.
+      await restore();
+      if (!canSendOrdinary()) return { ok: false, error: BUSY };
+      if (holdsUnconfirmed()) return { ok: false, error: UNSENT };
+    }
     const clientId = createId();
-    take({
-      v: PROTOCOL_VERSION,
-      type: "message",
-      message: {
-        id: clientId,
-        clientId,
-        role: "user",
-        parts: [...(body ? [textPart(body)] : []), ...attachments.map(attachmentPart)],
-        state: "sending",
-        createdAt: Date.now(),
-      },
-    });
     const entry: Send = {
       input: attachments.length ? { clientId, text: body, attachments } : { clientId, text: body },
       phase: "sending",
     };
+    const sentAt = Date.now();
+    take({ v: PROTOCOL_VERSION, type: "message", message: ownMessage(entry.input, sentAt) });
     sends.set(clientId, entry);
+    if (pending) {
+      // Shown at once, and saved before it goes out, so a reload can send this same message again.
+      now();
+      try {
+        await writePending(pending, {
+          v: 1,
+          scope: { ...pending.scope },
+          input: entry.input,
+          savedAt: sentAt,
+          expiresAt: sentAt + pending.retentionMs,
+        });
+      } catch {
+        // A write that failed may still have landed, and a copy of a message nobody sent would
+        // come back after a reload with Retry on it.
+        void writePending(pending, null).catch(() => {});
+        takeBack(clientId);
+        return { ok: false, error: NOT_STORED, input: entry.input };
+      }
+      stored = clientId;
+      // A stop while the copy saved leaves the message unsent, to go on Retry.
+      if (sends.get(clientId) !== entry || entry.phase !== "sending")
+        return unknownOutcome(clientId);
+    }
     return deliver(clientId, entry);
+  }
+
+  /** Takes a message back: it leaves the conversation, so its words can go back to the person. */
+  function takeBack(id: string): void {
+    sends.delete(id);
+    forget(id);
+    view = { ...view, messages: view.messages.filter((message) => message.id !== id) };
+    settle();
+    now();
   }
 
   function checkedInput(value: unknown, id: string, rootRunId: string): DisplayInput {
@@ -1237,22 +1388,22 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
       // says.
       if (sends.get(id) !== entry) return { ok: true, messageId: id, outcome: "accepted" };
       if (error instanceof TransportError && error.outcome === "refused") {
-        sends.delete(id);
-        view = { ...view, messages: view.messages.filter((message) => message.id !== id) };
-        settle();
-        now();
+        takeBack(id);
         return { ok: false, error: error.error, input: entry.input };
       }
       entry.phase = "unconfirmed";
       now();
       if (latestCommand === controller && !controller.signal.aborted) watch();
-      return { ok: true, messageId: id, outcome: "unknown" };
+      return unknownOutcome(id);
     }
-    if (sends.get(id) === entry && !controller.signal.aborted) entry.phase = "accepted";
+    if (sends.get(id) === entry && !controller.signal.aborted) {
+      entry.phase = "accepted";
+      forget(id);
+    }
     accepted(before, reply, controller, "send");
     now();
-    const outcome = sends.get(id) === entry && entry.phase !== "accepted" ? "unknown" : "accepted";
-    return { ok: true, messageId: id, outcome };
+    if (sends.get(id) === entry && entry.phase !== "accepted") return unknownOutcome(id);
+    return { ok: true, messageId: id, outcome: "accepted" };
   }
 
   async function retry(messageId: string): Promise<SendResult> {
@@ -1560,6 +1711,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   }
 
   function setOptions(next: ChatClientOptions): void {
+    checkPendingSend(next);
     settings = next;
     now();
   }

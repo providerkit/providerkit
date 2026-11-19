@@ -180,6 +180,34 @@ describe("composer send revisions", () => {
     await sending;
     expect(composer.getState().text).toBe("First");
   });
+
+  it("lets go of a message the client stored for a reload, and saves the empty draft at once", async () => {
+    // The stored message stays in the conversation with Retry on it. Kept here too, the same
+    // words could go again as a new message.
+    const saved: string[] = [];
+    const storage: DraftStorage = {
+      load: async () => null,
+      save: async (_scope, draft) => {
+        saved.push(draft.text);
+      },
+    };
+    const stored: SendResult = {
+      ok: true,
+      messageId: "message-1",
+      outcome: "unknown",
+      stored: true,
+    };
+    const composer = createComposer({
+      scope,
+      send: async () => stored,
+      initialText: "Hello",
+      draft: { storage, retentionMs: 60_000 },
+    });
+    expect(await composer.submit()).toEqual(stored);
+    expect(composer.getState()).toMatchObject({ text: "", error: undefined });
+    // Without waiting out the save delay, which a reload could fall inside.
+    expect(saved).toEqual([""]);
+  });
 });
 
 describe("uploads", () => {

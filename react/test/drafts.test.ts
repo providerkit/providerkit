@@ -4,9 +4,11 @@ import {
   createStoredDraft,
   draftScopeKey,
   parseDraft,
+  parseStoredSend,
   type DraftScope,
   type DraftStorage,
   type StoredDraft,
+  type StoredSend,
 } from "../src/drafts.ts";
 import type { SendResult } from "../src/client.ts";
 
@@ -77,6 +79,28 @@ describe("draft data", () => {
     }
     for (const retention of [0, -1, Infinity, NaN])
       expect(() => createStoredDraft(scope, content, retention)).toThrow();
+  });
+
+  it("restores a saved unconfirmed message only for its scope, within retention, as a valid send", () => {
+    const saved: StoredSend = {
+      v: 1,
+      scope,
+      input: { clientId: "client-1", text: "Hello", attachments: content.attachments },
+      savedAt: 1_000,
+      expiresAt: 1_100,
+    };
+    expect(parseStoredSend(saved, scope, 100, 1_050)).toEqual(saved);
+    expect(parseStoredSend(saved, { ...scope, conversationId: "chat-2" }, 100, 1_050)).toBeNull();
+    expect(parseStoredSend(saved, scope, 100, 1_100)).toBeNull();
+    // A shorter retention also applies to a copy saved under a longer one.
+    expect(parseStoredSend(saved, scope, 40, 1_050)).toBeNull();
+    for (const input of [
+      { text: "Hello" },
+      { clientId: "", text: "Hello" },
+      { clientId: "client-1", text: "   " },
+      { clientId: "client-1", text: "Hi", attachments: [{ id: "file" }] },
+    ])
+      expect(parseStoredSend({ ...saved, input }, scope, 100, 1_050)).toBeNull();
   });
 });
 

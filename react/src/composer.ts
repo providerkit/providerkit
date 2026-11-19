@@ -521,7 +521,9 @@ export function createComposer<F extends AttachmentFile>(
       return undefined;
     }
     if (!active || generation !== mine) return result;
-    if (result.ok && result.outcome === "accepted") {
+    // A stored message stays in the conversation, saved for a reload, with Retry on it. A second
+    // copy here could only go as a new message, so the composer lets go of it as if accepted.
+    if (result.ok && (result.outcome === "accepted" || result.stored)) {
       const submitted = new Set(items);
       edit({
         text: textRevision === revision ? "" : state.text,
@@ -530,6 +532,9 @@ export function createComposer<F extends AttachmentFile>(
         result,
         error: undefined,
       });
+      // Saved now, not after the pause: a reload in between would bring the words back beside
+      // the stored message.
+      if (result.stored) void flushDraft();
     } else publish({ submitting: false, result, error: result.ok ? unconfirmed : result.error });
     return result;
   }
