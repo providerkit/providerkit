@@ -8,7 +8,7 @@
  * session and its token refresh. A second reader here would drift from that one, so the app keeps
  * its reader and its API client, and this file keeps the rules every phone needs the same way:
  * which failure is a refusal, when a stream ends so the client can pick up from its cursor, and
- * when nothing should go out at all.
+ * when a reconnect waits for the phone.
  *
  * Because `fetch` waits for the whole response, a command cannot carry the stream. The server
  * answers `send` and `respond` with a short receipt, and the events arrive on `observe`.
@@ -113,8 +113,8 @@ export interface SseTransportOptions {
   silenceMs?: number;
   /** From `watchDevice`. A reconnect waits until the app is on screen and online, so the client
    * spends no tries on a phone that cannot reach the server. Silence counts only while the app is
-   * on screen, and the window starts again when it comes back. A command is refused while the
-   * phone is offline, before it goes out. */
+   * on screen, and the window starts again when it comes back. Commands still go out while the
+   * phone is offline, so turn Send and Retry off yourself while `device.offline` is true. */
   device?: Device;
 }
 
@@ -125,14 +125,8 @@ const RECEIPT = "application/json";
 
 const DEFAULT_MAX_STREAM_CHARS = 1_000_000;
 
-// The client's words for these follow its own: a `code` never changes, so an app can show its own
-// words for it, in its own language.
-const OFFLINE: DisplayError = Object.freeze({
-  code: "offline",
-  message: "You are offline, so nothing was sent. Try again when you are back online.",
-  retryable: true,
-});
-
+// Worded like the client's own errors: a `code` never changes, so an app can show its own words for
+// it, in its own language.
 function silence(ms: number): DisplayError {
   const seconds = Math.max(1, Math.round(ms / 1000));
   return Object.freeze({
@@ -245,10 +239,11 @@ export function createSseTransport(options: SseTransportOptions): ChatTransport 
   if (silenceMs !== undefined && !(Number.isFinite(silenceMs) && silenceMs > 0))
     throw new RangeError("silenceMs must be a finite number above zero.");
 
+  // Every command goes out, offline too. Refusing one here would be wrong for a Retry: the client
+  // forgets a refused message and its saved copy, though its first send may have arrived, and the
+  // transport cannot tell a first send from a retry (a retry after a restart carries a clientId it
+  // never saw). Offline, the app's fetch fails, and the message stays unconfirmed with its clientId.
   async function call(spec: SseRequest, fallback: unknown, signal?: AbortSignal): Promise<void> {
-    // Sent offline, a command fails as an unknown outcome, and the client keeps it as unconfirmed
-    // though it never left the phone. Refused here, the client gives it back to the person.
-    if (device?.offline) throw new TransportError("refused", OFFLINE);
     await command(prepare(spec, fallback, RECEIPT), { signal });
   }
 

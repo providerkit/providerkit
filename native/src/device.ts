@@ -1,8 +1,7 @@
 /**
  * Whether the app is on screen and the phone is online, from React Native's `AppState` and NetInfo,
- * which the app passes in. The stream transport reads it three ways: a reconnect waits until the
- * app is on screen and online, a silent stream is judged only while the app is on screen, and a
- * command is refused before it goes out while the phone is offline.
+ * which the app passes in. The stream transport reads it two ways: a reconnect waits until the app
+ * is on screen and online, and a silent stream is judged only while the app is on screen.
  *
  * Imports nothing from React Native, so it runs, and is tested, under Node.
  */
@@ -27,7 +26,8 @@ export interface DeviceOptions {
 export interface Device {
   /** False only while the app is in the background. */
   readonly active: boolean;
-  /** True only while NetInfo says there is no connection. */
+  /** True only while NetInfo says there is no connection. Turn Send and Retry off while it is true:
+   * the transport sends every command it is given. */
   readonly offline: boolean;
   /** Called after `active` or `offline` changed, never during `subscribe`. Returns the function
    * that stops it. */
@@ -52,7 +52,7 @@ export function watchDevice(options: DeviceOptions): Device {
   // keep running then, so only "background" counts as away.
   let active = appState.currentState !== "background";
   // NetInfo says `null` until it knows, which happens at every launch. Read as offline, that would
-  // refuse the first message of every session.
+  // hold the first stream and turn Send off at the start of every session.
   let offline = false;
   function notify(): void {
     for (const listener of [...listeners]) listener();

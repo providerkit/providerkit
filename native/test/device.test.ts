@@ -1,8 +1,11 @@
-import { createChatClient, TransportError, type Cursor } from "@providerkit/react";
+import { createChatClient, TransportError, type Cursor, type DraftScope } from "@providerkit/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { watchDevice, type AppStateLike, type NetInfoLike } from "../src/device.ts";
+import { createPendingSendStorage } from "../src/storage.ts";
 import { createSseTransport, type SendCommand } from "../src/transport.ts";
 import { at, drain, need, noCommand, reader, run, status } from "./fakes.ts";
+
+const scope: DraftScope = { principalId: "person-1", conversationId: "chat-1" };
 
 /** React Native's AppState, moved by hand. */
 function appState(initial: string | null = "active") {
@@ -167,32 +170,59 @@ describe("createSseTransport with the app's state", () => {
     expect(host.open).not.toHaveBeenCalled();
   });
 
-  it("refuses a command while the phone is offline, before it goes out", async () => {
+  it("keeps a message that may have arrived when Retry is pressed offline", async () => {
+    // A refusal here would make the client forget the message and its saved copy, though the first
+    // send may have reached the host. Sent again with a new clientId, it could run twice.
     const net = netInfo();
+    const host = reader();
     const device = watchDevice({ appState: appState().fake, netInfo: net.fake });
+    const items = new Map<string, string>();
+    const storage = createPendingSendStorage({
+      getItem: async (key) => items.get(key) ?? null,
+      setItem: async (key, value) => items.set(key, value),
+      removeItem: async (key) => items.delete(key),
+    });
+    const command = vi
+      .fn<SendCommand>()
+      // The first reply is lost, and the Retry made offline fails the way a phone's fetch does.
+      .mockRejectedValueOnce(new Error("Network request failed"))
+      .mockRejectedValueOnce(new Error("Network request failed"))
+      .mockResolvedValue({ received: true });
+    const client = createChatClient({
+      transport: createSseTransport({
+        observe: events,
+        send: () => "https://host.test/messages",
+        open: host.open,
+        command,
+        device,
+      }),
+      pendingSend: { storage, scope, retentionMs: 86_400_000 },
+    });
+    const detach = client.attach();
+    await flush();
+    const sent = await client.send("Book the 9am flight");
+    if (!sent.ok) throw new Error("An unknown outcome keeps the message.");
+    await flush();
+    host.push(status(run("completed"), at(1)));
+    await flush();
+    expect(client.getState().canRetry).toBe(true);
+
     net.report(false);
-    const command = vi.fn<SendCommand>(async () => ({ received: true }));
-    const transport = createSseTransport({
-      send: () => "https://host.test/messages",
-      stop: () => "https://host.test/stop",
-      open: reader().open,
-      command,
-      device,
-    });
-    const client = createChatClient({ transport });
-    expect(await client.send("Hello")).toMatchObject({
-      ok: false,
-      error: { code: "offline", retryable: true },
-      input: { text: "Hello" },
-    });
-    await expect(need(transport.stop, "stop")(run("running"))).rejects.toMatchObject({
-      outcome: "refused",
-      error: { code: "offline" },
-    });
-    expect(command).not.toHaveBeenCalled();
+    expect(await client.retry(sent.messageId)).toMatchObject({ ok: true, outcome: "unknown" });
+    expect(client.getState().messages).toMatchObject([{ id: sent.messageId, state: "failed" }]);
+    expect(client.getState().messageErrors).toHaveProperty(sent.messageId);
+    expect(items.size).toBe(1);
+
     net.report(true);
-    expect(await client.send("Hello")).toMatchObject({ ok: true, outcome: "accepted" });
-    expect(command).toHaveBeenCalledTimes(1);
+    await flush();
+    host.push(status(run("completed"), at(2)));
+    await flush();
+    expect(await client.retry(sent.messageId)).toMatchObject({ ok: true, outcome: "accepted" });
+    const [first, ...again] = command.mock.calls.map(([request]) => request.body);
+    expect(again).toEqual([first, first]);
+    await flush();
+    expect(items.size).toBe(0);
+    detach();
   });
 
   it("ends a stream that goes silent as a lost connection", async () => {
