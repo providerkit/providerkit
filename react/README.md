@@ -526,7 +526,14 @@ bun add @shadcn/react react-markdown remark-gfm
 `/ui` needs `@shadcn/react`, and `/markdown` needs `react-markdown` and `remark-gfm`. They are
 optional peer dependencies: your app installs them itself, and only when it imports one of these
 two entries. Up to version 0.1.1 they came with this package, so an app that imports `/ui` or
-`/markdown` must add them when it upgrades. An app that uses only the hooks has nothing to change.
+`/markdown` must add them when it upgrades.
+
+An app that uses only the hooks does not need them. But npm still checks their versions when your
+app already has one of them for its own use. This package asks for `@shadcn/react` ^0.3.1,
+`react-markdown` ^10.1.0 and `remark-gfm` ^4.0.1. If your app has a version outside these ranges,
+such as `react-markdown` 9, `npm install` stops with an `ERESOLVE` error. Change that package to a
+version in its range, or run `npm install --legacy-peer-deps`, which turns off peer checks for the
+whole install. Bun installs without this error.
 
 Keep your own header and layout. The components accept the hook values or equivalent data from
 your app's store:
