@@ -8,3 +8,5 @@ export type {
   SseTransportOptions,
   StreamHandlers,
 } from "./transport.ts";
+export { createDraftStorage, createPendingSendStorage } from "./storage.ts";
+export type { KeyValueStorage, StorageOptions } from "./storage.ts";
