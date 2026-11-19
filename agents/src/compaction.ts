@@ -146,7 +146,9 @@ export function compactionPlan(
   const previous = snapshot.models.at(-1);
   const measured = previous?.status === "completed" && previous.billing === "reported";
   // The last call counted its input, not its newly added answer, tools or steers.
-  const priorCount = previous ? conversationOf(snapshot, snapshot.models.length - 1).length : 0;
+  const priorCount = previous
+    ? conversationOf(snapshot, snapshot.models.length - 1, true).length
+    : 0;
   const count = measured
     ? previous.usage.inputTokens + conversationTokens(wire(full.slice(priorCount)).messages)
     : conversationTokens([{ role: "system", content: snapshot.definition.instructions }, ...core]);

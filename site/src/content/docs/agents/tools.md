@@ -102,8 +102,8 @@ other call, so past `costUsd` the cost limit is soft by that one call. Time limi
 limits and a Stop stay hard.
 
 `finish.emptyTurns` lets a few turns in a row come back with no text and no tool call before the
-run fails with `empty_output`. `finish.nearEnd` is a note the model reads with its last turn that
-has tools, so it can wrap up while it still can.
+run fails with `empty_output`. The model reads `finish.nearEnd` on its last turn with tools. The
+note applies to this run only. It stays out of the returned history and the session.
 
 ## Check output
 

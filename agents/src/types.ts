@@ -91,8 +91,8 @@ export type SalvageReason = "turns" | "toolCalls" | "costUsd" | "outputTokens" |
  * answer. A text agent gets it with no tools. A checked-output agent, or a `stopOnlyAtTools`
  * agent, is made to call its stopping tool, at effort `none` with earlier reasoning left out. */
 export interface FinishPolicy {
-  /** What the model reads with its last turn that has tools, one before `limits.turns`, so it
-   * can wrap up while it still can. No default. */
+  /** A note for the model on its last turn with tools, one before `limits.turns`. It stays
+   * out of the returned history and session. No default. */
   nearEnd?: string;
   /** Turns in a row that may come back with no text and no tool call before the next one fails
    * the run with `empty_output`. Default 0. */

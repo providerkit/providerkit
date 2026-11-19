@@ -968,9 +968,9 @@ const browser = defineAgent({
 ```
 
 `emptyTurns` lets that many turns in a row come back with no text and no tool call before the run
-fails with `empty_output`. Each one still costs a full request, so keep it small. `nearEnd` is a
-note the model reads with its last turn that has tools, one before `limits.turns`, so it can wrap
-up while it still can.
+fails with `empty_output`. Each one still costs a full request, so keep it small. The model reads
+`nearEnd` on its last turn with tools, one before `limits.turns`. Later calls in the same run
+keep the note. The returned history and the session leave it out.
 
 ### Refuse a call before it runs
 

@@ -13,6 +13,7 @@ import {
 } from "@providerkit/core";
 import {
   createMemoryInbox,
+  createMemorySession,
   defineAgent,
   RESULT_TOOL_NAME,
   subagentTool,
@@ -740,16 +741,19 @@ describe("finish turn of an agent that ends only on a stopping tool", () => {
     );
   });
 
-  it("offers a way out one turn before the limit, and keeps the note after it", async () => {
+  it("keeps the near-end note in this run's requests, not in the session", async () => {
     const NEAR =
       "You are near the end of your working budget. Call done now with your best summary, or ask whether to continue.";
     const finished = wire(
       calls("snapshot"),
       calls("snapshot"),
       calls(["done", { summary: "Filled 12 of 20 fields." }]),
+      calls(["done", { summary: "Four fields left." }]),
     );
-    const agent = { ...browser, limits: { turns: 3 }, finish: { nearEnd: NEAR } };
-    const outcome = await defineAgent({ ...agent, provider: finished.provider }).run("Fill it");
+    const config = { ...browser, limits: { turns: 3 }, finish: { nearEnd: NEAR } };
+    const agent = defineAgent({ ...config, provider: finished.provider });
+    const session = createMemorySession();
+    const outcome = await agent.run("Fill it", { session });
     expect(outcome).toMatchObject({ status: "completed", output: "Filled 12 of 20 fields." });
     expect(outcome).not.toHaveProperty("salvaged");
     expect(finished.requests.map((request) => request.messages.at(-1)?.content)).toEqual([
@@ -757,6 +761,11 @@ describe("finish turn of an agent that ends only on a stopping tool", () => {
       "snapshot ok",
       NEAR,
     ]);
+    const note = { role: "user", content: NEAR };
+    expect(outcome.newMessages).not.toContainEqual(note);
+    expect(outcome.history).not.toContainEqual(note);
+    await agent.run("Keep filling", { session });
+    expect(lastRequest(finished).messages).not.toContainEqual(note);
 
     // A model that ignores both notes still ends at the hard cap.
     const ignored = wire(
@@ -765,7 +774,7 @@ describe("finish turn of an agent that ends only on a stopping tool", () => {
       calls("snapshot"),
       calls("snapshot"),
     );
-    const limited = await defineAgent({ ...agent, provider: ignored.provider }).run("Fill it");
+    const limited = await defineAgent({ ...config, provider: ignored.provider }).run("Fill it");
     expect(limited).toMatchObject({ status: "limited", limit: "turns" });
     const finish = lastRequest(ignored);
     // The note stays where it was read, so the cached prefix holds.
