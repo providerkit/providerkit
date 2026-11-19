@@ -6,7 +6,7 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 ### Added
 
-- `stripLeakedToolMarkup(stream)` removes tool calls a model wrote into its text instead of calling the tool: DeepSeek's special tokens, with the rest of the turn's text after one, and made-up tags with a snake_case name and attributes or `/>`. The text around a tag keeps streaming. A tag split across chunks is caught, because text that could still become one waits for the next chunk; it goes out before the finish. Reasoning, tool calls and usage pass unchanged, and a citation whose span reaches removed text keeps its source and loses its span. `onStrip` reports each leak once, with the markup it removed.
+- `stripLeakedToolMarkup(stream)` removes tool calls a model wrote into its text instead of calling the tool: DeepSeek's special tokens, with the rest of the turn's text after one, and made-up tags with a snake_case name and an attribute (`name=`) or `/>`, with the closing tag of a pair whose opening tag it removed. The text around a tag keeps streaming, and so does a snake_case name followed by anything but an attribute, like `sort <in_file >out_file`. A call written as plain tags with no attributes, the way GLM writes one, stays whole. A tag split across chunks is caught, because text that could still become one waits for the next chunk; it goes out before the finish. Reasoning, tool calls and usage pass unchanged, and a citation whose span reaches removed text keeps its source and loses its span. `onStrip` reports each leak once, a pair included, with the markup that gave it away.
 
 ### Changed
 

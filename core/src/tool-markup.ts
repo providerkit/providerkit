@@ -7,23 +7,40 @@
 //    is the vendor's call syntax, never prose, so the rest of the turn's text
 //    goes with it.
 // 2. A call improvised as a tag, like `<suggest_dossie subjectType="company" />`.
-//    The signal is a snake_case name with attributes or a self-closing slash:
-//    real markup almost never puts an underscore in a tag name. Only the tag
-//    goes, and the prose around it keeps streaming.
+//    The signal is a snake_case name, then an attribute (`name=`) or a
+//    self-closing slash: real markup almost never puts an underscore in a tag
+//    name. Only the tag goes, with its closing tag when it opens a pair, and
+//    the prose around it keeps streaming.
+//
+// A false match deletes the reader's words, so a tag needs both halves of the
+// signal. The source app's filter took any space after the name for the start
+// of attributes: `sort <in_file >out_file` lost `<in_file >` and became a
+// different command, and `Promise<user_row | null>` became `Promise`. A closing
+// tag counts only when its opening tag went: alone, `</user_id>` is no more a
+// call than `<user_id>`, and stripping only the closing tags of a call written
+// as plain tags, the way GLM writes one, left the reader its opening tags and
+// arguments.
 import type { Citation } from "./hosted/types.ts";
 import type { ProviderChunk } from "./types.ts";
 
 /** How every DeepSeek special token opens: `<` and U+FF5C, written as an
  *  escape because it looks like `|` in most fonts. */
 const DEEPSEEK_TOKEN = "<\uFF5C";
-/** A whole pseudo tag: a snake_case name with attributes or a self-closing
- *  slash, or a snake_case closing tag. */
-const TAG =
-  /^<(?:\/[a-z][a-z0-9]*(?:_[a-z0-9]+)+\s*>|[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\s[^>]*\/?|\/)>)/;
-/** Text that may still grow into a tag, or a DeepSeek token, on the next chunk. */
-const PARTIAL_TAG = /^<\/?(?:[a-z0-9_]*|[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\s[^>]*)?\/?)$/;
-/** Held text that already reads as a pseudo tag's start: markup, even unclosed. */
-const OPENED_TAG = /^<\/?[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:[\s/]|$)/;
+/** A tag name with an underscore in it, like `save_note`. */
+const NAME = "[a-z][a-z0-9]*(?:_[a-z0-9]+)+";
+/** An attribute's name, like `title` or `subjectType`. */
+const ATTR = String.raw`[A-Za-z_][\w.:-]*`;
+/** A whole opening pseudo tag, its name captured: the name, then an attribute
+ *  or a self-closing slash. */
+const OPENING_TAG = new RegExp(String.raw`^<(${NAME})(?:\s+${ATTR}\s*=[^>]*|\s*/)>`);
+/** A whole closing tag, its name captured. */
+const CLOSING_TAG = new RegExp(String.raw`^</(${NAME})\s*>`);
+/** Text that may still grow into either tag, or a DeepSeek token, on the next chunk. */
+const PARTIAL_TAG = new RegExp(
+  String.raw`^<(?:/?[a-z0-9_]*|/${NAME}\s*|${NAME}(?:\s+(?:${ATTR}\s*(?:=[^>]*)?)?|\s*/)?)$`,
+);
+/** Held text that already reads as an opening pseudo tag: markup, even unclosed. */
+const OPENED_TAG = new RegExp(String.raw`^<${NAME}(?:\s+${ATTR}\s*=|\s*/)`);
 /** The longest text held while it waits for its `>` in a later chunk. A real
  *  leaked tag closes well within it; a tag that arrives whole is caught at any
  *  length. */
@@ -50,14 +67,17 @@ const MAX_HELD = 512;
  * in `requireContent` to have it fail like any other empty turn.
  *
  * `onStrip` runs once for each leak removed, with the markup that set it off: a
- * whole tag, or a DeepSeek token and the rest of the text it arrived in. Text
- * after a DeepSeek token in later chunks goes without another call.
+ * whole tag, or a DeepSeek token and the rest of the text it arrived in. The
+ * rest of a leak goes without another call: a pair's closing tag, and text
+ * after a DeepSeek token in later chunks.
  *
  * ponytail: a leaked call is dropped, not turned into the tool call it meant.
- * A `>` inside an attribute, a paired tag (the text between its tags stays,
- * and so does an opening tag with no attributes), or a tag split across chunks
- * that runs past 512 characters before it closes leaks in part. Count
- * `onStrip` to learn whether recovering the calls is worth building.
+ * Some get through, whole or in part: a pair of tags with no attributes (GLM's
+ * call format) stays whole, the text between a pair's tags stays, a `>` inside
+ * an attribute ends the tag early, and a tag split across chunks that runs past
+ * 512 characters before it closes leaks. Code is not exempt: a snake_case tag
+ * with an attribute, as in an XML sample, is removed from a code block too.
+ * Count `onStrip` to learn whether recovering the calls is worth building.
  */
 export async function* stripLeakedToolMarkup(
   chunks: AsyncIterable<ProviderChunk>,
@@ -67,6 +87,9 @@ export async function* stripLeakedToolMarkup(
   let held = "";
   // A DeepSeek token went by: the rest of the turn's text is its syntax.
   let tripped = false;
+  // The names of the pairs whose opening tag went and whose closing tag has not
+  // come yet. Only their closing tags are markup.
+  const open: string[] = [];
   // Positions in the source's text, the one a citation's span indexes: how
   // much of it is settled (sent on or removed), and where the first removal
   // began.
@@ -104,10 +127,20 @@ export async function* stripLeakedToolMarkup(
       }
       out += buf.slice(i, lt);
       const rest = buf.slice(lt);
-      const tag = TAG.exec(rest);
-      if (tag) {
-        strip(base + lt, tag[0]);
-        i = lt + tag[0].length;
+      const opening = OPENING_TAG.exec(rest);
+      if (opening) {
+        strip(base + lt, opening[0]);
+        if (!opening[0].endsWith("/>")) open.push(opening[1]!);
+        i = lt + opening[0].length;
+        continue;
+      }
+      const closing = CLOSING_TAG.exec(rest);
+      const pair = closing ? open.lastIndexOf(closing[1]!) : -1;
+      if (closing && pair >= 0) {
+        // The end of a leak already reported, so no second report. Its opening
+        // tag already marked the first cut the citations are checked against.
+        open.splice(pair, 1);
+        i = lt + closing[0].length;
         continue;
       }
       if (!tripped && rest.length <= MAX_HELD && PARTIAL_TAG.test(rest)) {
@@ -133,6 +166,10 @@ export async function* stripLeakedToolMarkup(
     // A tag the turn ended inside is still markup: never show it.
     if (OPENED_TAG.test(tail)) {
       strip(at, tail);
+      return [];
+    }
+    // Nor the start of the closing tag a removed pair was waiting for.
+    if (tail.startsWith("</") && open.some((name) => `</${name}`.startsWith(tail.trimEnd()))) {
       return [];
     }
     return [{ type: "delta", content: tail }];

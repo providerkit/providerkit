@@ -110,15 +110,18 @@ It removes two shapes from `content` as the stream arrives:
 
 - A DeepSeek token, which starts with `<` and a fullwidth `｜`, as in `<｜tool▁calls▁begin｜>`.
   Everything after it is the call's syntax, so the rest of the turn's text goes too.
-- A made-up tag with an underscore in its name and either attributes or a closing `/>`, like
-  `<save_note title="x" />`, and a closing tag like `</save_note>`. Only the tag goes. The text
-  around it stays.
+- A made-up tag with an underscore in its name, then an attribute (`title="x"`) or a closing
+  `/>`, like `<save_note title="x" />`. When the tag opens a pair, its closing tag `</save_note>`
+  goes too. Only the tags go. The text around them stays.
 
 A tag can arrive split across chunks, so text that could still become one (`<`, `<save_`) waits
 for the next chunk. Text held that way goes out before the finish chunk, and before the stream's
-own error. If the turn ends partway through a tag whose name is complete, like
-`<save_note title="x"`, that part is dropped. Ordinary angle brackets stay: `a < b`, `<strong>`,
-and `<user_id>` with no attributes.
+own error. If the turn ends partway through a tag that already has an attribute, like
+`<save_note title="x"`, that part is dropped.
+
+Ordinary angle brackets stay: `a < b`, `<strong>`, `<user_id>` and `</user_id>`. So does a tag
+name followed by anything but an attribute, like `sort <in_file >out_file` or
+`Promise<user_row | null>`.
 
 Only the text changes. Reasoning, tool calls and usage pass through as they came. A citation
 whose span reaches removed text keeps its source but loses its span, the same as any span that
@@ -131,16 +134,21 @@ result in `requireContent`:
 const checked = requireContent(provider.id, stripLeakedToolMarkup(stream));
 ```
 
-Pass `onStrip` to see each leak. It runs once per leak, with the markup it removed:
+Pass `onStrip` to see each leak. It runs once per leak, with the markup it removed. For a pair of
+tags, that is the opening tag:
 
 ```ts
 stripLeakedToolMarkup(stream, { onStrip: (markup) => log.warn("tool call in text", { markup }) });
 ```
 
-It removes calls, it doesn't run them. Some still get through in part: a tag with a `>` inside an
-attribute, the text inside a pair of tags like `<save_note>x</save_note>` (and the opening tag
-too, when it has no attributes), and a tag that arrives over several chunks and runs past 512
-characters before it closes.
+It removes calls, it doesn't run them, and some get through. A call written as plain tags with no
+attributes, the way GLM writes one, stays whole. The text between a pair's tags stays too. A `>`
+inside an attribute ends the tag early, so the rest of it shows, and so does a tag that arrives
+over several chunks and runs past 512 characters before it closes.
+
+It can also remove text that is not a call. Code gets no exception: a tag with an underscore in
+its name and an attribute, like `<save_note title="x" />` in an XML sample, is removed from a code
+block too.
 
 ## zod
 

@@ -1,7 +1,9 @@
 // Tool calls a model wrote into its text. The first four cases are the source
 // app's own tests for this filter, moved from its engine to the chunk stream;
-// the rest pin what a stream of chunks adds: a token split after its `<`, the
-// finish, a failure, the other fields, citations and the report.
+// the next pin what a stream of chunks adds: a token split after its `<`, the
+// finish, a failure, the other fields, citations and the report. The last pin
+// what the source's filter got wrong: text after a snake_case name that is no
+// attribute, and a closing tag whose opening tag stayed.
 import { describe, expect, it } from "vitest";
 import type { Source } from "../src/hosted/types.ts";
 import { stripLeakedToolMarkup } from "../src/tool-markup.ts";
@@ -137,5 +139,44 @@ describe("stripLeakedToolMarkup", () => {
     await strip("a <save_", 'brief title="x"/> b', ' <note_it c="1"');
     await strip("c <｜tool▁call｜>x", "more of the call");
     expect(stripped).toEqual(['<save_brief title="x"/>', '<note_it c="1"', "<｜tool▁call｜>x"]);
+  });
+
+  it.each([
+    ["a shell redirect", "Run `sort <in_file >out_file` to sort."],
+    ["a placeholder with a space in it", "Set the header to `Bearer <your_api_key here>`."],
+    ["a type argument", "type Row = Promise<user_row | null>;"],
+    ["a comparison the turn ends on", "Keep retries <max_retries and stop."],
+  ])("keeps %s, where no attribute follows the name", async (_, text) => {
+    // Each lost words when any space after a snake_case name counted as the
+    // start of attributes. Also cut after that space, where the text waits.
+    const cut = text.indexOf(" ", text.indexOf("<")) + 1;
+    expect(await textOf(text)).toBe(text);
+    expect(await textOf(text.slice(0, cut), text.slice(cut))).toBe(text);
+  });
+
+  it("lets prose go as soon as it can't become an attribute", async () => {
+    // Held, this would stall the answer for up to 512 characters.
+    const chunks = await chunksOf(stripLeakedToolMarkup(turn("Use <max_retries and stop", ".")));
+    expect(chunks[0]).toEqual({ type: "delta", content: "Use <max_retries and stop" });
+  });
+
+  it("removes a closing tag only with its opening tag, and reports the pair once", async () => {
+    const stripped: string[] = [];
+    const textWith = async (...parts: string[]) =>
+      (
+        await collectTurn(
+          stripLeakedToolMarkup(turn(...parts), { onStrip: (markup) => stripped.push(markup) }),
+        )
+      ).message.content;
+    expect(await textWith('Ok. <save_note title="x">', "body</save_", "note> done")).toBe(
+      "Ok. body done",
+    );
+    expect(await textWith('<save_note title="x">body</save_no')).toBe("body");
+    // A call written as plain tags, the way GLM writes one, stays whole: with
+    // only its closing tags gone, the reader still saw the call, unbalanced.
+    const plain =
+      "Ok.<tool_call>search\n<arg_key>q</arg_key>\n<arg_value>cats</arg_value>\n</tool_call>";
+    expect(await textWith(plain)).toBe(plain);
+    expect(stripped).toEqual(['<save_note title="x">', '<save_note title="x">']);
   });
 });

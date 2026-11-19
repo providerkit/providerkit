@@ -175,8 +175,8 @@ what, and how each call is billed.
 
 Some models write a tool call into their answer instead of calling the tool. DeepSeek does it
 with its own tokens (`<｜tool▁calls▁begin｜>`), and any model can make up a tag
-(`<save_note title="x" />`). Wrap the stream, and that markup never reaches the reader or the
-history:
+(`<save_note title="x" />`). Wrap the stream to remove that markup before it reaches the reader
+or the history:
 
 ```ts
 import { stripLeakedToolMarkup } from "@providerkit/core";
@@ -187,7 +187,9 @@ for await (const chunk of stripLeakedToolMarkup(provider.createStream(messages, 
 ```
 
 A tag split across chunks is caught too: text that could still become one waits for the next
-chunk. Ordinary angle brackets stay. Pass `onStrip` to log what it removes. The
+chunk. Ordinary angle brackets stay, like `a < b` or `Promise<user_row | null>`. A call written
+as plain tags with no attributes, the way GLM writes one, is not caught and stays whole. Pass
+`onStrip` to log what it removes. The
 [tools guide](https://providerkit.dev/guides/tools/#tool-calls-written-as-text) lists what it
 catches and what gets through.
 
