@@ -560,6 +560,45 @@ describe("toAnthropicMessages", () => {
   });
 });
 
+describe("anthropic prompt caching", () => {
+  type Block = Record<string, unknown>;
+  interface Body {
+    system?: Block[];
+    messages: { role: string; content: Block[] }[];
+  }
+  const search: ToolDefinition[] = [
+    { name: "search", description: "search", inputSchema: { type: "object" } },
+  ];
+
+  /** The request body a call sends, as it went out. */
+  async function sent(messages: ChatMessage[], tools = search): Promise<Body> {
+    const { seen, fetchImpl } = recorder(ANTHROPIC_TEXT_TURN);
+    const provider = createAnthropicProvider({ apiKey: "k", model: "claude-sonnet-5", fetchImpl });
+    await collect(provider.createStream(messages, tools));
+    const { system, messages: wire } = seen[0]!.body;
+    return { ...(Array.isArray(system) ? { system } : {}), messages: wire as Body["messages"] };
+  }
+
+  it("sends one system block per system message, in order, the marker on the last", async () => {
+    // A decorator over a Provider can only add a system message. A line it
+    // puts first now reaches the wire as its own first block, not as the start
+    // of one joined block. A blank message gets no block: alone, Anthropic
+    // refuses it.
+    const messages: ChatMessage[] = [
+      { role: "system", content: "First line." },
+      { role: "system", content: "  " },
+      { role: "system", content: "You are terse." },
+      { role: "user", content: "hi" },
+    ];
+    const blocks = [
+      { type: "text", text: "First line." },
+      { type: "text", text: "You are terse.", cache_control: { type: "ephemeral" } },
+    ];
+    expect((await sent(messages, [])).system).toEqual(blocks);
+    expect(toAnthropicMessages(messages).system).toEqual(blocks);
+  });
+});
+
 // ── OpenAI shape ──────────────────────────────────────────────────────────
 
 const OPENAI_TEXT_TURN = [

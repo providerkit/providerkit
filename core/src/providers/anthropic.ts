@@ -283,7 +283,8 @@ function partsToAnthropic(content: string | ContentPart[], provider: string): un
  * tool results are merged into one user turn, which the API requires.
  */
 /**
- * The system prompt as ONE cached block.
+ * The system prompt: one text block per system message, in order, with the
+ * cache breakpoint on the last.
  *
  * Anthropic's prompt caching is opt-in per block. A plain string system prompt
  * is never cached, however many times it is re-sent. An agent loop re-sends this
@@ -294,9 +295,25 @@ function partsToAnthropic(content: string | ContentPart[], provider: string): un
  * Unconditional. Below the model's minimum cacheable length the field is
  * ignored rather than rejected, and above it the one-time 1.25× write is repaid
  * by the second turn, which always comes in the loop this package sits under.
+ *
+ * A block per message, not one joined block, because a decorator over a
+ * Provider can only add a system message. A line it puts first then reaches the
+ * wire as its own first block, which a gateway that reads the first block finds
+ * alone, instead of as the start of a block that holds the whole prompt.
+ *
+ * A blank message gets no block. Joined, it was a few spaces inside real text;
+ * alone, it is a 400 ("system text blocks must contain non-whitespace text",
+ * recorded against claude-sonnet-5-5 by PydanticAI, MIT,
+ * tests/test_history_properties.py).
  */
-function systemBlocks(text: string): unknown[] | undefined {
-  return text ? [{ type: "text", text, cache_control: { type: "ephemeral" } }] : undefined;
+function systemBlocks(messages: readonly string[]): unknown[] | undefined {
+  const texts = messages.filter((text) => text.trim() !== "");
+  if (texts.length === 0) return undefined;
+  return texts.map((text, i) =>
+    i === texts.length - 1
+      ? { type: "text", text, cache_control: { type: "ephemeral" } }
+      : { type: "text", text },
+  );
 }
 
 /**
@@ -366,10 +383,7 @@ export function anthropicMessages(
   messages: AnthropicMessage[];
 } {
   const wireId = anthropicIds();
-  const system = messages
-    .filter((m) => m.role === "system")
-    .map((m) => m.content)
-    .join("\n\n");
+  const system = messages.flatMap((m) => (m.role === "system" ? [m.content] : []));
 
   const toolUse = (call: { id: string; name: string; arguments: string }) => ({
     type: "tool_use",
