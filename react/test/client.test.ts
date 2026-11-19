@@ -1006,6 +1006,51 @@ describe("stopping", () => {
     });
   });
 
+  it("without transport.stop, settles a thinking row the stop cut short, with no length", async () => {
+    // A stopped message is final, so nothing later could settle the row, and a renderer that draws
+    // Thinking while it is open would draw it forever.
+    const send = vi.fn<Send>(async () => ({
+      events: new Feed().push(
+        put(assistant("a1"), at(1)),
+        status(run("running"), at(2)),
+        patch(
+          "a1",
+          { type: "thinking", id: "a1-thinking", settled: false, startedAt: 1_000 },
+          at(3),
+        ),
+      ),
+    }));
+    const client = createChatClient({ transport: { send } });
+    await client.send("Hi");
+    await flush();
+    expect(await client.stop()).toEqual({ ok: true });
+    expect(find(client, "a1")).toMatchObject({
+      state: "stopped",
+      parts: [{ type: "thinking", id: "a1-thinking", settled: true, startedAt: 1_000 }],
+    });
+    expect(find(client, "a1")?.parts[0]).not.toHaveProperty("durationMs");
+  });
+
+  it("without transport.stop, offers Retry at once for a send the stop cut off", async () => {
+    // Closing the stream was the stop, and the client drew the run as stopped, so there is no run
+    // left to wait for.
+    const host = tail();
+    const send = vi.fn<Send>(
+      (_input, { signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }),
+    );
+    const client = createChatClient({ transport: { send, observe: host.observe } });
+    client.attach();
+    host.latest().push(status(run("completed", "run-0"), at(1)));
+    await flush();
+    const pending = client.send("Hello");
+    expect(await client.stop()).toEqual({ ok: true });
+    expect(await pending).toMatchObject({ ok: true, outcome: "unknown" });
+    expect(client.getState()).toMatchObject({ status: "ready", canRetry: true });
+  });
+
   it("will not claim to stop a run it only watches", async () => {
     const host = tail();
     const client = createChatClient({ transport: { observe: host.observe } });
@@ -2142,7 +2187,6 @@ describe("stream rules from a phone app", () => {
       expect(client.getState().canRetry).toBe(false);
       const first = await client.send("Unconfirmed message");
       if (!first.ok) throw new Error("An unknown outcome keeps the message.");
-      expect(client.getState().canRetry).toBe(true);
       host.latest().push(status(run(state, "another-run"), at(1)));
       await flush();
       // Steering keeps Send available, and still the unconfirmed message cannot go again.
@@ -2156,6 +2200,35 @@ describe("stream rules from a phone app", () => {
       expect(client.getState().canRetry).toBe(false);
     },
   );
+
+  it("offers Retry only once the host has said where the run stands", async () => {
+    // Until the host answers, the message may have started a run that nobody reported yet, and a
+    // retry would send it into that run.
+    const host = tail();
+    const send = vi
+      .fn<Send>()
+      .mockRejectedValueOnce(new Error("Lost reply"))
+      .mockResolvedValue(undefined);
+    const client = createChatClient({ transport: { send, observe: host.observe } });
+    client.attach();
+    host.latest().push(status(run("completed", "run-0"), at(1)));
+    await flush();
+    const first = await client.send("Hello");
+    if (!first.ok) throw new Error("An unknown outcome keeps the message.");
+    expect(client.getState()).toMatchObject({ status: "ready", canRetry: false });
+    expect(await client.retry(first.messageId)).toMatchObject({
+      ok: false,
+      error: { code: "checking" },
+    });
+    // The client asks the host again, and the host answers with the run as it stands now.
+    expect(host.opened).toHaveLength(2);
+    expect(host.opened[1]?.cursor).toEqual({ segment: "s1", seq: 1 });
+    host.latest().push(status(run("completed", "run-0")));
+    await flush();
+    expect(client.getState().canRetry).toBe(true);
+    expect(await client.retry(first.messageId)).toMatchObject({ ok: true, outcome: "accepted" });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
 });
 
 // A message whose delivery is unknown used to live only in memory, so a reload lost it, and the
@@ -2199,18 +2272,22 @@ describe("an unconfirmed message across a reload", () => {
       .fn<Send>()
       .mockRejectedValueOnce(new Error("socket hang up"))
       .mockResolvedValue(undefined);
-    const { box, before, after, input, result } = await reloadAfterLostReply(send);
-    expect(result).toMatchObject({ outcome: "unknown", stored: true });
+    const { box, before, after, host, input, result } = await reloadAfterLostReply(send);
+    expect(result).toEqual({ ok: true, messageId: input.clientId, outcome: "unknown" });
     expect(find(after, input.clientId)).toMatchObject({
       role: "user",
       state: "failed",
       createdAt: find(before, input.clientId)?.createdAt,
     });
+    // Retry waits for the host to say where the run stands: the lost reply may have started one.
     expect(after.getState()).toMatchObject({
       canSend: false,
-      canRetry: true,
+      canRetry: false,
       messageErrors: { [input.clientId]: { code: "unconfirmed" } },
     });
+    host.latest().push(status(run("completed", "run-0")));
+    await flush();
+    expect(after.getState()).toMatchObject({ canSend: false, canRetry: true });
     // One at a time: a second message could not be sent again safely after another reload.
     expect(await after.send("Something else")).toMatchObject({
       ok: false,
@@ -2259,7 +2336,9 @@ describe("an unconfirmed message across a reload", () => {
       .mockRejectedValueOnce(
         new TransportError("refused", { code: "closed", message: "This chat is closed." }),
       );
-    const { box, after, input } = await reloadAfterLostReply(send);
+    const { box, after, host, input } = await reloadAfterLostReply(send);
+    host.latest().push(status(run("completed", "run-0")));
+    await flush();
     expect(await after.retry(input.clientId)).toEqual({
       ok: false,
       error: { code: "closed", message: "This chat is closed." },
@@ -2269,6 +2348,77 @@ describe("an unconfirmed message across a reload", () => {
     await flush();
     expect(box.saved()).toBeUndefined();
   });
+
+  it("lets the person drop a message that never gets through, so the next one can go", async () => {
+    // Without a way to drop it, a message whose every send ends as unknown holds the conversation
+    // until its copy expires, a reload included.
+    const gateway = () =>
+      new TransportError("unknown", { code: "http_502", message: "The server did not answer." });
+    const send = vi
+      .fn<Send>()
+      .mockRejectedValueOnce(gateway())
+      .mockRejectedValueOnce(gateway())
+      .mockResolvedValue(undefined);
+    const { box, after, host, input } = await reloadAfterLostReply(send);
+    host.latest().push(status(run("completed", "run-0")));
+    await flush();
+    expect(await after.retry(input.clientId)).toMatchObject({ ok: true, outcome: "unknown" });
+    expect(after.getState().canSend).toBe(false);
+    expect(after.discard(input.clientId)).toEqual({ ok: true });
+    expect(after.getState()).toMatchObject({
+      messages: [],
+      canSend: true,
+      canRetry: false,
+      messageErrors: {},
+    });
+    expect(after.discard(input.clientId)).toMatchObject({
+      ok: false,
+      error: { code: "not_unconfirmed" },
+    });
+    await flush();
+    expect(box.saved()).toBeUndefined();
+    expect(await after.send("Something else")).toMatchObject({ ok: true, outcome: "accepted" });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([true, false])(
+    "keeps a message from going out when Stop comes while its copy saves (transport.stop: %s)",
+    async (hasStop) => {
+      // It has not gone out, so the stop is the client's to keep. Sent after the stop, it would
+      // start a run that nobody stopped, while the client waited for the host to stop it.
+      const box = device();
+      const write = deferred<void>();
+      const save = box.storage.save.getMockImplementation();
+      box.storage.save.mockImplementationOnce(async (...args) => {
+        await write.promise;
+        await save?.(...args);
+      });
+      const send = vi.fn<Send>(async () => {});
+      const stop = vi.fn(async () => {});
+      const client = createChatClient({
+        transport: hasStop ? { send, stop } : { send },
+        pendingSend: { storage: box.storage, scope, retentionMs: 60_000 },
+      });
+      const pending = client.send("Hello");
+      await flush();
+      expect(client.getState()).toMatchObject({ status: "sending", canStop: true });
+      expect(await client.stop()).toEqual({ ok: true });
+      expect(client.getState()).toMatchObject({ status: "ready", messages: [] });
+      write.resolve();
+      expect(await pending).toMatchObject({
+        ok: false,
+        error: { code: "send_stopped" },
+        input: { text: "Hello" },
+      });
+      await flush();
+      expect(send).not.toHaveBeenCalled();
+      expect(stop).not.toHaveBeenCalled();
+      expect(client.getState()).toMatchObject({ status: "ready", canSend: true, messages: [] });
+      // The copy that landed after the stop goes too: a reload would bring back a message nobody
+      // sent, with Retry on it.
+      expect(box.saved()).toBeUndefined();
+    },
+  );
 
   it("saves the copy before the message goes out, and sends nothing it could not save", async () => {
     const box = device();

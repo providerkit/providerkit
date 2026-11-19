@@ -13,11 +13,11 @@ not reset the budget; repeated empty closes eventually show a lost connection wi
 reconnect action. An unfinished stream is not converted into success.
 
 Sends, uploads and request answers are not replayed automatically. If a send is refused, the
-composer keeps the draft. If delivery is unknown, the message stays unconfirmed. Before offering a manual retry, **your app** must check the server's saved conversation. The client does not wait for that check: `retry(messageId)` sends the message again with the same client ID. Show Retry only while `canRetry` is true: it is false while a run is going, because the message sent again into that run could ask for the same work twice.
+composer keeps the draft. If delivery is unknown, the message stays unconfirmed. Before offering a manual retry, **your app** must check the server's saved conversation. Show Retry only while `canRetry` is true. It is false until the server says where the run stands after the lost reply, and while a run is going, because the message sent again into that run could ask for the same work twice. `retry(messageId)` sends the message again with the same client ID, and `discard(messageId)` removes it without sending it.
 
 An unconfirmed message lives in memory unless you pass `pendingSend` with your storage. Then the
 client saves each message before it goes out, brings an unconfirmed one back after a reload, and
-keeps one at a time.
+keeps one at a time. The composer keeps its words too, so a refused retry loses nothing.
 
 Unmounting or changing account/conversation detaches the old observer. It does not cancel the
 server's run. Late events and reads from the old scope cannot update the new one.

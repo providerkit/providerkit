@@ -255,11 +255,13 @@ export interface ChatState {
   canSend: boolean;
   /** `retry` can send a message whose delivery is unknown now. False while a run is going
    * (unless `allowSendWhileRunning`), even when steering keeps `canSend` true: sending it again
-   * into a running one could ask for the same work twice. Show Retry on a message only when this
-   * is true and `messageErrors` has it. */
+   * into a running one could ask for the same work twice. Also false until the host has said
+   * where its run stands since the delivery became unknown, because the message may have started
+   * a run nobody reported yet. Show Retry on a message only when this is true and `messageErrors`
+   * has it. */
   canRetry: boolean;
   /** A stop can reach the run: the transport has `stop`, or the client can abort its pending
-   * command or reply stream. */
+   * command or reply stream, or keep a message whose copy is still being saved from going out. */
   canStop: boolean;
   /** The connection is lost and the transport can observe, so `reconnect` can work. */
   canReconnect: boolean;
@@ -269,11 +271,9 @@ export type CommandResult = { ok: true } | { ok: false; error: DisplayError };
 
 /** `ok` means the message stays in the conversation, not that delivery is confirmed. Clear
  * a submitted draft only when `outcome` is `accepted`. An `unknown` outcome stays visible while
- * observation checks the host. Otherwise `input` is what was taken back, so the draft can keep it.
- * `stored` comes only with `unknown`, from a client with `pendingSend`: the message is saved for a
- * reload, so a composer can let go of its own copy, which could only be sent as a new message. */
+ * observation checks the host. Otherwise `input` is what was taken back, so the draft can keep it. */
 export type SendResult =
-  | { ok: true; messageId: string; outcome: "accepted" | "unknown"; stored?: true }
+  | { ok: true; messageId: string; outcome: "accepted" | "unknown" }
   | { ok: false; error: DisplayError; input?: SendInput };
 
 /** How the client reattaches when a stream ends or fails while a run is going. */
@@ -306,9 +306,10 @@ export interface ChatClientOptions {
   /** Saves each message in the app's storage before it goes out, and keeps it there while its
    * delivery is unknown. After a reload the message is back in the conversation as unconfirmed,
    * and `retry` sends it again with the same `clientId`, only when the person asks. One message
-   * at a time: while one is unconfirmed, a new send is refused, because two could not both be
-   * sent again safely. A send whose copy cannot be saved is refused before it goes out. Off by
-   * default. Steering input (`enqueue`) is not kept. */
+   * at a time: while one is unconfirmed, a new send is refused until the person sends it again or
+   * removes it with `discard`, because two could not both be sent again safely. A send whose copy
+   * cannot be saved is refused before it goes out. Off by default. Steering input (`enqueue`) is
+   * not kept. */
   pendingSend?: PendingSendOptions;
   /** App-owned handlers with an explicit repeat-safety declaration or a durable host claim.
    * All dispatch is manual. Disclosure or a browser key alone never authorizes a write. */
@@ -333,6 +334,10 @@ export interface ChatClient {
   /** Sends a message whose outcome is unknown again, with the same `clientId`. Nothing else ever
    * sends a message twice. */
   retry(messageId: string): Promise<SendResult>;
+  /** Takes a message whose outcome is unknown out of the conversation, and out of `pendingSend`
+   * storage, without sending it again: for a message the person gives up on. If it did arrive,
+   * the host's copy still shows once the host sends it. */
+  discard(messageId: string): CommandResult;
   /** Asks the host to stop the run, then waits for it to say so, with the observation still
    * open. Without `transport.stop`, closes the stream the run lives in and marks it stopped here. */
   stop(): Promise<CommandResult>;
@@ -376,14 +381,23 @@ const CANNOT_STOP = fixed("unsupported", "This chat cannot stop the answer.");
 const NOT_WAITING = fixed("not_waiting", "This request is no longer waiting for an answer.");
 const ANSWERING = fixed("answering", "Your answer is still on its way.");
 const NOTHING_TO_RETRY = fixed("not_unconfirmed", "This message does not need to be sent again.");
+const NOTHING_TO_DISCARD = fixed(
+  "not_unconfirmed",
+  "This message cannot be removed. It was sent, or it is still on its way.",
+);
+const CHECKING = fixed("checking", "Checking whether your message arrived. Try again in a moment.");
 const UNCONFIRMED_SEND = fixed("unconfirmed", "This message may not have been sent.");
 const UNSENT = fixed(
   "unconfirmed_send",
-  "Your last message may not have been sent. Send it again, or wait until it arrives, before you send another.",
+  "Your last message may not have been sent. Send it again or remove it before you send another.",
 );
 const NOT_STORED = fixed(
   "not_stored",
   "Your message was not sent, because this device could not save a copy first. Try again. If it keeps failing, check the app's storage.",
+);
+const SEND_STOPPED = fixed(
+  "send_stopped",
+  "Your message was not sent, because you stopped it first.",
 );
 const UNCONFIRMED_ANSWER = fixed("unconfirmed", "Your answer may not have arrived.");
 const STOP_FAILED = fixed("stop_failed", "Could not stop the answer. Try again.");
@@ -391,9 +405,11 @@ const LOST = fixed("connection_lost", "The connection to the server was lost.");
 
 interface Send {
   input: SendInput;
-  /** `sending`: the call is out. `accepted`: the host took it, and its own copy has not arrived
-   * yet. `unconfirmed`: the call failed in a way that says nothing about whether the host has it. */
-  phase: "sending" | "accepted" | "unconfirmed";
+  /** `saving`: its copy for a reload is being saved, and the call has not gone out, so a stop can
+   * still keep it here. `sending`: the call is out. `accepted`: the host took it, and its own copy
+   * has not arrived yet. `unconfirmed`: the call failed in a way that says nothing about whether
+   * the host has it. */
+  phase: "saving" | "sending" | "accepted" | "unconfirmed";
   /** The copy shown in its place, kept so a rebuild that changed nothing hands out the same
    * object. */
   shown?: { from: DisplayMessage; message: DisplayMessage };
@@ -401,6 +417,7 @@ interface Send {
 
 /** How each phase shows. The view itself keeps every message this client sent as `sending`. */
 const SHOWN = {
+  saving: undefined,
   sending: undefined,
   accepted: "settled",
   unconfirmed: "failed",
@@ -539,7 +556,10 @@ function writing(messages: readonly DisplayMessage[], id?: string): DisplayMessa
  * answered. */
 function seal(part: DisplayPart): DisplayPart {
   switch (part.type) {
+    // A thinking row settles with no length: the stop cut it short, so a length would measure the
+    // stop.
     case "text":
+    case "thinking":
       return part.settled ? part : { ...part, settled: true };
     case "tool":
       return part.state === "running" || part.state === "waiting"
@@ -654,6 +674,9 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
   let stored: string | undefined;
   let restoring: Promise<void> | undefined;
   let writes: Promise<void> = Promise.resolve();
+  /** Whether the host said where its run stands since the last send whose outcome is unknown.
+   * Until it does, that message may have started a run nobody reported yet, so Retry waits. */
+  let heardRun = false;
   let state = build(undefined);
   let notified = state;
 
@@ -713,10 +736,6 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     if (!settings.pendingSend) return false;
     for (const send of sends.values()) if (send.phase !== "accepted") return true;
     return false;
-  }
-
-  function unknownOutcome(id: string): SendResult {
-    return { ok: true, messageId: id, outcome: "unknown", ...(stored === id && { stored: true }) };
   }
 
   function getState(): ChatState {
@@ -779,11 +798,13 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
           Boolean(view.run.id) &&
           transport.enqueue !== undefined),
       canRetry:
-        canSendOrdinary(status) && [...sends.values()].some((send) => send.phase === "unconfirmed"),
+        canRetryNow(status) && [...sends.values()].some((send) => send.phase === "unconfirmed"),
       canStop:
         status !== "ready" &&
         status !== "stopping" &&
-        (transport.stop !== undefined || commands.size > 0),
+        (transport.stop !== undefined ||
+          commands.size > 0 ||
+          [...sends.values()].some((send) => send.phase === "saving")),
       canReconnect: lost && transport.observe !== undefined,
     };
     if (problem) next.error = problem.error;
@@ -799,12 +820,23 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     );
   }
 
+  /** A retry is an ordinary send, and its message may have started a run nobody reported yet, so
+   * it also waits for the host's word on the run. A transport that cannot observe has none to
+   * wait for. */
+  function canRetryNow(status = statusOf()): boolean {
+    return (
+      canSendOrdinary(status) &&
+      (settings.allowSendWhileRunning === true || heardRun || !settings.transport.observe)
+    );
+  }
+
   function statusOf(): ChatStatus {
     if (stopping) return "stopping";
     const { status } = view.run;
     if (status === "running" || status === "waiting") return status;
     if (starting) return stream?.kind === "command" ? "running" : "sending";
-    for (const send of sends.values()) if (send.phase === "sending") return "sending";
+    for (const send of sends.values())
+      if (send.phase === "saving" || send.phase === "sending") return "sending";
     return "ready";
   }
 
@@ -931,7 +963,10 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     if (event.seq !== undefined && left.has(segmentKey(event.segment))) return false;
     const next = reduceChat(view, event);
     // Even an unchanged idle snapshot confirms the host was read. EOF alone cannot do that.
-    if (event.type === "snapshot" || event.type === "run") initialized = true;
+    if (event.type === "snapshot" || event.type === "run") {
+      initialized = true;
+      heardRun = true;
+    }
     // A numbered no-op is a duplicate. An unnumbered snapshot can still report a new refusal
     // with identical display fields, so it must reconcile this submission's local feedback.
     if (next === view && event.seq !== undefined) return false;
@@ -1228,7 +1263,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     const clientId = createId();
     const entry: Send = {
       input: attachments.length ? { clientId, text: body, attachments } : { clientId, text: body },
-      phase: "sending",
+      phase: pending ? "saving" : "sending",
     };
     const sentAt = Date.now();
     take({ v: PROTOCOL_VERSION, type: "message", message: ownMessage(entry.input, sentAt) });
@@ -1236,25 +1271,27 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     if (pending) {
       // Shown at once, and saved before it goes out, so a reload can send this same message again.
       now();
-      try {
-        await writePending(pending, {
-          v: 1,
-          scope: { ...pending.scope },
-          input: entry.input,
-          savedAt: sentAt,
-          expiresAt: sentAt + pending.retentionMs,
-        });
-      } catch {
-        // A write that failed may still have landed, and a copy of a message nobody sent would
-        // come back after a reload with Retry on it.
+      const saved = await writePending(pending, {
+        v: 1,
+        scope: { ...pending.scope },
+        input: entry.input,
+        savedAt: sentAt,
+        expiresAt: sentAt + pending.retentionMs,
+      }).then(
+        () => true,
+        () => false,
+      );
+      // Only a stop takes it back while it saves.
+      const stopped = sends.get(clientId) !== entry;
+      if (stopped || !saved) {
+        // It never went out. A copy that landed, even from a write that failed, would come back
+        // after a reload with Retry on a message nobody sent.
         void writePending(pending, null).catch(() => {});
-        takeBack(clientId);
-        return { ok: false, error: NOT_STORED, input: entry.input };
+        if (!stopped) takeBack(clientId);
+        return { ok: false, error: stopped ? SEND_STOPPED : NOT_STORED, input: entry.input };
       }
       stored = clientId;
-      // A stop while the copy saved leaves the message unsent, to go on Retry.
-      if (sends.get(clientId) !== entry || entry.phase !== "sending")
-        return unknownOutcome(clientId);
+      entry.phase = "sending";
     }
     return deliver(clientId, entry);
   }
@@ -1266,6 +1303,13 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     view = { ...view, messages: view.messages.filter((message) => message.id !== id) };
     settle();
     now();
+  }
+
+  function discard(messageId: string): CommandResult {
+    if (sends.get(messageId)?.phase !== "unconfirmed")
+      return { ok: false, error: NOTHING_TO_DISCARD };
+    takeBack(messageId);
+    return { ok: true };
   }
 
   function checkedInput(value: unknown, id: string, rootRunId: string): DisplayInput {
@@ -1392,9 +1436,13 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
         return { ok: false, error: error.error, input: entry.input };
       }
       entry.phase = "unconfirmed";
+      // The host may have taken it and started a run: Retry waits until a fresh read says where
+      // the run stands, and an open observation may have nothing new to say, so it opens again.
+      // A call this client aborted was a local stop, which already said the run ended.
+      if (!controller.signal.aborted) heardRun = false;
       now();
-      if (latestCommand === controller && !controller.signal.aborted) watch();
-      return unknownOutcome(id);
+      if (latestCommand === controller && !controller.signal.aborted) watch(true);
+      return { ok: true, messageId: id, outcome: "unknown" };
     }
     if (sends.get(id) === entry && !controller.signal.aborted) {
       entry.phase = "accepted";
@@ -1402,8 +1450,8 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     }
     accepted(before, reply, controller, "send");
     now();
-    if (sends.get(id) === entry && entry.phase !== "accepted") return unknownOutcome(id);
-    return { ok: true, messageId: id, outcome: "accepted" };
+    const outcome = sends.get(id) === entry && entry.phase !== "accepted" ? "unknown" : "accepted";
+    return { ok: true, messageId: id, outcome };
   }
 
   async function retry(messageId: string): Promise<SendResult> {
@@ -1411,6 +1459,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     if (!entry || entry.phase !== "unconfirmed") return { ok: false, error: NOTHING_TO_RETRY };
     if (!settings.transport.send) return { ok: false, error: CANNOT_SEND };
     if (!canSendOrdinary()) return { ok: false, error: BUSY };
+    if (!canRetryNow()) return { ok: false, error: CHECKING };
     entry.phase = "sending";
     return deliver(messageId, entry);
   }
@@ -1455,6 +1504,9 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
 
   async function stop(): Promise<CommandResult> {
     for (const device of deviceRuns.values()) device.controller.abort();
+    // A message whose copy is still being saved has not gone out, so the stop keeps it here and
+    // `send` gives its words back. Sent after the stop, it would start a run nobody stopped.
+    for (const [id, send] of sends) if (send.phase === "saving") takeBack(id);
     const { transport } = settings;
     const { status, canStop } = getState();
     // Pressed as the run ended, or pressed twice: there is nothing left to stop.
@@ -1722,6 +1774,7 @@ export function createChatClient(options: ChatClientOptions): ChatClient {
     attach,
     send,
     retry,
+    discard,
     stop,
     respond,
     startClientTool,

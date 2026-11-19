@@ -95,12 +95,13 @@ A run can keep working while its connection is lost. `chat.run.status` describes
 - A send with no confirmed reply can have reached the server. Keep it visible as unconfirmed and
   check the saved conversation before offering a resend. A successful `send` result includes
   `outcome: "accepted" | "unknown"`; a custom composer clears its submitted draft only when
-  `result.ok && result.outcome === "accepted"`, or when `result.stored` says the client kept the
-  message for a reload (below). `ok` alone means the message remains in the view, not that the
-  server confirmed it.
+  `result.ok && result.outcome === "accepted"`. `ok` alone means the message remains in the view,
+  not that the server confirmed it.
 - Show Retry on an unconfirmed message only while `chat.canRetry` is true. It is false while a run
   is going, even when you can still steer the run with `enqueue`: sent again into a running run,
-  the message could ask for the same work twice.
+  the message could ask for the same work twice. It is also false until your server says where the
+  run stands, because the lost reply may have started one. Offer Remove beside Retry too:
+  `chat.discard(messageId)` takes the message out without sending it.
 
 For a read-only screen, use `useAgentRun({ id, transport })`. It observes the same display events
 without exposing a send action.
@@ -126,10 +127,15 @@ message, refuses it, or sends back its own copy with the `clientId`. Echo that i
 the client cannot tell the message arrived.
 
 It keeps one message at a time. While one is unconfirmed, `canSend` is false and a new send is
-refused, because two could not both be sent again safely after another reload. If the copy cannot
-be saved, the send is refused before it goes out, and its words come back in the result. The
-composer lets go of its own copy when a result says `stored: true`, since the message waits in the
-conversation with Retry on it.
+refused, because two could not both be sent again safely after another reload. The person can send
+it again with Retry, or drop it with `chat.discard(messageId)` if it keeps failing. If the copy
+cannot be saved, the send is refused before it goes out, and its words come back in the result. A
+Stop pressed while the copy saves keeps the message from going out, and its words come back the
+same way.
+
+The composer keeps the words of an unconfirmed message, as it does without `pendingSend`. So when
+your server refuses a retry, or the person drops the message, the words are still there to edit.
+Give the composer draft storage too, so they also come back after a reload.
 
 `storage` has two functions, and `scope` names the person and the conversation, as in drafts:
 
