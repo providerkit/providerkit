@@ -14,11 +14,12 @@ import {
   type TreeNode,
 } from "../index.ts";
 import { allModels } from "../compaction.ts";
-import type { RemoteSnapshot } from "../a2a/remote.ts";
+import { remoteChecks, type RemoteSnapshot } from "../a2a/remote.ts";
 import { inputOf, readInput } from "../input.ts";
 import {
   agentSnapshot,
   copyData,
+  installRemoteChecks,
   isId,
   isRecord,
   isUsage,
@@ -43,6 +44,8 @@ import type {
 /** Uses the SDK's structural and journal checks, never resume or an output validator. A stored
  * journal is data, not permission to run a tool. Unknown output contracts stay unknown JSON. */
 export function readJournal(raw: unknown): RunSnapshot {
+  // A stored journal can hold remote nodes when no remote agent is defined in this process.
+  installRemoteChecks(remoteChecks);
   const value = isRecord(raw) && "snapshot" in raw ? raw.snapshot : raw;
   if (!isRecord(value) || value.kind !== "agent" || !isId(value.agentId) || !isId(value.version))
     throw new TypeError("Provide a format-3 agent run journal or an SDK agent outcome.");

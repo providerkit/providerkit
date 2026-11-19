@@ -1,4 +1,4 @@
-import { isRemoteSnapshot, checkRemoteSnapshot, checkRemoteProgress } from "./a2a/remote.ts";
+import type { RemoteSnapshot } from "./a2a/remote.ts";
 import {
   isWorkflowSnapshot,
   checkWorkflowSnapshot,
@@ -1092,8 +1092,35 @@ export function isTreeInfo(value: unknown): value is RunSnapshot["tree"] {
   );
 }
 
+/** How a run tree checks its A2A remote nodes. `defineRemoteAgent` installs them, and a tree
+ * can only hold a remote node made by a remote agent the host defined, so an agent that never
+ * uses A2A refuses one and bundles none of its wire code. That code was about 15 KB of the
+ * 191 KB the main entry minified to at 92f8868 (esbuild). */
+export interface RemoteChecks {
+  isRemoteSnapshot(raw: unknown): raw is RemoteSnapshot;
+  checkRemoteSnapshot(snapshot: RemoteSnapshot): void;
+  checkRemoteProgress(previous: RemoteSnapshot, next: RemoteSnapshot): void;
+}
+let remoteChecks: RemoteChecks | undefined;
+
+export function installRemoteChecks(checks: RemoteChecks): void {
+  remoteChecks = checks;
+}
+
+function remoteNodeChecks(): RemoteChecks {
+  if (!remoteChecks)
+    throw new TypeError(
+      "This run holds an A2A remote agent. Define it with defineRemoteAgent from @providerkit/agents/a2a before you resume the run.",
+    );
+  return remoteChecks;
+}
+
 export function isTreeNode(value: unknown): value is TreeNode {
-  return isSnapshot(value) || isWorkflowSnapshot(value) || isRemoteSnapshot(value);
+  return (
+    isSnapshot(value) ||
+    isWorkflowSnapshot(value) ||
+    (isRecord(value) && value.kind === "remote" && remoteNodeChecks().isRemoteSnapshot(value))
+  );
 }
 
 export function agentSnapshot(node: TreeNode): RunSnapshot {
@@ -1141,7 +1168,7 @@ export function checkTree(root: TreeNode): void {
       throw new TypeError("The child belongs to a different tree or deadline.");
     if (depth > root.tree.limits.maxDepth) throw new TypeError("The tree exceeds its depth limit.");
     if (node.kind === "remote") {
-      checkRemoteSnapshot(node);
+      remoteNodeChecks().checkRemoteSnapshot(node);
       if (
         root.runId === root.tree.runId &&
         node.remote.sends.some((send) =>
@@ -1351,7 +1378,7 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
   )
     throw new TypeError("The child host returned a different or regressed node.");
   if (previous.kind === "remote" && next.kind === "remote") {
-    checkRemoteProgress(previous, next);
+    remoteNodeChecks().checkRemoteProgress(previous, next);
     return;
   }
   if (previous.kind === "workflow" && next.kind === "workflow") {

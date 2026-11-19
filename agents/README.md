@@ -1183,6 +1183,11 @@ or a workflow's `agents`. Local agents, workflows and remote children use the sa
 admission, host binding, checkpoints and tree limits. Remote agents are not handoff targets.
 Their snapshots have a remote message journal, not made-up local models or model turns.
 
+The main entry checks a remote node only with code that `defineRemoteAgent` hands it, so an
+agent that never uses A2A bundles none of A2A's code (about 15 KB minified). A process that
+resumes a run holding a remote agent must define that agent first, as it defines the run's other
+agents; until then the run is refused with a TypeError that names `defineRemoteAgent`.
+
 Configure the host-owned `id`, `agentVersion`, `card`, `version` (`"1.0"` or `"0.3"`),
 `binding` (`"JSONRPC"` or `"HTTP+JSON"`) and `policy.allow`. Use `updates: "poll"` (default)
 or `"stream"`; streaming requires a card that supports it. The SDK refuses missing required

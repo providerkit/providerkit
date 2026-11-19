@@ -20,6 +20,7 @@ import {
   equalData,
   immutableCopy,
   inlineBytes,
+  installRemoteChecks,
   isAskRecord,
   isId,
   isImageMime,
@@ -28,6 +29,7 @@ import {
   isTreeInfo,
   isTurnContent,
   readTreeLimits,
+  type RemoteChecks,
 } from "../snapshot.ts";
 import {
   authorizeTree,
@@ -744,6 +746,13 @@ export function checkRemoteProgress(previous: RemoteSnapshot, next: RemoteSnapsh
     throw new TypeError("The host changed a completed remote result.");
 }
 
+/** What the main entry's tree checks call for a remote node. */
+export const remoteChecks: RemoteChecks = {
+  isRemoteSnapshot,
+  checkRemoteSnapshot,
+  checkRemoteProgress,
+};
+
 export function defineRemoteAgent<T>(
   options: RemoteAgentOptions<T> & { output: ResultSchema<T> },
 ): RemoteAgent<T>;
@@ -751,6 +760,9 @@ export function defineRemoteAgent(
   options: RemoteAgentOptions<string> & { output?: undefined },
 ): RemoteAgent<string>;
 export function defineRemoteAgent<T>(config: RemoteAgentOptions<T>): RemoteAgent<T | string> {
+  // Only a defined remote agent can make a remote node, so defining one hands the main entry
+  // the checks for them. See installRemoteChecks.
+  installRemoteChecks(remoteChecks);
   if (
     !isId(config.id) ||
     !isId(config.agentVersion) ||
