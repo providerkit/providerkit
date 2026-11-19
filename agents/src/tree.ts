@@ -304,8 +304,11 @@ export class ExecutionTree {
 
   /** Checks the caller and every agent above it, found by the caller's scope path, against
    * its own cost limit, so a helper stops once its creator's budget is spent. Synchronous like
-   * reserveModel, so the check and the receipt it admits never straddle an await. */
-  reserveCost(path: readonly ChildPathStep[]): void {
+   * reserveModel, so the check and the receipt it admits never straddle an await. `own: false`
+   * leaves out the caller's own limit, for its finish turn: the one call a finish policy buys
+   * past that limit. An ancestor's spent budget still stops it, so a tree goes past its root's
+   * limit by at most the root's own finish turn. */
+  reserveCost(path: readonly ChildPathStep[], own = true): void {
     let node: TreeNode = this.root;
     const lineage = [node];
     for (const step of path) {
@@ -318,7 +321,7 @@ export class ExecutionTree {
     }
     // ponytail: each check walks the bounded subtree again, as reserveModel does, so the
     // saved prices stay the only ledger across resume.
-    for (const holder of lineage)
+    for (const holder of own ? lineage : lineage.slice(0, -1))
       if (
         holder.kind === "agent" &&
         holder.limits.costUsd !== undefined &&

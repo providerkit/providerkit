@@ -7,11 +7,13 @@ import {
   defineTool,
   messageOf,
   parseToolArgs,
+  stripReasoning,
   type Provider,
   type ProviderChunk,
   type TokenUsage,
   type Tool,
   type ToolChoice,
+  type Turn,
 } from "@providerkit/core";
 import {
   bindMemoryTool,
@@ -103,6 +105,7 @@ import {
   checkPricing,
   emitEvent,
   fail,
+  knownCostUsd,
   requirePricing,
   treeUsage,
   nodeId,
@@ -115,6 +118,7 @@ import {
   type ExecutionScope,
 } from "./tree.ts";
 import {
+  allowedEmpty,
   callOrder,
   checkOptions,
   agentSnapshot,
@@ -123,6 +127,9 @@ import {
   equalData,
   finalToolResult,
   finalHandoffResult,
+  finishAfter,
+  finishCall,
+  finishTools,
   immutableCopy,
   inlineBytes,
   isBase64,
@@ -135,6 +142,7 @@ import {
   jsonArguments,
   modelId,
   nudgeAfter,
+  readFinishPolicy,
   recordCodeTools,
   readLimits,
   readModelSettings,
@@ -143,6 +151,7 @@ import {
   readTurn,
   snapshotInlineBytes,
   toolId,
+  wasCutOff,
 } from "./snapshot.ts";
 import type {
   Agent,
@@ -167,6 +176,7 @@ import type {
   RunOptions,
   RunOutcome,
   RunSnapshot,
+  SalvageReason,
   SessionStatus,
   ToolRequest,
   ToolResult,
@@ -174,6 +184,45 @@ import type {
 
 /** Reserved for the output contract supplied to defineAgent. */
 export const RESULT_TOOL_NAME = "submit_result";
+
+// What the finish turn says. An answer in text gets a private adopter's salvage notes, word for
+// word, whose step budget covers its USD budget too. A turn that must call its stopping tool
+// keeps the same reasons and adds another adopter's last-step note: a model that cannot be
+// forced to a tool is told in words.
+const BUDGET_SPENT = "You have reached your step budget.";
+const REPLY_CUT = "Your last reply hit the output limit and was cut off.";
+const CUT_CALL = "The output limit cut this turn off. This call did not run.";
+const BUDGET_CALL = "The run reached its tool call limit. This call did not run.";
+
+function namesOf(tools: readonly string[]): string {
+  const quoted = tools.map((name) => `\`${name}\``);
+  return quoted.length > 1
+    ? `${quoted.slice(0, -1).join(", ")} or ${quoted.at(-1)}`
+    : (quoted[0] ?? "");
+}
+
+/** What the model reads on its finish turn: why the run is ending, and how to answer. `tools`
+ * is what the turn makes it call, or nothing for an answer in text. */
+function finishNote(reason: SalvageReason, tools: readonly string[]): string {
+  let why = BUDGET_SPENT;
+  if (reason === "outputTokens") why = REPLY_CUT;
+  else if (reason === "missing_result")
+    why = `You answered without calling \`${RESULT_TOOL_NAME}\`.`;
+  if (tools.length)
+    return `${why} Call ${namesOf(tools)} now with your best answer, based only on the evidence you have already gathered. No other tool will run.`;
+  // An answer in text is written again from the start, so after a cut it has to be shorter.
+  const ask =
+    reason === "outputTokens"
+      ? "Write your final answer again, shorter,"
+      : "Write your best final answer now";
+  return `${why} ${ask} from what you have already gathered. Do not request any more tools.`;
+}
+
+/** The finish turn that saved a completed run, for its outcome. */
+function salvagedOf(snapshot: RunSnapshot): { salvaged?: SalvageReason } {
+  const reason = snapshot.models.at(-1)?.finish;
+  return reason !== undefined ? { salvaged: reason } : {};
+}
 
 type CompletedModel = Extract<ModelExecution, { status: "completed" }>;
 /** What answers a call that does not run: a refusal or a cancel. */
@@ -444,6 +493,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       "stopOnlyAtTools needs a tool that can end the run: name one in stopAtTools, mark one isTerminal, or set an output contract.",
     );
   const stopOnlyAtTools = stopOnly && { nudge: stopOnly.nudge };
+  const finish = readFinishPolicy(definition.finish);
   if (output) {
     tools.push(
       defineTool({
@@ -459,6 +509,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       }),
     );
   }
+  const resultTool = output ? RESULT_TOOL_NAME : undefined;
   if (
     [...codeTools.values()].some((code) =>
       code.tools.some((tool) => stopAtTools.includes(tool.name)),
@@ -644,6 +695,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       stopAtTools: [...stopAtTools],
       ...(runFirst.length ? { runFirst: [...runFirst] } : {}),
       ...(stopOnlyAtTools ? { stopOnlyAtTools: { ...stopOnlyAtTools } } : {}),
+      ...(finish ? { finish: { ...finish } } : {}),
       ...(codeTools.size ? { codeTools: recordCodeTools(codeTools) } : {}),
       guardrails: copyData(guardPolicy),
       compaction: copyData(compaction),
@@ -1308,6 +1360,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
      * the call in run order. */
     function turnEnded(model: CompletedModel, before: readonly number[]): string | undefined {
       for (const index of before) {
+        // The finish turn's cancels each answer one call, never the rest of its turn.
+        if (finishCancel(model, index) !== undefined) continue;
         const tool = model.tools[index];
         const verdict = verdictOf(tool) ?? programVerdict(tool?.calls);
         if (verdict !== undefined) return verdict;
@@ -1322,6 +1376,18 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           return `The run ended earlier this turn (\`${name}\`). This call did not run.`;
       }
       return undefined;
+    }
+
+    /** On the finish turn, what answers every call but its one stopping call. Ported from a
+     * private adopter's loop (finalTool): tool choice is a request to the provider, not
+     * permission to execute, so a call the model added anyway never runs. */
+    function finishCancel(model: CompletedModel, index: number): string | undefined {
+      if (
+        model.finish === undefined ||
+        index === finishCall(snapshot.definition, model, resultTool)
+      )
+        return undefined;
+      return `Only ${namesOf(finishTools(snapshot.definition, resultTool))} runs on the run's last turn. This call did not run.`;
     }
 
     async function checkToolRetry(slot: ToolSlot): Promise<void> {
@@ -1365,6 +1431,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       invocationActive(slot);
       if (slot.inner && slot.inner.callsLeft() <= 0) return false;
       if (usedTools() >= limits.toolCalls) {
+        // Under a finish policy the failure stands, and the finish turn follows the budget.
+        if (snapshot.definition.finish) return false;
         throw new Halt({ status: "limited", limit: "toolCalls" });
       }
       await checkToolRetry(slot);
@@ -1542,7 +1610,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           kind: "invalid_input",
           content: "Tool arguments must be one complete JSON object. Send the full object again.",
         };
-      } else if (runsAlone(tool) && slot.model?.tools.length !== 1) {
+      } else if (
+        runsAlone(tool) &&
+        slot.model?.tools.length !== 1 &&
+        // On the finish turn every other call is cancelled before it can start.
+        slot.model?.finish === undefined
+      ) {
         result = {
           ok: false,
           kind: "invalid_input",
@@ -2220,6 +2293,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         if (index === undefined || !execution || execution.status === "completed") continue;
         // The rest of the turn is cancelled when the loop reaches it. Nobody is asked about it.
         if (turnEnded(model, order.slice(0, at)) !== undefined) return;
+        if (finishCancel(model, index) !== undefined) continue;
         if (usedTools() >= limits.toolCalls && !execution.asks?.length) break;
         const request = requestFor(snapshot, model, index);
         const tool = tools.find((tool) => tool.name === request.call.name);
@@ -2305,7 +2379,34 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     async function handleTurn(model: CompletedModel): Promise<void> {
       active();
       const { message, finishReason } = model.turn;
-      if (finishReason === "length") throw new Halt({ status: "limited", limit: "outputTokens" });
+      const modelIndex = snapshot.models.indexOf(model);
+      const policy = snapshot.definition.finish;
+      const forced = finishTools(snapshot.definition, resultTool).length > 0;
+      /** The end a run gets when its finish turn could not save it: the one it would have had. */
+      function unsaved(reason: SalvageReason): never {
+        if (reason === "missing_result")
+          fail(
+            "missing_result",
+            `The model did not submit a result through ${RESULT_TOOL_NAME}.`,
+            model.id,
+          );
+        throw new Halt({ status: "limited", limit: reason });
+      }
+      if (finishReason === "length" || (policy && wasCutOff(model.turn))) {
+        // A turn the output limit cut is not the agent's answer, and no call in it runs. Under a
+        // finish policy, ported from a private adopter's engine, each call is answered without
+        // running and the finish turn follows, reading the cut text: retrying the cut turn would
+        // most likely be cut again at the same cap, at full cost each time.
+        if (!policy || model.finish !== undefined) unsaved(model.finish ?? "outputTokens");
+        for (const [index, tool] of model.tools.entries())
+          if (tool.status === "pending")
+            await finishTool(model, index, requestFor(snapshot, model, index), {
+              ok: false,
+              kind: "cancelled",
+              content: CUT_CALL,
+            });
+        return;
+      }
       if (finishReason === "content_filter")
         fail(
           "content_filtered",
@@ -2320,16 +2421,26 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         );
       const calls = message.toolCalls ?? [];
       if (calls.length === 0) {
+        // The finish turn's answer: text, or nothing when it had to call its stopping tool.
+        if (model.finish !== undefined) {
+          if (forced || !message.content.trim()) unsaved(model.finish);
+          snapshot.state = { status: "completed", candidate: message.content };
+          return;
+        }
         // Under stopOnlyAtTools a text answer does not end the run: the next request answers it
         // with the nudge. Ported from TabRunner's loop, where a question written as prose
         // paused nothing and the person never got to answer it.
-        if (nudgeAfter(snapshot.definition, model) !== undefined) return;
-        if (output)
+        if (nudgeAfter(snapshot, modelIndex) !== undefined) return;
+        if (allowedEmpty(snapshot, modelIndex)) return;
+        if (output) {
+          // A finish policy answers a result written as text with a finish turn that asks for it.
+          if (policy) return;
           fail(
             "missing_result",
             `The model did not submit a result through ${RESULT_TOOL_NAME}.`,
             model.id,
           );
+        }
         if (!message.content.trim())
           fail(
             "empty_output",
@@ -2342,7 +2453,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
 
       // The one extra call at the local turn limit has no tools, even if a provider ignores
       // toolChoice. Never execute calls it returns. The shared tree limit remains a hard cap.
-      if (snapshot.models.indexOf(model) >= limits.turns)
+      // A finish turn with no tools ends the same way; one with a stopping tool runs only that.
+      if (model.finish !== undefined && !forced) unsaved(model.finish);
+      if (model.finish === undefined && modelIndex >= limits.turns)
         throw new Halt({ status: "limited", limit: "turns" });
 
       // `runFirst` calls lead their turn. Positions below walk this order; `index` is the
@@ -2361,8 +2474,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         active();
         // A call after a `cancel` verdict, or after a stopping tool under stopOnlyAtTools, never
         // starts, so no budget can hold it up. Only the calls after it in run order: one ahead of
-        // the verdict that asked a question here keeps its answer.
-        const ended = turnEnded(model, order.slice(0, position));
+        // the verdict that asked a question here keeps its answer. On the finish turn, every call
+        // but its stopping call is cancelled too.
+        const ended = turnEnded(model, order.slice(0, position)) ?? finishCancel(model, index);
         if (ended !== undefined && screenable(model.tools[index])) {
           await finishTool(model, index, requestFor(snapshot, model, index), {
             ok: false,
@@ -2392,8 +2506,20 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           capacity <= 0 &&
           model.tools[index]?.status === "pending" &&
           !model.tools[index]?.asks?.length
-        )
-          throw new Halt({ status: "limited", limit: "toolCalls" });
+        ) {
+          if (!policy) throw new Halt({ status: "limited", limit: "toolCalls" });
+          // Under a finish policy the calls the budget cannot hold are answered without running,
+          // and the finish turn follows. Its own stopping call runs past the budget.
+          if (model.finish === undefined) {
+            await finishTool(model, index, request, {
+              ok: false,
+              kind: "cancelled",
+              content: BUDGET_CALL,
+            });
+            position++;
+            continue;
+          }
+        }
         if (model.tools[index]?.retries.length) await checkToolRetry(slotFor(model, index));
         if (!available) {
           await finishTool(model, index, request, {
@@ -2646,12 +2772,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       // then select the first stopping tool in model order, not completion order.
       const final =
         finalHandoffResult(snapshot, model) ??
-        finalToolResult(
-          model,
-          snapshot.definition.stopAtTools,
-          output ? RESULT_TOOL_NAME : undefined,
-        );
+        finalToolResult(model, snapshot.definition.stopAtTools, resultTool);
       if (final) snapshot.state = { status: "completed", candidate: final.candidate };
+      else if (model.finish !== undefined) unsaved(model.finish);
     }
 
     // One load per media id per attempt. The bytes live only in the requests built from it,
@@ -2792,6 +2915,21 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
     }
 
+    /** Why the model call at `position` is the run's finish turn, or undefined for an ordinary
+     * one. Read from the journal, so a restart decides the same, and saved with the call. */
+    function finishFor(position: number): SalvageReason | undefined {
+      if (!snapshot.definition.finish) return undefined;
+      const after = finishAfter(snapshot, position - 1, resultTool);
+      if (after !== undefined) return after;
+      if (position >= limits.turns) return "turns";
+      // As a private adopter's loop does: answer once the tool calls are used up, rather than
+      // wait for the model to ask for one more and be refused.
+      if (usedTools() >= limits.toolCalls) return "toolCalls";
+      if (limits.costUsd !== undefined && knownCostUsd(snapshot) >= limits.costUsd)
+        return "costUsd";
+      return undefined;
+    }
+
     async function nextTurn(
       previous?: Extract<ModelExecution, { status: "running" }>,
     ): Promise<CompletedModel> {
@@ -2819,17 +2957,19 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           "The interrupted model call's tool definitions changed. Restore the same definitions or reconcile the run.",
           previous.id,
         );
+      // A finish policy makes this call the run's finish turn instead of ending it unanswered.
+      const finish = previous ? previous.finish : finishFor(position);
       // Ported from Microsoft Agent Framework (MIT), _tools.py: after the iteration
       // allowance, ask once for a tool-free answer. Checked output needs submit_result, and
       // stopOnlyAtTools a stopping tool, so those modes keep the hard local turn cap instead of
-      // buying a call that cannot end them.
-      const finalTurn = position === limits.turns;
+      // buying a call that cannot end them, unless a finish turn makes them call it.
+      const finalTurn = position === limits.turns && finish === undefined;
       if (position > limits.turns || (finalTurn && (output || snapshot.definition.stopOnlyAtTools)))
         throw new Halt({ status: "limited", limit: "turns" });
       // A steer never changes the input of an already admitted call, including safe replay.
       // Check capacity before polling so a spent budget leaves delivery queued in the host.
       scope.tree.reserveModel();
-      scope.tree.reserveCost(scope.path);
+      scope.tree.reserveCost(scope.path, finish === undefined);
       if (!previous) {
         await acceptInputs(snapshot, scope, options, signal);
         await compact();
@@ -2852,6 +2992,26 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         tools: finalTurn ? [] : copyData(selected),
         settings: modelSettings,
       };
+      if (finish !== undefined) {
+        const stopping = finishTools(snapshot.definition, resultTool);
+        const [only] = stopping;
+        if (only === undefined) {
+          modelSettings.toolChoice = "none";
+          modelInput.tools = [];
+        } else {
+          // Ported from a private adopter's engine: this turn only writes down what the run
+          // already found, so it runs at the lowest effort and leaves the whole output budget to
+          // the answer. Reasoning from turns at another effort is left out, since a provider can
+          // refuse it on a turn that does not think. Hosted tools go too: core refuses a forced
+          // choice beside them. The tool list stays, and with it the cached prefix.
+          modelInput.messages = stripReasoning(request);
+          modelSettings.toolChoice = stopping.length === 1 ? { name: only } : "required";
+          modelSettings.effort = "none";
+          modelSettings.hostedTools = [];
+        }
+        // This call only: the finish turn is the run's last, so no later request carries it.
+        modelInput.messages.push({ role: "user", content: finishNote(finish, stopping) });
+      }
       const done = await callModel(
         operationId,
         modelInput,
@@ -2860,6 +3020,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           snapshot.models[position] = model;
         },
         previous,
+        false,
+        finish,
       );
       for (const receipt of inputReceipts(snapshot).filter(
         (receipt) => receipt.modelId === done.id,
@@ -2870,7 +3032,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     }
 
     // Both ordinary turns and explicit summaries use the same admission, guards, usage
-    // checkpoints and collection path. Summaries stay private and never dispatch tools.
+    // checkpoints and collection path. Summaries stay private and never dispatch tools. A finish
+    // turn saves its reason with the call, and is admitted past the run's own cost limit.
     async function callModel(
       operationId: string,
       modelInput: ModelInput,
@@ -2878,6 +3041,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       record: (model: ModelExecution) => void,
       previous?: Extract<ModelExecution, { status: "running" }>,
       summary = false,
+      finish?: SalvageReason,
     ): Promise<CompletedModel> {
       const { messages: request, settings: modelSettings } = modelInput;
       await guards.check("modelInput", operationId, snapshot.attemptId, modelInput);
@@ -2891,13 +3055,14 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       // The tree check and the receipt stay together, with no await between them, so two
       // children racing for the tree's last model call cannot both take it.
       scope.tree.reserveModel();
-      scope.tree.reserveCost(scope.path);
+      scope.tree.reserveCost(scope.path, finish === undefined);
       const model: ModelExecution = {
         id: operationId,
         attemptId: snapshot.attemptId,
         status: "running",
         billing: "unknown",
         usage: { ...EMPTY_USAGE },
+        ...(finish !== undefined ? { finish } : {}),
         interrupted: previous
           ? [
               ...previous.interrupted,
@@ -2917,6 +3082,10 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       let reportedUsage = false;
       let bufferedChunks = 0;
       let bufferedBytes = 0;
+      // Kept under a finish policy, for a turn the output cap cut while the model was thinking.
+      // ponytail: that holds each chunk until the call ends, so a turn sits in memory twice at
+      // worst. Keeping only the assembled turn would need collectTurn to hand back a partial one.
+      const seen: ProviderChunk[] = [];
       const guarded = !!guardrails?.modelOutput;
       const served = {
         provider: selectedProvider.id,
@@ -2962,6 +3131,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         });
         for await (const chunk of stream) {
           active();
+          if (snapshot.definition.finish) seen.push(chunk);
           if (chunk.usage) {
             if (!isUsage(chunk.usage))
               fail("invalid_usage", "The provider returned invalid token usage.", model.id);
@@ -2997,9 +3167,30 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           yield chunk;
         }
       }
+      // Ported from a private adopter's engine (cutWhileThinking): core's empty-answer guard
+      // throws `invalid` once the output cap ran out while the model was still thinking, after
+      // the `length` finish streamed. That is a cut turn like any other, and the finish turn is
+      // its fix, so under a finish policy it comes back as one instead of failing the run.
+      async function collect(): Promise<Turn> {
+        try {
+          return await untilAbort(collectTurn(observed()), signal);
+        } catch (error) {
+          const cutWhileThinking =
+            error instanceof ProviderError &&
+            error.kind === "invalid" &&
+            seen.some((chunk) => chunk.type === "finish" && chunk.finishReason === "length");
+          if (!cutWhileThinking) throw error;
+          active();
+          return collectTurn(
+            (async function* () {
+              yield* seen;
+            })(),
+          );
+        }
+      }
       let collected;
       try {
-        collected = await untilAbort(collectTurn(observed()), signal);
+        collected = await collect();
       } catch (error) {
         await observe({ type: "model_error", operationId: model.id, attemptId: model.attemptId });
         active();
@@ -3181,7 +3372,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     const state = snapshot.state;
     if (state.status === "completed") {
       if (!completed) throw new Error("The agent completed without validating its result.");
-      return { ...record, status: "completed", output: completed.output };
+      return {
+        ...record,
+        status: "completed",
+        output: completed.output,
+        ...salvagedOf(snapshot),
+      };
     }
     return state.status === "suspended"
       ? { ...record, ...state, requests: openRequests(snapshot), wakeAt: wakeAt(snapshot) }
@@ -3332,6 +3528,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         stopAtTools,
         ...(runFirst.length ? { runFirst } : {}),
         ...(stopOnlyAtTools ? { stopOnlyAtTools } : {}),
+        ...(finish ? { finish } : {}),
         recovery,
         guardrails: guardPolicy,
         compaction,
@@ -3433,7 +3630,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         id,
         version,
         subagent ? subagentLimits(limits, subagent.spec.limits) : limits,
-        output ? RESULT_TOOL_NAME : undefined,
+        resultTool,
         codeTools,
       );
       checkNames(snapshot.definition.enabledTools);
@@ -3465,6 +3662,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         !equalData(snapshot.definition.stopAtTools, stopAtTools) ||
         !equalData(snapshot.definition.runFirst ?? [], runFirst) ||
         !equalData(snapshot.definition.stopOnlyAtTools, stopOnlyAtTools) ||
+        !equalData(snapshot.definition.finish, finish) ||
         (output && !snapshot.definition.enabledTools.includes(RESULT_TOOL_NAME))
       )
         throw new TypeError("The recorded tool behavior does not match this agent version.");
@@ -3528,7 +3726,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       const state = record.snapshot.state;
       if (state.status === "running") throw new Error("A child has not settled yet.");
       return state.status === "completed"
-        ? { ...record, status: "completed", output: completedOutput(record.snapshot) }
+        ? {
+            ...record,
+            status: "completed",
+            output: completedOutput(record.snapshot),
+            ...salvagedOf(record.snapshot),
+          }
         : state.status === "suspended"
           ? { ...record, ...state, requests: openRequests(snapshot), wakeAt: wakeAt(snapshot) }
           : { ...record, ...state };

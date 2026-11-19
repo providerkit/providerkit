@@ -56,7 +56,8 @@ export interface TreeLimits {
 export interface RunLimits {
   /** Tool-capable model turns. Text agents may make one final tool-free call, still counted
    * against the tree's model-call budget. Checked-output agents and `stopOnlyAtTools` agents
-   * keep the hard cap: a tool-free call cannot end them. */
+   * keep the hard cap: a tool-free call cannot end them. With `AgentConfig.finish`, every agent
+   * gets that one extra call, as its finish turn. */
   turns: number;
   /** A call `host.screenCall` refused, or one cancelled with the rest of its turn, does not
    * count: it never started. That holds inside a code program too, where the program's own
@@ -76,8 +77,26 @@ export interface RunLimits {
    * model call starts in the run or under it, and the run ends `limited` with `costUsd`. It
    * limits starting calls, not the bill: calls already running when the limit is reached, such
    * as parallel helpers or the rest of a tool batch, can finish above it. A call that never
-   * reported usage adds nothing. Absent means no limit. */
+   * reported usage adds nothing. Absent means no limit. With `AgentConfig.finish`, reaching
+   * this run's own limit buys one more call, its finish turn, so the limit is soft by that one
+   * bounded call. It is priced and counted like any other. */
   costUsd?: number;
+}
+
+/** What would have ended the run when its finish turn saved it: a limit it reached, a turn the
+ * output limit cut, or a checked-output answer written as text. */
+export type SalvageReason = "turns" | "toolCalls" | "costUsd" | "outputTokens" | "missing_result";
+
+/** Opt in to a finish turn: one more model call, made instead of ending a run without its
+ * answer. A text agent gets it with no tools. A checked-output agent, or a `stopOnlyAtTools`
+ * agent, is made to call its stopping tool, at effort `none` with earlier reasoning left out. */
+export interface FinishPolicy {
+  /** What the model reads with its last turn that has tools, one before `limits.turns`, so it
+   * can wrap up while it still can. No default. */
+  nearEnd?: string;
+  /** Turns in a row that may come back with no text and no tool call before the next one fails
+   * the run with `empty_output`. Default 0. */
+  emptyTurns?: number;
 }
 
 /** Bytes the host keeps under an id. The SDK stores only the reference and asks
@@ -353,6 +372,8 @@ export interface RunDefinition {
   runFirst?: string[];
   /** `AgentConfig.stopOnlyAtTools`, when set. */
   stopOnlyAtTools?: { nudge: string };
+  /** `AgentConfig.finish`, when set. */
+  finish?: { emptyTurns: number; nearEnd?: string };
   /** Present for registered code tools, including ones disabled for this run. */
   codeTools?: Record<string, RecordedCodeTool>;
   /** Null refuses interrupted effects. Recorded policy and identities must match on recovery. */
@@ -405,6 +426,16 @@ export interface AgentConfig<H = unknown> {
    * stopping tool returns an empty summary, the turn's text is the answer. The turn limit is a
    * hard cap, with no tool-free final call. A run that disables every stopping tool throws. */
   stopOnlyAtTools?: { nudge: string };
+  /** Opt in to one finish turn for a run that would otherwise end without its answer: when it
+   * reaches `limits.turns`, `limits.toolCalls` or its own `limits.costUsd`, when the output
+   * limit cut a turn (a tool call whose arguments do not parse counts as cut), or when a
+   * checked-output agent answers in text. The model reads a note saying why, then answers with
+   * no tools (a text agent) or is made to call its stopping tool. None of a cut turn's calls
+   * run. The finish turn is the run's last call, and only one stopping call runs in it. It is
+   * priced and counted like any other call; past `costUsd` that makes the cap soft by one
+   * bounded call. A run it saves completes with `salvaged`; otherwise the run ends as it would
+   * have. Time limits, the tree's limits and a Stop stay hard. */
+  finish?: FinishPolicy;
   limits?: Partial<RunLimits>;
   /** Applies when this agent is the root. Descendants share the root's limits. */
   treeLimits?: Partial<TreeLimits>;
@@ -854,6 +885,8 @@ export type ModelExecution = {
   /** What `host.priceModelCall` returned for this attempt's usage when it arrived. Absent
    * without a price function or before any usage. */
   costUsd?: number;
+  /** Set on the finish turn, saved before it is sent: what would have ended the run. */
+  finish?: SalvageReason;
 } & (
   | { id: string; attemptId: string; status: "running"; usage: TokenUsage }
   | {
@@ -987,7 +1020,12 @@ interface RunRecord {
 
 export type RunOutcome<T = string> = RunRecord &
   (
-    | { status: "completed"; output: T }
+    | {
+        status: "completed";
+        output: T;
+        /** Present when the finish turn saved the run: what would have ended it. */
+        salvaged?: SalvageReason;
+      }
     | {
         status: "suspended";
         requests: (PendingRequest & { problem?: RequestProblem })[];

@@ -18,6 +18,7 @@ import {
   isImageMime,
   isPart,
   isRecord,
+  nearEndBefore,
   nudgeAfter,
 } from "./snapshot.ts";
 import type {
@@ -249,13 +250,17 @@ export function conversationOf(
   for (let position = 0; position <= beforeModel; position++) {
     // A turn that wrote text and called no tool, under stopOnlyAtTools, is answered with the
     // nudge, ahead of any steer that joins at the same boundary.
-    const nudge = nudgeAfter(snapshot.definition, snapshot.models[position - 1]);
-    if (nudge !== undefined && (position < snapshot.models.length || upcoming))
-      messages.push({ role: "user", content: nudge });
+    const nudge = nudgeAfter(snapshot, position - 1);
+    const sent = position < snapshot.models.length || upcoming;
+    if (nudge !== undefined && sent) messages.push({ role: "user", content: nudge });
     // Steering joins only between whole rounds. Its saved position survives attempts and
     // preserves the exact prefix even when the host later offers more input.
     for (const input of snapshot.inputs)
       if (input.beforeModel === position) messages.push({ role: "user", content: input.content });
+    // The finish policy's near-end note goes with the last call that has tools, after the steers
+    // the model reads at that boundary, and stays for every later request.
+    const nearEnd = nearEndBefore(snapshot, position);
+    if (nearEnd !== undefined && sent) messages.push({ role: "user", content: nearEnd });
     const model = position < beforeModel ? snapshot.models[position] : undefined;
     if (
       !model ||
