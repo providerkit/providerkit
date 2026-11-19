@@ -68,6 +68,22 @@ decoded. It replaces any other image with a note the model reads, like
 always gets a note, because its size can't be checked. Only the last 4 images in a request are
 sent. To apply the same check in your own adapter, call `gateImages(messages, limits)`.
 
+`gateImages` takes two options. `toolResultsOnly: true` checks and counts only the images in tool
+results, and leaves the person's own images as they are, so pruning old screenshots never takes
+the attachment the task is about. `reason` puts one reason in every note. For a model that reads
+no images, pass `maxImages: 0` and a reason that says so:
+
+```ts
+gateImages(
+  messages,
+  { minSide: 0, minArea: 0, maxDecodedBytes: Infinity, maxImages: 0 },
+  { reason: "this model reads text only" },
+);
+```
+
+Every image then becomes `[image omitted: image/png] (this model reads text only)`, with its own
+media type.
+
 ## Chunks
 
 ```ts

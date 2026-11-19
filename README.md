@@ -148,6 +148,30 @@ each family uses. You can also sign in with `createAuthFlow("opencode-zen", host
 `claude-sonnet-5-5`). Sign in with `createAuthFlow("antigravity", host)` to discover the
 Cloud Code Assist project and hand the token source to `withToken` or `createRegistry`.
 
+### Tools
+
+```ts
+import { zodTool } from "@providerkit/core/zod";
+import { z } from "zod";
+
+const lookup = zodTool({
+  name: "lookup",
+  description: "Look up an order.",
+  input: z.object({ id: z.string() }),
+  async run({ id }) {
+    return await orders.get(id);
+  },
+});
+
+const outcome = await lookup.invoke(argsFromModel);
+```
+
+`invoke` never throws. A bad argument, a timeout or a failing tool comes back as an outcome the
+model reads, so it can fix its call. When a model sends an array as a JSON string, or a string as
+`{ text }`, the tool repairs it and checks again. Pass `output` to check results too.
+`lookup.accepts(args)` runs the same check without running the tool, so nobody is asked to approve
+a call that can't run. The [tools guide](https://providerkit.dev/guides/tools/) covers the rest.
+
 ### Hosted tools
 
 Let the vendor search the web, fetch a page or run code inside its own turn.

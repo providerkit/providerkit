@@ -121,4 +121,57 @@ describe("gateImages", () => {
       images: [png(32, 32)],
     });
   });
+
+  // The person's attachment is what the task is about; a long run that drops it
+  // forgets what it was asked. Old screenshots are what can go.
+  it("leaves the person's own images alone when it gates tool results only", () => {
+    const messages: ChatMessage[] = [
+      { role: "tool", toolCallId: "c1", name: "shot", content: "", images: [png(32, 32)] },
+      {
+        role: "tool",
+        toolCallId: "c2",
+        name: "shot",
+        content: "",
+        images: [png(40, 40), gif(64, 16)],
+      },
+      // Newer than every screenshot, and two of them would be refused: none of it is gated.
+      userWith(png(48, 48), png(4, 4), webp),
+    ];
+    const gated = gateImages(messages, { ...LIMITS, maxImages: 2 }, { toolResultsOnly: true });
+    expect(gated[0]).toEqual({
+      ...messages[0],
+      content: "[image omitted: image/png] (only the last 2 images are attached per request)",
+      images: [],
+    });
+    expect(gated[1]).toBe(messages[1]);
+    expect(gated[2]).toBe(messages[2]);
+  });
+
+  it("gives every note the reason it is handed, for a model that reads no images", () => {
+    const reason = "this model reads text only";
+    const gated = gateImages(
+      [
+        userWith(png(32, 32), webp),
+        { role: "tool", toolCallId: "c1", name: "shot", content: "saved", images: [png(4, 4)] },
+      ],
+      { ...LIMITS, maxImages: 0 },
+      { reason },
+    );
+    expect(gated).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: `[image omitted: image/png] (${reason})` },
+          { type: "text", text: `[image omitted: image/webp] (${reason})` },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "c1",
+        name: "shot",
+        content: `saved\n[image omitted: image/png] (${reason})`,
+        images: [],
+      },
+    ]);
+  });
 });
