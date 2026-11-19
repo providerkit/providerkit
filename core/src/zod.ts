@@ -39,18 +39,20 @@ export function toJsonObjectSchema(schema: z.ZodType, label = "schema"): JsonObj
   return json as JsonObjectSchema;
 }
 
-export interface ZodToolSpec<I, O> {
+/** `R` is what `run` returns. It is `O` unless `output` parses it into something else. */
+export interface ZodToolSpec<I, O, R = O> {
   name: string;
   description: string;
   input: z.ZodType<I>;
   /**
    * Checks every result before the model or your code reads it, and fills `outputSchema` for
-   * generated result types. A result that fails is a `failed` outcome the model reads, and its
-   * value is dropped. A result that passes is the parsed value, so unknown keys are dropped and
-   * defaults are filled in before the model sees it.
+   * generated result types. `run` returns what the schema takes, `unknown` included, and the
+   * tool returns what the schema parses that into, after any transform. A result that fails is
+   * a `failed` outcome the model reads, and its value is dropped. A result that passes is the
+   * parsed value, so unknown keys are dropped and defaults are filled in before the model sees it.
    */
-  output?: z.ZodType<O>;
-  run: (input: I, ctx: ToolContext) => Promise<O>;
+  output?: z.ZodType<O, R>;
+  run: (input: I, ctx: ToolContext) => Promise<R>;
   summarize?: (output: O) => string;
   timeoutMs?: number;
   isReadOnly?: boolean;
@@ -156,8 +158,14 @@ function repairSlips(raw: unknown, issues: Issues): unknown {
   return changed ? copy : raw;
 }
 
-/** `spec.run` with each result checked against `output` before the model or your code reads it. */
-function checkedRun<I, O>(spec: ZodToolSpec<I, O>, output: z.ZodType<O>): ZodToolSpec<I, O>["run"] {
+/**
+ * `spec.run` with each result checked against `output` before the model or your code reads it.
+ * The result is read as unknown: `output` decides its type, whatever `run` declared.
+ */
+function checkedRun<I, O>(
+  spec: ZodToolSpec<I, O, unknown>,
+  output: z.ZodType<O>,
+): (input: I, ctx: ToolContext) => Promise<O> {
   return async (input, ctx) => {
     const result = await spec.run(input, ctx);
     let problems: string;
@@ -181,10 +189,23 @@ function checkedRun<I, O>(spec: ZodToolSpec<I, O>, output: z.ZodType<O>): ZodToo
 }
 
 /**
+ * A zod tool that checks its results too. It returns what `output` makes of `run`'s result, so
+ * `run` can return `unknown`, or the string a transform turns into a `Date`.
+ */
+export function zodTool<I, O, R>(
+  spec: ZodToolSpec<I, O, R> & { output: z.ZodType<O, R> },
+): Tool<I, O>;
+/**
  * A tool whose arguments are validated by zod, with the failure reported to
  * the model in words it can act on. `topic: expected string, received number`
  * beats a stack trace it cannot read.
  */
+export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O>;
+// Two signatures, so only a tool with `output` can return a type `run` does not. `output` comes
+// first: the second signature takes an optional one too, for a wrapper that passes it through,
+// and would type a `run` that returns `unknown` as a tool that returns `unknown`. The body is
+// typed as the second. With `output`, `checkedRun` reads the result as unknown, so that holds
+// for any `R`.
 export function zodTool<I, O>(spec: ZodToolSpec<I, O>): Tool<I, O> {
   const inputSchema = toJsonObjectSchema(spec.input, `Tool "${spec.name}" input`);
   const { output } = spec;

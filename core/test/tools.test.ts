@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { z } from "zod";
 import { defineTool, ToolRegistry, ToolTimeoutError } from "../src/tools.ts";
 import { zodTool, toJsonObjectSchema } from "../src/zod.ts";
@@ -397,6 +397,7 @@ describe("zodTool", () => {
   describe("output", () => {
     // Upstream JSON, typed by nothing until `output` checks it.
     let reply = "";
+    const upstream = async (): Promise<unknown> => JSON.parse(reply);
     const lookup = (isReadOnly: boolean) =>
       zodTool({
         name: "lookup",
@@ -404,13 +405,34 @@ describe("zodTool", () => {
         isReadOnly,
         input: z.object({ q: z.string() }),
         output: z.object({ hits: z.number() }),
-        run: async () => JSON.parse(reply),
+        run: upstream,
       });
 
     it("hands back the parsed result, so the model never sees keys the schema left out", async () => {
       reply = '{"hits":3,"debug":"internal"}';
-      const outcome = await lookup(true).invoke({ q: "x" });
+      const tool = lookup(true);
+      // `run` returns unknown, and the result still has the schema's type.
+      expectTypeOf(tool.call).returns.resolves.toEqualTypeOf<{ hits: number }>();
+      const outcome = await tool.invoke({ q: "x" });
       expect(outcome.ok && [outcome.output, outcome.summary]).toEqual([{ hits: 3 }, '{"hits":3}']);
+    });
+
+    // `run` returns what the schema takes, and the tool returns what the schema makes of it.
+    it("types `run` by what a transform takes, and the result by what it makes", async () => {
+      const at = z.object({ at: z.string().transform((s) => new Date(s)) });
+      const stamp = zodTool({
+        name: "stamp",
+        description: "stamp",
+        input: z.object({}),
+        output: at,
+        run: async () => ({ at: "1970-01-01T00:00:00.000Z" }),
+      });
+      expectTypeOf(stamp.call).returns.resolves.toEqualTypeOf<{ at: Date }>();
+      expect(await stamp.call({})).toEqual({ at: new Date(0) });
+      // Returning the Date the transform makes would fail on every call, so it does not compile.
+      const date = async () => ({ at: new Date(0) });
+      // @ts-expect-error `run` returns the string the transform takes
+      zodTool({ name: "stamp", description: "stamp", input: z.object({}), output: at, run: date });
     });
 
     // A bad result is the tool's failure, read by the model like any other.

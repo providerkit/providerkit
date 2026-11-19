@@ -211,6 +211,11 @@ const lookup = zodTool({
 });
 ```
 
+`run` returns what the schema takes, and the tool returns what the schema gives back. So `run` can
+return `unknown`, such as JSON from another service, and your code still gets a typed result. A
+transform runs on what `run` returned: with `at: z.string().transform((s) => new Date(s))`, `run`
+returns the string and the tool returns a `Date`.
+
 A result that fails the check, or a check that throws, comes back as a `failed` outcome, and the
 model reads the problems like any other failure. `invoke` still never throws. Unless the tool is
 marked `isReadOnly`, the message also tells the model to check the call's effect before calling it
