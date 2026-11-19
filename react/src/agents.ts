@@ -28,7 +28,7 @@ import type {
   RunState,
   ToolResult,
 } from "@providerkit/agents";
-import { sameData } from "./state.ts";
+import { isRecord, sameData, type Cursor } from "./state.ts";
 import {
   PROTOCOL_VERSION,
   REMOTE_STATUS_UNKNOWN,
@@ -1761,4 +1761,122 @@ export function createAgentProjector(options: AgentProjectorOptions): AgentProje
       };
     },
   });
+}
+
+/** One progress record of a stored run, as the SDK's background `observe` hands it out. */
+export interface RunRecord {
+  seq: number;
+  type: string;
+  data: unknown;
+  /** When the host stored it. `@gusnips/server/runs` gives a `Date`. */
+  at?: Date | number;
+}
+
+/** One stored row of a run, whose `id` numbers its records: a display event's `segment`. */
+export interface RunSegment {
+  id: string;
+  /** Every record of the row from its first, like `background.observe(owner, id, 0, signal)`. */
+  records: AsyncIterable<RunRecord>;
+}
+
+export interface FollowRunOptions {
+  /** A fresh projector is made from these for each viewer, because only one that saw the log
+   * from the run's first record draws the rows after the viewer's cursor as the live stream did. */
+  projector: AgentProjectorOptions;
+  /** The run's rows in order: the first, then one for each approval that continued it. Only the
+   * last can still grow. */
+  segments: readonly RunSegment[];
+  /** The viewer's cursor. Without one, or with one from another run, the viewer gets the run from
+   * its start, opening with a snapshot of the conversation. */
+  cursor?: Cursor;
+  /** The saved run, read after a gap in the log and when the last row ends. It holds private
+   * journals: check that this viewer may see the run before calling `followRun`. */
+  read: () => Promise<TreeNode>;
+  /** The whole conversation for a snapshot: the host's own messages with `reply`, this run's
+   * message as the projector draws it, in its place. A snapshot replaces the whole list. */
+  conversation: (
+    reply: DisplayMessage,
+  ) => readonly DisplayMessage[] | Promise<readonly DisplayMessage[]>;
+}
+
+/** The SDK's own progress sink wrote this into the host's log; a browser never did. Only the type
+ * is checked, because the projector skips a type it does not know. */
+function isAgentEvent(value: unknown): value is AgentEvent {
+  return isRecord(value) && typeof value.type === "string";
+}
+
+/**
+ * The display events for one viewer of a stored run: what the live stream would have sent after
+ * the viewer's cursor, then the saved run once the log ends.
+ *
+ * It replays the run's log from its first record through a fresh projector and sends only what
+ * comes after the cursor. At a gap in the log it sends the projector's marker and a snapshot of
+ * the saved run read then. When the last row ends it sends that snapshot again, with the final
+ * state. A viewer already past the end still gets it, unnumbered, so its client knows the host
+ * answered.
+ *
+ * ```ts
+ * for await (const event of followRun({ projector, segments, cursor, read, conversation }))
+ *   write(`data: ${JSON.stringify(event)}\n\n`);
+ * ```
+ */
+export async function* followRun(options: FollowRunOptions): AsyncGenerator<ChatEvent> {
+  const { segments, cursor, read, conversation } = options;
+  const first = segments[0];
+  if (!first || segments.some((segment) => typeof segment.id !== "string" || !segment.id))
+    throw new TypeError("Give followRun the run's rows, each with its id.");
+  const projector = createAgentProjector(options.projector);
+  const { messageId, runId } = options.projector;
+  const reached = cursor ? segments.findIndex((segment) => segment.id === cursor.segment) : -1;
+
+  async function snapshot(
+    reply: DisplayMessage,
+    run: RunInfo,
+    inputs?: readonly DisplayInput[],
+  ): Promise<ChatEvent> {
+    const messages = await conversation(reply);
+    return { v: PROTOCOL_VERSION, type: "snapshot", messages, run, ...(inputs && { inputs }) };
+  }
+
+  async function saved(): Promise<ChatEvent> {
+    const tree = await read();
+    return snapshot(projector.snapshot(tree), projector.run(tree), projector.inputs(tree));
+  }
+
+  // A new viewer has nothing on screen to lose, so it opens with the conversation around an empty
+  // reply. Numbered 0 in the first row, so a viewer that already has it does not take it again.
+  if (reached < 0)
+    yield {
+      ...(await snapshot(
+        { id: messageId, role: "assistant", parts: [], state: "live" },
+        { id: runId, status: "running", messageId },
+      )),
+      segment: first.id,
+      seq: 0,
+    };
+  for (const [index, segment] of segments.entries()) {
+    for await (const record of segment.records) {
+      const where = { segment: segment.id, seq: record.seq };
+      const unseen = index > reached || (index === reached && record.seq > (cursor?.seq ?? 0));
+      if (record.type === "agent" && isAgentEvent(record.data)) {
+        const at = record.at instanceof Date ? record.at.getTime() : record.at;
+        const out = projector.event(record.data, { ...where, ...(at !== undefined && { at }) });
+        if (unseen) yield* out;
+      } else if (record.type === "agent.gap" || record.type === "agent.resync") {
+        const marker = projector.gap();
+        // A gap the viewer already passed is replayed without a read: the log is fed before the
+        // journal is read, never after, or older progress lands on a newer save.
+        // ponytail: so rows that gap hid stay as the viewer last saw them until the next gap or
+        // the end. Read at the first record past the cursor if a viewer is seen waiting on that.
+        if (unseen) {
+          yield* marker;
+          yield { ...(await saved()), ...where };
+        }
+      } else if (record.type === "end" && index === segments.length - 1) {
+        const final = await saved();
+        yield unseen ? { ...final, ...where } : final;
+        return;
+      }
+    }
+  }
 }
