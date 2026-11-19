@@ -67,7 +67,8 @@ await writer.run("Explain database indexes.", { modelSettings: { maxTokens: 512 
 ```
 
 `ModelSettings` is core's `StreamOptions` without `signal`, `sessionId` or `json`. The SDK owns
-those three: use `RunOptions.signal` to stop, and `output` for checked results. Provider defaults
+those three: use `RunOptions.signal` to stop, `RunOptions.providerSessionId` to name the provider
+session (see [Sessions](#sessions)), and `output` for checked results. Provider defaults
 apply first, agent settings override them, and run settings win last. Unset or `undefined` fields
 inherit; `0` and `false` do not. All settings go to every model call. Support still depends on the
 provider, which may refuse a setting.
@@ -452,6 +453,22 @@ it. An append that fails never changes the run's own status.
 Resume never loads a session again. Pass the run's own session to `resume` so the turn is
 appended when the run settles; another session is refused. A specialist never gets its parent's
 session.
+
+Some providers route and cache requests by a session id: OpenCode Go's session header, the ChatGPT
+backend's `session-id` and `prompt_cache_key` on the Responses shape. Each run sends its own run
+id unless you name one, so each turn of a conversation starts a new provider session. Pass the
+conversation's id to keep one session for all its turns:
+
+```ts
+await writer.run("When do they slow down writes?", {
+  session: thread,
+  providerSessionId: thread.id,
+});
+```
+
+The run saves the id with its definition, and resume keeps it. Specialists and helpers keep their
+own run ids, because their instructions differ and they share no cached prompt with the parent.
+Workflows and remote agents make no model calls of their own, so they refuse the option.
 
 `createMemorySession` keeps everything in this process and loses it when the process ends. For
 your own store, implement `Session` (`load` and `append`) and check it with

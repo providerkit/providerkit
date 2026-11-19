@@ -1292,10 +1292,11 @@ function checkWorkflowOptions(options: RunOptions, resume = false): void {
     options.historyLimit !== undefined ||
     options.prepareHistory ||
     options.modelSettings ||
-    options.enabledTools
+    options.enabledTools ||
+    options.providerSessionId !== undefined
   )
     throw new TypeError(
-      "Workflows use typed input, not sessions, model settings or tool selection. Configure those on their agents.",
+      "Workflows use typed input, not sessions, model settings, provider sessions or tool selection. Configure those on their agents.",
     );
 }
 export async function checkReplay<I, O>(

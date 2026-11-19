@@ -561,6 +561,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       instructions: text,
       ...(memory ? { memory: copyData(memory) } : {}),
       modelSettings,
+      ...(options.providerSessionId !== undefined
+        ? { providerSessionId: options.providerSessionId }
+        : {}),
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
       ...(codeTools.size ? { codeTools: recordCodeTools(codeTools) } : {}),
@@ -2558,9 +2561,13 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             ? { onRateLimit: options.modelSettings.onRateLimit }
             : {}),
           signal,
+          // A summary keeps a session of its own: it has its own instructions, so it shares no
+          // cached prefix with the turns.
           sessionId: summary
             ? operationId
-            : (snapshot.subagent?.identity.originRunId ?? snapshot.runId),
+            : (snapshot.definition.providerSessionId ??
+              snapshot.subagent?.identity.originRunId ??
+              snapshot.runId),
         });
         for await (const chunk of stream) {
           active();

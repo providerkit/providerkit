@@ -143,7 +143,8 @@ export interface ResultSchema<T> {
 }
 
 /** Core's call settings. Cancellation, conversation identity and checked output stay with
- * the loop. Provider defaults apply first, then agent settings, then run settings. */
+ * the loop: `RunOptions.signal`, `RunOptions.providerSessionId` and `output`. Provider
+ * defaults apply first, then agent settings, then run settings. */
 export type ModelSettings = Omit<StreamOptions, "signal" | "sessionId" | "json">;
 
 /** Observers do not change the request and cannot be saved as JSON. */
@@ -339,6 +340,8 @@ export interface RecordedCodeTool {
 export interface RunDefinition {
   instructions: string;
   modelSettings: RecordedModelSettings;
+  /** `RunOptions.providerSessionId`, when the run named one. */
+  providerSessionId?: string;
   enabledTools: string[];
   stopAtTools: string[];
   /** Present for registered code tools, including ones disabled for this run. */
@@ -615,6 +618,12 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Overrides agent settings for this run. Recorded settings cannot change on resume. */
   modelSettings?: ModelSettings;
+  /** The id this run's model calls send as core's `sessionId`, which some providers route and
+   * cache by: OpenCode Go's session header, the ChatGPT backend's `session-id` and
+   * `prompt_cache_key` on the Responses shape. Defaults to the run id, so each run is its own
+   * session. Pass the conversation id to keep one provider session across a conversation's
+   * turns. Recorded when the run starts; resume keeps it. Never passed to specialists. */
+  providerSessionId?: string;
   /** Narrows the agent's enabled tools for this run. Resolved once, before saving. */
   enabledTools?: EnabledTools;
   /** Passed to tools with reserved runId, attemptId, operationId, callId and signal supplied by the loop. */
@@ -642,7 +651,13 @@ export interface RunOptions {
 
 export interface ResumeOptions extends Omit<
   RunOptions,
-  "runId" | "session" | "historyLimit" | "prepareHistory" | "modelSettings" | "enabledTools"
+  | "runId"
+  | "session"
+  | "historyLimit"
+  | "prepareHistory"
+  | "modelSettings"
+  | "enabledTools"
+  | "providerSessionId"
 > {
   host: AgentHost & { authorizeResume: NonNullable<AgentHost["authorizeResume"]> };
   /** The run's own session, so the turn is appended once the run settles. Resume never loads

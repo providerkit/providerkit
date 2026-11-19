@@ -276,10 +276,11 @@ function checkRunOptions(options: RunOptions, resume = false): void {
     options.prepareHistory ||
     options.enabledTools ||
     options.modelSettings ||
-    options.memory
+    options.memory ||
+    options.providerSessionId !== undefined
   )
     throw new TypeError(
-      "Remote agents do not accept local sessions, memory, model settings or tool selection.",
+      "Remote agents do not accept local sessions, memory, model settings, provider sessions or tool selection.",
     );
 }
 function safeParts(parts: A2APart[], includeImages = false): A2APart[] {

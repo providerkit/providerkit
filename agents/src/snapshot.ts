@@ -502,7 +502,7 @@ export function isRecordedModelSettings(value: unknown): value is RecordedModelS
 export function readModelSettings(value: unknown = {}): ModelSettings {
   if (!isModelSettings(value))
     throw new TypeError(
-      "Invalid modelSettings. Use core StreamOptions without signal, sessionId or json; the agent owns those fields.",
+      "Invalid modelSettings. Use core StreamOptions without signal, sessionId or json; the agent owns those fields. Name a provider session with the providerSessionId run option.",
     );
   // Undefined means inherit, not erase a lower-precedence value. Keep observers outside the
   // JSON copy: they do not change the request and may close over process-local services.
@@ -600,6 +600,7 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     isRecord(value) &&
     typeof value.instructions === "string" &&
     isRecordedModelSettings(value.modelSettings) &&
+    optional(value.providerSessionId, isId) &&
     isNames(value.enabledTools) &&
     isNames(value.stopAtTools) &&
     optional(value.codeTools, isRecordedCodeTools) &&
@@ -638,16 +639,22 @@ export function checkOptions(
       "enabledTools must be an allow-list of unique tool names, or a function returning one.",
     );
   if (value.modelSettings !== undefined) readModelSettings(value.modelSettings);
+  if (!optional(value.providerSessionId, isId))
+    throw new TypeError("providerSessionId must be a non-empty string.");
   // ResumeOptions leaves these out, but a JavaScript caller can still pass them. Say so,
   // rather than ignore a value someone set.
   if (
     use === "resume" &&
-    [value.historyLimit, value.prepareHistory, value.modelSettings, value.enabledTools].some(
-      (item) => item !== undefined,
-    )
+    [
+      value.historyLimit,
+      value.prepareHistory,
+      value.modelSettings,
+      value.enabledTools,
+      value.providerSessionId,
+    ].some((item) => item !== undefined)
   )
     throw new TypeError(
-      "historyLimit, prepareHistory, modelSettings and enabledTools apply when a run starts. A resumed run keeps its recorded history and definition.",
+      "historyLimit, prepareHistory, modelSettings, enabledTools and providerSessionId apply when a run starts. A resumed run keeps its recorded history and definition.",
     );
   if (value.host !== undefined) {
     if (!isRecord(value.host)) throw new TypeError("The run host must be an object.");
