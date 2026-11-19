@@ -666,12 +666,13 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
   return "unknown";
 }
 
-/**
- * How long the provider asked us to wait, in ms. Two dialects: Gemini's
- * RetryInfo (`"retryDelay": "52s"`, inside the body) and the `Retry-After`
- * header, which SDKs keep on the error. Honouring it beats guessing: a
- * backoff shorter than the window just burns an attempt.
- */
+function secondsMatchToMs(match: RegExpMatchArray | null): number | undefined {
+  const ms = Math.round(Number(match?.[1]) * 1000);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** How long the provider asked us to wait, in ms. Prefer its explicit reset,
+ *  RetryInfo or header over a delay it only mentions in the message. */
 export function parseRetryAfterMs(err: unknown, body?: string): number | undefined {
   // Adapters already normalized the response headers. Re-parsing only the body
   // discarded this property and made retries ignore their own Retry-After.
@@ -680,9 +681,14 @@ export function parseRetryAfterMs(err: unknown, body?: string): number | undefin
   const text = body ?? bodyTextOf(err);
   const usageLimit = parseUsageLimitBody(text);
   if (usageLimit.retryAfterMs !== undefined) return usageLimit.retryAfterMs;
-  const delay = text.match(/"?retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)s"?/i);
-  if (delay?.[1]) return Math.round(parseFloat(delay[1]) * 1000);
+  return (
+    secondsMatchToMs(text.match(/"?retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)s"?/i)) ??
+    retryAfterHeaderMs(err) ??
+    secondsMatchToMs(text.match(/\bplease retry in (\d+(?:\.\d+)?)\s*s\b/i))
+  );
+}
 
+function retryAfterHeaderMs(err: unknown): number | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const headers = (err as { headers?: unknown }).headers;
   const value =

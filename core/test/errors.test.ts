@@ -613,6 +613,19 @@ describe("retry-after — honouring it beats guessing", () => {
     expect(parseRetryAfterMs(apiError(429, { retryDelay: "1.5s" }))).toBe(1_500);
   });
 
+  it("reads Google's wait from the message only when no explicit delay is available", () => {
+    const message = "Please retry in 3.365734019s.";
+    expect(parseRetryAfterMs(apiError(429, [{ error: { message } }]))).toBe(3_366);
+    expect(parseRetryAfterMs(apiError(429, { message, details: [{ retryDelay: "3s" }] }))).toBe(
+      3_000,
+    );
+    expect(parseRetryAfterMs(apiError(429, { message }, { headers: { "retry-after": "8" } }))).toBe(
+      8_000,
+    );
+    expect(parseRetryAfterMs(new Error("Please retry in 200ms."))).toBeUndefined();
+    expect(parseRetryAfterMs(new Error(`Please retry in ${"9".repeat(310)}s.`))).toBeUndefined();
+  });
+
   it("Retry-After header in seconds, as a Headers instance", () => {
     const err = apiError(429, {}, { headers: new Headers({ "retry-after": "30" }) });
     expect(parseRetryAfterMs(err)).toBe(30_000);

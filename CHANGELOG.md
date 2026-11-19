@@ -2,6 +2,13 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- On OpenRouter's Responses API, `usage.reportedCostUsd` now includes the bill for a completed call or one cut short by its output limit. If you bring your own key, it includes both OpenRouter's fee and the upstream charge. Both chat adapters use your rate when either part of that bill is missing or when a different host reports a `cost` in unknown units.
+- Gemini sometimes gives a retry delay only in the error message. Core now reads `Please retry in 3.365734019s.` as 3,366 ms. An explicit header or structured delay still wins.
+
 ## [0.35.0] - 2026-11-19
 
 ### Added
