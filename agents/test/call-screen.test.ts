@@ -19,6 +19,7 @@ import {
   type ToolRequest,
 } from "../src/index.ts";
 import { codeMode } from "../src/code.ts";
+import { exact, runEvals } from "../src/evals.ts";
 import { createQuickJsDriver } from "../src/quickjs.ts";
 import { evidenceFor } from "./fixtures/requests.ts";
 
@@ -856,6 +857,24 @@ describe("host.screenCall", () => {
         host: { authorizeResume: () => {} },
       }),
     ).resolves.toMatchObject({ status: "completed" });
+  });
+
+  it("keeps its rules in an eval", async () => {
+    const click = vi.fn(async () => "clicked");
+    const report = await runEvals({
+      name: "plan gate",
+      agent: () =>
+        defineAgent({
+          ...base,
+          provider: wire(turn(["click", { ref: "e1" }]), text("Blocked")).provider,
+          tools: [tool("click", { run: click }), tool("plan")],
+        }),
+      cases: [{ id: "gate", input: "Click it", expected: "Blocked" }],
+      host: { screenCall: tabRunner() },
+      scorers: [exact()],
+    });
+    expect(report.cases[0]?.status).toBe("passed");
+    expect(click).not.toHaveBeenCalled();
   });
 
   it.each([{}, { refuse: " " }, { refuse: "No", cancel: "No" }, { stop: "No" }, "No"])(

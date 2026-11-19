@@ -287,13 +287,15 @@ export interface ScoreResult {
   error?: "scorer_failed" | "invalid_score" | "cancelled";
 }
 
-/** New executions only. Only the separate trusted driver may answer; stored effects never resume. */
+/** New executions only. Only the separate trusted driver may answer; stored effects never resume.
+ * `screenCall`, like `needsApproval`, is the agent's own policy, so a check runs the same agent. */
 export type EvalHost = Pick<
   AgentHost,
   | "checkpoint"
   | "loadMedia"
   | "prepareRequest"
   | "needsApproval"
+  | "screenCall"
   | "beforeTool"
   | "beforeStep"
   | "canRunConcurrently"

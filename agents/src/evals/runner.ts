@@ -349,6 +349,7 @@ export async function runEvals<T, E>(options: EvalOptions<T, E>): Promise<EvalRe
           "loadMedia",
           "prepareRequest",
           "needsApproval",
+          "screenCall",
           "beforeTool",
           "beforeStep",
           "canRunConcurrently",

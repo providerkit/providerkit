@@ -2464,6 +2464,10 @@ and child paths can narrow the match. They do not turn model-written text into p
 `stub` replaces both tool execution paths and
 backend validation; it does not prove that the replaced backend checks work.
 
+Give the eval's `host` the same `screenCall`, `needsApproval` and `canRunConcurrently` your app
+uses, so a check runs your agent with its own rules. An eval host cannot answer requests: that is
+what `drivers` are for.
+
 Simulated users need an explicit provider and `allowSimulation: true`. Model judges, including
 `grounded`, need an explicit provider/rubric and `allowJudge: true`. These make extra provider
 calls and may cost money. A judge's score is an assessment, not proof that an answer is true.
