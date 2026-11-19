@@ -13,7 +13,7 @@ import {
 } from "../errors.ts";
 import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
-import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
 import { attributionHeaders } from "../attribution.ts";
 import type {
@@ -86,6 +86,8 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   jsonWithTools?: JsonWithTools;
   maxTokens?: number;
   fetchImpl?: FetchLike;
+  /** Leave the provider's words out of every error. See `PresetProviderConfig.redactErrors`. */
+  redactErrors?: boolean;
   headers?: Record<string, string>;
   /**
    * App attribution for OpenRouter's rankings. The site URL rides as
@@ -855,5 +857,9 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
     },
   };
 
-  return configuredFallbacks(provider, config, codecs);
+  return configuredFallbacks(
+    config.redactErrors ? withRedactedErrors(provider) : provider,
+    config,
+    codecs,
+  );
 }

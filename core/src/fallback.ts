@@ -71,17 +71,26 @@ export type FallbackCandidate = Provider | FallbackSpec;
 function resolveFallback(
   candidate: FallbackCandidate,
   inheritedWatchdog?: WatchdogOptions,
+  inheritedRedactErrors?: boolean,
   codecs?: HostedCodecs,
 ): Provider {
   if (typeof candidate === "object" && candidate !== null && "createStream" in candidate) {
+    // `redactErrors` is not applied here: a hand-built provider keeps its own errors. We didn't
+    // build it, and a rebuild would turn a pool's `NoAvailableProviderError` into a plain error.
     return inheritedWatchdog ? withWatchdog(candidate, inheritedWatchdog) : candidate;
   }
-  const { preset, watchdog = inheritedWatchdog, ...config } = candidate;
+  const {
+    preset,
+    watchdog = inheritedWatchdog,
+    redactErrors = inheritedRedactErrors,
+    ...config
+  } = candidate;
   return presetProvider(
     preset,
     {
       ...config,
       ...(watchdog ? { watchdog } : {}),
+      ...(redactErrors ? { redactErrors } : {}),
     },
     codecs,
   );
@@ -112,10 +121,11 @@ export function withConfiguredFallbacks(
   return configuredFallbacks(primary, config);
 }
 
-/** @internal Keeps opt-in codecs on nested preset fallbacks. */
+/** @internal Keeps opt-in codecs on nested preset fallbacks. `redactErrors` comes in with the
+ *  adapter's or preset's own config, so its specs inherit it as they inherit the watchdog. */
 export function configuredFallbacks(
   primary: Provider,
-  config?: ProviderFallbackConfig,
+  config?: ProviderFallbackConfig & { redactErrors?: boolean },
   codecs?: HostedCodecs,
 ): Provider {
   const watchedPrimary = config?.watchdog ? withWatchdog(primary, config.watchdog) : primary;
@@ -123,7 +133,9 @@ export function configuredFallbacks(
   return withFallbackProviders(
     [
       watchedPrimary,
-      ...config.fallbacks.map((candidate) => resolveFallback(candidate, config.watchdog, codecs)),
+      ...config.fallbacks.map((candidate) =>
+        resolveFallback(candidate, config.watchdog, config.redactErrors, codecs),
+      ),
     ],
     config.fallbackOptions,
   );

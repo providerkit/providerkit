@@ -178,3 +178,41 @@ several layers is safe.
 
 Inspect `body` in trusted diagnostics when a failure is unknown. A vendor message can echo
 private request data, so do not send it to a browser or public log without checking it.
+
+## Keep the provider's words out
+
+A vendor's error can quote what you sent. `message` keeps up to 500 characters of its reply and
+`body` up to 2,000, and both end up in your logs and in every run an agent saves. To leave them
+out, pass `redactErrors: true`:
+
+```ts
+import { createPresetProvider } from "@providerkit/core";
+
+const provider = createPresetProvider("openrouter", { apiKey, redactErrors: true });
+```
+
+Each error that provider throws keeps its `kind`, `status`, `code` and retry hints, and loses
+the rest. A context overflow also keeps its token counts, so `parseContextOverflow` still reads
+them:
+
+```ts
+err.message; // "openrouter: the model call failed (rate, HTTP 429). The error text is left out because redactErrors is on."
+err.body; // undefined
+err.cause; // undefined
+```
+
+Retries, fallback pools and key pools read only what stays, so they make the same choices. A
+`code` stays only when it is one short word, like `overloaded_error`, because a vendor that puts a
+sentence there could be quoting you. The package's own wording goes too, for a refused option or
+a stream cut short, so a redacted log says only the kind, the status, the code and an overflow's
+token counts. Turn it off while you debug. It is off by default, because the words usually name
+the fix.
+
+All four adapters take it, and so do `createPresetProvider` and a
+[registry connection](/guides/registry/#the-providers-words-in-errors). A `models` chain and
+`fallbacks` specs inherit it. A provider you built yourself keeps its own setting, so build it
+with `redactErrors: true` too.
+
+Speech always works this way, because its errors can repeat the text you asked it to read out.
+Transcription keeps the vendor's words: what you sent is audio, which no error repeats, and the
+words often name the fix ("Invalid file format. Supported formats: ...").

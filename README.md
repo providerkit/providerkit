@@ -68,6 +68,12 @@ try {
 }
 ```
 
+Those words can quote what you sent. Pass `redactErrors: true` to a provider or a registry
+connection to leave them out of every error: it keeps `kind`, `status`, `code` and the retry
+hints, which is all retries and fallbacks read. The
+[errors guide](https://providerkit.dev/guides/errors/#keep-the-providers-words-out) says what
+stays and why.
+
 ### Z.ai Coding Plan
 
 `createZaiCodingProvider` uses the Coding Plan endpoint with Bearer authentication.

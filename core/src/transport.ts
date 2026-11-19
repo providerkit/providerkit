@@ -4,12 +4,21 @@
 //
 // Adapters keep only their per-event mapping; everything about being an HTTP
 // client lives here once.
-import { classifyHttp, parseRetryAfterMs, ProviderError, type ErrorKind } from "./errors.ts";
+import {
+  classify,
+  classifyHttp,
+  parseContextOverflow,
+  parseRetryAfterMs,
+  ProviderError,
+  type ContextOverflowInfo,
+  type ErrorKind,
+} from "./errors.ts";
 import {
   parseRateLimitReset,
   parseRateLimitResponse,
   type RateLimitReading,
 } from "./rate-limit.ts";
+import type { Provider } from "./types.ts";
 
 /**
  * What a `fetchImpl` option takes: anything called like `fetch` that answers with a `Response`.
@@ -433,6 +442,82 @@ export async function callOnce<T>(
   } catch (error) {
     throw noReplay(provider, error, signal, rebuild);
   }
+}
+
+/** A vendor code short enough to be a name, not a sentence. */
+const CODE_SLUG = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/**
+ * @internal What `redactErrors` turns on for chat: the speech rule of invariant 18. A vendor's
+ * error can quote what was sent, and its message, `body` and `cause` carry that into logs and
+ * into every run an agent saves. Each `ProviderError` the adapter throws comes back as a copy
+ * that keeps what retries, pools and logs read: the kind, the status, a `code` that is one
+ * short word, the retry hints, and a context overflow's token counts. So a retry or a fallback
+ * decides exactly as it would have on the original, and an app trims by the same numbers.
+ * Anything else passes through as thrown: a socket that died mid-read is the runtime's error,
+ * not the vendor's, and an abort reason (the caller's Stop, or the deadline a watchdog outside
+ * this layer aborted with) stays itself.
+ *
+ * Applied once, where each adapter hands out its provider, so a new failure path inside an
+ * adapter cannot forget it. The same reason `noReplay` lives in one place.
+ *
+ * ponytail: every error loses its words, ours too (a refused option, a stream cut short), so a
+ * redacted log says only the kind, the status, the code and an overflow's counts. And a code
+ * that is one word stays, so a vendor that put one of the caller's words in its code would
+ * still show it. Upgrade: mark the errors that carry vendor text where they are built, and keep
+ * our own words.
+ */
+export function withRedactedErrors(provider: Provider): Provider {
+  return {
+    ...provider,
+    async *createStream(messages, tools, opts = {}) {
+      try {
+        yield* provider.createStream(messages, tools, opts);
+      } catch (error) {
+        if (!(error instanceof ProviderError) || error === opts.signal?.reason) throw error;
+        throw withoutVendorWords(error);
+      }
+    },
+  };
+}
+
+function withoutVendorWords(error: ProviderError): ProviderError {
+  const { provider, kind, status, retryAfterMs, resetAtMs, window, shouldRetry } = error;
+  const code = error.code !== undefined && CODE_SLUG.test(error.code) ? error.code : undefined;
+  const overflow = parseContextOverflow(error);
+  const facts = [
+    kind,
+    ...(status === undefined ? [] : [`HTTP ${status}`]),
+    ...(code === undefined ? [] : [`code ${code}`]),
+    // `parseContextOverflow` reads the token counts out of the message, and an app lowers
+    // `maxTokens` or compacts by them. Counts are not the person's words, so they stay.
+    ...(overflow === undefined ? [] : [overflowFact(overflow)]),
+    // `isRetryable` reads a cancel phrase in the message as the caller's Stop and never retries
+    // it. That one fact stays, or the copy would be retried where the original was not.
+    ...(classify({ message: error.message }) === "aborted" ? ["client closed request"] : []),
+  ];
+  return new ProviderError(
+    provider,
+    kind,
+    `${provider}: the model call failed (${facts.join(", ")}). ` +
+      "The error text is left out because redactErrors is on.",
+    { status, code, retryAfterMs, resetAtMs, window, shouldRetry },
+  );
+}
+
+/** An overflow in the wording `parseContextOverflow` reads for its shape, so the copy parses to
+ *  the same numbers as the original. */
+function overflowFact({
+  inputTokens,
+  maxTokens,
+  contextLimit,
+  excessTokens,
+}: ContextOverflowInfo): string {
+  // The excess is counted from the input, so it gives the input back if a wording ever lacks it.
+  const input = inputTokens ?? contextLimit + excessTokens - (maxTokens ?? 0);
+  return maxTokens === undefined
+    ? `prompt is too long: ${input} tokens > ${contextLimit}`
+    : `input length and max_tokens exceed context limit: ${input} + ${maxTokens} > ${contextLimit}`;
 }
 
 /** Pull the `data:` payload out of one SSE frame, joining continuation lines

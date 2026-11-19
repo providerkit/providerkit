@@ -17,7 +17,7 @@ import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
-import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
@@ -49,6 +49,8 @@ export interface AnthropicConfig extends ProviderFallbackConfig {
   maxTokens?: number;
   version?: string;
   fetchImpl?: FetchLike;
+  /** Leave the provider's words out of every error. See `PresetProviderConfig.redactErrors`. */
+  redactErrors?: boolean;
   /** Merged into every request. The subscription backend needs its own beta
    *  headers, and a gateway in front usually wants one of its own. */
   headers?: Record<string, string>;
@@ -783,5 +785,9 @@ export function anthropicProvider(config: AnthropicConfig, codecs?: HostedCodecs
       }
     },
   };
-  return configuredFallbacks(provider, config, codecs);
+  return configuredFallbacks(
+    config.redactErrors ? withRedactedErrors(provider) : provider,
+    config,
+    codecs,
+  );
 }

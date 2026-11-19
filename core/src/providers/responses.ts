@@ -25,7 +25,7 @@ import {
 } from "../errors.ts";
 import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
-import { streamSse, apiUrl, parseFrame, type FetchLike } from "../transport.ts";
+import { streamSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
 import { settleToolCalls } from "../tool-args.ts";
 import type {
@@ -55,6 +55,8 @@ export interface ResponsesConfig extends ProviderFallbackConfig {
   effort?: Effort;
   maxTokens?: number;
   fetchImpl?: FetchLike;
+  /** Leave the provider's words out of every error. See `PresetProviderConfig.redactErrors`. */
+  redactErrors?: boolean;
   /** Extra request headers, where a subscription backend's account id goes
    *  (`ChatGPT-Account-Id`), which those backends reject the request without. */
   headers?: Record<string, string>;
@@ -874,5 +876,9 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
     },
   };
 
-  return configuredFallbacks(provider, config, codecs);
+  return configuredFallbacks(
+    config.redactErrors ? withRedactedErrors(provider) : provider,
+    config,
+    codecs,
+  );
 }

@@ -168,6 +168,19 @@ a connection or on the registry. A connection's own setting replaces the registr
 Don't wrap a provider from `get` in `withWatchdog`. A clock around the whole chain would cancel the
 chain, not just the model that went quiet.
 
+## The provider's words in errors
+
+```ts
+const providers = createRegistry({
+  connections: { go: { preset: "opencode-go", apiKey: goKey, redactErrors: true } },
+});
+```
+
+`redactErrors: true` leaves the provider's words out of every error from that connection. Each
+error keeps its `kind`, `status`, `code` and retry hints, so the pool still benches and moves on
+as before. Set it on each connection that needs it: a chain can mix connections with it and
+without it. [Errors](/guides/errors/#keep-the-providers-words-out) says what stays and why.
+
 ## Changing a connection while running
 
 ```ts
