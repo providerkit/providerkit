@@ -947,6 +947,50 @@ describe.each(VENDORS)("$name", (vendor) => {
     expect(repairHistory(once).messages).toEqual(once);
   });
 
+  it("sends a longer history as the shorter one's request, plus what is new", async () => {
+    // The other half of invariant 14. The prompt cache is a prefix cache, so
+    // one earlier byte that changes from one turn to the next re-bills every
+    // turn after it. A cache marker is the one thing that may move: Anthropic's
+    // moves forward every turn, and a moved marker is not a changed prefix, so
+    // the markers are left out of the comparison.
+    const { raw, fetchImpl } = recording(vendor.turn);
+    const provider = vendor.create(fetchImpl);
+    const history: ChatMessage[] = [{ role: "user", content: "find cats" }];
+    const turns: ChatMessage[][] = [
+      [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "search", arguments: '{"q":"cats"}' }],
+        },
+        { role: "tool", toolCallId: "call_1", name: "search", content: "3 cats" },
+      ],
+      [
+        { role: "assistant", content: "Three cats." },
+        { role: "user", content: "and dogs?" },
+      ],
+    ];
+    await assemble(provider.createStream(history, TOOLS));
+    for (const turn of turns) {
+      history.push(...turn);
+      await assemble(provider.createStream(history, TOOLS));
+    }
+    const unmarked = (body: string): Record<string, unknown> =>
+      JSON.parse(body, (key: string, value: unknown) =>
+        key === "cache_control" ? undefined : value,
+      );
+    const prefix = (before: unknown, after: unknown) =>
+      Array.isArray(before) && Array.isArray(after) ? after.slice(0, before.length) : after;
+    expect(raw).toHaveLength(3);
+    for (let n = 1; n < raw.length; n++) {
+      const before = unmarked(raw[n - 1]!);
+      const after = unmarked(raw[n]!);
+      for (const [field, value] of Object.entries(before)) {
+        expect(prefix(value, after[field]), field).toEqual(value);
+      }
+    }
+  });
+
   it("renames an id the next reply reuses, call and result together", async () => {
     // Anthropic and Responses reject a second `functions.search:0`, and the
     // turn after a Kimi reply on a rotation can land on either.

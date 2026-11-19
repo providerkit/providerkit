@@ -317,6 +317,97 @@ function systemBlocks(messages: readonly string[]): unknown[] | undefined {
 }
 
 /**
+ * Whether Anthropic takes a cache marker on this block. A list of the blocks
+ * that do, rather than of the ones that don't: a marker on a block that refuses
+ * one is a 400 that loses the turn, while a block missing from this list only
+ * moves the marker back a block.
+ *
+ * Thinking blocks of both kinds and empty text cannot carry one; text, images,
+ * tool use and tool results can, the last two in user and assistant turns alike
+ * (Anthropic, Prompt caching, "What can be cached" and "What cannot be cached",
+ * read 2026-11-19). A server tool's result takes one too: the API puts its own
+ * breakpoint there before its tool loop's next step (Anthropic, Tool use with
+ * prompt caching, read 2026-11-19). Blank text counts as empty: the API refuses
+ * a text block of only whitespace outright.
+ */
+function takesMarker(block: unknown): block is Record<string, unknown> {
+  if (typeof block !== "object" || block === null || !("type" in block)) return false;
+  const { type } = block;
+  if (type === "text") {
+    return "text" in block && typeof block.text === "string" && block.text.trim() !== "";
+  }
+  return (
+    type === "image" ||
+    type === "tool_use" ||
+    type === "tool_result" ||
+    type === "server_tool_use" ||
+    (typeof type === "string" && type.endsWith("_tool_result"))
+  );
+}
+
+/** `message` with a marker on its last block that takes one, or as it was when none does. */
+function markLast(message: AnthropicMessage): AnthropicMessage {
+  for (let i = message.content.length - 1; i >= 0; i--) {
+    const block = message.content[i];
+    if (!takesMarker(block)) continue;
+    const content = [...message.content];
+    content[i] = { ...block, cache_control: { type: "ephemeral" } };
+    return { ...message, content };
+  }
+  return message;
+}
+
+/**
+ * The conversation's cache breakpoints. The system marker caches the fixed
+ * prefix, tools and system; these cache the conversation, which grows every
+ * turn while that prefix stays the same size. Without them every turn billed
+ * the whole history again at the full input rate, and only tools and system
+ * came from cache.
+ *
+ * Two of them, on the last block that takes one (see takesMarker):
+ * - The newest message. Each request writes its entry there.
+ * - The message just before the newest assistant message: where the previous
+ *   request ended, so this one reads that request's entry exactly. A read looks
+ *   back at most 20 positions from a breakpoint for an entry an earlier request
+ *   wrote. On the Claude API a run of tool_use blocks counts as one position, and
+ *   so does a run of tool_result blocks; the docs state that rule for no other
+ *   platform. A turn that adds more than 20 would read nothing from the newest
+ *   marker alone, and bill its whole prefix fresh. An adopter ran on the newest
+ *   marker alone and named this second one as the upgrade.
+ *
+ * Only on a request another one will follow: one that declares tools, or one
+ * whose messages already hold an assistant turn. A one-shot would pay the 1.25×
+ * write for an entry nothing reads. A prefix under the model's minimum (512
+ * tokens on the newest models, up to 4,096 on older ones) is neither cached
+ * nor billed as a write.
+ *
+ * Block markers only, never the top-level `cache_control` field that turns on
+ * automatic caching: the legacy Bedrock integration (bedrock-runtime) answers
+ * that field with a 400, and no Anthropic-shape gateway has been checked.
+ *
+ * With the system's, three markers at most, under the API's cap of four. They
+ * depend only on the messages, and a moved marker is not a changed prefix (the
+ * docs' own growing conversation moves it every turn and reads the last
+ * turn's entry), so a longer history still sends the shorter one's bytes plus
+ * what is new (invariant 14).
+ *
+ * Documented (Anthropic, Prompt caching, read 2026-11-19:
+ * platform.claude.com/docs/en/build-with-claude/prompt-caching); not measured
+ * live here.
+ */
+function markConversation(
+  messages: AnthropicMessage[],
+  declaresTools: boolean,
+): AnthropicMessage[] {
+  const newestReply = messages.map((message) => message.role).lastIndexOf("assistant");
+  if (!declaresTools && newestReply < 0) return messages;
+  const previousEnd = newestReply - 1;
+  return messages.map((message, i) =>
+    i === messages.length - 1 || i === previousEnd ? markLast(message) : message,
+  );
+}
+
+/**
  * The schema, as an extra system block. Anthropic has no native schema mode,
  * and the seam promises that a provider without one gets the schema in the
  * prompt instead. Without this an `opts.json` request went out carrying
@@ -667,7 +758,13 @@ export function anthropicProvider(config: AnthropicConfig, codecs?: HostedCodecs
         let cached = 0;
         let written = 0;
         let output = 0;
-        const payload = hostedStream?.payload(request, body) ?? request;
+        // Marked per pass, because each pass is a request of its own: the one
+        // after a pause ends in the paused turn, so that is its newest message.
+        const messages = markConversation(
+          hostedStream?.messages(body) ?? body,
+          request.tools !== undefined,
+        );
+        const payload = hostedStream?.payload({ ...request, messages }) ?? { ...request, messages };
 
         read: for await (const data of streamSse({
           url: apiUrl(baseUrl, "/v1/messages"),
