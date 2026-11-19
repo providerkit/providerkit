@@ -41,7 +41,8 @@ await writer.run(question, { session: thread, providerSessionId: thread.id });
 
 Some providers route and cache requests by a session id, OpenCode Go among them. Each run sends
 its own run id unless you name one, so pass the conversation's id to let every turn reuse what the
-provider cached. A resumed run keeps the id it started with. Specialists keep their own.
+provider cached. A resumed run keeps the id it started with. Specialists and a workflow's agent
+steps keep their own.
 
 ## Images and files
 

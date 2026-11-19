@@ -152,10 +152,11 @@ describe("provider session", () => {
       },
     });
     // Its type leaves the option out, and its agents would drop it, so a JavaScript caller who
-    // passes one is told rather than ignored.
+    // passes one is told rather than ignored. No agent option can set it, so the error says what
+    // an agent step does instead of sending the caller to look for one.
     await expect(
       Reflect.apply(flow.run, flow, [{}, { providerSessionId: "conversation-1" }]),
-    ).rejects.toThrow("provider sessions");
+    ).rejects.toThrow("uses its own run id as its provider session");
     expect(source.sessions).toEqual([]);
   });
 });

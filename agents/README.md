@@ -471,7 +471,8 @@ await writer.run("When do they slow down writes?", {
 
 The run saves the id with its definition, and resume keeps it. Specialists and helpers keep their
 own run ids, because their instructions differ and they share no cached prompt with the parent.
-Workflows and remote agents make no model calls of their own, so they refuse the option.
+Workflows and remote agents make no model calls of their own, so they refuse the option. Inside a
+workflow, each agent step uses its own run id as its provider session.
 
 `createMemorySession` keeps everything in this process and loses it when the process ends. For
 your own store, implement `Session` (`load` and `append`) and check it with
