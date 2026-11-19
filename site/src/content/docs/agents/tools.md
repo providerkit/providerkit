@@ -25,6 +25,17 @@ Unmarked tools run serially. Parallel execution needs both `isConcurrencySafe` o
 permission from the host. `isReadOnly` is a claim you make about the real implementation, not a
 promise inferred from its name.
 
+## Make the model call one tool first
+
+```ts
+const assistant = defineAgent({ ...config, modelSettings: { toolChoice: { name: "route" } } });
+```
+
+Every turn must call `route` until one call of it succeeds. A failed or denied call, or a call to
+another tool, forces `route` again on the next turn, up to the turn limit. After that the model
+chooses its tools. `"required"` asks for any tool and lets the model answer once a turn has
+called one.
+
 ## Check output
 
 `output.schema` tells the model what result to submit. `output.validate` checks the actual value

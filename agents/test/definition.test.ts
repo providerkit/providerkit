@@ -455,6 +455,54 @@ describe("tool choice and turn limit", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("holds a named choice until a call of that tool succeeds", async () => {
+    // A router the rest of the work depends on. A failed call, or a call to another tool that a
+    // gateway let through, must not free the model to answer before it is routed.
+    let attempts = 0;
+    const route = tool("route", {
+      run: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("Name one area.");
+        return "routed";
+      },
+    });
+    const wire = fake([calls("route"), calls("read"), calls("route"), text()]);
+    const result = await defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [route, tool("read")],
+      modelSettings: { toolChoice: { name: "route" } },
+    }).run("Route this");
+    expect(result.status).toBe("completed");
+    expect(wire.requests.map((request) => request.options.toolChoice)).toEqual([
+      { name: "route" },
+      { name: "route" },
+      { name: "route" },
+      "auto",
+    ]);
+  });
+
+  it("keeps a named choice forced after a person denies the call, across the resume", async () => {
+    const wire = fake([calls("send"), calls("send")]);
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [tool("send", { needsApproval: true })],
+      modelSettings: { toolChoice: { name: "send" } },
+    });
+    const deny: AgentHost = { ...approval, resolveRequest: () => ({ type: "deny" }) };
+    const pending = await agent.run("Send", { host: deny });
+    const next = await agent.resume(pending.snapshot, {
+      host: { ...deny, authorizeResume },
+      answers: evidenceFor(pending.snapshot, "ticket"),
+    });
+    expect(next.status).toBe("suspended");
+    expect(wire.requests.map((request) => request.options.toolChoice)).toEqual([
+      { name: "send" },
+      { name: "send" },
+    ]);
+  });
+
   it("makes exactly one tool-free final call and counts its usage", async () => {
     const wire = fake([calls("read"), text("Answer from the last call")]);
     const agent = defineAgent({

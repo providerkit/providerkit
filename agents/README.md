@@ -79,8 +79,11 @@ rather than in JSON. After a restart, only observers from the rebuilt agent appl
 progress through `onEvent`.
 
 `toolChoice` accepts `"auto"`, `"none"`, `"required"` or `{ name: "lookup" }`. A named tool must
-be enabled. After a tool call, a forced choice becomes `"auto"` for the rest of that run,
-including after resume. `"none"` stays `"none"`: calls a provider returns anyway are refused.
+be enabled. `"required"` becomes `"auto"` once a turn has called any tool. A named tool stays
+forced until a call of it succeeds: a failed or denied call, or a call to another tool, forces it
+again on the next turn, up to the turn limit. Use it for a step the rest of the run depends on,
+such as a router. Both read the journal, so a resumed run keeps the choice where it was.
+`"none"` stays `"none"`: calls a provider returns anyway are refused.
 A checked-output agent refuses `"none"` at creation because it needs `submit_result` to finish.
 
 ## Instructions and tools per run

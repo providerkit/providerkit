@@ -11,6 +11,7 @@ import {
   type ProviderChunk,
   type TokenUsage,
   type Tool,
+  type ToolChoice,
 } from "@providerkit/core";
 import {
   bindMemoryTool,
@@ -2395,6 +2396,28 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
     }
 
+    /** Whether a forced choice has done its job, read from the journal so a resume agrees and
+     * cannot force it a second time. "required" is ported from OpenAI Agents JS (MIT),
+     * runner/modelSettings.ts, maybeResetToolChoice: any tool call frees it, so the model can
+     * answer. A named tool gates work on its own result, such as a router that must run first,
+     * so it holds until a call of that tool succeeds. A failed or refused call, or a call to
+     * another tool, keeps it forced. */
+    function choiceDone(choice: ToolChoice | undefined): boolean {
+      if (choice === "required")
+        return snapshot.models.some(
+          (model) => model.status === "completed" && model.tools.length > 0,
+        );
+      if (typeof choice !== "object") return false;
+      return snapshot.models.some(
+        (model) =>
+          model.status === "completed" &&
+          (model.turn.message.toolCalls ?? []).some((call, index) => {
+            const tool = model.tools[index];
+            return call.name === choice.name && tool?.status === "completed" && tool.result.ok;
+          }),
+      );
+    }
+
     async function nextTurn(
       previous?: Extract<ModelExecution, { status: "running" }>,
     ): Promise<CompletedModel> {
@@ -2446,14 +2469,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
       active();
       const modelSettings = copyData(snapshot.definition.modelSettings);
-      // Ported from OpenAI Agents JS (MIT), runner/modelSettings.ts, maybeResetToolChoice.
-      // Derive usage from the journal so resume cannot force the first tool a second time.
-      const choice = modelSettings.toolChoice;
-      if (
-        (choice === "required" || typeof choice === "object") &&
-        snapshot.models.some((model) => model.status === "completed" && model.tools.length > 0)
-      )
-        modelSettings.toolChoice = "auto";
+      if (choiceDone(modelSettings.toolChoice)) modelSettings.toolChoice = "auto";
       if (finalTurn) modelSettings.toolChoice = "none";
       const operationId = modelId(snapshot.runId, position);
       const modelInput: ModelInput = {
