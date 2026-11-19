@@ -619,11 +619,26 @@ describe("retry-after — honouring it beats guessing", () => {
     expect(parseRetryAfterMs(apiError(429, { message, details: [{ retryDelay: "3s" }] }))).toBe(
       3_000,
     );
-    expect(parseRetryAfterMs(apiError(429, { message }, { headers: { "retry-after": "8" } }))).toBe(
-      8_000,
-    );
+    for (const headers of [
+      { "Retry-After": "8", "unrelated invalid name": "ignore" },
+      new Headers({ "retry-after-ms": "8000", "Retry-After": "10" }),
+    ]) {
+      expect(
+        ProviderError.from("gemini", apiError(429, { message }, { headers })).retryAfterMs,
+      ).toBe(8_000);
+    }
     expect(parseRetryAfterMs(new Error("Please retry in 200ms."))).toBeUndefined();
     expect(parseRetryAfterMs(new Error(`Please retry in ${"9".repeat(310)}s.`))).toBeUndefined();
+  });
+
+  it("reads the wait on the next line of a JSON error in HTTP and streaming replies", () => {
+    const envelope = {
+      error: { code: 429, message: "Too many requests.\nPlease retry in 3.365734019s." },
+    };
+    expect([
+      parseRetryAfterMs({}, JSON.stringify(envelope)),
+      streamError("gemini", envelope).retryAfterMs,
+    ]).toEqual([3_366, 3_366]);
   });
 
   it("Retry-After header in seconds, as a Headers instance", () => {

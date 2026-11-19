@@ -681,29 +681,32 @@ export function parseRetryAfterMs(err: unknown, body?: string): number | undefin
   const text = body ?? bodyTextOf(err);
   const usageLimit = parseUsageLimitBody(text);
   if (usageLimit.retryAfterMs !== undefined) return usageLimit.retryAfterMs;
+  const retryInfo = secondsMatchToMs(text.match(/"?retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)s"?/i));
+  if (retryInfo !== undefined) return retryInfo;
+  const headers = errorHeaders(err);
+  // A newline before "Please" can be the two characters backslash and n in a JSON body.
   return (
-    secondsMatchToMs(text.match(/"?retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)s"?/i)) ??
-    retryAfterHeaderMs(err) ??
-    secondsMatchToMs(text.match(/\bplease retry in (\d+(?:\.\d+)?)\s*s\b/i))
+    (headers && parseRateLimitReset(headers).retryAfterMs) ??
+    secondsMatchToMs(text.match(/(?:\b|\\[nrtf])please retry in (\d+(?:\.\d+)?)\s*s\b/i))
   );
 }
 
-function retryAfterHeaderMs(err: unknown): number | undefined {
-  if (typeof err !== "object" || err === null) return undefined;
-  const headers = (err as { headers?: unknown }).headers;
-  const value =
-    headers instanceof Headers
-      ? headers.get("retry-after")
-      : typeof headers === "object" && headers !== null
-        ? (headers as Record<string, unknown>)["retry-after"]
-        : undefined;
-  if (typeof value !== "string") return undefined;
-  // Seconds, or an HTTP-date — both are legal per RFC 9110. Seconds are read
-  // as a NUMBER first: `Date.parse("1.5")` is a day in 2001, a wait of zero.
-  const seconds = Number(value.trim());
-  if (value.trim() !== "" && Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const date = Date.parse(value);
-  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+/** SDK errors and stream envelopes can carry headers as plain objects. */
+function errorHeaders(source: unknown): Headers | undefined {
+  if (typeof source !== "object" || source === null || !("headers" in source)) return undefined;
+  const raw = source.headers;
+  if (raw instanceof Headers) return raw;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== "string" && typeof value !== "number") continue;
+    try {
+      headers.set(name, String(value));
+    } catch {
+      // A malformed header must not mask the original failure or the other retry hints.
+    }
+  }
+  return headers;
 }
 
 export interface ContextOverflowInfo {
@@ -854,15 +857,8 @@ export function streamError(provider: string, envelope: unknown): ProviderError 
 /** Read reset metadata without copying echoed request data into diagnostics.
  *  Mirrored account windows describe only rate/quota failures, not a 503. */
 function readReset(envelope: unknown, error: unknown, body: string, kind: ErrorKind) {
-  const headers = new Headers();
-  for (const source of [error, envelope]) {
-    if (typeof source !== "object" || source === null || !("headers" in source)) continue;
-    const raw = source.headers;
-    if (typeof raw !== "object" || raw === null) continue;
-    for (const [name, value] of Object.entries(raw)) {
-      if (typeof value === "string" || typeof value === "number") headers.set(name, String(value));
-    }
-  }
+  const headers = new Headers(errorHeaders(error));
+  errorHeaders(envelope)?.forEach((value, name) => headers.set(name, value));
   if (kind !== "rate" && kind !== "quota") {
     return {
       retryAfterMs: parseRateLimitReset(headers).retryAfterMs ?? parseRetryAfterMs(error, body),
