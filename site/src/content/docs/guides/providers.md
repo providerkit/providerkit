@@ -322,6 +322,31 @@ createPresetProvider("openrouter", {
 });
 ```
 
+### OpenRouter output ceiling
+
+When you set no `maxTokens`, the `openrouter` preset sends `max_tokens: 32000`. Without a ceiling,
+OpenRouter sets aside the cost of its own per-request cap from your balance before the call
+starts, so a low balance answers 402 to a call that would have cost cents
+([OpenRouter's limits](https://openrouter.ai/docs/api-reference/limits)). 32,000 is about twice
+the longest real answers one adopter measured over 60 days (the p99 was 16,389 tokens on GLM 5.3
+Flash).
+
+Set your own `maxTokens` on a model that can't write that much. OpenRouter sends a call only to
+hosts that can write a reply that long
+([provider routing](https://openrouter.ai/docs/features/provider-routing)), so a model whose
+every host stops sooner can't take the call. On 2026-11-19 that was 57 of the 479 models
+OpenRouter listed, `openai/gpt-4o-mini` (16,384) among them. Every model the preset lists writes
+65,536 or more.
+
+```ts
+createPresetProvider("openrouter", { apiKey, model: "openai/gpt-4o-mini", maxTokens: 16_384 });
+```
+
+The ceiling also has to fit in the context window beside the prompt, and thinking shares it with
+the answer. With `effort` set, OpenRouter sizes some models' thinking from it: 80% of it at
+`high` on Claude ([reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)).
+A `createOpenAIProvider` pointed at OpenRouter sends no ceiling unless you set one.
+
 ### Curated presets and `createPresetProvider`
 
 Instead of hand-crafting `baseUrl`, header styles, and dialect quirks per vendor, you can instantiate

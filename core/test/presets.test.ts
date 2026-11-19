@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createPresetProvider,
+  createRegistry,
   OPENCODE_CLI_USER_AGENT,
   OPENCODE_PUBLIC_API_KEY,
   PRESET_IDS,
@@ -154,6 +155,34 @@ describe("provider presets — every row joins to one request, correctly", () =>
     // The adapter's own default is 8,192, which GLM fills with reasoning alone.
     expect(await sent()).toBe(65_536);
     expect(await sent(4_000)).toBe(4_000);
+  });
+
+  it("gives openrouter an output ceiling, unless the caller sets one", async () => {
+    // Without one, OpenRouter holds the cost of its own per-request cap against the balance
+    // before the call starts, and a low balance answers 402 to a call that would cost cents.
+    const sent = async (
+      build: (fetchImpl: typeof fetch) => Provider,
+      call: { maxTokens?: number } = {},
+    ) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(ok());
+      await drain(build(fetchImpl).createStream([{ role: "user", content: "hi" }], [], call));
+      return JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body)).max_tokens;
+    };
+    const openrouter = (fetchImpl: typeof fetch) =>
+      createPresetProvider("openrouter", { apiKey: "k", fetchImpl });
+    const capped = (fetchImpl: typeof fetch) =>
+      createPresetProvider("openrouter", { apiKey: "k", maxTokens: 4_000, fetchImpl });
+    const connection = (fetchImpl: typeof fetch) =>
+      createRegistry({
+        connections: { or: { preset: "openrouter", apiKey: "k", fetchImpl } },
+        // Its watchdog fails a turn with no answer, and this test only reads the request.
+        watchdog: false,
+      }).get("or");
+
+    expect(await sent(openrouter)).toBe(32_000);
+    expect(await sent(connection)).toBe(32_000);
+    expect(await sent(capped)).toBe(4_000);
+    expect(await sent(openrouter, { maxTokens: 100 })).toBe(100);
   });
 });
 

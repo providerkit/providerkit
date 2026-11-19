@@ -302,6 +302,20 @@ export const PROVIDER_PRESETS = {
       "x-ai/grok-4.6",
       "openai/gpt-5.6-luna-pro",
     ],
+    // An absent `max_tokens` is not "no limit" here. OpenRouter holds each paid call's cost up
+    // front, counting "the completion tokens allowed by `max_tokens` up to a fixed per-request
+    // cap (the cap is used when `max_tokens` is not set)" (its limits page, read 2026-11-19). On
+    // a low balance that hold alone answers 402: an adopter's error watcher was refused that way
+    // (measured 2026-09-10). 32,000 is that adopter's chat ceiling, from 60 days of its output:
+    // p99 16,389 tokens on GLM 5.3 Flash and 9,565 on DeepSeek V4 Flash, and one runaway call
+    // that returned 131,072. It cannot go above a model's own limit for free: "if you set
+    // `max_tokens`, then OpenRouter will only route to providers that support a response of
+    // that length" (its provider routing page, read 2026-11-19). That day, 57 of the 479 models
+    // OpenRouter listed had no host that writes 32,000 (`openai/gpt-4o-mini` stops at 16,384),
+    // and every host of every model above writes 65,536 or more. A caller on a model that stops
+    // sooner sets its own `maxTokens`. 16,384 would keep gpt-4o-mini, and cut about one in a
+    // hundred of those GLM answers.
+    maxTokens: 32_000,
     // Source: OpenRouter's text-to-speech guide, read 2026-11-02. It takes mp3 or pcm
     // (its own default is pcm), and some models take only one: Gemini TTS and HeyGen
     // answer 400 to mp3, MiniMax to pcm. This row asks for mp3, so a Gemini TTS model
