@@ -13,6 +13,12 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 - When a `zodTool` input check throws, such as a transform that calls `new URL` on a bad link, `outcome.cause` is now the tool's own error, and what the check threw is its `cause`. An `output` check that throws already worked this way. Before, what the check threw was `outcome.cause` itself, so read it at `outcome.cause.cause` now. The model reads the same words, and the kind is still `invalid_input`.
 
+### Fixed
+
+- A 400 from Google that says `Please pass a valid API key` is now `auth`. Google's OpenAI-compatible endpoint sends it for a bad key, and it read as `invalid`, so a key pool threw instead of trying its next key and a fallback chain stopped on it. A body that says `API key is required` or `API key is missing` is `auth` too.
+- Google's `Multiturn chat is not enabled` is now `model`. Google sends it as a 400 when a conversation reaches its second turn on a model that answers one turn only. As `invalid`, a fallback chain stopped there; now it rests that model for an hour and tries the next.
+- Z.ai's plan gate is now `entitlement`. Z.ai answers a model your plan does not include with a 403 and code 1311 (`[1311][当前订阅套餐暂未开放GLM-5.3-FlashX权限]`). It read as `auth`, so a key pool benched a working key for 12 hours, and inside a stream it read as `overload` and was retried. Only the code as Z.ai writes it counts, so `messages[1311]` in another vendor's error stays `invalid`.
+
 ## [0.34.0] - 2026-11-19
 
 ### Breaking
