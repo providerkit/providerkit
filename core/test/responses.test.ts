@@ -834,6 +834,74 @@ describe("responses request", () => {
     expect(seen[0]!.body.tool_choice).toBeUndefined();
   });
 
+  describe("a forced tool on Muse Contributor, which takes no tool_choice but auto", () => {
+    const muse = (fetchImpl: typeof fetch) =>
+      provider({ fetchImpl, model: "muse-spark-1.3-contributor" });
+    const tool = (name: string): ToolDefinition => ({
+      name,
+      description: `the ${name} tool`,
+      inputSchema: { type: "object" },
+    });
+
+    it("offers a named tool alone and sends no tool_choice", async () => {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await collect(
+        muse(fetchImpl).createStream(hi, [tool("web_search"), tool("save_brief")], {
+          toolChoice: { name: "save_brief" },
+          parallelToolCalls: false,
+        }),
+      );
+      expect(seen[0]!.body).not.toHaveProperty("tool_choice");
+      expect((seen[0]!.body.tools as { name: string }[]).map((sent) => sent.name)).toEqual([
+        "save_brief",
+      ]);
+      // Still a request with a tool in it, so the one-call-at-a-time ask rides.
+      expect(seen[0]!.body.parallel_tool_calls).toBe(false);
+    });
+
+    it("refuses a named tool the call does not carry, before any request", async () => {
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      // Filtered to nothing, the call would go out with no tools and answer in
+      // text: "call this tool" silently turned into "call nothing".
+      const err = await collect(
+        muse(fetchImpl).createStream(hi, [tool("web_search")], {
+          toolChoice: { name: "save_brief" },
+        }),
+      ).catch((caught: unknown) => caught);
+      expect(err).toBeInstanceOf(ProviderError);
+      expect(err).toMatchObject({
+        kind: "invalid",
+        message: expect.stringContaining('"save_brief"'),
+      });
+      expect(seen).toHaveLength(0);
+    });
+
+    it("still sends required, which the endpoint refuses", async () => {
+      // Every tool under `auto` is the request saying nothing sends, so
+      // `required` has no tool-list spelling and stays the endpoint's to refuse.
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await collect(
+        muse(fetchImpl).createStream(hi, [tool("web_search"), tool("save_brief")], {
+          toolChoice: "required",
+        }),
+      );
+      expect(seen[0]!.body.tool_choice).toBe("required");
+      expect(seen[0]!.body.tools).toHaveLength(2);
+    });
+
+    it("still sends a named tool that is the call's only tool, as it sends required", async () => {
+      // Offered alone, it would be the exact request saying nothing sends, so
+      // the forced call would quietly become `auto` (invariant 12).
+      const { seen, fetchImpl } = recorder(TEXT_TURN);
+      await collect(
+        muse(fetchImpl).createStream(hi, [tool("extract")], { toolChoice: { name: "extract" } }),
+      );
+      await collect(muse(fetchImpl).createStream(hi, [tool("extract")]));
+      expect(seen[0]!.body.tool_choice).toEqual({ type: "function", name: "extract" });
+      expect(seen[0]!.body).not.toEqual(seen[1]!.body);
+    });
+  });
+
   it("keeps Muse Contributor's max tier instead of applying OpenAI's high ceiling", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
     await collect(

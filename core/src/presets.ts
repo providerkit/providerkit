@@ -530,9 +530,10 @@ export const PROVIDER_PRESETS = {
    * Muse Contributor, measured 2026-09-28 on /responses: text, images, strict
    * JSON Schema, parallel tools and tool-result round trips all passed. It
    * requires reasoning (`none` becomes `minimal`) and accepts only automatic
-   * tool choice (`none` is encoded by sending no tools). Contributor requests
-   * may be used to improve Meta products; the workspace must explicitly allow
-   * those endpoints.
+   * tool choice: `none` is sent as no tools and a named tool as that tool alone,
+   * while `required`, and a named tool that is the call's only tool, are still
+   * sent and refused. Contributor requests may be used to improve Meta products;
+   * the workspace must explicitly allow those endpoints.
    *
    * Reasoning effort is spelled per model on chat completions (see
    * `effortParams`): GLM takes only `high` and `max`, DeepSeek V4 and MiMo

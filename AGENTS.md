@@ -152,6 +152,7 @@ TypeScript 7 does not ship. Move it when both do.
 | `usage.ts`                     | cost arithmetic (rates stay with the caller)                                         |
 | `transport.ts`                 | fetch + the error envelope, `parseSseStream`, and the no-replay rule for paid calls  |
 | `tool-args.ts`                 | truncation salvage + double-escape healing                                           |
+| `tool-markup.ts`               | tool calls a model wrote into its text, stripped as the stream arrives               |
 | `tools.ts`                     | validated, cancellable, time-bounded tool calls + registry                           |
 | `schema.ts`                    | clamp overflow to advertised bounds                                                  |
 | `context.ts`                   | `needsCompaction`, `pickCut`, `applyCompaction`, and `repairHistory`                 |

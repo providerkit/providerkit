@@ -116,9 +116,12 @@ const provider = createPresetProvider("opencode-go", {
 
 A per-call `model` on a different wire than the provider's own is refused with an
 `invalid` error, before any request. Muse Contributor supports text, images, strict JSON
-Schema and parallel tools, but only automatic tool choice; `toolChoice: "none"` is encoded
-by sending no tools. Contributor requests may be used to improve Meta products and require
-the workspace to allow those endpoints.
+Schema and parallel tools, but only automatic tool choice. `toolChoice: "none"` is sent as no
+tools, and a named tool as that tool alone, so it is the only call the model can make. It can
+still answer in text instead. `"required"` is still sent, and so is a named tool when it is the
+only tool you pass. Muse refuses both. For a structured answer, ask for it with `json`.
+Contributor requests may be used to improve Meta products and require the workspace to allow
+those endpoints.
 
 Pass `watchdog: { idleMs: 60_000 }` to time each model separately, so a model that opens a
 connection and then goes silent rotates too. Do not wrap the returned pool with
@@ -167,6 +170,28 @@ before sending a request. With `/hosted`, an adapter that can't run a tool or ap
 settings, such as a domain filter, refuses unless you mark that tool `optional`.
 The [tools guide](https://providerkit.dev/guides/tools/#hosted-tools) says which adapter runs
 what, and how each call is billed.
+
+### Tool calls written as text
+
+Some models write a tool call into their answer instead of calling the tool. DeepSeek does it
+with its own tokens (`<｜tool▁calls▁begin｜>`), and any model can make up a tag
+(`<save_note title="x" />`). Wrap the stream to remove that markup before it reaches the reader
+or the history:
+
+```ts
+import { stripLeakedToolMarkup } from "@providerkit/core";
+
+for await (const chunk of stripLeakedToolMarkup(provider.createStream(messages, tools))) {
+  if (chunk.content) write(chunk.content);
+}
+```
+
+A tag split across chunks is caught too: text that could still become one waits for the next
+chunk. Ordinary angle brackets stay, like `a < b` or `Promise<user_row | null>`. A call written
+as plain tags with no attributes, the way GLM writes one, is not caught and stays whole. Pass
+`onStrip` to log what it removes. The
+[tools guide](https://providerkit.dev/guides/tools/#tool-calls-written-as-text) lists what it
+catches and what gets through.
 
 ### Chat tracing
 
