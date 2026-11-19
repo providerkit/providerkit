@@ -1,8 +1,9 @@
 import * as hostedProviders from "../src/hosted.ts";
-// Golden transcripts: one turn and five failures on four vendors' wires, and
-// one turn that ran a hosted search, asked the same questions on all four. One
-// case belongs to a single wire: the refusal OpenCode Go recorded for a forced
-// tool on Muse Contributor, on Responses.
+// Golden transcripts: one turn and five failures on four vendors' wires, one
+// turn that ran a hosted search, and the one turn with a tool call written into
+// its text, asked the same questions on all four. One case belongs to a single
+// wire: the refusal OpenCode Go recorded for a forced tool on Muse Contributor,
+// on Responses.
 //
 // Every other suite here asks ONE adapter whether it reads its own vendor
 // correctly. This one asks all four the same question: given the same turn, do
@@ -27,6 +28,7 @@ import { createGeminiProvider } from "../src/providers/gemini.ts";
 import { createOpenAIProvider } from "../src/providers/openai.ts";
 import { createResponsesProvider } from "../src/providers/responses.ts";
 import { withStreamRetry } from "../src/retry.ts";
+import { stripLeakedToolMarkup } from "../src/tool-markup.ts";
 import { collectTurn } from "../src/turn.ts";
 import type {
   ChatMessage,
@@ -1537,5 +1539,57 @@ describe("responses, a forced tool on Muse Contributor", () => {
     expect(isRetryable(err)).toBe(false);
     expect(isBackupEligible(classify(err))).toBe(false);
     expect(sent).toHaveLength(1);
+  });
+});
+
+// ── a tool call written into the text, four ways ──────────────────────────
+//
+// The one turn, with the model also writing a tool call into its text, split
+// across its two text deltas the way it streamed, and the bytes cut mid-frame
+// as ever. DeepSeek leaks its own special tokens; any model can improvise a
+// tag. Both payloads are the ones the source app's tests hold. Filtered, every
+// wire must hand over the turn it streams without the leak.
+
+const PSEUDO_TAG = '<suggest_dossie subjectType="company" subjectId="22145039000130" />';
+const DEEPSEEK_CALL = '<｜tool▁calls▁begin｜><｜tool▁call｜>search{"q":"cats"}<｜tool▁call▁end｜>';
+/** A string as it sits inside a JSON string on the wire. */
+const inJson = (text: string) => JSON.stringify(text).slice(1, -1);
+
+const LEAKS = [
+  {
+    leak: "an improvised tag",
+    // Cut mid-name: `<suggest_` can still become anything until `dossie` lands.
+    swaps: [
+      ['"Hello"', '"Hello<suggest_"'],
+      ['" there"', `"${inJson(PSEUDO_TAG.slice("<suggest_".length))} there"`],
+    ],
+    markup: PSEUDO_TAG,
+  },
+  {
+    leak: "DeepSeek's special tokens",
+    // Cut after the `<`, which could still open a tag or a token.
+    swaps: [
+      ['"Hello"', '"Hello there<"'],
+      ['" there"', `"${inJson(DEEPSEEK_CALL.slice(1))}"`],
+    ],
+    markup: DEEPSEEK_CALL,
+  },
+] satisfies { leak: string; swaps: [string, string][]; markup: string }[];
+
+describe.each(VENDORS)("$name, a tool call written into the text", (vendor) => {
+  it.each(LEAKS)("strips $leak and hands over the turn without it", async ({ swaps, markup }) => {
+    const leaked = rewrite(vendor.turn, swaps);
+    // Unfiltered, the reader sees the markup.
+    expect((await assemble(ask(vendor.create(serving(leaked))))).text).toContain(markup);
+
+    const stripped: string[] = [];
+    const turn = await assemble(
+      stripLeakedToolMarkup(ask(vendor.create(serving(leaked))), {
+        onStrip: (found) => stripped.push(found),
+      }),
+    );
+    expect(turn).toEqual(theTurn(vendor));
+    // Whole, though it arrived in two deltas.
+    expect(stripped).toEqual([markup]);
   });
 });

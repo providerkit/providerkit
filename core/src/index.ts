@@ -38,6 +38,7 @@ export {
 } from "./transport.ts";
 export * from "./rate-limit.ts";
 export * from "./tool-args.ts";
+export * from "./tool-markup.ts";
 export * from "./tools.ts";
 export * from "./schema.ts";
 export * from "./context.ts";

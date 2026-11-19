@@ -93,6 +93,55 @@ const args = parseToolArgs(raw); // never throws
 recover from the truncated JSON. It also heals double-escaped `\\uXXXX` sequences, which some
 gateways emit when they re-encode a payload.
 
+## Tool calls written as text
+
+Some models write a tool call into their answer instead of calling the tool. The person reading
+sees raw markup, and once it is in the history the model writes it again on later turns.
+
+```ts
+import { stripLeakedToolMarkup } from "@providerkit/core";
+
+for await (const chunk of stripLeakedToolMarkup(provider.createStream(messages, tools))) {
+  if (chunk.content) write(chunk.content);
+}
+```
+
+It removes two shapes from `content` as the stream arrives:
+
+- A DeepSeek token, which starts with `<` and a fullwidth `｜`, as in `<｜tool▁calls▁begin｜>`.
+  Everything after it is the call's syntax, so the rest of the turn's text goes too.
+- A made-up tag with an underscore in its name and either attributes or a closing `/>`, like
+  `<save_note title="x" />`, and a closing tag like `</save_note>`. Only the tag goes. The text
+  around it stays.
+
+A tag can arrive split across chunks, so text that could still become one (`<`, `<save_`) waits
+for the next chunk. Text held that way goes out before the finish chunk, and before the stream's
+own error. If the turn ends partway through a tag whose name is complete, like
+`<save_note title="x"`, that part is dropped. Ordinary angle brackets stay: `a < b`, `<strong>`,
+and `<user_id>` with no attributes.
+
+Only the text changes. Reasoning, tool calls and usage pass through as they came. A citation
+whose span reaches removed text keeps its source but loses its span, the same as any span that
+doesn't match the text.
+
+A turn that was only markup ends with no text. To fail it like any other empty answer, wrap the
+result in `requireContent`:
+
+```ts
+const checked = requireContent(provider.id, stripLeakedToolMarkup(stream));
+```
+
+Pass `onStrip` to see each leak. It runs once per leak, with the markup it removed:
+
+```ts
+stripLeakedToolMarkup(stream, { onStrip: (markup) => log.warn("tool call in text", { markup }) });
+```
+
+It removes calls, it doesn't run them. Some still get through in part: a tag with a `>` inside an
+attribute, the text inside a pair of tags like `<save_note>x</save_note>` (and the opening tag
+too, when it has no attributes), and a tag that arrives over several chunks and runs past 512
+characters before it closes.
+
 ## zod
 
 ```ts

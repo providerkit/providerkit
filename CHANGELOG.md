@@ -4,6 +4,10 @@ All notable changes to `@providerkit/core` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `stripLeakedToolMarkup(stream)` removes tool calls a model wrote into its text instead of calling the tool: DeepSeek's special tokens, with the rest of the turn's text after one, and made-up tags with a snake_case name and attributes or `/>`. The text around a tag keeps streaming. A tag split across chunks is caught, because text that could still become one waits for the next chunk; it goes out before the finish. Reasoning, tool calls and usage pass unchanged, and a citation whose span reaches removed text keeps its source and loses its span. `onStrip` reports each leak once, with the markup it removed.
+
 ### Changed
 
 - On OpenCode Go's Muse Contributor, a named `toolChoice` is now sent as that tool alone, with no `tool_choice` field. Muse answers any choice but `auto` with a 400 that classifies as `invalid`, so no retry or fallback chain got past it, and a run that forced its last step lost the turn. Offered alone, the tool is the only call the model can make, though it can still answer in text. A named tool that is not in the call's tools now fails with `invalid` before any request. `"required"` is still sent, and Muse still refuses it.

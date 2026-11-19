@@ -170,6 +170,26 @@ settings, such as a domain filter, refuses unless you mark that tool `optional`.
 The [tools guide](https://providerkit.dev/guides/tools/#hosted-tools) says which adapter runs
 what, and how each call is billed.
 
+### Tool calls written as text
+
+Some models write a tool call into their answer instead of calling the tool. DeepSeek does it
+with its own tokens (`<｜tool▁calls▁begin｜>`), and any model can make up a tag
+(`<save_note title="x" />`). Wrap the stream, and that markup never reaches the reader or the
+history:
+
+```ts
+import { stripLeakedToolMarkup } from "@providerkit/core";
+
+for await (const chunk of stripLeakedToolMarkup(provider.createStream(messages, tools))) {
+  if (chunk.content) write(chunk.content);
+}
+```
+
+A tag split across chunks is caught too: text that could still become one waits for the next
+chunk. Ordinary angle brackets stay. Pass `onStrip` to log what it removes. The
+[tools guide](https://providerkit.dev/guides/tools/#tool-calls-written-as-text) lists what it
+catches and what gets through.
+
 ### Chat tracing
 
 ```ts
