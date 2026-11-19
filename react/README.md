@@ -551,13 +551,15 @@ for await (const event of followRun({ projector, segments, cursor, read, convers
 
 A new viewer first gets a snapshot of the conversation around an empty reply, numbered 0. Then
 each record after the cursor goes through the projector, with its stored time as `at`. At a gap
-or resync the viewer gets the marker and a snapshot of the saved run. When the last row ends, it
-gets the final snapshot. A viewer already past the end still gets that snapshot, unnumbered, so
-its client knows your server answered.
+or resync the viewer gets the marker and, while the run is still going in its last row, a snapshot
+of the saved run. When the last row ends, it gets the final snapshot. A viewer already past the end
+still gets that snapshot, unnumbered, so its client knows your server answered.
 
-A gap the viewer had already passed is replayed without a read, because the log must be fed
-before the journal is read, never after. Rows that gap hid can stay as the viewer last saw them
-until the next gap or the end.
+The log must be fed before the saved run is read, never after: a save is where the run is now, and
+older records sent after it can show a waiting run as running again. So a gap the viewer already
+passed, or one in a row the run has moved on from, is replayed without a read. A save read at a
+gap that already shows the run waiting or ended is not sent there either: the final snapshot
+brings it. Rows that a gap hid can stay as the viewer last saw them until the next gap or the end.
 
 ## Show who answers after a handoff
 

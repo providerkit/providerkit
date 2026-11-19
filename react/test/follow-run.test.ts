@@ -123,6 +123,76 @@ async function thinkAndAnswer() {
   return { events, saves, outcome };
 }
 
+/** A run that files a note once the person approves it: its first row ends waiting for the
+ * approval, and a second row finishes the run. */
+async function fileAfterApproval() {
+  const file = defineTool({
+    name: "file",
+    description: "File the note.",
+    inputSchema: { type: "object" },
+    needsApproval: true,
+    run: async () => "Filed",
+  });
+  const agent = defineAgent({
+    id: "clerk",
+    version: "1",
+    instructions: "Offline fixture.",
+    provider: provider([
+      answer(["Filing it."], undefined, [{ id: "call-1", name: "file", arguments: "{}" }]),
+      answer(["Done."]),
+    ]),
+    tools: [file],
+  });
+  const host = {
+    authorizeResume() {},
+    prepareRequest: () => ({
+      scope: {
+        actorId: "person-1",
+        resource: { id: "thread-1", version: "1" },
+        expiresAt: Date.now() + 60_000,
+      },
+    }),
+    resolveRequest: () => ({ type: "approve" as const }),
+    beforeTool() {},
+  } satisfies AgentHost;
+  const firstEvents: AgentEvent[] = [];
+  const waiting = await agent.run("File the note.", {
+    runId: "root",
+    host,
+    onEvent: (event) => {
+      firstEvents.push(event);
+    },
+  });
+  if (waiting.status !== "suspended") throw new Error("The run must wait for the approval.");
+  const nextEvents: AgentEvent[] = [];
+  const done = await agent.resume(waiting.snapshot, {
+    host,
+    answers: { [waiting.requests[0]!.id]: "yes" },
+    onEvent: (event) => {
+      nextEvents.push(event);
+    },
+  });
+  if (done.status !== "completed") throw new Error("The approved run must finish.");
+  return { firstEvents, nextEvents, waiting, done };
+}
+
+/** The log of the first row with a gap right after the model's first chunk. */
+function gapAfterFirstChunk(events: readonly AgentEvent[]): RunRecord[] {
+  const first = events.findIndex((event) => event.type === "model_chunk");
+  return row([...events.slice(0, first + 1), { gap: true }, ...events.slice(first + 1)]);
+}
+
+/** The run status a client shows after each event, starting from `from`. */
+function statuses(events: readonly ChatEvent[], from: ChatView = emptyChatView()): string[] {
+  const shown: string[] = [];
+  events.reduce((current, event) => {
+    const next = reduceChat(current, event);
+    shown.push(next.run.status);
+    return next;
+  }, from);
+  return shown;
+}
+
 describe("followRun", () => {
   it("gives a new viewer the conversation, the run as it streamed, then the saved run", async () => {
     const { events, outcome } = await thinkAndAnswer();
@@ -219,54 +289,45 @@ describe("followRun", () => {
     expect(sent[0]?.seq).toBeUndefined();
   });
 
+  it.each(["new", "returning"] as const)(
+    "sends no save at a gap that the rest of the log is older than, for a %s viewer",
+    async (viewer) => {
+      // The save read at the gap already waits for the approval. The records after the gap are
+      // older than that, and sent after it they would show the waiting run as running again, with
+      // Stop on it. So the save goes out at the end, after the log.
+      const { firstEvents, waiting } = await fileAfterApproval();
+      const records = gapAfterFirstChunk(firstEvents);
+      const read = async () => waiting.snapshot;
+      const everything = await follow([records], { read });
+      // The opening snapshot is numbered 0, so a returning viewer's cursor is before the gap.
+      const cursor = viewer === "returning" ? { segment: "row-1", seq: 0 } : undefined;
+      const before = cursor ? view(upTo(everything, "row-1", 0)) : emptyChatView();
+      const sent = cursor ? await follow([records], { read, cursor }) : everything;
+      const shown = statuses(sent, before);
+      expect(shown.slice(shown.indexOf("waiting"))).not.toContain("running");
+      expect(view(sent, before)).toEqual(view(everything));
+      expect(view(everything).run).toMatchObject({ status: "waiting" });
+    },
+  );
+
+  it("reads no save at a gap in a row the run moved on from", async () => {
+    // Any save is from a later row then, so every record left in this one is older than it.
+    const { firstEvents, nextEvents, done } = await fileAfterApproval();
+    let reads = 0;
+    const sent = await follow([gapAfterFirstChunk(firstEvents), row(nextEvents)], {
+      read: async () => {
+        reads += 1;
+        return done.snapshot;
+      },
+    });
+    expect(reads).toBe(1);
+    const shown = statuses(sent);
+    expect(shown.slice(shown.indexOf("completed"))).not.toContain("running");
+    expect(shown.at(-1)).toBe("completed");
+  });
+
   it("follows the row an approval continued the run in", async () => {
-    const file = defineTool({
-      name: "file",
-      description: "File the note.",
-      inputSchema: { type: "object" },
-      needsApproval: true,
-      run: async () => "Filed",
-    });
-    const agent = defineAgent({
-      id: "clerk",
-      version: "1",
-      instructions: "Offline fixture.",
-      provider: provider([
-        answer(["Filing it."], undefined, [{ id: "call-1", name: "file", arguments: "{}" }]),
-        answer(["Done."]),
-      ]),
-      tools: [file],
-    });
-    const host = {
-      authorizeResume() {},
-      prepareRequest: () => ({
-        scope: {
-          actorId: "person-1",
-          resource: { id: "thread-1", version: "1" },
-          expiresAt: Date.now() + 60_000,
-        },
-      }),
-      resolveRequest: () => ({ type: "approve" as const }),
-      beforeTool() {},
-    } satisfies AgentHost;
-    const firstEvents: AgentEvent[] = [];
-    const waiting = await agent.run("File the note.", {
-      runId: "root",
-      host,
-      onEvent: (event) => {
-        firstEvents.push(event);
-      },
-    });
-    if (waiting.status !== "suspended") throw new Error("The run must wait for the approval.");
-    const nextEvents: AgentEvent[] = [];
-    const done = await agent.resume(waiting.snapshot, {
-      host,
-      answers: { [waiting.requests[0]!.id]: "yes" },
-      onEvent: (event) => {
-        nextEvents.push(event);
-      },
-    });
-    expect(done.status).toBe("completed");
+    const { firstEvents, nextEvents, done } = await fileAfterApproval();
     const rows = [row(firstEvents), row(nextEvents)];
     const read = async () => done.snapshot;
     const everything = await follow(rows, { read });

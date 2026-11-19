@@ -1810,10 +1810,10 @@ function isAgentEvent(value: unknown): value is AgentEvent {
  * the viewer's cursor, then the saved run once the log ends.
  *
  * It replays the run's log from its first record through a fresh projector and sends only what
- * comes after the cursor. At a gap in the log it sends the projector's marker and a snapshot of
- * the saved run read then. When the last row ends it sends that snapshot again, with the final
- * state. A viewer already past the end still gets it, unnumbered, so its client knows the host
- * answered.
+ * comes after the cursor. At a gap in the log it sends the projector's marker, then a snapshot of
+ * the saved run read then, while that run is still going in the last row. When the last row ends
+ * it sends that snapshot again, with the final state. A viewer already past the end still gets it,
+ * unnumbered, so its client knows the host answered.
  *
  * ```ts
  * for await (const event of followRun({ projector, segments, cursor, read, conversation }))
@@ -1828,6 +1828,7 @@ export async function* followRun(options: FollowRunOptions): AsyncGenerator<Chat
   const projector = createAgentProjector(options.projector);
   const { messageId, runId } = options.projector;
   const reached = cursor ? segments.findIndex((segment) => segment.id === cursor.segment) : -1;
+  const last = segments.length - 1;
 
   async function snapshot(
     reply: DisplayMessage,
@@ -1838,8 +1839,7 @@ export async function* followRun(options: FollowRunOptions): AsyncGenerator<Chat
     return { v: PROTOCOL_VERSION, type: "snapshot", messages, run, ...(inputs && { inputs }) };
   }
 
-  async function saved(): Promise<ChatEvent> {
-    const tree = await read();
+  function saved(tree: TreeNode): Promise<ChatEvent> {
     return snapshot(projector.snapshot(tree), projector.run(tree), projector.inputs(tree));
   }
 
@@ -1864,16 +1864,20 @@ export async function* followRun(options: FollowRunOptions): AsyncGenerator<Chat
         if (unseen) yield* out;
       } else if (record.type === "agent.gap" || record.type === "agent.resync") {
         const marker = projector.gap();
-        // A gap the viewer already passed is replayed without a read: the log is fed before the
-        // journal is read, never after, or older progress lands on a newer save.
-        // ponytail: so rows that gap hid stay as the viewer last saw them until the next gap or
-        // the end. Read at the first record past the cursor if a viewer is seen waiting on that.
-        if (unseen) {
-          yield* marker;
-          yield { ...(await saved()), ...where };
-        }
-      } else if (record.type === "end" && index === segments.length - 1) {
-        const final = await saved();
+        if (!unseen) continue;
+        yield* marker;
+        // The log is fed before the journal is read, never after, or older progress lands on a
+        // newer save: a waiting run would show as running again. A gap the viewer passed, or one in
+        // a row the run moved on from, is replayed without a read, and a save that already paused
+        // or ended the run waits for the end, because every record left is older than it.
+        // ponytail: rows a gap hid can then stay as the viewer last saw them until a later gap or
+        // the end, and a running save read at a gap far back in the log can still be ahead of the
+        // records after it. A log position on each save would end both.
+        if (index < last) continue;
+        const tree = await read();
+        if (tree.state.status === "running") yield { ...(await saved(tree)), ...where };
+      } else if (record.type === "end" && index === last) {
+        const final = await saved(await read());
         yield unseen ? { ...final, ...where } : final;
         return;
       }
