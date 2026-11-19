@@ -105,8 +105,10 @@ describe("Z.ai Coding Plan", () => {
 
   // Claude 4.5 and older run without thinking on two kinds of request that
   // extended mode can't serve here: one that continues a tool loop, and one
-  // whose tool choice forces a tool. Those rules are Claude's. GLM gets
-  // exactly the bodies it got before them, through both ways in.
+  // whose tool choice forces a tool. Those rules are Claude's, so GLM keeps
+  // thinking on both kinds, through both ways in. Each pin holds the whole
+  // body, so it holds the cache markers too: every Anthropic-shape endpoint
+  // gets them, Z.ai included.
   const weather: ToolDefinition = {
     name: "weather",
     description: "Weather for a city",
@@ -139,6 +141,7 @@ describe("Z.ai Coding Plan", () => {
   };
   const budget = { thinking: { type: "enabled", budget_tokens: 2_048 } };
   const low = { effort: "low", temperature: 0.3 } as const;
+  const marked = { cache_control: { type: "ephemeral" } };
 
   it("keeps thinking on through a tool loop, byte for byte", async () => {
     const loop: ChatMessage[] = [
@@ -151,10 +154,12 @@ describe("Z.ai Coding Plan", () => {
       },
       { role: "tool", toolCallId: "call_1", name: "weather", content: "20°C, sunny" },
     ];
+    // Two markers: on the question, where the request before this one ended,
+    // and on the tool result, the newest message.
     const expected = JSON.stringify({
       ...head,
       messages: [
-        { role: "user", content: [{ type: "text", text: "Weather in Paris?" }] },
+        { role: "user", content: [{ type: "text", text: "Weather in Paris?", ...marked }] },
         {
           role: "assistant",
           content: [{ type: "tool_use", id: "call_1", name: "weather", input: { city: "Paris" } }],
@@ -166,6 +171,7 @@ describe("Z.ai Coding Plan", () => {
               type: "tool_result",
               tool_use_id: "call_1",
               content: [{ type: "text", text: "20°C, sunny" }],
+              ...marked,
             },
           ],
         },
@@ -177,10 +183,13 @@ describe("Z.ai Coding Plan", () => {
   });
 
   it("keeps thinking on beside a forced tool choice, byte for byte", async () => {
+    // One marker, on the newest message: no request came before this one.
     const expected = (tool_choice: unknown) =>
       JSON.stringify({
         ...head,
-        messages: [{ role: "user", content: [{ type: "text", text: "Weather in Paris?" }] }],
+        messages: [
+          { role: "user", content: [{ type: "text", text: "Weather in Paris?", ...marked }] },
+        ],
         ...tail,
         tool_choice,
         ...budget,
