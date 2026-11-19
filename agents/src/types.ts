@@ -428,7 +428,7 @@ export interface AgentConfig<H = unknown> {
   stopOnlyAtTools?: { nudge: string };
   /** Opt in to one finish turn for a run that would otherwise end without its answer: when it
    * reaches `limits.turns`, `limits.toolCalls` or its own `limits.costUsd`, when the output
-   * limit cut a turn (a tool call whose arguments do not parse counts as cut), or when a
+   * limit cut a turn (including incomplete arguments on an otherwise finished turn), or when a
    * checked-output agent answers in text. The model reads a note saying why, then answers with
    * no tools (a text agent) or is made to call its stopping tool. None of a cut turn's calls
    * run. The finish turn is the run's last call, and only one stopping call runs in it. It is

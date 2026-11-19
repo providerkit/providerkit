@@ -324,7 +324,9 @@ export function effortParams(
     case "opencode-go":
       return goEffortParams(effort, model);
     case "openai":
-      return { reasoning_effort: level ?? "none" };
+      // The pinned OpenAI host above refuses `none` for gpt-5-mini. Only that measured id
+      // gets its floor; an unrequested effort still sends nothing.
+      return { reasoning_effort: level ?? (model === "gpt-5-mini" ? "minimal" : "none") };
     case "off":
       return {};
   }

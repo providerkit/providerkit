@@ -92,9 +92,9 @@ const analyst = defineAgent({ ...config, output, limits: { turns: 8 }, finish: {
 With `finish`, a run that would end without its answer gets one more model call, its finish turn.
 It comes when the run reaches its turn, tool-call or own cost limit, when the output limit cut a
 turn off, or when a checked-output agent answered in text instead of calling `submit_result`. The
-model reads a short note that says why. A text agent answers with no tools. Any other agent is
-made to call its stopping tool, at effort `none` so its whole output budget goes to the answer,
-and only that call runs. None of a cut turn's calls run.
+model reads a short note that says why. A text agent answers with no tools. Other agents request
+effort `none` and must call their stopping tool. Only that call runs. None of a cut turn's calls
+run. A provider block or a stream with no finish reason does not trigger a finish turn.
 
 A saved run completes with `salvaged` naming what would have ended it. When the finish turn
 cannot save it, the run ends as it would have. The finish turn is priced and counted like any

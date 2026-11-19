@@ -934,21 +934,22 @@ const analyst = defineAgent({ ...config, output, limits: { turns: 8 }, finish: {
 That call, the finish turn, comes when:
 
 - the run reaches `limits.turns`, `limits.toolCalls` or its own `limits.costUsd`
-- the output limit cut a turn off. A tool call whose arguments do not parse counts as cut, and none
-  of that turn's calls run
+- the output limit cut a turn off. A tool call with incomplete arguments also counts as cut if
+  the provider ended the turn normally. None of a cut turn's calls run. A blocked answer or a
+  stream with no finish reason gets no finish turn
 - a checked-output agent answered in text instead of calling `submit_result`
 
 The model reads a short note that says why. A text agent then answers with no tools, and after a
 cut it is asked for a shorter answer. A checked-output agent is made to call `submit_result`, and
-a `stopOnlyAtTools` agent its stopping tool. Those calls run at effort `none`, without the
-reasoning of earlier turns, so the whole output budget goes to the answer. Only the one stopping
-call runs: any other call the model adds gets a result that says it did not run. The note goes
-with that request only, so the conversation the run returns does not include it.
+a `stopOnlyAtTools` agent its stopping tool. Those calls request effort `none` and leave out
+reasoning from earlier turns. On models that require reasoning, Core uses the lowest known
+setting when it has one. Only the first stopping call runs. Other calls get a result that says
+they did not run. The finish note goes with that request only, not in the returned conversation.
 
 A run the finish turn saves completes as usual, and `outcome.salvaged` says what would have ended
-it: `"turns"`, `"toolCalls"`, `"costUsd"`, `"outputTokens"` or `"missing_result"`. When the finish
-turn cannot save it, the run ends as it would have without one. The finish turn is always the
-run's last call.
+it: `"turns"`, `"toolCalls"`, `"costUsd"`, `"outputTokens"` or `"missing_result"`. If the finish turn
+produces no usable answer or the provider refuses the call, the run keeps its original limit or
+missing-result error. The finish turn is always the run's last call.
 
 It is a model call like any other: priced, counted in `usage` and in the tree's call limit, and
 given its own receipt. After `costUsd` that makes the cost limit soft by one bounded call. A
