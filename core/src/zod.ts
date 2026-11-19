@@ -87,11 +87,27 @@ function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** A JSON array or object, or undefined: `"42"`, `"null"` and prose stay strings. */
-function jsonContainer(text: string): object | undefined {
+/** Whether each zod type a JSON string can stand in for is a JSON list (true) or object (false). */
+const JSON_CONTAINERS = new Map([
+  ["array", true],
+  ["tuple", true],
+  ["object", false],
+  ["record", false],
+]);
+
+/**
+ * `text` decoded, only when it is the JSON container the schema `expected`. Anything else fails
+ * the second parse too, and that parse's error would tell the model about a value it never
+ * sent: `"[3]"` for a number would come back as "received array". `"42"`, `"null"` and prose
+ * stay strings.
+ */
+function jsonContainer(text: string, expected: string): object | undefined {
+  const isList = JSON_CONTAINERS.get(expected);
+  if (isList === undefined) return undefined;
   try {
     const value: unknown = JSON.parse(text);
-    return typeof value === "object" && value !== null ? value : undefined;
+    const fits = typeof value === "object" && value !== null && Array.isArray(value) === isList;
+    return fits ? value : undefined;
   } catch {
     return undefined;
   }
@@ -108,7 +124,7 @@ function jsonContainer(text: string): object | undefined {
  *   `text`: an extra key or a non-string `text` stays the model's error to fix.
  */
 function slipFix(value: unknown, expected: string): unknown {
-  if (typeof value === "string") return jsonContainer(value);
+  if (typeof value === "string") return jsonContainer(value, expected);
   const wrapped =
     expected === "string" &&
     isRecord(value) &&

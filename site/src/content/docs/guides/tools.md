@@ -176,15 +176,16 @@ zod is an **optional peer dependency**. The kernel never imports it, so a projec
 When zod rejects a value for its type, `zodTool` repairs two mistakes models often make, then
 checks the call again:
 
-- an array or object sent as a JSON string: `"rows": "[{\"qty\":2}]"` becomes
-  `"rows": [{ "qty": 2 }]`
+- an array or object sent as a JSON string, where the schema wants that array or object:
+  `"rows": "[{\"qty\":2}]"` becomes `"rows": [{ "qty": 2 }]`
 - a string sent as an object with only a `text` key: `"title": { "text": "Q3" }` becomes
   `"title": "Q3"`
 
-Nothing else changes. A string the schema accepts stays as sent, even when it looks like JSON,
-and `"42"` never becomes a number. If the call still fails, the model reads what the second check
-found, so a mistake inside the decoded JSON still reaches it. It sees at most five problems, each
-with its path, then how many more there are:
+Nothing else changes. A string the schema accepts stays as sent, even when it looks like JSON. A
+string sent for a number, such as `"42"` or `"[3]"`, stays a string, so the error names what the
+model sent. If the call still fails, the model reads what the second check found, so a mistake
+inside the decoded JSON still reaches it. It sees at most five problems, each with its path, then
+how many more there are:
 
 ```text
 Invalid arguments for sheet: rows.0.qty: Invalid input: expected number, received string; …; and 35 more

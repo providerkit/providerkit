@@ -291,16 +291,25 @@ describe("zodTool", () => {
       expect(outcome.ok && outcome.output).toEqual({ title: "[1]", rows: [{ qty: 2 }] });
     });
 
-    it("leaves a rejected string that is not a JSON array or object", async () => {
+    // Only into the container the schema wants: a decoded "[3]" can never be a number, and the
+    // second parse would tell the model about an array it never sent.
+    it("leaves a rejected string that is not the JSON array or object the schema wants", async () => {
       const count = zodTool({
         name: "count",
         description: "count",
         input: z.object({ n: z.number() }),
         run: async ({ n }) => n,
       });
-      for (const n of ["not json", "42", "null", '"text"']) {
-        expect(await count.invoke({ n }), n).toMatchObject({ ok: false, kind: "invalid_input" });
+      for (const n of ["not json", "42", "null", '"text"', "[3]", '{"n":3}']) {
+        expect(await count.invoke({ n }), n).toMatchObject({
+          kind: "invalid_input",
+          error: "Invalid arguments for count: n: Invalid input: expected number, received string",
+        });
       }
+      const outcome = await sheet.invoke({ title: "t", rows: '{"qty":2}' });
+      expect(!outcome.ok && outcome.error).toContain(
+        "rows: Invalid input: expected array, received string",
+      );
     });
 
     it("reports the real problem inside a decoded string", async () => {
