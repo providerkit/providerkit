@@ -886,7 +886,10 @@ export type OperationReceipt =
       parentOperationId?: string;
       callId: string;
       attemptId: string;
-      status: "running" | "completed" | "interrupted";
+      /** `asked`: the attempt reported a cost, then stopped to ask the person. The answer runs the
+       * tool again as a new attempt with its own receipt, so the charge stays on this one. An
+       * attempt that asked without reporting a cost gets no receipt. */
+      status: "running" | "completed" | "interrupted" | "asked";
       result?: ToolResult;
       /** What this attempt reported through `context.reportCost`. */
       costUsd?: number;

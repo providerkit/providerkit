@@ -1822,10 +1822,12 @@ The check keeps the tool usable outside an agent run, where the context has no `
 amount joins the known cost that the limit checks before the next model call, so the rest of the
 batch still runs. The SDK saves it right away in `snapshot.toolCosts`, with the call attempt that
 spent it, and that attempt's receipt carries it as `costUsd`. A retried or replayed call keeps each
-attempt's charge. Report before the tool returns: a later report, say from work that outlived the
-tool's timeout, is saved with the run's next checkpoint, and is lost if the run has ended. An
-amount that is not a finite number of 0 or more throws a TypeError in the tool and is not saved.
-`reportCost` works without a cost limit too, so your ledger can read the charges from the receipts.
+attempt's charge. So does a call that reports a cost and then asks the person: the answer runs the
+tool again as a new attempt, and the attempt that asked gets its own receipt, with status `asked`.
+Report before the tool returns: a later report, say from work that outlived the tool's timeout, is
+saved with the run's next checkpoint, and is lost if the run has ended. An amount that is not a
+finite number of 0 or more throws a TypeError in the tool and is not saved. `reportCost` works
+without a cost limit too, so your ledger can read the charges from the receipts.
 
 ## Asking the person
 
@@ -2011,7 +2013,8 @@ per attempt: key billing by `(id, attemptId)`, not just `id`. Model receipts hav
 `billing: "unknown"` while running or interrupted, and `"reported"` once a stream with a usage
 report completes. A completed stream without usage stays `"unknown"`. Reported is not an audited
 bill. A process can die before saving a new usage report, and an
-interrupted request may cost more than its saved usage. Ordinary tool charges remain unknown.
+interrupted request may cost more than its saved usage. A tool's own charges are known only when
+the tool reports them with `reportCost` (see [Cost limit](#cost-limit)).
 
 Before replacement output, `operation_restart` reports `kind`, `runId`, `operationId`,
 `previousAttemptId` and `attemptId`. A display projector must clear the interrupted attempt's

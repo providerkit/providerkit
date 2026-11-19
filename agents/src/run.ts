@@ -250,6 +250,25 @@ function recordOf(snapshot: RunSnapshot) {
             ...(inner.status === "completed" ? { result: inner.result } : {}),
           });
       }
+      // A call that asks the person keeps no record of that attempt: the answer reruns it under
+      // the next attempt id. Its charge in `toolCosts` still needs a receipt to sit on.
+      const recorded = [
+        ...tool.interrupted,
+        ...tool.retries,
+        ...(tool.status === "pending" ? [] : [tool]),
+      ];
+      for (const cost of saved.toolCosts ?? [])
+        if (
+          cost.operationId === tool.id &&
+          !recorded.some((attempt) => attempt.attemptId === cost.attemptId)
+        )
+          receipts.push({
+            kind: "tool",
+            id: tool.id,
+            callId: call.id,
+            attemptId: cost.attemptId,
+            status: "asked",
+          });
       if (tool.status === "pending") continue;
       receipts.push({
         kind: saved.delegations.find((journal) => journal.operationId === tool.id)?.kind ?? "tool",

@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { defineTool, type Provider, type ProviderChunk } from "@providerkit/core";
-import { defineAgent, type MeasuredModelCall, type TreeNode } from "../src/index.ts";
+import {
+  answerOf,
+  defineAgent,
+  InputRequired,
+  type MeasuredModelCall,
+  type RunOutcome,
+  type TreeNode,
+} from "../src/index.ts";
 import { usageOf } from "../src/evals/journal.ts";
 
 const base = { version: "1", instructions: "Host instructions." };
@@ -128,6 +135,62 @@ describe("tool cost", () => {
       ["interrupted", 0.3],
       ["completed", 0.3],
     ]);
+  });
+
+  it("keeps the charge of an attempt that asked the person on a receipt of its own", async () => {
+    const source = wire(call("pick"), text("Picked"));
+    // A paid search, then a question about which result to use. The answer reruns the search.
+    const pick = defineTool({
+      name: "pick",
+      description: "Search, then ask which result to use.",
+      inputSchema: { type: "object" },
+      run: async (_input, context) => {
+        if (typeof context.reportCost === "function") context.reportCost(0.25);
+        const answer = answerOf(context, "result");
+        if (!answer) throw new InputRequired({ key: "result", message: "Which result?" });
+        return `Using ${answer.text}`;
+      },
+    });
+    const agent = defineAgent({ ...base, id: "picker", provider: source.provider, tools: [pick] });
+    const asking = {
+      ...host,
+      prepareRequest: () => ({
+        scope: {
+          actorId: "owner",
+          resource: { id: "archive", version: "1" },
+          expiresAt: Date.now() + 60_000,
+        },
+      }),
+      resolveRequest: () => ({ type: "answer" as const, answer: { text: "the first" } }),
+    };
+    const charges = (outcome: RunOutcome) =>
+      outcome.receipts.flatMap((receipt) =>
+        receipt.kind === "tool"
+          ? [{ operationId: receipt.id, attemptId: receipt.attemptId, costUsd: receipt.costUsd }]
+          : [],
+      );
+    const waiting = await agent.run("Pick one", { host: asking });
+    const request = waiting.status === "suspended" ? waiting.requests[0] : undefined;
+    if (!request) throw new Error("Expected a question");
+    // Nobody has answered yet, and the search is already paid for.
+    expect(waiting.receipts.find((receipt) => receipt.kind === "tool")).toMatchObject({
+      status: "asked",
+      costUsd: 0.25,
+    });
+    expect(charges(waiting)).toEqual(waiting.snapshot.toolCosts);
+
+    const done = await agent.resume(waiting.snapshot, {
+      host: asking,
+      answers: { [request.id]: "evidence" },
+    });
+    expect(done).toMatchObject({ status: "completed", output: "Picked" });
+    // Two attempts paid $0.25 each. A ledger that reads the receipts sees both.
+    expect(done.snapshot.toolCosts).toHaveLength(2);
+    expect(charges(done)).toEqual(done.snapshot.toolCosts);
+    expect(
+      done.receipts.flatMap((receipt) => (receipt.kind === "tool" ? [receipt.status] : [])),
+    ).toEqual(["asked", "completed"]);
+    expect(usageOf(done.snapshot).knownCostUsd).toBeCloseTo(0.5);
   });
 
   it("refuses an amount that is not USD, and saves nothing for it", async () => {
