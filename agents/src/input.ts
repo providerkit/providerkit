@@ -10,6 +10,7 @@ import {
   type ContentPart,
   type ToolCall,
 } from "@providerkit/core";
+import { imagePlaceholder, omitImages } from "./model-view.ts";
 import {
   copyData,
   isAgentMessage,
@@ -184,6 +185,7 @@ function clientCopy(message: AgentMessage): AgentMessage {
       toolCallId: message.toolCallId,
       name: message.name,
       content: message.content,
+      ...(message.omittedImages?.length ? { omittedImages: [...message.omittedImages] } : {}),
       ...(message.images
         ? { images: message.images.map(({ type, mimeType, data }) => ({ type, mimeType, data })) }
         : {}),
@@ -277,6 +279,9 @@ export function conversationOf(
           name: call.name,
           content: tool.result.content,
           ...(tool.result.ok && tool.result.images ? { images: tool.result.images } : {}),
+          ...(tool.result.ok && tool.result.omittedImages
+            ? { omittedImages: tool.result.omittedImages }
+            : {}),
         });
       }
     }
@@ -301,9 +306,29 @@ export async function requestOf(
   instructions: string,
   conversation: readonly AgentMessage[],
   load: (ref: MediaRef) => Promise<string>,
+  onTextOnlyImages?: (count: number) => void,
 ): Promise<ChatMessage[]> {
   const request: ChatMessage[] = [{ role: "system", content: instructions }];
+  let omitted = 0;
   for (const message of conversation) {
+    if (
+      message.role === "tool" &&
+      (message.omittedImages?.length || (onTextOnlyImages && message.images?.length))
+    ) {
+      const { omittedImages = [], images, ...tool } = message;
+      const missing = omittedImages.map(imagePlaceholder);
+      if (onTextOnlyImages) {
+        for (const image of images ?? []) missing.push(imagePlaceholder(image.mimeType));
+        omitted += missing.length;
+        request.push({ ...tool, images: missing });
+      } else {
+        const [noted] = omitImages([{ ...tool, images: missing }], false);
+        if (noted?.role !== "tool")
+          throw new TypeError("Image gating must preserve the tool result.");
+        request.push({ ...noted, images });
+      }
+      continue;
+    }
     if (message.role !== "user") {
       request.push(message);
       continue;
@@ -314,6 +339,16 @@ export async function requestOf(
     }
     const content: ContentPart[] = [];
     for (const part of message.content) {
+      if (
+        onTextOnlyImages &&
+        (part.type === "image" || part.type === "media") &&
+        isImageMime(part.mimeType)
+      ) {
+        // The note needs the type, not the bytes. Do not ask the host to load an unseen image.
+        content.push(imagePlaceholder(part.mimeType));
+        omitted++;
+        continue;
+      }
       if (part.type !== "media") {
         content.push(part);
         continue;
@@ -327,6 +362,10 @@ export async function requestOf(
       );
     }
     request.push({ role: "user", content });
+  }
+  if (onTextOnlyImages && omitted) {
+    onTextOnlyImages(omitted);
+    return omitImages(request, true);
   }
   return request;
 }

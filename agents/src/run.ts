@@ -25,6 +25,7 @@ import {
   recallMemory,
   withMemoryRecall,
 } from "./memory.ts";
+import { imageBudgets, isToolHistory, keepImages, retainHistoryImages } from "./model-view.ts";
 import {
   allModels,
   compactionDefinition,
@@ -424,6 +425,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     throw new TypeError("An agent needs an id, version, instructions and provider.");
   }
   const settings = readModelSettings(definition.modelSettings);
+  if (definition.supportsVision !== undefined && typeof definition.supportsVision !== "boolean")
+    throw new TypeError("Set supportsVision to true or false.");
+  if (definition.toolHistory !== undefined && !isToolHistory(definition.toolHistory))
+    throw new TypeError("toolHistory.keepImages must be a whole number of 0 or more.");
+  const modelView: Pick<RunDefinition, "supportsVision" | "toolHistory"> = {
+    ...(definition.supportsVision === false && { supportsVision: false }),
+    ...(definition.toolHistory && {
+      toolHistory: { keepImages: definition.toolHistory.keepImages },
+    }),
+  };
   const memory = memoryPolicy(definition.memory);
   const compaction = compactionDefinition(definition.compaction);
   const summarizer = definition.compaction?.summarize?.provider;
@@ -716,6 +727,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       ...(options.providerSessionId !== undefined
         ? { providerSessionId: options.providerSessionId }
         : {}),
+      ...modelView,
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
       ...(runFirst.length ? { runFirst: [...runFirst] } : {}),
@@ -1574,30 +1586,6 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         result,
       });
       invocationActive(slot);
-      // Check after callbacks: another concurrent result may have consumed the remaining bytes.
-      if (
-        result.ok &&
-        result.images &&
-        snapshotInlineBytes(snapshot) +
-          inlineBytes(
-            [
-              {
-                role: "tool",
-                name: request.call.name,
-                toolCallId: request.call.id,
-                content: result.content,
-                images: result.images,
-              },
-            ],
-            "",
-          ) >
-          limits.inlineBytes
-      )
-        fail(
-          "tool_media_limit",
-          "Tool images exceed this run's inline byte limit. Return fewer or smaller images before starting new work.",
-          request.operationId,
-        );
       if (slot.inner) result = slot.inner.record(result);
       const previous = slot.get();
       slot.set({
@@ -1610,6 +1598,22 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         status: "completed",
         result,
       });
+      if (result.ok && result.images?.length) {
+        // No await between inserting the candidate and committing its image window. A parallel
+        // sibling sees either the old window or the new one, never a half-retired batch.
+        const budgets = imageBudgets(snapshot);
+        if (snapshotInlineBytes(snapshot, budgets) > limits.inlineBytes) {
+          slot.set(previous);
+          fail(
+            "tool_media_limit",
+            "Tool images exceed this run's inline byte limit. Return fewer or smaller images before starting new work.",
+            request.operationId,
+          );
+        }
+        for (const [source, keep] of budgets) {
+          if ((source.images?.length ?? 0) > keep) Object.assign(source, keepImages(source, keep));
+        }
+      }
       await save();
       emit({ type: "tool_result", request, result });
     }
@@ -2827,6 +2831,28 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       return data;
     }
 
+    function prepareModelView(
+      operationId: string,
+      instructions = snapshot.definition.instructions,
+      view = withMemoryRecall(snapshot, modelConversation(snapshot)),
+    ) {
+      return requestOf(
+        instructions,
+        view,
+        loadMedia,
+        snapshot.definition.supportsVision === false
+          ? (count) =>
+              emit({
+                type: "images_omitted",
+                runId: snapshot.runId,
+                attemptId: snapshot.attemptId,
+                operationId,
+                count,
+              })
+          : undefined,
+      );
+    }
+
     async function compact(): Promise<void> {
       const last = snapshot.compactions.at(-1);
       if (last?.status === "running")
@@ -2864,7 +2890,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       snapshot.compactions.push(entry);
       await save();
       active();
-      const messages = await requestOf(summary.instructions, removed, loadMedia);
+      const messages = await prepareModelView(entry.id, summary.instructions, removed);
       await callModel(
         entry.id,
         {
@@ -2991,16 +3017,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       active();
       // Media is read before the receipt below exists, so a missing loader or file fails the
       // run with no model operation left running and nothing to reconcile.
-      const request = await requestOf(
-        snapshot.definition.instructions,
-        withMemoryRecall(snapshot, modelConversation(snapshot)),
-        loadMedia,
-      );
+      const operationId = modelId(snapshot.runId, position);
+      const request = await prepareModelView(operationId);
       active();
       const modelSettings = copyData(snapshot.definition.modelSettings);
       if (choiceDone(modelSettings.toolChoice)) modelSettings.toolChoice = "auto";
       if (finalTurn) modelSettings.toolChoice = "none";
-      const operationId = modelId(snapshot.runId, position);
       const modelInput: ModelInput = {
         messages: request,
         tools: finalTurn ? [] : copyData(selected),
@@ -3385,10 +3407,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
   function freeze(start: RunStart): RunStart {
     // Once, here: adapters repair every request again, and repair is idempotent, so the
     // bytes a provider caches never change between turns or across a resume.
-    const history = repairConversation(
+    const repaired = repairConversation(
       start.history,
       (name) => (registry.get(name) ?? codeTools.get(name))?.isReadOnly === true,
     );
+    const history = retainHistoryImages(repaired, modelView);
     checkInline({ history, input: start.input });
     return { ...start, history };
   }
@@ -3440,6 +3463,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       definition: resolved,
       ...(record ? { subagent: record } : {}),
       history: copyData(history),
+      ...(tree &&
+      resolved.toolHistory &&
+      history.some((message) => message.role === "tool" && message.images?.length)
+        ? { historyHash: await requestHash(history) }
+        : {}),
       input: copyData(input),
       inputs: [],
       guards: [],
@@ -3513,6 +3541,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         instructions: typeof instructions === "string" ? instructions : null,
         enabledTools: Array.isArray(enabledTools) ? enabledTools : null,
         modelSettings,
+        ...modelView,
         limits,
         output: output?.schema ?? null,
         stopAtTools,
@@ -3624,6 +3653,13 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         codeTools,
       );
       checkNames(snapshot.definition.enabledTools);
+      if (
+        snapshot.definition.supportsVision !== modelView.supportsVision ||
+        !equalData(snapshot.definition.toolHistory, modelView.toolHistory)
+      )
+        throw new TypeError(
+          "Restore the same image support and tool history settings before resuming.",
+        );
       if (!equalData(snapshot.definition.memory, memory))
         throw new TypeError("Restore the same memory recall policy before resuming.");
       if (

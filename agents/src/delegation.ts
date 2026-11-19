@@ -2,8 +2,8 @@ import type { RemoteAgent, RemoteInput, RemoteOutcome } from "./a2a/remote.ts";
 import type { Workflow, WorkflowOutcome } from "./workflow-types.ts";
 import type { TreeNode } from "./types.ts";
 import { messageOf, type JsonObjectSchema, type ToolDefinition } from "@providerkit/core";
-import { admitChild, startChild, childOptions, prepareChild } from "./child.ts";
-import { RequestJournal } from "./request.ts";
+import { admitChild, matchesChildInput, startChild, childOptions, prepareChild } from "./child.ts";
+import { RequestJournal, requestHash } from "./request.ts";
 import { checkMemoryBinding } from "./memory.ts";
 import { isSubagentTool, type SubagentCreation, type SubagentRecord } from "./subagents.ts";
 import { successfulToolResult } from "./extensions.ts";
@@ -436,13 +436,11 @@ export async function executeDelegation(
     const resume = entry !== undefined;
     if (entry) {
       const saved = entry.snapshot;
-      const savedStart =
-        saved.kind === "agent" ? { history: saved.history, input: saved.input } : saved.input;
       if (
         saved.kind !== agent.kind ||
         nodeId(saved) !== agent.id ||
         saved.version !== agent.version ||
-        !equalData(savedStart, start) ||
+        !matchesChildInput(saved, start) ||
         !equalData(
           saved.kind === "agent" && saved.subagent
             ? { ...saved.subagent, base: undefined }
@@ -474,6 +472,21 @@ export async function executeDelegation(
       }
       const work = async () => {
         const saved = await admitted;
+        // A coordinator replay may supply the original bytes or the already-retired journal.
+        // A different image of the same type must not reuse the first image's answer.
+        if (
+          resume &&
+          saved.snapshot.kind === "agent" &&
+          saved.snapshot.historyHash &&
+          isRecord(start) &&
+          !equalData(saved.snapshot.history, start.history) &&
+          (await requestHash(start.history)) !== saved.snapshot.historyHash
+        )
+          fail(
+            "child_key_conflict",
+            "This child key belongs to another input.",
+            journal.operationId,
+          );
         await startChild(
           saved,
           parent,

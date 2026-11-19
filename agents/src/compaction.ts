@@ -10,6 +10,7 @@ import {
   type ChatMessage,
 } from "@providerkit/core";
 import { conversationOf } from "./input.ts";
+import { pruneToolText } from "./model-view.ts";
 import { copyData, isId, isRecord, nearEndBefore, nudgeAfter } from "./snapshot.ts";
 import type {
   AgentMessage,
@@ -100,11 +101,12 @@ export function compactMessages(
 export function modelConversation(
   snapshot: RunSnapshot,
   messages = conversationOf(snapshot, snapshot.models.length, true),
+  previous: CompactionExecution | null = snapshot.compactions.at(-1) ?? null,
 ): AgentMessage[] {
-  const last = snapshot.compactions.at(-1);
-  return last?.status === "completed"
-    ? compactMessages(messages, last.cut, last.summary)
-    : messages;
+  const view = snapshot.definition.toolHistory ? pruneToolText(messages) : messages;
+  return previous?.status === "completed"
+    ? compactMessages(view, previous.cut, previous.summary)
+    : view;
 }
 
 function cutFor(
@@ -181,7 +183,7 @@ export function checkCompactions(snapshot: RunSnapshot): void {
     const minimumSource =
       source.length -
       snapshot.inputs.filter((input) => input.beforeModel === entry.beforeModel).length;
-    const view = previous ? compactMessages(full, previous.cut, previous.summary) : full;
+    const view = modelConversation(snapshot, full, previous ?? null);
     const cut = cutFor(snapshot, entry.beforeModel, view, previous?.cut);
     if (
       !policy ||

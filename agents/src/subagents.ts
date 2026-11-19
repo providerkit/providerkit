@@ -14,6 +14,7 @@ import {
 import { jsonBytes } from "./extensions.ts";
 import { conversationOnly, isHandoff } from "./handoff.ts";
 import { conversationOf, readInput } from "./input.ts";
+import { matchesChildInput } from "./child.ts";
 import {
   copyData,
   childRunId,
@@ -676,8 +677,7 @@ export function subagentTool(spec: SubagentToolSpec): Delegation {
             child.snapshot.agentId !== template().id ||
             child.snapshot.version !== template().version ||
             child.snapshot.session !== undefined ||
-            !equalData(child.snapshot.history, start.history) ||
-            child.snapshot.input !== start.input ||
+            !matchesChildInput(child.snapshot, start) ||
             !equalData(child.snapshot.limits, subagentLimits(runtime.limits, record.spec.limits)) ||
             !equalData(record.base.enabledTools, expectedNames) ||
             !equalData(record.base.modelSettings, expectedSettings) ||

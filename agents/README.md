@@ -394,6 +394,23 @@ A run accepts 5 MB of inline images and files across its history and new turn
 (`limits.inlineBytes`). The snapshot keeps them, and every checkpoint writes the whole snapshot
 again, so larger files belong behind a reference.
 
+### Limit tool history
+
+Set `toolHistory: { keepImages: 2 }` on an agent to keep the two newest tool images. The
+person's own images stay. When a new tool image displaces an old one, the next checkpoint keeps
+its type instead of its bytes, and the model gets a note in its place. Only retained bytes count
+toward `limits.inlineBytes`. This does not erase checkpoints your host already stored.
+
+With `toolHistory` set, once tool text passes 120,000 characters, older results become short
+notes until about 60,000 characters remain. The newest result stays whole even if it alone is
+larger. The gap keeps the same prefix on later requests. Call ids and the journal's original
+text stay intact. Without `toolHistory`, the agent keeps all tool results within its byte limit.
+
+If the model cannot read images, set `supportsVision: false`. Each affected model request gets
+text notes instead of images, including the person's attachments. It does not load image
+references. The host gets an `images_omitted` event with the request's image count. User
+attachments stay in the transcript. Nothing guesses image support from a model name.
+
 ### Media references
 
 Keep the bytes on your server and send a reference:
@@ -850,7 +867,7 @@ stay JSON. JPEG, PNG, WebP and GIF use the same padded-base64 checks as user att
 Files and media references are not supported in tool results: return text and inline images.
 Tool images count toward the run's total `limits.inlineBytes`, including earlier tool results
 and user attachments. Too many bytes stops the run with `tool_media_limit`, without repeating
-the tool. Results retain images across checkpoints, sessions and resume. Client tools and
+the tool. By default, results retain images across checkpoints, sessions and resume. Client tools and
 pure delegations use the same normalization. Display projectors must still opt in to tool
 content and replace inline bytes with authorized references.
 

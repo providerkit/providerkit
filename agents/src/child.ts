@@ -1,9 +1,32 @@
 import { AGENT_RUNTIME, type NodeRuntime, type Specialist } from "./delegation.ts";
 import type { SubagentCreation } from "./subagents.ts";
 import { readInput } from "./input.ts";
+import { retainHistoryImages } from "./model-view.ts";
 import type { ChildEnvelope, RunOptions, TreeNode } from "./types.ts";
-import { checkChildProgress, checkTree, immutableCopy, isId, isRecord } from "./snapshot.ts";
+import {
+  checkChildProgress,
+  checkTree,
+  equalData,
+  immutableCopy,
+  isAgentMessage,
+  isId,
+  isRecord,
+} from "./snapshot.ts";
 import { emitEvent, fail, untilAbort, type ExecutionScope } from "./tree.ts";
+
+/** Compare an admitted input after retiring exactly the images its newer tools displaced. */
+export function matchesChildInput(saved: TreeNode, start: unknown): boolean {
+  if (saved.kind !== "agent") return equalData(saved.input, start);
+  return (
+    isRecord(start) &&
+    Array.isArray(start.history) &&
+    start.history.every(isAgentMessage) &&
+    equalData(
+      { history: saved.history, input: saved.input },
+      { ...start, history: retainHistoryImages(start.history, saved.definition, saved.models) },
+    )
+  );
+}
 
 /** Capture input before asynchronous admission so callers cannot change the saved identity. */
 export function prepareChild(
