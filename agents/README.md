@@ -2379,6 +2379,9 @@ server code:
 - `resolveRequest` returns each decision only for that claim. `beforeTool` checks current access
   and resource version again immediately before the action.
 
+The optional `screenCall`, `needsApproval`, `answerNow` and `canRunConcurrently` work as they do
+on a direct run's host.
+
 Return database handles or other worker-only tool values through `policy.context`. They are not
 serialized. Do not put secrets or handles in a saved snapshot.
 

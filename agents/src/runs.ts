@@ -456,6 +456,7 @@ function bindBackground<I, R extends NodeOutcome>(
       ...(trusted.reconcileStep ? { reconcileStep: trusted.reconcileStep } : {}),
       ...(trusted.reconcileToolRetry ? { reconcileToolRetry: trusted.reconcileToolRetry } : {}),
       ...(trusted.needsApproval ? { needsApproval: trusted.needsApproval } : {}),
+      ...(trusted.screenCall ? { screenCall: trusted.screenCall } : {}),
       ...(trusted.answerNow ? { answerNow: trusted.answerNow } : {}),
       canRunConcurrently: (request) => trusted.canRunConcurrently?.(request) === true,
       ...(trusted.loadMedia ? { loadMedia: trusted.loadMedia } : {}),
