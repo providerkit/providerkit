@@ -69,6 +69,30 @@ export interface TextPart {
   agentId?: string;
 }
 
+/** The model thought before it answered. By default a host sends only that it thought and for how
+ * long, never what it thought: reasoning can quote the instructions, a tool's output or private
+ * data. */
+export interface ThinkingPart {
+  type: "thinking";
+  id: string;
+  /** False while the model is still thinking. Once true, a delta no longer adds to it. */
+  settled: boolean;
+  /** When it started thinking, in epoch milliseconds on the host's clock. Absent when the host
+   * did not record it. */
+  startedAt?: number;
+  /** How long it thought, in milliseconds. Present once settled, and only when the host saw both
+   * ends. Measured on the host, so a device whose clock is off still shows the right length. */
+  durationMs?: number;
+  /** What it thought. Present only when the host chose to send it, and then it streams like a
+   * text part's text. */
+  text?: string;
+  /** Monotone attempt number, as on the text part of the same model call. Absent means the
+   * first. */
+  attempt?: number;
+  /** The id of the `agent` part for the specialist that thought. Absent for the main assistant. */
+  agentId?: string;
+}
+
 /** A file shown in the conversation. Showing it does not make the model read it: how a file
  * reaches the model is the host's decision. */
 export interface AttachmentPart {
@@ -234,6 +258,7 @@ export interface DataPart {
 
 export type DisplayPart =
   | TextPart
+  | ThinkingPart
   | AttachmentPart
   | SourcePart
   | ToolPart
@@ -326,8 +351,9 @@ export type ChatEvent = ChatEnvelope &
         part: DisplayPart;
       }
     | {
-        /** Appends to a text part that a `part` event already created and has not settled,
-         * in a message that has not finished. */
+        /** Appends to a text part that a `part` event already created and has not settled, in a
+         * message that has not finished. Also to a thinking part, when that part carries `text`:
+         * one that came without words never gains them from a delta. */
         type: "text";
         messageId: string;
         partId: string;
@@ -452,6 +478,18 @@ function readText(id: string, fields: Fields): TextPart | null {
   return optional(part, "agentId", fields.agentId, isId) &&
     optional(part, "attempt", fields.attempt, isAttempt) &&
     optional(part, "incomplete", fields.incomplete, isFlag)
+    ? part
+    : null;
+}
+
+function readThinking(id: string, fields: Fields): ThinkingPart | null {
+  if (!isFlag(fields.settled)) return null;
+  const part: ThinkingPart = { type: "thinking", id, settled: fields.settled };
+  return optional(part, "startedAt", fields.startedAt, isTime) &&
+    optional(part, "durationMs", fields.durationMs, isCount) &&
+    optional(part, "text", fields.text, isText) &&
+    optional(part, "attempt", fields.attempt, isAttempt) &&
+    optional(part, "agentId", fields.agentId, isId)
     ? part
     : null;
 }
@@ -616,6 +654,8 @@ function readPart(value: unknown): DisplayPart | null | undefined {
   switch (value.type) {
     case "text":
       return known(readText);
+    case "thinking":
+      return known(readThinking);
     case "attachment":
       return known(readAttachment);
     case "source":

@@ -238,6 +238,8 @@ function sketch(message: DisplayMessage | undefined): string[] {
     switch (part.type) {
       case "text":
         return `text "${part.text}"${part.settled ? "" : " streaming"}${by("by", part.agentId)}`;
+      case "thinking":
+        return `thinking${part.text === undefined ? "" : ` "${part.text}"`}${by("by", part.agentId)}`;
       case "tool":
         return `tool ${part.label} ${part.state}${by("by", part.agentId)}`;
       case "agent":
@@ -1516,8 +1518,9 @@ describe("createAgentProjector", () => {
     const text = JSON.stringify(sent);
     for (const value of Object.values(secret)) expect(text).not.toContain(value);
 
-    // What is meant to cross still does.
+    // What is meant to cross still does. The lead thought: its row crosses, its words do not.
     expect(sketch(failedView.snapshot(failed.snapshot))).toEqual([
+      "thinking",
       'text "Working on it."',
       "tool search done",
       "tool broken failed",

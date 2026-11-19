@@ -266,6 +266,13 @@ export function createAgUiWriter(options: AgUiOptions): AgUiWriter {
                 "Native tool calls lack program parents and operation attempts. The display extension preserves them.",
               ),
             );
+          if (part.type === "thinking")
+            issues.push(
+              issue(
+                "unsupported",
+                "Native events do not carry thinking rows. The display extension preserves them.",
+              ),
+            );
           if (part.type === "text" && !replace && message.role === "assistant") {
             const messageId = textId(message.id, part.id);
             const agent = part.agentId

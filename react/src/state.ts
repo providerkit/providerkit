@@ -102,6 +102,7 @@ export function isFinal(message: DisplayMessage): boolean {
 function isSettled(part: DisplayPart): boolean {
   switch (part.type) {
     case "text":
+    case "thinking":
       return part.settled;
     case "tool":
       return part.state !== "running" && part.state !== "waiting";
@@ -130,6 +131,11 @@ function upsertPart(parts: readonly DisplayPart[], part: DisplayPart): readonly 
     if ((part.attempt ?? 1) < (held.attempt ?? 1)) return parts;
     if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
     if (held.incomplete && !part.incomplete) return parts;
+  }
+  // The thinking of a restarted model call follows its text: the newer attempt replaces it.
+  if (held.type === "thinking" && part.type === "thinking") {
+    if ((part.attempt ?? 1) < (held.attempt ?? 1)) return parts;
+    if ((part.attempt ?? 1) > (held.attempt ?? 1)) return replaceAt(parts, index, part);
   }
   if (held.type === "tool" && part.type === "tool") {
     // Operation ownership is fixed, even when an attempt restarts.
@@ -165,6 +171,15 @@ function isAhead(held: DisplayPart, incoming: DisplayPart): boolean {
     );
   if (held.type === "agent" && incoming.type === "agent")
     return isSettled(held) && !isSettled(incoming);
+  // A stretch of thinking that ended, or that streamed further, is ahead of a read taken while it
+  // ran, like a tool that finished and like streaming text.
+  if (held.type === "thinking" && incoming.type === "thinking")
+    return (
+      (held.attempt ?? 1) > (incoming.attempt ?? 1) ||
+      ((held.attempt ?? 1) === (incoming.attempt ?? 1) &&
+        !incoming.settled &&
+        (held.settled || (held.text ?? "").startsWith(incoming.text ?? "")))
+    );
   return (
     held.type === "text" &&
     incoming.type === "text" &&
@@ -302,15 +317,13 @@ function applyText(
   if (!message || !delta || isFinal(message)) return messages;
   const at = indexOfId(message.parts, partId);
   const part = message.parts[at];
-  if (
-    !part ||
-    part.type !== "text" ||
-    part.settled ||
-    part.incomplete ||
-    (part.attempt ?? 1) !== attempt
-  )
-    return messages;
-  const parts = replaceAt(message.parts, at, { ...part, text: part.text + delta });
+  if (part?.type !== "text" && part?.type !== "thinking") return messages;
+  if (part.settled || (part.attempt ?? 1) !== attempt) return messages;
+  if (part.type === "text" && part.incomplete) return messages;
+  // A thinking part that came without words gains none, so words the host left out cannot
+  // arrive later by mistake.
+  if (part.type === "thinking" && part.text === undefined) return messages;
+  const parts = replaceAt(message.parts, at, { ...part, text: (part.text ?? "") + delta });
   return replaceAt(messages, index, { ...message, parts });
 }
 
