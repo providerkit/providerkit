@@ -82,6 +82,27 @@ describe("defineTool", () => {
     if (!outcome.ok) expect(outcome.error).toContain("q must be a string");
   });
 
+  // A host asks before it opens an approval: nobody should say yes to a call
+  // that comes back `invalid_input` the moment it runs.
+  it("accepts() runs the same validate as invoke, and never the tool", async () => {
+    const run = vi.fn(async ({ q }: { q: string }) => q);
+    const tool = defineTool<{ q: string }, string>({
+      name: "search",
+      description: "search",
+      inputSchema: schema,
+      validate: (raw) => {
+        if (typeof (raw as { q?: unknown })?.q !== "string") throw new Error("q must be a string");
+        return raw as { q: string };
+      },
+      run,
+    });
+    expect([tool.accepts({ q: "cats" }), tool.accepts({ q: 42 })]).toEqual([true, false]);
+    expect(run).not.toHaveBeenCalled();
+    // With no validate, invoke takes anything, so accepts does too.
+    const open = defineTool({ name: "open", description: "open", inputSchema: schema, run });
+    expect(open.accepts(42)).toBe(true);
+  });
+
   it("times out a tool that would hang the run", async () => {
     vi.useFakeTimers();
     try {
@@ -252,6 +273,169 @@ describe("zodTool", () => {
     expect(await tool.invoke({ wrong: "field" })).toMatchObject({
       ok: false,
       kind: "invalid_input",
+    });
+  });
+
+  describe("slips it repairs", () => {
+    const sheet = zodTool({
+      name: "sheet",
+      description: "sheet",
+      input: z.object({ title: z.string(), rows: z.array(z.object({ qty: z.number() })).max(5) }),
+      run: async (input) => input,
+    });
+
+    // Seen in production: 13 of 16 spreadsheet calls in a day sent `rows` this
+    // way, and each was resent unchanged until the model gave up.
+    it("decodes an array sent as a JSON string, and leaves strings the schema took", async () => {
+      const outcome = await sheet.invoke({ title: "[1]", rows: JSON.stringify([{ qty: 2 }]) });
+      expect(outcome.ok && outcome.output).toEqual({ title: "[1]", rows: [{ qty: 2 }] });
+    });
+
+    it("leaves a rejected string that is not a JSON array or object", async () => {
+      const count = zodTool({
+        name: "count",
+        description: "count",
+        input: z.object({ n: z.number() }),
+        run: async ({ n }) => n,
+      });
+      for (const n of ["not json", "42", "null", '"text"']) {
+        expect(await count.invoke({ n }), n).toMatchObject({ ok: false, kind: "invalid_input" });
+      }
+    });
+
+    it("reports the real problem inside a decoded string", async () => {
+      const outcome = await sheet.invoke({ title: "t", rows: JSON.stringify([{ qty: "two" }]) });
+      expect(!outcome.ok && outcome.error).toBe(
+        "Invalid arguments for sheet: rows.0.qty: Invalid input: expected number, received string",
+      );
+    });
+
+    // Seen in production: `hooks` sent as `[{ text }]`, the shape of a sibling
+    // field, on a research run's last step, which lost the run its brief.
+    it("takes a string wrapped as { text }, and nothing looser", async () => {
+      const brief = zodTool({
+        name: "save_brief",
+        description: "save",
+        input: z.object({ hooks: z.array(z.string()), title: z.string() }),
+        run: async (input) => input.hooks,
+      });
+      const args = { hooks: [{ text: "a" }, "b"], title: "t" };
+      expect(await brief.invoke(args)).toMatchObject({ ok: true, output: ["a", "b"] });
+      expect(args.hooks[0]).toEqual({ text: "a" });
+      for (const hooks of [[{ text: "a", extra: 1 }], [{ text: 1 }], [{ body: "a" }]]) {
+        expect((await brief.invoke({ hooks, title: "t" })).ok, JSON.stringify(hooks)).toBe(false);
+      }
+      // A wrapper fixed, a real mistake beside it still reported.
+      const mixed = await brief.invoke({ hooks: [{ text: "a" }], title: 1 });
+      expect(!mixed.ok && mixed.error).toBe(
+        "Invalid arguments for save_brief: title: Invalid input: expected string, received number",
+      );
+    });
+
+    it("clamps a value it repaired, for a terminal tool's one chance", async () => {
+      const submit = zodTool({
+        name: "submit",
+        description: "submit",
+        isTerminal: true,
+        clampOverflow: true,
+        input: z.object({ summary: z.string().max(10) }),
+        run: async (input) => input.summary,
+      });
+      const outcome = await submit.invoke({ summary: { text: "way past the advertised limit" } });
+      expect(outcome).toMatchObject({ ok: true, output: "way past …" });
+    });
+
+    it("accepts() answers by the same parse as invoke, without running the tool", async () => {
+      const run = vi.fn(async () => "ok");
+      const tool = zodTool({
+        name: "sheet",
+        description: "sheet",
+        input: z.object({ rows: z.array(z.string()) }),
+        run,
+      });
+      const cases = [
+        { rows: ["a"] },
+        { rows: '["a"]' },
+        { rows: [{ text: "a" }] },
+        { rows: [{ text: "a", extra: 1 }] },
+        { rows: "a" },
+      ];
+      const accepted = cases.map((args) => tool.accepts(args));
+      expect(run).not.toHaveBeenCalled();
+      expect(accepted).toEqual([true, true, true, false, false]);
+      for (const [i, args] of cases.entries()) {
+        expect((await tool.invoke(args)).ok).toBe(accepted[i]);
+      }
+    });
+  });
+
+  // A 1,000-row sheet can fail on every cell. The count tells the model the
+  // five it sees are not the whole problem.
+  it("shows the model at most five problems, and counts the rest", async () => {
+    const tool = zodTool({
+      name: "values",
+      description: "values",
+      input: z.object({ values: z.array(z.number()) }),
+      run: async () => "ok",
+    });
+    const outcome = await tool.invoke({ values: Array.from({ length: 40 }, () => "x") });
+    const issue = (i: number) => `values.${i}: Invalid input: expected number, received string`;
+    expect(!outcome.ok && outcome.error).toBe(
+      `Invalid arguments for values: ${[0, 1, 2, 3, 4].map(issue).join("; ")}; and 35 more`,
+    );
+  });
+
+  describe("output", () => {
+    // Upstream JSON, typed by nothing until `output` checks it.
+    let reply = "";
+    const lookup = (isReadOnly: boolean) =>
+      zodTool({
+        name: "lookup",
+        description: "lookup",
+        isReadOnly,
+        input: z.object({ q: z.string() }),
+        output: z.object({ hits: z.number() }),
+        run: async () => JSON.parse(reply),
+      });
+
+    it("hands back the parsed result, so the model never sees keys the schema left out", async () => {
+      reply = '{"hits":3,"debug":"internal"}';
+      const outcome = await lookup(true).invoke({ q: "x" });
+      expect(outcome.ok && [outcome.output, outcome.summary]).toEqual([{ hits: 3 }, '{"hits":3}']);
+    });
+
+    // A bad result is the tool's failure, read by the model like any other.
+    // A write already ran, so the model is told to check before calling again.
+    it.each([
+      [true, ""],
+      [false, " Check its effect before calling it again."],
+    ])("fails a result that breaks it, as data (read-only: %s)", async (isReadOnly, effect) => {
+      reply = '{"hits":"3"}';
+      const tool = lookup(isReadOnly);
+      expect(await tool.invoke({ q: "x" })).toMatchObject({
+        ok: false,
+        kind: "failed",
+        error: `lookup ran, but its result does not match its output schema.${effect} Problems: hits: Invalid input: expected number, received string`,
+      });
+      await expect(tool.call({ q: "x" })).rejects.toThrow("does not match its output schema");
+    });
+
+    it("fills outputSchema as metadata, and refuses no type JSON Schema lacks", () => {
+      expect(lookup(true).outputSchema).toEqual({
+        type: "object",
+        properties: { hits: { type: "number" } },
+        required: ["hits"],
+        additionalProperties: false,
+      });
+      expect(lookup(true).definition()).not.toHaveProperty("outputSchema");
+      const dated = zodTool({
+        name: "dated",
+        description: "dated",
+        input: z.object({}),
+        output: z.object({ at: z.date() }),
+        run: async () => ({ at: new Date(0) }),
+      });
+      expect(dated.outputSchema).toMatchObject({ properties: { at: {} } });
     });
   });
 });

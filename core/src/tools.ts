@@ -41,7 +41,8 @@ export interface ToolSpec<I, O> {
   description: string;
   /** Advertised to the model verbatim. */
   inputSchema: JsonObjectSchema;
-  /** JSON Schema for generated result types. Not validated or sent to providers. */
+  /** JSON Schema for generated result types. Not validated here or sent to providers;
+   *  `zodTool`'s `output` checks results and fills this in. */
   outputSchema?: Record<string, unknown>;
   /**
    * Turn raw arguments into `I`, or throw with a message the MODEL can act on.
@@ -72,7 +73,8 @@ export interface Tool<I = unknown, O = unknown> {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: JsonObjectSchema;
-  /** JSON Schema for generated result types. Not validated or sent to providers. */
+  /** JSON Schema for generated result types. Not validated here or sent to providers;
+   *  `zodTool`'s `output` checks results and fills this in. */
   readonly outputSchema?: Record<string, unknown>;
   readonly timeoutMs: number;
   readonly isReadOnly: boolean;
@@ -80,6 +82,12 @@ export interface Tool<I = unknown, O = unknown> {
   readonly isConcurrencySafe: boolean;
   readonly isTerminal: boolean;
   definition(): ToolDefinition;
+  /**
+   * Whether `invoke` would take these raw arguments, by the same `validate`, without running
+   * the tool. Ask before opening an approval, so nobody is asked to approve a call that cannot
+   * run: it would come back `invalid_input` after they said yes.
+   */
+  accepts(rawArgs: unknown): boolean;
   /** Validate, run, and report the outcome. Never throws except on abort. */
   invoke(rawArgs: unknown, ctx?: ToolContext): Promise<ToolOutcome<O>>;
   /** The typed path for internal callers: throws on failure. */
@@ -149,6 +157,12 @@ export function defineTool<I = unknown, O = unknown>(spec: ToolSpec<I, O>): Tool
     return name === "AbortError" ? "aborted" : "failed";
   }
 
+  /** The one parse `invoke` and `accepts` share, so a host asking first gets the answer
+   *  `invoke` would give. Throws with the message the model reads. */
+  function parse(rawArgs: unknown): I {
+    return spec.validate ? spec.validate(rawArgs) : (rawArgs as I);
+  }
+
   return {
     name: spec.name,
     description: spec.description,
@@ -173,13 +187,22 @@ export function defineTool<I = unknown, O = unknown>(spec: ToolSpec<I, O>): Tool
       return (await execute(input, ctx)).output;
     },
 
+    accepts(rawArgs) {
+      try {
+        parse(rawArgs);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
     async invoke(rawArgs, ctx = {}) {
       const callId = ctx.callId ?? newId();
       const started = Date.now();
 
       let input: I;
       try {
-        input = spec.validate ? spec.validate(rawArgs) : (rawArgs as I);
+        input = parse(rawArgs);
       } catch (err) {
         return {
           ok: false,
