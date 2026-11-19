@@ -68,7 +68,10 @@
   "peerDependencies": {
     "@providerkit/agents": "^0.2.0 || ^0.3.0",
     "@providerkit/core": "^0.33.1",
-    "react": "^19"
+    "@shadcn/react": "^0.3.1",
+    "react": "^19",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "peerDependenciesMeta": {
     "@providerkit/agents": {
@@ -76,17 +79,29 @@
     },
     "@providerkit/core": {
       "optional": true
+    },
+    "@shadcn/react": {
+      "optional": true
+    },
+    "react-markdown": {
+      "optional": true
+    },
+    "remark-gfm": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@providerkit/agents": "workspace:*",
     "@providerkit/core": "workspace:*",
+    "@shadcn/react": "^0.3.1",
     "@types/bun": "^1.4.4",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "happy-dom": "^20.14.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   },
@@ -94,10 +109,5 @@
     "type": "git",
     "url": "git+https://github.com/providerkit/providerkit.git",
     "directory": "react"
-  },
-  "dependencies": {
-    "@shadcn/react": "^0.3.1",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
   }
 }

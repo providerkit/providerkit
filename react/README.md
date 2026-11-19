@@ -517,6 +517,17 @@ check, never a local claim that the agent did not see the message.
 
 ## Use the optional components
 
+The components and the Markdown renderer need three packages that the hooks do not:
+
+```sh
+bun add @shadcn/react react-markdown remark-gfm
+```
+
+`/ui` needs `@shadcn/react`, and `/markdown` needs `react-markdown` and `remark-gfm`. They are
+optional peer dependencies: your app installs them itself, and only when it imports one of these
+two entries. Up to version 0.1.1 they came with this package, so an app that imports `/ui` or
+`/markdown` must add them when it upgrades. An app that uses only the hooks has nothing to change.
+
 Keep your own header and layout. The components accept the hook values or equivalent data from
 your app's store:
 
@@ -605,16 +616,16 @@ only plain text; the UI entry does not import its parser.
 
 ## Imports
 
-| Import               | Responsibility                                             |
-| -------------------- | ---------------------------------------------------------- |
-| `@providerkit/react` | Client state and React hooks                               |
-| `/protocol`          | Display types, event validation and reduction              |
-| `/sse`               | Fetch-based stream transport; requires `@providerkit/core` |
-| `/agents`            | Server-side projection of agent events and snapshots       |
-| `/markdown`          | Markdown, code blocks and source markers                   |
-| `/ui`                | Chat components                                            |
-| `/ag-ui`             | AG-UI event mapping                                        |
-| `/styles.css`        | Optional default styles                                    |
+| Import               | Responsibility                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| `@providerkit/react` | Client state and React hooks                                                         |
+| `/protocol`          | Display types, event validation and reduction                                        |
+| `/sse`               | Fetch-based stream transport; requires `@providerkit/core`                           |
+| `/agents`            | Server-side projection of agent events and snapshots                                 |
+| `/markdown`          | Markdown, code blocks and source markers; requires `react-markdown` and `remark-gfm` |
+| `/ui`                | Chat components; requires `@shadcn/react`                                            |
+| `/ag-ui`             | AG-UI event mapping                                                                  |
+| `/styles.css`        | Optional default styles                                                              |
 
 Hook-only imports load no CSS, Markdown parser or server
 runtime. The `/agents` entry imports SDK types only; it does not execute an agent.
