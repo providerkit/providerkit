@@ -261,6 +261,14 @@ function recordOf(snapshot: RunSnapshot) {
       });
     }
   }
+  // Billing is keyed by (id, attemptId), so each tool attempt's receipt says what it reported.
+  for (const receipt of receipts) {
+    if (receipt.kind === "model" || receipt.kind === "remote") continue;
+    const cost = saved.toolCosts?.find(
+      (entry) => entry.operationId === receipt.id && entry.attemptId === receipt.attemptId,
+    );
+    if (cost) receipt.costUsd = cost.costUsd;
+  }
   // A root run replaces this with what its append did. Read from a snapshot alone, whether the
   // session has the turn is not known.
   const session: SessionStatus | undefined = saved.session && {
@@ -830,6 +838,38 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         );
       return cost;
     }
+
+    /** `context.reportCost` for one call attempt: what the tool spent outside the model calls,
+     * such as a paid API or a model it calls itself. Each amount joins the attempt's entry in
+     * `snapshot.toolCosts`, which the cost limit and the receipts read. While the call runs it
+     * is saved at once, as model usage is, so a worker that dies first keeps what it spent. A
+     * report after the call returned waits for the next checkpoint: the run may have ended. */
+    function costReporter(request: ToolRequest) {
+      let open = true;
+      return {
+        report(usd: number): void {
+          if (typeof usd !== "number" || !Number.isFinite(usd) || usd < 0)
+            throw new TypeError("reportCost takes a finite USD amount of 0 or more.");
+          const costs = (snapshot.toolCosts ??= []);
+          const entry = costs.find(
+            (saved) =>
+              saved.operationId === request.operationId && saved.attemptId === request.attemptId,
+          );
+          if (entry) entry.costUsd += usd;
+          else
+            costs.push({
+              operationId: request.operationId,
+              attemptId: request.attemptId,
+              costUsd: usd,
+            });
+          // A failed write fails the run through the tree, at its next step.
+          if (open) void save().catch(() => {});
+        },
+        close(): void {
+          open = false;
+        },
+      };
+    }
     const callbackContext: LifecycleContext = Object.freeze({
       agentId: id,
       version,
@@ -1321,6 +1361,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             .reverse()
             .find((record) => !record.closed && record.decision)?.decision;
           if (!tool) throw new TypeError("Missing dispatched tool.");
+          const cost = costReporter(request);
           return untilAbort(
             bindMemoryTool(tool, options.memory, snapshot, request).invoke(
               copyData(request.arguments),
@@ -1334,10 +1375,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
                 parentOperationId: request.parentOperationId,
                 callId: request.call.id,
                 signal: callSignal,
+                reportCost: cost.report,
               },
             ),
             callSignal,
-          );
+          ).finally(cost.close);
         }
         let outcome;
         try {

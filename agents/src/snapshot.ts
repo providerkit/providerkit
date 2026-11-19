@@ -58,6 +58,7 @@ import type {
   RunState,
   Session,
   SessionStatus,
+  ToolCost,
   ToolExecution,
   ToolRequest,
   ToolResult,
@@ -967,6 +968,16 @@ function isCompaction(value: unknown): value is CompactionExecution {
   );
 }
 
+function isToolCost(value: unknown): value is ToolCost {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 3 &&
+    isId(value.operationId) &&
+    isId(value.attemptId) &&
+    finite(value.costUsd)
+  );
+}
+
 export function isState(value: unknown): value is RunState {
   if (!isRecord(value)) return false;
   switch (value.status) {
@@ -1055,6 +1066,7 @@ function isSnapshot(value: unknown): value is RunSnapshot {
     value.guards.every(isGuardRecord) &&
     Array.isArray(value.compactions) &&
     value.compactions.every(isCompaction) &&
+    optional(value.toolCosts, (costs) => Array.isArray(costs) && costs.every(isToolCost)) &&
     optional(value.session, isSessionRef) &&
     isLimits(value.limits) &&
     Array.isArray(value.models) &&
@@ -1402,6 +1414,19 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
       .some((entry) => entry.beforeModel < previous.models.length)
   )
     throw new TypeError("The child host changed an admitted model's context.");
+  // A charge only grows while its attempt runs, and is never dropped.
+  if (
+    (previous.toolCosts ?? []).some((entry, index) => {
+      const saved = next.toolCosts?.[index];
+      return (
+        !saved ||
+        saved.operationId !== entry.operationId ||
+        saved.attemptId !== entry.attemptId ||
+        saved.costUsd < entry.costUsd
+      );
+    })
+  )
+    throw new TypeError("The child host erased or lowered a reported tool cost.");
   if (previous.models.length > next.models.length)
     throw new TypeError("The child host dropped saved model receipts.");
   if (
@@ -1821,6 +1846,28 @@ function checkProgramJournal(
   return total;
 }
 
+/** Each reported cost belongs to one attempt of a call in this run's journal. */
+function checkToolCosts(snapshot: RunSnapshot): void {
+  const costs = snapshot.toolCosts ?? [];
+  const calls = new Set(
+    snapshot.models.flatMap((model) =>
+      model.status === "completed"
+        ? model.tools.flatMap((tool) => [tool.id, ...(tool.calls ?? []).map((call) => call.id)])
+        : [],
+    ),
+  );
+  if (
+    costs.some(
+      (entry, index) =>
+        !calls.has(entry.operationId) ||
+        costs.findIndex(
+          (other) => other.operationId === entry.operationId && other.attemptId === entry.attemptId,
+        ) !== index,
+    )
+  )
+    throw new TypeError("A reported tool cost names no call in this run, or repeats an attempt.");
+}
+
 /** Validate data-only journals without live tools. Execution callers supply their actual code
  * registry, which must match the saved policy. Recorded data never replaces host authorization. */
 export function readSnapshot(
@@ -2080,6 +2127,7 @@ export function readSnapshot(
   }
   checkMemorySnapshot(raw);
   checkCompactions(raw);
+  checkToolCosts(raw);
   for (const entry of raw.compactions) {
     if (
       raw.models

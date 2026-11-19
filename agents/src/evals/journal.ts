@@ -127,6 +127,8 @@ export function usageOf(root: TreeNode, price?: EvalPrice): EvalUsage {
       continue;
     }
     if (node.kind !== "agent") continue;
+    // A tool reports its own charge in USD, so it needs no rate.
+    for (const entry of node.toolCosts ?? []) totals.knownCostUsd += entry.costUsd;
     for (const model of allModels(node)) {
       if (seen.has(model.id)) continue;
       seen.add(model.id);

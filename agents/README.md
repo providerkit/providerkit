@@ -1754,10 +1754,11 @@ Resuming does not reset the deadline or give the tree a fresh call budget.
 
 `usage` describes the current agent's model calls. `treeUsage` includes registered descendants
 without counting recorded work twice. Only model usage reported by providers is known; an
-interrupted call may have cost more than its last report. Ordinary tools' external service charges
-are not included. Prices and billing stay with the host, and these counters are not a bill. Use
-SDK delegation rather than calling another model directly inside an ordinary tool when that work
-must share the tree's limits and usage.
+interrupted call may have cost more than its last report. A tool's own charges, such as a paid
+API, count only when the tool reports them in USD (see [Cost limit](#cost-limit)). Prices and
+billing stay with the host, and these counters are not a bill. When a tool calls another model
+itself, those tokens stay out of `usage` and the tree's call limits. Use SDK delegation instead
+when that work must share them.
 
 ### Cost limit
 
@@ -1795,6 +1796,31 @@ without waiting. Anything else fails the run with `invalid_cost`. The journal ke
 run never prices a saved call again, even when your prices change by time of day. A run with
 `costUsd` and no `priceModelCall` is refused with a TypeError before it starts or resumes. A
 helper's `prepare` may give one helper a lower `costUsd`.
+
+A tool that pays for something outside the model calls, such as a paid search or a model it calls
+itself, reports the amount with `reportCost` on its context:
+
+```ts
+const search = defineTool({
+  name: "search",
+  description: "Search the archive.",
+  inputSchema: { type: "object" },
+  run: async (input, context) => {
+    const found = await archive.search(input);
+    if (typeof context.reportCost === "function") context.reportCost(found.costUsd);
+    return found.text;
+  },
+});
+```
+
+The check keeps the tool usable outside an agent run, where the context has no `reportCost`. The
+amount joins the known cost that the limit checks before the next model call, so the rest of the
+batch still runs. The SDK saves it right away in `snapshot.toolCosts`, with the call attempt that
+spent it, and that attempt's receipt carries it as `costUsd`. A retried or replayed call keeps each
+attempt's charge. Report before the tool returns: a later report, say from work that outlived the
+tool's timeout, is saved with the run's next checkpoint, and is lost if the run has ended. An
+amount that is not a finite number of 0 or more throws a TypeError in the tool and is not saved.
+`reportCost` works without a cost limit too, so your ledger can read the charges from the receipts.
 
 ## Asking the person
 

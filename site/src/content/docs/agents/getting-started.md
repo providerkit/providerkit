@@ -73,8 +73,9 @@ await analyst.run(question, { host: { priceModelCall: ({ usage }) => costUsd(usa
 
 Once the calls this run and its helpers made cost $1.50, no new call starts and the run ends
 `limited` with `limit: "costUsd"`. Your host supplies the prices: Core's `costUsd` turns token
-counts into dollars with your own rates. Calls that were already running can finish above the
-limit. The [cost limit section](https://github.com/providerkit/providerkit/blob/main/agents/README.md#cost-limit)
+counts into dollars with your own rates. A tool that pays for something itself, such as a paid
+API, adds the amount with `context.reportCost(usd)`, and the limit counts it. Calls that were
+already running can finish above the limit. The [cost limit section](https://github.com/providerkit/providerkit/blob/main/agents/README.md#cost-limit)
 covers helpers, workflows and resume.
 
 Change the agent's version when its instructions, tools or result contract change. A saved run
