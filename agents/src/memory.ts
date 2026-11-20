@@ -514,9 +514,10 @@ export function withMemoryRecall(snapshot: RunSnapshot, messages: AgentMessage[]
   const last = snapshot.compactions.at(-1);
   const cut = last?.status === "completed" ? last.cut : 0;
   const inputIndex = snapshot.history.length;
-  if (cut > inputIndex) view.splice(1, 0, { role: "user", content: text });
+  const pinned = snapshot.definition.compaction?.retryOnContextLimit;
+  if (cut > inputIndex && !pinned) view.splice(1, 0, { role: "user", content: text });
   else {
-    const message = view[inputIndex - cut + (cut ? 1 : 0)];
+    const message = view[cut > inputIndex ? 1 : inputIndex - cut + (cut ? 1 : 0)];
     if (!message || message.role !== "user")
       throw new TypeError("The recorded memory input position is missing.");
     message.content =

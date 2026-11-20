@@ -721,6 +721,8 @@ export function checkOptions(
       "canRunConcurrently",
       "child",
       "loadMedia",
+      "priceModelCall",
+      "onContextLimit",
     ]) {
       if (!optional(value.host[key], (fn) => typeof fn === "function")) {
         throw new TypeError(`host.${key} must be a function.`);
@@ -1008,6 +1010,9 @@ function isCompaction(value: unknown): value is CompactionExecution {
     Number.isSafeInteger(value.beforeModel) &&
     positive(value.sourceCount) &&
     positive(value.cut) &&
+    optional(value.rejectedAttemptId, isId) &&
+    (value.interruptedSummary === undefined ||
+      (value.status === "completed" && value.interruptedSummary === true)) &&
     optional(value.model, isModel) &&
     (value.status === "running" || (value.status === "completed" && isId(value.summary)))
   );
@@ -1617,6 +1622,7 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
       entry.cut !== saved.cut ||
       entry.sourceCount !== saved.sourceCount ||
       entry.beforeModel !== saved.beforeModel ||
+      entry.rejectedAttemptId !== saved.rejectedAttemptId ||
       (entry.status === "completed" && !equalData(entry, saved)) ||
       (entry.model && (!saved.model || entry.model.attemptId !== saved.model.attemptId))
     )
@@ -1625,7 +1631,15 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
   if (
     next.compactions
       .slice(previous.compactions.length)
-      .some((entry) => entry.beforeModel < previous.models.length)
+      .some(
+        (entry) =>
+          entry.beforeModel < previous.models.length &&
+          !(
+            entry.rejectedAttemptId &&
+            entry.beforeModel === previous.models.length - 1 &&
+            previous.models[entry.beforeModel]?.status === "running"
+          ),
+      )
   )
     throw new TypeError("The child host changed an admitted model's context.");
   // A charge only grows while its attempt runs, and is never dropped.
@@ -2134,11 +2148,17 @@ export function readSnapshot(
   for (const [index, model] of raw.models.entries()) {
     if (model.id !== modelId(raw.runId, index))
       throw new TypeError("Invalid model operation identity.");
+    const rejected = raw.compactions.find(
+      (entry) => entry.beforeModel === index,
+    )?.rejectedAttemptId;
+    const interrupted = model.interrupted.filter(
+      (attempt) => attempt.attemptId !== rejected,
+    ).length;
     if (
-      model.interrupted.length &&
+      interrupted &&
       (!raw.definition.recovery?.policy.inferenceOnly ||
         !!raw.definition.modelSettings.hostedTools?.length ||
-        model.interrupted.length >= raw.definition.recovery.policy.maxAttempts)
+        interrupted >= raw.definition.recovery.policy.maxAttempts)
     )
       throw new TypeError("Model attempts exceed the recorded recovery policy.");
     const last = index === raw.models.length - 1;

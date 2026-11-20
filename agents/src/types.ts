@@ -273,6 +273,10 @@ export interface CompactionPolicy {
   identity: string;
   /** Supply the actual window for the configured model. No model-name guessing. */
   contextWindow: number;
+  /** Keep the run's task through every cut. A length rejection before the first chunk can
+   * buy one shorter retry per run, using the same turn. Never retries a hosted-tool request.
+   * After a restart, use a trim note rather than resend an interrupted summary. */
+  retryOnContextLimit?: boolean;
   /** Recent tokens to keep. Core's historyBudgetTokens(contextWindow) is the default. */
   keepTokens?: number;
   /** Omit to trim without a paid call. This provider must do inference only. The SDK sends
@@ -282,6 +286,7 @@ export interface CompactionPolicy {
 export interface CompactionDefinition {
   identity: string;
   contextWindow: number;
+  retryOnContextLimit?: true;
   keepTokens: number;
   summarize: {
     provider: { id: string; model: string };
@@ -295,8 +300,10 @@ export type CompactionExecution = {
   /** Count and cut in the full conversation, not in the shortened model view. */
   sourceCount: number;
   cut: number;
+  /** The turn attempt the provider refused before any chunk. A retry stays in that turn's slot. */
+  rejectedAttemptId?: string;
   model?: ModelExecution;
-} & ({ status: "running" } | { status: "completed"; summary: string });
+} & ({ status: "running" } | { status: "completed"; summary: string; interruptedSummary?: true });
 
 /** Per-operation budgets adapted from PydanticAI's tool_manager.py (MIT). No retries by
  * default. These retry settled failures only; crash recovery remains a separate policy. */
@@ -689,6 +696,16 @@ export interface AgentHost {
    * run never prices a saved call again, even when the host's prices change by time of day.
    * Synchronous; return a finite amount of 0 or more. */
   priceModelCall?: (call: MeasuredModelCall) => number;
+  /** Reports a length rejection from a turn. Counts are present only if the provider supplied
+   * them; the configured window and earlier calls are not measurements of this request. */
+  onContextLimit?: (limit: {
+    runId: string;
+    operationId: string;
+    provider: string;
+    model: string;
+    inputTokens?: number;
+    contextLimit?: number;
+  }) => void;
 }
 
 /** One model call's usage and the endpoint that served it: the turn's source when a fallback
@@ -992,7 +1009,7 @@ export type OperationReceipt =
       purpose?: "compaction";
       id: string;
       attemptId: string;
-      status: "running" | "completed" | "interrupted";
+      status: "running" | "completed" | "interrupted" | "context_rejected";
       /** reported means a stream with usage ended, not that the SDK verified the vendor's bill. */
       billing: "unknown" | "reported";
       usage: TokenUsage;

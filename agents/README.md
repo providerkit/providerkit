@@ -543,6 +543,15 @@ Change `compaction.identity` when the prompt or hidden provider configuration ch
 refuses a different recorded policy or summary provider identity. Unlike `prepareHistory`, this
 feature runs inside the journal and never rewrites the session's stored transcript.
 
+Set `retryOnContextLimit: true` on `compaction` to recover when a provider rejects a turn as too
+long before emitting any chunk. The SDK notifies `host.onContextLimit` with any `inputTokens` and
+`contextLimit` reported by the provider error, folds once on the same turn without spending another
+turn slot, and retries once. It never retries after output starts or when `hostedTools` are set,
+and the retry still respects `limits.costUsd`, `treeLimits.modelCalls`, deadlines and abort.
+With `retryOnContextLimit: true`, old tool text is pruned before paying for a summary, the run's
+own task stays pinned after the summary, and a summary interrupted by a crash settles to the trim
+note on resume without replaying the paid summary call.
+
 ### Send messages while a run works
 
 Add a correction or more context without interrupting the current call:

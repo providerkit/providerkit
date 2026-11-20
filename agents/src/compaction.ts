@@ -3,6 +3,7 @@
 // Changed: core owns cutting/pairing; a running summary is never silently called twice.
 import {
   applyCompaction,
+  EMPTY_USAGE,
   conversationTokens,
   historyBudgetTokens,
   needsCompaction,
@@ -11,7 +12,7 @@ import {
 } from "@providerkit/core";
 import { conversationOf } from "./input.ts";
 import { pruneToolText } from "./model-view.ts";
-import { copyData, isId, isRecord, nearEndBefore, nudgeAfter } from "./snapshot.ts";
+import { copyData, equalData, isId, isRecord, nearEndBefore, nudgeAfter } from "./snapshot.ts";
 import type {
   AgentMessage,
   CompactionDefinition,
@@ -20,6 +21,8 @@ import type {
   ModelExecution,
   RunSnapshot,
 } from "./types.ts";
+
+export const TRIM_NOTE = "Earlier messages were omitted. No summary was generated.";
 
 const positive = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -31,6 +34,7 @@ export function isCompactionDefinition(value: unknown): value is CompactionDefin
       isId(value.identity) &&
       positive(value.contextWindow) &&
       positive(value.keepTokens) &&
+      (value.retryOnContextLimit === undefined || value.retryOnContextLimit === true) &&
       (value.summarize === null ||
         (isRecord(value.summarize) &&
           isRecord(value.summarize.provider) &&
@@ -44,7 +48,10 @@ export function isCompactionDefinition(value: unknown): value is CompactionDefin
 export function compactionDefinition(policy?: CompactionPolicy): CompactionDefinition | null {
   if (policy === undefined) return null;
   const summary = policy.summarize;
-  const definition = {
+  if (policy.retryOnContextLimit !== undefined && typeof policy.retryOnContextLimit !== "boolean")
+    throw new TypeError("Set compaction.retryOnContextLimit to true or false.");
+  const definition: CompactionDefinition = {
+    ...(policy.retryOnContextLimit && { retryOnContextLimit: true }),
     identity: policy.identity,
     contextWindow: policy.contextWindow,
     keepTokens: policy.keepTokens ?? historyBudgetTokens(policy.contextWindow),
@@ -103,10 +110,25 @@ export function modelConversation(
   messages = conversationOf(snapshot, snapshot.models.length, true),
   previous: CompactionExecution | null = snapshot.compactions.at(-1) ?? null,
 ): AgentMessage[] {
-  const view = snapshot.definition.toolHistory ? pruneToolText(messages) : messages;
-  return previous?.status === "completed"
-    ? compactMessages(view, previous.cut, previous.summary)
-    : view;
+  const pinned = snapshot.definition.compaction?.retryOnContextLimit;
+  const view = pinned || snapshot.definition.toolHistory ? pruneToolText(messages) : messages;
+  if (previous?.status !== "completed") return view;
+  const compacted = compactMessages(view, previous.cut, previous.summary);
+  if (pinned && previous.cut > snapshot.history.length) {
+    // Re-attach the run's original user turn right after the summary so the task is never lost.
+    compacted.splice(1, 0, view[snapshot.history.length]!);
+  }
+  return compacted;
+}
+
+/** Offset from a compacted view back to the original journal. A cut past the task puts
+ * both the summary and the original task before its tail. */
+function cutOffset(snapshot: RunSnapshot, cut: number): number {
+  if (!cut) return 0;
+  return (
+    cut -
+    (snapshot.definition.compaction?.retryOnContextLimit && cut > snapshot.history.length ? 2 : 1)
+  );
 }
 
 function cutFor(
@@ -114,10 +136,20 @@ function cutFor(
   beforeModel: number,
   view: readonly AgentMessage[],
   previousCut = 0,
+  rejected = false,
 ): number {
   const policy = snapshot.definition.compaction;
   if (!policy) return 0;
-  const cut = pickCut(wire(view).messages, policy.keepTokens) + (previousCut ? previousCut - 1 : 0);
+  const messages = wire(view).messages;
+  const offset = cutOffset(snapshot, previousCut);
+  let cut = pickCut(messages, policy.keepTokens) + offset;
+  // A length rejection overrides the advertised window. If that budget keeps everything,
+  // ask core for just its newest intact round rather than retry the same request.
+  const onlyTask =
+    policy.retryOnContextLimit &&
+    snapshot.history.length === previousCut &&
+    cut === previousCut + 1;
+  if (rejected && (cut <= previousCut || onlyTask)) cut = pickCut(messages, 0) + offset;
   // A not-yet-delivered steer must reach the model verbatim, and so must the nudge before it and
   // the finish policy's near-end note after it. These are user boundaries between whole rounds,
   // so capping core's cut here cannot split a call from its result.
@@ -136,29 +168,47 @@ function cutFor(
 
 export function compactionPlan(
   snapshot: RunSnapshot,
+  beforeModel = snapshot.models.length,
+  rejected = false,
 ): { cut: number; sourceCount: number; removed: AgentMessage[] } | undefined {
   const policy = snapshot.definition.compaction;
   if (!policy) return;
   const last = snapshot.compactions.at(-1);
   // Once per boundary, including a crash after the summary was saved but before model admission.
-  if (last?.beforeModel === snapshot.models.length) return;
-  const full = conversationOf(snapshot, snapshot.models.length, true);
+  if (last?.beforeModel === beforeModel) return;
+  const full = conversationOf(snapshot, beforeModel, true);
   const view = modelConversation(snapshot, full);
-  const core = wire(view).messages;
-  const previous = snapshot.models.at(-1);
-  const measured = previous?.status === "completed" && previous.billing === "reported";
-  // The last call counted its input, not its newly added answer, tools or steers.
-  const priorCount = previous
-    ? conversationOf(snapshot, snapshot.models.length - 1, true).length
-    : 0;
-  const count = measured
-    ? previous.usage.inputTokens + conversationTokens(wire(full.slice(priorCount)).messages)
-    : conversationTokens([{ role: "system", content: snapshot.definition.instructions }, ...core]);
-  if (!needsCompaction(count, policy.contextWindow)) return;
-  const cut = cutFor(snapshot, snapshot.models.length, view, last?.cut);
-  const localCut = cut - (last ? last.cut - 1 : 0);
-  if (localCut <= 0 || cut <= (last?.cut ?? 0)) return;
-  return { cut, sourceCount: full.length, removed: view.slice(0, localCut) };
+  if (!rejected) {
+    const core = wire(view).messages;
+    const previous = snapshot.models[beforeModel - 1];
+    let count = conversationTokens([
+      { role: "system", content: snapshot.definition.instructions },
+      ...core,
+    ]);
+    if (previous?.status === "completed" && previous.billing === "reported") {
+      const prior = conversationOf(snapshot, beforeModel - 1, true);
+      // The provider measured the previous request, which already saw `last`. Price only the
+      // change in the view, not all the newly arrived tool text: a pruning cut may have made room.
+      const delta = policy.retryOnContextLimit
+        ? conversationTokens(core) -
+          conversationTokens(wire(modelConversation(snapshot, prior, last ?? null)).messages)
+        : conversationTokens(wire(full.slice(prior.length)).messages);
+      count = previous.usage.inputTokens + delta;
+    }
+    if (!needsCompaction(count, policy.contextWindow)) return;
+  }
+  const previousCut = last?.cut ?? 0;
+  const cut = cutFor(snapshot, beforeModel, view, previousCut, rejected);
+  if (cut <= previousCut) return;
+  const offset = cutOffset(snapshot, previousCut);
+  const removed = view.slice(0, cut - offset);
+  if (policy.retryOnContextLimit && cut > snapshot.history.length) {
+    if (previousCut === snapshot.history.length && cut === previousCut + 1) return;
+    const pinnedIndex =
+      previousCut > snapshot.history.length ? 1 : snapshot.history.length - offset;
+    removed.splice(pinnedIndex, 1);
+  }
+  return { cut, sourceCount: full.length, removed };
 }
 
 export function compactionId(runId: string, index: number): string {
@@ -175,6 +225,7 @@ export function allModels(snapshot: RunSnapshot): ModelExecution[] {
 
 export function checkCompactions(snapshot: RunSnapshot): void {
   let previous: Extract<CompactionExecution, { status: "completed" }> | undefined;
+  let recovered = false;
   for (const [index, entry] of snapshot.compactions.entries()) {
     const policy = snapshot.definition.compaction;
     // Each cut was planned for the request at its boundary, so it is checked against that one.
@@ -184,7 +235,36 @@ export function checkCompactions(snapshot: RunSnapshot): void {
       source.length -
       snapshot.inputs.filter((input) => input.beforeModel === entry.beforeModel).length;
     const view = modelConversation(snapshot, full, previous ?? null);
-    const cut = cutFor(snapshot, entry.beforeModel, view, previous?.cut);
+    const cut = cutFor(snapshot, entry.beforeModel, view, previous?.cut, !!entry.rejectedAttemptId);
+    const turn = snapshot.models[entry.beforeModel];
+    const pendingRetry = turn?.status === "running" && turn.attemptId === entry.rejectedAttemptId;
+    if (entry.rejectedAttemptId) {
+      const refused = pendingRetry
+        ? turn
+        : turn?.interrupted.find((attempt) => attempt.attemptId === entry.rejectedAttemptId);
+      if (
+        recovered ||
+        !policy?.retryOnContextLimit ||
+        snapshot.definition.modelSettings.hostedTools?.length ||
+        !refused ||
+        refused.costUsd !== undefined ||
+        !equalData(refused.usage, EMPTY_USAGE) ||
+        (entry.status === "running" && !pendingRetry)
+      )
+        throw new TypeError(
+          "A context retry needs its own refused attempt with no streamed usage or hosted tools.",
+        );
+      recovered = true;
+    }
+    const fallback = entry.status === "completed" && entry.interruptedSummary === true;
+    if (
+      fallback &&
+      (!policy?.retryOnContextLimit ||
+        !policy.summarize ||
+        entry.summary !== TRIM_NOTE ||
+        entry.model?.status === "completed")
+    )
+      throw new TypeError("An interrupted summary can only use the saved trim note.");
     if (
       !policy ||
       entry.id !== compactionId(snapshot.runId, index) ||
@@ -194,20 +274,23 @@ export function checkCompactions(snapshot: RunSnapshot): void {
       entry.sourceCount < minimumSource ||
       entry.cut !== cut ||
       entry.cut <= (previous?.cut ?? 0) ||
+      (policy.retryOnContextLimit &&
+        previous?.cut === snapshot.history.length &&
+        entry.cut === previous.cut + 1) ||
       entry.cut >= full.length ||
       (entry.status === "running" &&
         (index !== snapshot.compactions.length - 1 ||
-          entry.beforeModel !== snapshot.models.length ||
+          entry.beforeModel !== snapshot.models.length - (pendingRetry ? 1 : 0) ||
           snapshot.state.status === "completed")) ||
       (entry.model && !policy.summarize) ||
-      (entry.status === "completed" && !!entry.model !== !!policy.summarize)
+      (entry.status === "completed" && !fallback && !!entry.model !== !!policy.summarize)
     )
       throw new TypeError("Invalid compaction position or definition.");
     if (
       entry.model &&
       (entry.model.id !== entry.id ||
         entry.model.interrupted.length !== 0 ||
-        entry.model.status !== entry.status ||
+        entry.model.status !== (fallback ? "running" : entry.status) ||
         (entry.model.status === "completed" &&
           (entry.model.tools.length !== 0 ||
             entry.model.turn.message.toolCalls?.length ||
