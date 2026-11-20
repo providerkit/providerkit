@@ -39,8 +39,9 @@ export function createWriter(provider: Provider) {
 ```
 
 Set up routing, fallback models, provider deadlines and retry policy in core. The agent uses that
-provider as supplied; it does not retry a failed live call. Opt-in crash recovery is separate,
-as described under checkpoints and recovery.
+provider as supplied; by default it does not retry a failed live call after output starts. Opt-in
+mid-stream retries for unwatched runs (`retryAfterOutput`) and opt-in crash recovery (`recovery`)
+are separate, as described under [checkpoints and recovery](#checkpoints-and-recovery).
 
 Change the agent's version when its instructions, tools or result contract change. A saved run
 from another version is refused rather than resumed under different rules.
@@ -610,13 +611,20 @@ on each receiving node. `history` and `newMessages` include it in order, without
 calls from results. Session append keeps its original run id and revision, including on resume
 and through handoffs, so a message is not appended twice.
 
-A final answer can win the race with enqueue. Messages arriving after the last poll stay
-`queued`; accepted messages whose call never completed stay unconfirmed. Keep both kinds for
+A final answer can win the race with enqueue. By default, messages arriving after the last poll
+stay `queued`; accepted messages whose call never completed stay unconfirmed. Keep both kinds for
 explicit recall or a new run. Do not display them as read, discard them on completion or start
 another paid run automatically. After the run settles, `inbox.list()` lets the host offer their
 content back to the person. Reconcile any interrupted call before sending it again. An accepted
 message may already be in the session: use the saved history rather than appending that same
 message a second time.
+
+To answer late input before the run settles, opt in with `steering: { answerLateInput: true }` on
+`defineAgent`. When a text answer would end the run and another turn still fits in the run's turn,
+cost and tree model-call budgets, the SDK polls `host.inbox`, accepts any queued messages and runs
+another model turn to answer them instead of leaving them queued for recall. If no budget remains,
+the completed answer settles and late messages stay queued. Checked-output agents still finish on
+`submit_result`, and `stopOnlyAtTools` agents keep steering through their stopping tool.
 
 ### Implement a durable inbox
 
@@ -1935,9 +1943,14 @@ raw histories, notes or events to a browser. Project only approved identities, l
 
 ## Limits and usage
 
-Per-run defaults are 12 model turns, 32 tool calls, 5 minutes, at most 3 approved concurrent
-ordinary tools and 5 MB (`inlineBytes: 5_000_000`) of inline images and files. Change these
-through `limits` when configuring an agent. A call your host refuses or cancels before it starts
+Per-run defaults are 12 model turns, 32 tool calls, 5 minutes wall time (`elapsedMs`), at most 3
+approved concurrent ordinary tools and 5 MB (`inlineBytes: 5_000_000`) of inline images and files.
+Change these through `limits` when configuring an agent. `limits.activeMs` adds an optional
+active-time limit per attempt: it pauses while `host.answerNow` waits for a person in process,
+never counts time spent suspended between attempts, and starts fresh on each resume. Use it when a
+run may wait hours or days for an approval (`elapsedMs` stays the wall-clock cap across resumes)
+while each active working attempt still needs a tight cap. When `activeMs` expires, the run ends
+with `status: "limited"` and `limit: "activeMs"`. A call your host refuses or cancels before it starts
 does not count as a tool call. Once a text agent uses all its model turns, it gets
 one final call with no tools to answer from what it found. That call still counts against the
 tree's model-call and time budgets. Any tool calls it returns are refused. Checked-output agents
@@ -2069,8 +2082,11 @@ The host supplies these callbacks:
   decision }`; a saved decision cannot bypass this check. The callback is required when using
   an answer and before exposing a client-tool request.
 - Optional `needsApproval(call)` requires approval even for an unmarked tool. It cannot waive
-  a tool's own `needsApproval` flag. Optional `answerNow(request)` returns a standing policy
-  decision, or `undefined` to ask the person. This is trusted policy, not model output.
+  a tool's own `needsApproval` flag. Optional `answerNow(request, { signal })` returns a standing
+  policy decision, waits for a person in process under the run's abort signal, or returns
+  `undefined` to leave the request pending and suspend the run. While `answerNow` waits,
+  `limits.activeMs` is paused; `limits.elapsedMs`, `treeLimits.elapsedMs` and the caller's `signal`
+  still abort the wait through `signal`. This is trusted policy, not model output.
 - Optional `screenCall(call, { turn, earlier })` refuses a call before any approval opens for
   it, so nobody is asked about work the host would refuse. See
   [Refuse a call before it runs](#refuse-a-call-before-it-runs).
@@ -2092,8 +2108,13 @@ ship a JSON Schema evaluator. Your host must validate their data. Wrong kinds, f
 unknown or repeated choices, disallowed text and blank answers stay pending with a `problem`.
 Invalid edited arguments become a failed tool result without executing the tool.
 
-You may answer a subset. All approval-required calls remaining in a turn open together, within
-the tool budget. A later call waits behind an earlier open request. Specialists can wait on
+You may answer a subset. By default, all approval-required calls remaining in a turn open together,
+within the tool budget. Set `requests: { onePerTurn: true }` on `defineAgent` to open only the
+first pending request in a turn and suspend, opening the next one on resume after the first settles.
+Set `requests: { validateBeforeAsk: true }` to run each tool's own `accepts(arguments)` (or a
+client tool's argument validator) before opening an approval for it: a call with invalid arguments
+skips approval and returns `invalid_input` to the model so nobody is asked to approve a call that
+would fail. A later call waits behind an earlier open request. Specialists can wait on
 several requests at once; answering one keeps the other requests and completed work intact.
 Usage and admissions do not reset. Cancelling a coordinator's question also stops its unfinished
 children; settled children remain. Progress includes `request` and `decision` events, but these
@@ -2165,6 +2186,30 @@ An operation recorded as running has an unknown outcome after a crash. The defau
 with `interrupted_operation`, not replay. A model may have run provider-hosted tools even if no
 tool call appeared in its stream. A tool may have acted before it could report `InputRequired`.
 Neither an empty stream nor an idempotency key proves that repeating it is safe.
+
+#### Opt in to retry after emitted output
+
+By default, a model stream that fails transiently after chunks arrived fails the run, keeping
+core's rule that a reader never sees tokens twice. For unattended runs whose stream nobody watches,
+opt in with `retryAfterOutput` on `defineAgent`:
+
+```ts
+const summarizer = defineAgent({
+  id: "summarizer",
+  version: "1",
+  instructions: "Summarize the report.",
+  provider,
+  retryAfterOutput: { maxRetries: 2, baseDelayMs: 1_000, maxDelayMs: 30_000 },
+});
+```
+
+When a transient `ProviderError` arrives after chunks were emitted, the SDK drops the partial turn,
+waits with full-jitter exponential backoff and calls the provider again, up to `maxRetries` times
+(1 to 10) per model turn. Each attempt is journaled in `interrupted`, priced through
+`priceModelCall`, emitted with `operation_restart`, and counted toward `usage`, `limits.costUsd`
+and `treeLimits.modelCalls`. Non-transient failures, aborts and deadlines never retry. The option
+is refused at agent definition and at run start when `hostedTools` are set, because a hosted delta
+commits the stream and replaying it would rerun and rebill the vendor's tool.
 
 #### Opt in to safe replay
 
