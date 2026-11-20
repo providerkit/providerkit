@@ -3,6 +3,7 @@ import {
   backoffMs,
   isRetryable,
   parseContextOverflow,
+  parseRetryAfterMs,
   ProviderError,
   sleep,
   ToolRegistry,
@@ -225,6 +226,21 @@ function finishNote(reason: SalvageReason, tools: readonly string[]): string {
       ? "Write your final answer again, shorter,"
       : "Write your best final answer now";
   return `${why} ${ask} from what you have already gathered. Do not request any more tools.`;
+}
+
+function retryDelayMs(
+  error: ProviderError,
+  attempt: number,
+  policy: { baseDelayMs: number; maxDelayMs: number },
+): number | null {
+  const asked = parseRetryAfterMs(error);
+  const resetWait =
+    error.resetAtMs !== undefined ? Math.max(0, error.resetAtMs - Date.now()) : undefined;
+  if (asked !== undefined || resetWait !== undefined) {
+    const wait = Math.max(asked ?? 0, resetWait ?? 0);
+    return wait > policy.maxDelayMs ? null : wait;
+  }
+  return backoffMs(attempt, policy.baseDelayMs, policy.maxDelayMs);
 }
 
 /** Core reports a length finish and its usage, then throws if no answer fit. The finish policy
@@ -2641,13 +2657,14 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         // A checked answer in prose buys a finish turn. Silence did not produce one.
         if (!output) {
           // Opt-in late steering: if the user queued input while the model was writing its final
-          // answer (and another turn fits in the run's and tree's budgets), accept it and run
-          // another turn instead of ending with the message still queued for recall.
+          // answer (and another normal turn fits in the run's and tree's budgets), accept it and
+          // run another turn instead of ending with the message still queued for recall. Never
+          // consume the post-limit tool-free finalTurn slot for late input: that slot exists only
+          // to close out work already done at limits.turns, not to start answering new user input
+          // with tools stripped.
           if (snapshot.definition.steering?.answerLateInput) {
             const nextPos = snapshot.models.length;
-            const canFollowUp =
-              nextPos < limits.turns || (nextPos === limits.turns && !snapshot.definition.finish);
-            if (canFollowUp) {
+            if (nextPos < limits.turns) {
               let hasRoom = true;
               try {
                 scope.tree.reserveModel();
@@ -3396,13 +3413,18 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
               if (finish !== undefined) unsaved(finish, operationId);
               failModel(operationId, !!guardrails?.modelOutput, thrown.error);
             }
-            const delay = backoffMs(retried + 1, retryPolicy.baseDelayMs, retryPolicy.maxDelayMs);
+            const delay = retryDelayMs(thrown.error, retried + 1, retryPolicy);
+            if (delay === null) {
+              if (finish !== undefined) unsaved(finish, operationId);
+              failModel(operationId, !!guardrails?.modelOutput, thrown.error);
+            }
             if (delay > 0) {
               try {
                 await retryAfterOutputSleep(delay, signal);
-              } catch {
+              } catch (sleepError) {
                 active();
-                throw new Halt({ status: "cancelled" });
+                if (signal.aborted) throw new Halt({ status: "cancelled" });
+                throw sleepError;
               }
             }
             active();

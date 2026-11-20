@@ -188,6 +188,80 @@ describe("retryAfterOutput (opt-in for unwatched runs)", () => {
     ).rejects.toThrow(/hostedTools/);
   });
 
+  it("honours retryAfterMs and resetAtMs on mid-stream rate errors, failing if the wait exceeds maxDelayMs", async () => {
+    const sleeps: number[] = [];
+    const rateLimited = (retryAfterMs: number) =>
+      async function* (): AsyncIterable<ProviderChunk> {
+        yield { type: "delta", content: "Partial" };
+        throw new ProviderError("fake", "rate", "Slow down", { retryAfterMs });
+      };
+    const { provider, count } = scriptedProvider(
+      rateLimited(250),
+      cleanAnswer("After retry-after"),
+    );
+    const agent = defineAgent({
+      ...base,
+      provider,
+      retryAfterOutput: {
+        maxRetries: 2,
+        baseDelayMs: 10,
+        maxDelayMs: 500,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    });
+
+    const outcome = await agent.run("Summarize");
+    expect(outcome.status).toBe("completed");
+    if (outcome.status === "completed") expect(outcome.output).toBe("After retry-after");
+    expect(count()).toBe(2);
+    expect(sleeps).toEqual([250]);
+
+    // When the provider's asked wait exceeds maxDelayMs, fail instead of cutting it short.
+    const { provider: longProvider, count: longCount } = scriptedProvider(
+      rateLimited(5_000),
+      cleanAnswer(),
+    );
+    const longAgent = defineAgent({
+      ...base,
+      provider: longProvider,
+      retryAfterOutput: {
+        maxRetries: 2,
+        baseDelayMs: 10,
+        maxDelayMs: 500,
+        sleep: async () => {},
+      },
+    });
+    const failed = await longAgent.run("Summarize");
+    expect(failed.status).toBe("failed");
+    expect(longCount()).toBe(1);
+  });
+
+  it("fails the run instead of cancelling when a custom sleep rejects without an abort", async () => {
+    const { provider, count } = scriptedProvider(async function* () {
+      yield { type: "delta", content: "Half" };
+      throw new ProviderError("fake", "rate", "Drop 1", { retryAfterMs: 50 });
+    }, cleanAnswer());
+    const agent = defineAgent({
+      ...base,
+      provider,
+      retryAfterOutput: {
+        maxRetries: 2,
+        baseDelayMs: 100,
+        maxDelayMs: 1_000,
+        sleep: async () => {
+          throw new Error("sleep exploded");
+        },
+      },
+    });
+
+    const outcome = await agent.run("Summarize");
+    expect(outcome.status).toBe("failed");
+    if (outcome.status === "failed") expect(outcome.error.message).toContain("sleep exploded");
+    expect(count()).toBe(1);
+  });
+
   it("rejects invalid retryAfterOutput configuration", () => {
     const { provider } = scriptedProvider();
     expect(() => defineAgent({ ...base, provider, retryAfterOutput: { maxRetries: 0 } })).toThrow(

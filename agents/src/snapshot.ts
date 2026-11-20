@@ -2261,6 +2261,7 @@ export function readSnapshot(
   // finish turn it calls for.
   const lateInputAfter = (model: ModelExecution, index: number) =>
     raw.definition.steering?.answerLateInput === true &&
+    index + 1 < limits.turns &&
     model.status === "completed" &&
     model.finish === undefined &&
     model.tools.length === 0 &&

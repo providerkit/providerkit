@@ -138,6 +138,26 @@ describe("steering.answerLateInput (opt-in late input turn)", () => {
     expect(inbox.list()[0]?.status).toBe("queued");
   });
 
+  it("does not consume the post-limit tool-free finalTurn slot for late input", async () => {
+    const inbox = createMemoryInbox(runId);
+    const model = wire([text("First answer"), text("Should not run")], (position) => {
+      if (position === 0) inbox.enqueue({ id: "late-1", content: "Also check the table." });
+    });
+    const agent = defineAgent({
+      ...base,
+      provider: model.provider,
+      limits: { turns: 1 },
+      treeLimits: { modelCalls: 4 },
+      steering: { answerLateInput: true },
+    });
+
+    const outcome = await agent.run("Explain indexes.", { runId, host: { inbox } });
+    expect(outcome.status).toBe("completed");
+    if (outcome.status === "completed") expect(outcome.output).toBe("First answer");
+    expect(model.sent).toHaveLength(1);
+    expect(inbox.list()[0]?.status).toBe("queued");
+  });
+
   it("rejects invalid steering configuration", () => {
     const { provider } = wire([]);
     expect(() =>
