@@ -4,6 +4,7 @@
     "module": "ESNext",
     "types": [],
     "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
     "moduleResolution": "bundler",
     "rootDir": "./src",
     "outDir": "./dist",
