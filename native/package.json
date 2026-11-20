@@ -39,11 +39,13 @@
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit && tsc -p test",
-    "lint": "oxlint -c ../.oxlintrc.json src test",
+    "typecheck": "tsc --noEmit && tsc -p test && tsc -p scripts",
+    "lint": "oxlint -c ../.oxlintrc.json src test scripts",
     "test": "vitest run",
+    "check:babel": "bun scripts/check-babel.ts",
+    "check:hermes": "node scripts/check-hermes.ts",
     "sync:docs": "cp ../LICENSE .",
-    "prepublishOnly": "bun run lint && bun run build && bun run typecheck && bun run sync:docs",
+    "prepublishOnly": "bun run lint && bun run build && bun run typecheck && bun run check:babel && bun run check:hermes && bun run sync:docs",
     "release": "bun publish --access public"
   },
   "peerDependencies": {
@@ -52,13 +54,23 @@
     "react-native": ">=0.86"
   },
   "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/runtime": "^7.25.0",
     "@providerkit/react": "workspace:*",
+    "@react-native/babel-preset": "0.86.2",
+    "@react-native/metro-config": "0.86.2",
+    "@types/babel__core": "^7.20.5",
+    "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "happy-dom": "^20.14.5",
+    "hermes-compiler": "250829098.0.16",
+    "nativewind": "5.0.0-preview.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-native": "0.86.2",
+    "react-native-css": "3.0.7",
+    "react-native-worklets": "0.10.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   },
