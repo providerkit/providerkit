@@ -44,4 +44,5 @@ results need a host-selected projection. Never send a raw agent snapshot to a br
 - [Handle questions and client actions](/react/requests/) without treating the browser as an authority.
 - [Use the components](/react/components/) and [your own styles](/react/styles/).
 - [Recover a conversation](/react/recovery/) without replaying a command.
+- [Build on React Native](/react/native/) with your own stream reader and classes.
 - [Connect an AG-UI host](/react/ag-ui/) or [look up an export](/reference/react/).

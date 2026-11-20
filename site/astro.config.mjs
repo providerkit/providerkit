@@ -206,6 +206,7 @@ export default defineConfig({
             { label: "Components and content", slug: "react/components" },
             { label: "Styling", slug: "react/styles" },
             { label: "Recovery and drafts", slug: "react/recovery" },
+            { label: "React Native", slug: "react/native" },
             { label: "AG-UI", slug: "react/ag-ui" },
           ],
         },
