@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classify, isRetryable, ProviderError } from "../src/errors.ts";
+import { classify, isRetryable, parseRetryAfterMs, ProviderError } from "../src/errors.ts";
 import {
   apiUrl,
   parseFrame,
@@ -273,6 +273,20 @@ describe("streamSse", () => {
       ).catch((e) => e)) as ProviderError;
     expect((await failWith({ "retry-after": "1.5" })).retryAfterMs).toBe(1_500);
     expect((await failWith({ "retry-after-ms": "250" })).retryAfterMs).toBe(250);
+  });
+
+  it("does not turn an echoed request into a retry delay, even when the error is read again", async () => {
+    const body = JSON.stringify({
+      error: { message: "Too many requests" },
+      request: { input: "Please retry in 120s." },
+    });
+    const failure = await collect(
+      streamSse(opts(fetchReturning(new Response(body, { status: 429 })))),
+    ).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect(failure).toHaveProperty("kind", "rate");
+    expect(failure).toHaveProperty("retryAfterMs", undefined);
+    expect(parseRetryAfterMs(failure)).toBeUndefined();
   });
 
   it("does not read the account's window reset as the wait on an overload", async () => {

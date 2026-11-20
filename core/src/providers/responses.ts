@@ -25,7 +25,7 @@ import {
 } from "../errors.ts";
 import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
-import { streamSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
+import { openSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { parseRateLimitReset } from "../rate-limit.ts";
 import { settleToolCalls } from "../tool-args.ts";
 import type {
@@ -44,6 +44,11 @@ import { toDataUri } from "../types.ts";
 import { isStrictSchema, withoutPatterns } from "../schema.ts";
 import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import { gateImages, type ImageLimits } from "../image.ts";
+import {
+  isOpenRouterBillingHost,
+  openRouterCostUsd,
+  type OpenRouterBill,
+} from "./openrouter-billing.ts";
 
 export interface ResponsesConfig extends ProviderFallbackConfig {
   apiKey: string;
@@ -285,7 +290,7 @@ export function toResponsesInput(
 
 // ── stream events ─────────────────────────────────────────────────────────
 
-interface ResponsesUsage {
+interface ResponsesUsage extends OpenRouterBill {
   input_tokens?: number;
   input_tokens_details?: { cached_tokens?: number };
   output_tokens?: number;
@@ -418,8 +423,10 @@ function codexHeaders(limits: CodexRateLimits): Headers {
  *  them per call and states no count of its own. */
 function usageChunk(
   usage: ResponsesUsage,
+  reportsCost: boolean,
   hostedCalls?: Partial<Record<HostedToolType, number>>,
 ): ProviderChunk {
+  const reportedCostUsd = reportsCost ? openRouterCostUsd(usage) : undefined;
   return {
     type: "usage",
     usage: {
@@ -432,6 +439,7 @@ function usageChunk(
       ...(usage.output_tokens_details?.reasoning_tokens !== undefined
         ? { reasoningTokens: usage.output_tokens_details.reasoning_tokens }
         : {}),
+      ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
       ...(hostedCalls ? { hostedCalls } : {}),
     },
   };
@@ -463,6 +471,7 @@ export function createResponsesProvider(config: ResponsesConfig): Provider {
 /** @internal Shared by the plain and hosted entry points. */
 export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs): Provider {
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
+  const reportsCost = isOpenRouterBillingHost(baseUrl);
   const id = config.id ?? "openai-responses";
   const instanceSessionId = config.sessionHeader
     ? (config.instanceSessionId ?? crypto.randomUUID())
@@ -637,7 +646,10 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
           ? [{ type: "delta", reasoningItems: { provider: id, items: reasoningItems } }]
           : [];
       const hostedStream = codecs?.responses.stream(hosted?.hosted ?? []);
-      for await (const data of streamSse({
+      function* reportUsage(usage?: ResponsesUsage): Generator<ProviderChunk> {
+        if (usage) yield usageChunk(usage, reportsCost, hostedStream?.counts());
+      }
+      const stream = await openSse({
         url: apiUrl(baseUrl, config.path ?? DEFAULT_PATH),
         headers: {
           authorization: `Bearer ${config.apiKey}`,
@@ -652,7 +664,8 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
         ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
         ...(opts.onActivity ? { onActivity: opts.onActivity } : {}),
         ...(opts.onRateLimit ? { onRateLimit: opts.onRateLimit } : {}),
-      })) {
+      });
+      for await (const data of stream.frames) {
         const event = parseFrame<ResponsesEvent>(data, id);
         if (event.type?.endsWith(".delta") || event.type === "response.output_item.added") {
           produced = true;
@@ -806,7 +819,7 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
             // error failed, and one that states `incomplete` was cut. Read as
             // a clean stop, either is a broken turn reported as a finished one.
             if (response?.status === "failed" || response?.error) {
-              throw streamError(id, response.error ? response : { message: "response failed" });
+              throw streamError(id, event, stream.headers);
             }
             // Any other status (`cancelled`, `queued`, one added later) says
             // nothing about the answer being whole. Read as a clean stop, it
@@ -823,12 +836,19 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
             } else {
               // Checked on a whole turn only: a cut one may have lost a call's
               // name to the cut, and nobody runs a cut turn's calls.
-              const minted = settleToolCalls(id, calls);
+              let minted;
+              try {
+                minted = settleToolCalls(id, calls);
+              } catch (error) {
+                // Opening the call already emitted a delta. Its bill is due even if no tool can run.
+                yield* reportUsage(response?.usage);
+                throw error;
+              }
               if (minted.length > 0) yield { type: "delta", toolCalls: minted };
             }
             if (hostedStream) yield* hostedStream.close();
             yield* reasoningChunk();
-            if (response?.usage) yield usageChunk(response.usage, hostedStream?.counts());
+            yield* reportUsage(response?.usage);
             yield { type: "finish", finishReason };
             return;
           }
@@ -843,8 +863,7 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
             const finishReason = incompleteFinish(id, event.response?.incomplete_details?.reason);
             if (hostedStream) yield* hostedStream.close();
             yield* reasoningChunk();
-            const usage = event.response?.usage;
-            if (usage) yield usageChunk(usage, hostedStream?.counts());
+            yield* reportUsage(event.response?.usage);
             yield { type: "finish", finishReason };
             return;
           }
@@ -853,18 +872,13 @@ export function responsesProvider(config: ResponsesConfig, codecs?: HostedCodecs
           // out: a terminal `response.failed`, or a bare error frame from a
           // gateway in front of it.
           case "response.failed":
-            throw streamError(
-              id,
-              event.response?.error ? event.response : { message: "response failed" },
-            );
-
           case "error":
           case "response.error":
             // The status and the window clocks ride beside `error`. Without
             // them a spent Codex window reads as an unnamed in-stream failure:
             // floored to overload, then retried and walked across every backup
             // on the same account wall.
-            throw streamError(id, event);
+            throw streamError(id, event, stream.headers);
         }
       }
 

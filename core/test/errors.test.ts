@@ -613,6 +613,55 @@ describe("retry-after — honouring it beats guessing", () => {
     expect(parseRetryAfterMs(apiError(429, { retryDelay: "1.5s" }))).toBe(1_500);
   });
 
+  it("reads Google's wait from the message only when no explicit delay is available", () => {
+    const message = "Please retry in 3.365734019s.";
+    expect(parseRetryAfterMs(apiError(429, [{ error: { message } }]))).toBe(3_366);
+    expect(parseRetryAfterMs(apiError(429, { message, details: [{ retryDelay: "3s" }] }))).toBe(
+      3_000,
+    );
+    for (const headers of [
+      { "Retry-After": "8", "unrelated invalid name": "ignore" },
+      new Headers({ "retry-after-ms": "8000", "Retry-After": "10" }),
+    ]) {
+      expect(
+        ProviderError.from("gemini", apiError(429, { message }, { headers })).retryAfterMs,
+      ).toBe(8_000);
+    }
+    expect(parseRetryAfterMs(new Error("Please retry in 200ms."))).toBeUndefined();
+    expect(parseRetryAfterMs(new Error(`Please retry in ${"9".repeat(310)}s.`))).toBeUndefined();
+  });
+
+  it("reads the wait on the next line of a JSON error in HTTP and streaming replies", () => {
+    const envelope = {
+      error: { code: 429, message: "Too many requests.\nPlease retry in 3.365734019s." },
+    };
+    expect([
+      parseRetryAfterMs({}, JSON.stringify(envelope)),
+      streamError("gemini", envelope).retryAfterMs,
+    ]).toEqual([3_366, 3_366]);
+  });
+
+  it("uses the same explicit wait on raw and wrapped SDK errors", () => {
+    const message = "Please retry in 1s.";
+    for (const err of [
+      apiError(429, { retry_after_seconds: 8, message }),
+      apiError(429, { message: "Try again in 2s." }, { retryAfterMs: 8_000 }),
+      apiError(429, { message }, { headers: { "x-ratelimit-reset-requests": "8s" } }),
+      apiError(429, {
+        message: "The previous retryDelay=1s expired. Try again in 2s.",
+        details: [{ retryDelay: "8s" }],
+      }),
+    ]) {
+      expect(parseRetryAfterMs(err)).toBe(8_000);
+      expect(ProviderError.from("test", err).retryAfterMs).toBe(8_000);
+    }
+  });
+
+  it("reads an SDK's own message when its error body names no delay", () => {
+    const err = apiError(429, { status: "RESOURCE_EXHAUSTED" }, { message: "Please retry in 1s." });
+    expect(ProviderError.from("test", err).retryAfterMs).toBe(1_000);
+  });
+
   it("Retry-After header in seconds, as a Headers instance", () => {
     const err = apiError(429, {}, { headers: new Headers({ "retry-after": "30" }) });
     expect(parseRetryAfterMs(err)).toBe(30_000);

@@ -36,7 +36,14 @@ export {
   type RequestInit_,
   type SseHooks,
 } from "./transport.ts";
-export * from "./rate-limit.ts";
+export {
+  parseRateLimitReset,
+  parseRateLimitResponse,
+  parseUsageLimitBody,
+  type RateLimitReading,
+  type RateLimitReset,
+  type RateLimitWindow,
+} from "./rate-limit.ts";
 export * from "./tool-args.ts";
 export * from "./tool-markup.ts";
 export * from "./tools.ts";
@@ -55,11 +62,11 @@ export {
   createOpenAIProvider,
   toOpenAIMessages,
   effortParams,
-  openRouterCostUsd,
   openRouterHostFor,
   type OpenAIConfig,
   type EffortDialect,
 } from "./providers/openai.ts";
+export { openRouterCostUsd } from "./providers/openrouter-billing.ts";
 export {
   createResponsesProvider,
   toResponsesInput,

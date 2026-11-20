@@ -17,7 +17,7 @@ import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAnthropicToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls, type ToolCallIdentity } from "../tool-args.ts";
-import { streamSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
+import { openSse, apiUrl, parseFrame, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { attributionHeaders } from "../attribution.ts";
 import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
@@ -766,7 +766,7 @@ export function anthropicProvider(config: AnthropicConfig, codecs?: HostedCodecs
         );
         const payload = hostedStream?.payload({ ...request, messages }) ?? { ...request, messages };
 
-        read: for await (const data of streamSse({
+        const stream = await openSse({
           url: apiUrl(baseUrl, "/v1/messages"),
           headers,
           body: payload,
@@ -778,7 +778,8 @@ export function anthropicProvider(config: AnthropicConfig, codecs?: HostedCodecs
           // The stop reason rides in `message_delta` with the final usage, so a
           // read that dies after it loses nothing but `message_stop`.
           finished: () => stopped,
-        })) {
+        });
+        read: for await (const data of stream.frames) {
           const event = parseFrame<AnthropicEvent>(data, id);
           if (hostedStream) yield* hostedStream.event(event);
 
@@ -788,7 +789,7 @@ export function anthropicProvider(config: AnthropicConfig, codecs?: HostedCodecs
             // most of the time, but a prompt found too long mid-stream arrives the
             // same way, and retrying that one only fails it again more slowly.
             case "error":
-              throw streamError(id, event);
+              throw streamError(id, event, stream.headers);
 
             case "message_start": {
               const usage = event.message?.usage;

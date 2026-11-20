@@ -1310,16 +1310,17 @@ describe("provider-reported cost", () => {
     ).not.toHaveProperty("reportedCostUsd");
   });
 
-  it("reads no cost from an endpoint that is not OpenRouter", async () => {
-    // `usage.cost` is OpenRouter's field, in OpenRouter's unit. Another
-    // gateway that happens to send one has not told us what it means.
-    expect(await usageFrom(OPENROUTER_USAGE, "https://api.deepseek.com")).toEqual({
-      inputTokens: 1_200,
-      cachedInputTokens: 1_000,
-      outputTokens: 40,
-      reasoningTokens: 0,
-    });
-  });
+  it.each(["https://api.deepseek.com", "https://openrouter.ai.example.org"])(
+    "reads no dollar cost from %s",
+    async (url) => {
+      expect(await usageFrom(OPENROUTER_USAGE, url)).toEqual({
+        inputTokens: 1_200,
+        cachedInputTokens: 1_000,
+        outputTokens: 40,
+        reasoningTokens: 0,
+      });
+    },
+  );
 });
 
 describe("what the OpenAI dialect cannot carry", () => {

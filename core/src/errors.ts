@@ -10,12 +10,7 @@
 // read before the status — status alone gives the wrong advice ("retry" for an
 // empty balance, "check your key" for a plan that never included the API).
 
-import {
-  parseRateLimitReset,
-  parseRateLimitResponse,
-  parseUsageLimitBody,
-  type RateLimitWindow,
-} from "./rate-limit.ts";
+import { failureReset, type RateLimitReset, type RateLimitWindow } from "./rate-limit.ts";
 import type { FilePart } from "./types.ts";
 
 /** What kind of failure this is, named by what actually fixes it. */
@@ -176,12 +171,11 @@ export class ProviderError extends Error {
     const code = readString(err, "code") ?? readString(err, "type");
     const message = messageOf(err);
     const body = bodyTextOf(err);
-    const resetBody = providerBodyOf(err) ?? body;
-    return new ProviderError(provider, classify(err, status, body), message, {
+    const kind = classify(err, status, body);
+    return new ProviderError(provider, kind, message, {
       status,
       code,
-      retryAfterMs: parseRetryAfterMs(err, resetBody),
-      ...parseUsageLimitBody(resetBody),
+      ...sdkReset(err, kind),
       body: body.slice(0, 2_000) || undefined,
       cause: err,
     });
@@ -666,38 +660,51 @@ export function classify(err: unknown, status?: number, body?: string): ErrorKin
   return "unknown";
 }
 
-/**
- * How long the provider asked us to wait, in ms. Two dialects: Gemini's
- * RetryInfo (`"retryDelay": "52s"`, inside the body) and the `Retry-After`
- * header, which SDKs keep on the error. Honouring it beats guessing: a
- * backoff shorter than the window just burns an attempt.
- */
-export function parseRetryAfterMs(err: unknown, body?: string): number | undefined {
-  // Adapters already normalized the response headers. Re-parsing only the body
-  // discarded this property and made retries ignore their own Retry-After.
-  const normalized = readNumber(err, "retryAfterMs");
-  if (normalized !== undefined && Number.isFinite(normalized) && normalized >= 0) return normalized;
-  const text = body ?? bodyTextOf(err);
-  const usageLimit = parseUsageLimitBody(text);
-  if (usageLimit.retryAfterMs !== undefined) return usageLimit.retryAfterMs;
-  const delay = text.match(/"?retryDelay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)s"?/i);
-  if (delay?.[1]) return Math.round(parseFloat(delay[1]) * 1000);
+function normalizedWait(err: unknown): number | undefined {
+  const ms = readNumber(err, "retryAfterMs");
+  return ms !== undefined && Number.isFinite(ms) && ms >= 0 ? ms : undefined;
+}
 
-  if (typeof err !== "object" || err === null) return undefined;
-  const headers = (err as { headers?: unknown }).headers;
-  const value =
-    headers instanceof Headers
-      ? headers.get("retry-after")
-      : typeof headers === "object" && headers !== null
-        ? (headers as Record<string, unknown>)["retry-after"]
-        : undefined;
-  if (typeof value !== "string") return undefined;
-  // Seconds, or an HTTP-date — both are legal per RFC 9110. Seconds are read
-  // as a NUMBER first: `Date.parse("1.5")` is a day in 2001, a wait of zero.
-  const seconds = Number(value.trim());
-  if (value.trim() !== "" && Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const date = Date.parse(value);
-  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+function sdkReset(err: unknown, kind: ErrorKind, body?: string): RateLimitReset {
+  const message = typeof err === "string" ? err : readString(err, "message");
+  let payload = body ?? providerBodyOf(err);
+  if (err instanceof ProviderError) payload ??= err.body;
+  if (payload === undefined && typeof err === "object" && !(err instanceof Error)) {
+    payload = providerBodyOf({ error: err });
+  }
+  const headers = errorHeaders(err);
+  // Some SDKs repeat the entire JSON reply after a status prefix in Error.message.
+  // Do not search that copy when the real envelope says nothing about a wait.
+  const plainMessage = message && !/[{[]/.test(message) ? message : undefined;
+  return failureReset(payload ?? message ?? "", {
+    headers,
+    accountWindow: kind === "rate" || kind === "quota" || (kind === "unknown" && !headers),
+    normalizedDelay: normalizedWait(err),
+    fallbackMessage: err instanceof ProviderError ? undefined : plainMessage,
+  });
+}
+
+/** How long the provider asked us to wait, in ms. */
+export function parseRetryAfterMs(err: unknown, body?: string): number | undefined {
+  return normalizedWait(err) ?? sdkReset(err, classify(err, undefined, body), body).retryAfterMs;
+}
+
+/** SDK errors and stream envelopes can carry headers as plain objects. */
+function errorHeaders(source: unknown): Headers | undefined {
+  if (typeof source !== "object" || source === null || !("headers" in source)) return undefined;
+  const raw = source.headers;
+  if (raw instanceof Headers) return raw;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== "string" && typeof value !== "number") continue;
+    try {
+      headers.set(name, String(value));
+    } catch {
+      // A malformed header must not mask the original failure or the other retry hints.
+    }
+  }
+  return headers;
 }
 
 export interface ContextOverflowInfo {
@@ -804,18 +811,27 @@ const STATUS_BY_TYPE: ReadonlyMap<string, number> = new Map([
  * body does name keeps its own kind, which is what tells the caller to wait,
  * rotate a key, or compact instead of retrying a failure that will repeat.
  */
-export function streamError(provider: string, envelope: unknown): ProviderError {
+export function streamError(
+  provider: string,
+  envelope: unknown,
+  responseHeaders?: Headers,
+): ProviderError {
   // Only failure data is searchable or logged. A failed Responses object can
   // echo instructions, tool definitions and output alongside its error.
-  const outer =
-    typeof envelope === "object" && envelope !== null ? (envelope as Record<string, unknown>) : {};
-  const error = outer.error ?? outer.errors ?? envelope;
-  const body = JSON.stringify(error ?? {}) ?? "";
+  const outer = recordOf(envelope) ?? {};
+  const response = recordOf(outer.response);
+  let error = response?.error ?? outer.error ?? outer.errors;
+  if (error == null) {
+    error =
+      response || outer.type === "response.failed" ? { message: "response failed" } : envelope;
+  }
+  const body = failureJson(error ?? {});
   const status = [
     readNumber(error, "code"),
     readNumber(error, "status"),
     readNumber(error, "status_code"),
-    readNumber(envelope, "status_code"),
+    readNumber(outer, "status_code"),
+    readNumber(response, "status_code"),
   ].find((value) => value !== undefined && value >= 400 && value < 600);
   const code =
     readString(error, "code") ?? readString(error, "status") ?? readString(error, "type");
@@ -839,35 +855,62 @@ export function streamError(provider: string, envelope: unknown): ProviderError 
     {
       ...(status !== undefined ? { status } : {}),
       ...(code ? { code } : {}),
-      ...readReset(envelope, error, body, kind),
+      ...readReset(outer, response, error, kind, responseHeaders),
       body: body.slice(0, 2_000),
     },
   );
 }
 
-/** Read reset metadata without copying echoed request data into diagnostics.
- *  Mirrored account windows describe only rate/quota failures, not a 503. */
-function readReset(envelope: unknown, error: unknown, body: string, kind: ErrorKind) {
-  const headers = new Headers();
-  for (const source of [error, envelope]) {
-    if (typeof source !== "object" || source === null || !("headers" in source)) continue;
-    const raw = source.headers;
-    if (typeof raw !== "object" || raw === null) continue;
-    for (const [name, value] of Object.entries(raw)) {
-      if (typeof value === "string" || typeof value === "number") headers.set(name, String(value));
-    }
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+// Gateways can mirror request fields or headers even inside a flat error.
+const ECHOED_FIELDS = new Set([
+  "headers",
+  "request",
+  "response",
+  "instructions",
+  "input",
+  "output",
+  "tools",
+]);
+
+function failureJson(value: unknown): string {
+  return (
+    JSON.stringify(value, (key, field: unknown) => (ECHOED_FIELDS.has(key) ? undefined : field)) ??
+    ""
+  );
+}
+
+/** A gateway can put retry hints beside its nested error. Never scan the whole
+ *  event for them: an echoed prompt could name a different failure or delay. */
+function readReset(
+  outer: Record<string, unknown>,
+  response: Record<string, unknown> | undefined,
+  error: unknown,
+  kind: ErrorKind,
+  responseHeaders?: Headers,
+): RateLimitReset {
+  const headers = new Headers(errorHeaders(error));
+  for (const source of [errorHeaders(response), errorHeaders(outer), responseHeaders]) {
+    source?.forEach((value, name) => headers.set(name, value));
   }
-  if (kind !== "rate" && kind !== "quota") {
-    return {
-      retryAfterMs: parseRateLimitReset(headers).retryAfterMs ?? parseRetryAfterMs(error, body),
-    };
-  }
-  const metadata =
-    typeof envelope === "object" && envelope !== null && "metadata" in envelope
-      ? envelope.metadata
-      : undefined;
-  const reset = parseRateLimitResponse(headers, JSON.stringify({ error, metadata }));
-  return { ...reset, retryAfterMs: reset.retryAfterMs ?? parseRetryAfterMs(error, body) };
+  const body = failureJson({
+    error,
+    metadata: {
+      resetsAt:
+        readString(outer.metadata, "resetsAt") ?? readString(response?.metadata, "resetsAt"),
+    },
+    retry_after_seconds: outer.retry_after_seconds ?? response?.retry_after_seconds,
+  });
+  // Standing account windows describe a throttle, not an unrelated 503.
+  return failureReset(body, {
+    headers,
+    accountWindow: kind === "rate" || kind === "quota",
+  });
 }
 
 /**

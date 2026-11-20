@@ -22,7 +22,7 @@ import type { HostedToolType } from "../hosted/types.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAntigravityToolSchema, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
-import { streamSse, apiUrl, withRedactedErrors, type FetchLike } from "../transport.ts";
+import { openSse, apiUrl, withRedactedErrors, type FetchLike } from "../transport.ts";
 import { configuredFallbacks, type ProviderFallbackConfig } from "../fallback.ts";
 import type {
   ChatMessage,
@@ -689,7 +689,7 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
       for (let baseIdx = 0; baseIdx < bases.length; baseIdx++) {
         const currentBase = bases[baseIdx]!;
         try {
-          for await (const data of streamSse({
+          const stream = await openSse({
             // Without `?alt=sse` the response is one long JSON array that only
             // parses once complete, which is not a stream.
             url: apiUrl(currentBase, path),
@@ -704,7 +704,8 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
             // the end: a read that dies after it can cost a late usage record, never
             // the answer.
             finished: () => finished,
-          })) {
+          });
+          for await (const data of stream.frames) {
             let parsed: GeminiResponse & { response?: GeminiResponse };
             try {
               parsed = JSON.parse(data) as GeminiResponse & { response?: GeminiResponse };
@@ -716,7 +717,7 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
             // `?alt=sse` commits to 200 the moment the headers go out, so a
             // throttle or an overload landing after that arrives here as a
             // google.rpc.Status in the body rather than as a status line.
-            if (chunk.error) throw streamError(id, chunk);
+            if (chunk.error) throw streamError(id, parsed, stream.headers);
             // A blocked PROMPT has no candidate to finish, so it reads as a cut
             // stream — retried, into the same block. It is a content failure.
             const blocked = chunk.promptFeedback?.blockReason;

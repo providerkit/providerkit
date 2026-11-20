@@ -253,13 +253,6 @@ function windowForMs(ms: number): RateLimitWindow {
   return "monthly";
 }
 
-/** A wait read off a body, named as a window once it is long enough to be one. */
-function resetAfter(waitMs: number, now: number): RateLimitReset {
-  const result: RateLimitReset = { retryAfterMs: waitMs, resetAtMs: now + waitMs };
-  if (waitMs > WINDOW_FLOOR_MS) result.window = windowForMs(waitMs);
-  return result;
-}
-
 /** A finite number off a JSON field, the string form a relay may stringify it
  *  into included. Bare `Number()` is the trap `numeric()` guards against one
  *  layer up: `Number(null)`, `Number("")`, `Number([])` and `Number(false)` are
@@ -279,7 +272,16 @@ const PROSE_RETRY_PATTERNS = [
   /retry[- ]after[:\s]+(\d+(?:\.\d+)?)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:(?:ou)?rs?)?)?/i,
 ];
 
+function secondsMs(value: unknown): number | undefined {
+  const seconds = jsonSeconds(value);
+  if (seconds === undefined || seconds < 0) return undefined;
+  const ms = Math.round(seconds * 1000);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
 function parseProseRetryMs(text: string): number | undefined {
+  const google = text.match(/\bplease retry in (\d+(?:\.\d+)?)\s*s\b/i);
+  if (google) return secondsMs(google[1]);
   for (const pattern of PROSE_RETRY_PATTERNS) {
     const match = text.match(pattern);
     if (!match?.[1]) continue;
@@ -287,76 +289,128 @@ function parseProseRetryMs(text: string): number | undefined {
     if (!Number.isFinite(val) || val <= 0) continue;
     const unit = (match[2] ?? "s").toLowerCase();
     const multiplier = unit.startsWith("h") ? 3_600_000 : unit.startsWith("m") ? 60_000 : 1_000;
-    return Math.ceil(val * multiplier);
+    const ms = Math.ceil(val * multiplier);
+    if (Number.isFinite(ms)) return ms;
   }
   return undefined;
 }
 
-/**
- * ChatGPT's codex backend puts the reset IN THE 429 BODY, not the headers:
- * `{"error":{"type":"usage_limit_reached","resets_at":1788801754,"resets_in_seconds":2501465}}`.
- * Other providers and gateways (LiteLLM, Cloudflare, Ollama) report countdowns in prose:
- * `Rate limit exceeded. Try again in 20s.`
- * The window name is inferred from the wait itself, and only past the floor
- * above. A sub-minute retry is a throttle, not a subscription window.
- */
-export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLimitReset {
-  let body: unknown;
+/** SDKs may append a serialized reply to a status line. Only the text before it is
+ *  prose: a partial JSON body cannot tell us which words belong to the provider. */
+function plainMessageDelay(text: string): number | undefined {
+  const jsonAt = text.search(/\{|\[/u);
+  return parseProseRetryMs(jsonAt < 0 ? text : text.slice(0, jsonAt));
+}
+
+function fields(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+interface BodyHints {
+  accountAt?: number;
+  delay?: number;
+  prose?: number;
+}
+
+/** A real account reset survives a shorter Retry-After. A guess from prose does not. Keep
+ *  those sources separate until the headers are known. Never scan a serialized request: a
+ *  gateway may echo the entire prompt alongside its error. */
+function bodyHints(text: string, now: number): BodyHints {
+  let decoded: unknown;
   try {
-    body = JSON.parse(bodyText);
+    decoded = JSON.parse(text);
   } catch {
-    body = undefined;
+    return { prose: plainMessageDelay(text) };
   }
-
-  if (typeof body === "object" && body !== null) {
-    const source = (body as Record<string, unknown>).error;
-    const error =
-      typeof source === "object" && source !== null
-        ? (source as Record<string, unknown>)
-        : (body as Record<string, unknown>);
-
-    // OpenCode puts a budget's ISO reset in envelope metadata, or in Google's
-    // ErrorInfo details. It names the real horizon, not a short retry hint.
-    const envelopes: unknown[] = [
-      body,
-      error,
-      ...(Array.isArray(error.details) ? error.details : []),
-    ];
-    let metadataReset = -Infinity;
-    for (const envelope of envelopes) {
-      if (typeof envelope !== "object" || envelope === null || !("metadata" in envelope)) continue;
-      const metadata = envelope.metadata;
-      if (
-        typeof metadata !== "object" ||
-        metadata === null ||
-        !("resetsAt" in metadata) ||
-        typeof metadata.resetsAt !== "string"
-      )
-        continue;
-      const at = Date.parse(metadata.resetsAt);
-      if (Number.isFinite(at)) metadataReset = Math.max(metadataReset, at);
-    }
-
-    const inSeconds = jsonSeconds(error.resets_in_seconds);
-    const atSeconds = jsonSeconds(error.resets_at);
-    // The plain wait some gateways put in the error body instead of a header,
-    // under either name (cc-proxy reads both off the ChatGPT backend's frames).
-    const afterSeconds =
-      jsonSeconds(error.retry_after) ??
-      jsonSeconds(error.retry_after_seconds) ??
-      jsonSeconds((body as Record<string, unknown>).retry_after_seconds);
-    let waitMs: number | undefined;
-    if (inSeconds !== undefined && inSeconds >= 0) waitMs = inSeconds * 1000;
-    else if (atSeconds !== undefined && atSeconds > 0) waitMs = Math.max(0, atSeconds * 1000 - now);
-    else if (afterSeconds !== undefined && afterSeconds >= 0) waitMs = afterSeconds * 1000;
-    if (waitMs !== undefined || Number.isFinite(metadataReset)) {
-      return resetAfter(Math.max(0, waitMs ?? 0, metadataReset - now), now);
+  if (typeof decoded === "string") return { prose: parseProseRetryMs(decoded) };
+  const hints: BodyHints = {};
+  for (const row of Array.isArray(decoded) ? decoded : [decoded]) {
+    const outer = fields(row);
+    if (!outer) continue;
+    const error = fields(outer.error) ?? outer;
+    const message = typeof outer.error === "string" ? outer.error : error.message;
+    if (typeof message === "string") hints.prose ??= parseProseRetryMs(message);
+    // Codex's relative reset is authoritative when it also gives an epoch. Gateways
+    // can add a later account reset in metadata, including on a Google ErrorInfo detail.
+    const relative = secondsMs(error.resets_in_seconds);
+    const epoch = secondsMs(error.resets_at);
+    const at = relative !== undefined ? now + relative : epoch;
+    if (at !== undefined && at > 0) hints.accountAt = Math.max(hints.accountAt ?? now, at);
+    hints.delay ??=
+      secondsMs(error.retry_after) ??
+      secondsMs(error.retry_after_seconds) ??
+      secondsMs(outer.retry_after_seconds);
+    const details: unknown[] = Array.isArray(error.details) ? error.details : [];
+    for (const value of [outer, error, ...details]) {
+      const item = fields(value);
+      const deadline = fields(item?.metadata)?.resetsAt;
+      if (typeof deadline === "string") {
+        const ms = Date.parse(deadline);
+        if (Number.isFinite(ms)) hints.accountAt = Math.max(hints.accountAt ?? now, ms);
+      }
+      // RetryInfo spells even whole seconds as a string. A mention of "retryDelay=1s"
+      // inside the model's error message is not this field.
+      if (typeof item?.retryDelay === "string") {
+        hints.delay ??= secondsMs(/^(\d+(?:\.\d+)?)s$/.exec(item.retryDelay)?.[1]);
+      }
     }
   }
+  return hints;
+}
 
-  // If structured JSON did not yield a reset, check prose wording
-  const waitMs = parseProseRetryMs(bodyText);
-  return waitMs === undefined ? {} : resetAfter(waitMs, now);
+interface HintOptions {
+  headers?: Headers;
+  accountWindow?: boolean;
+  normalizedDelay?: number;
+  fallbackMessage?: string;
+}
+
+function mergedReset(text: string, options: HintOptions, now: number): RateLimitReset {
+  const header = options.headers ? parseRateLimitReset(options.headers, now) : {};
+  const body = bodyHints(text, now);
+  const aboutWindow = options.accountWindow !== false;
+  const explicit = options.normalizedDelay ?? header.retryAfterMs;
+  // A Retry-After header alone supplies no independent account horizon. In particular,
+  // it cannot restore a longer delay that the caller has already normalized.
+  let headerAt = aboutWindow ? header.resetAtMs : undefined;
+  if (
+    header.retryAfterMs !== undefined &&
+    headerAt === now + header.retryAfterMs &&
+    !header.window
+  ) {
+    headerAt = undefined;
+  }
+  const accountAt = aboutWindow ? body.accountAt : undefined;
+  let bodyWait = body.delay;
+  if (accountAt !== undefined) bodyWait = Math.max(accountAt - now, bodyWait ?? 0);
+  if (explicit === undefined && headerAt === undefined && bodyWait === undefined) {
+    bodyWait = body.prose ?? parseProseRetryMs(options.fallbackMessage ?? "");
+  }
+  const delay = explicit ?? bodyWait;
+  if (!aboutWindow) return delay === undefined ? {} : { retryAfterMs: delay };
+  const end = Math.max(headerAt ?? 0, accountAt ?? 0, delay === undefined ? 0 : now + delay);
+  const bodySetsEnd =
+    end > 0 &&
+    (end === accountAt ||
+      (explicit === undefined && bodyWait !== undefined && end === now + bodyWait));
+  let window: RateLimitWindow | undefined;
+  if (header.window && headerAt === end) {
+    window = header.window;
+  } else if (bodySetsEnd && end - now > WINDOW_FLOOR_MS) {
+    window = windowForMs(end - now);
+  }
+  return {
+    ...(end > 0 ? { resetAtMs: end } : {}),
+    ...(delay !== undefined ? { retryAfterMs: delay } : {}),
+    ...(window ? { window } : {}),
+  };
+}
+
+/** Read a usage deadline, RetryInfo field or wait stated in the provider's own message. */
+export function parseUsageLimitBody(bodyText: string, now = Date.now()): RateLimitReset {
+  return mergedReset(bodyText, {}, now);
 }
 
 /** Read both places an endpoint can report its reset. A short Retry-After is
@@ -366,17 +420,16 @@ export function parseRateLimitResponse(
   bodyText: string,
   now = Date.now(),
 ): RateLimitReset {
-  const header = parseRateLimitReset(headers, now);
-  const body = parseUsageLimitBody(bodyText, now);
-  const resetAtMs = Math.max(header.resetAtMs ?? 0, body.resetAtMs ?? 0);
-  const retryAfterMs = header.retryAfterMs ?? body.retryAfterMs;
-  const window =
-    body.resetAtMs !== undefined && body.resetAtMs > (header.resetAtMs ?? 0)
-      ? body.window
-      : (header.window ?? body.window);
-  return {
-    ...(resetAtMs > 0 ? { resetAtMs } : {}),
-    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
-    ...(window ? { window } : {}),
-  };
+  return mergedReset(bodyText, { headers }, now);
+}
+
+/** @internal A failed rate-limited call can use a known account deadline as its wait even
+ *  without Retry-After. Standing account headers say nothing about unrelated failures. */
+export function failureReset(bodyText: string, options: HintOptions): RateLimitReset {
+  const now = Date.now();
+  const reset = mergedReset(bodyText, options, now);
+  if (reset.retryAfterMs === undefined && reset.resetAtMs !== undefined) {
+    reset.retryAfterMs = Math.max(0, reset.resetAtMs - now);
+  }
+  return reset;
 }

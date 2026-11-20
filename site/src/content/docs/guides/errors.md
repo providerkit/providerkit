@@ -156,9 +156,9 @@ status and no type it knows gets there. Everything the body does name keeps its 
 
 ## Retry-After
 
-`parseRetryAfterMs` reads a server-requested wait from a `Retry-After` header (both the seconds
-and the HTTP-date form) and from Gemini's `RetryInfo` body, where the delay is a string like
-`"48s"`. It lands on `err.retryAfterMs`.
+`parseRetryAfterMs` reads the wait from a `Retry-After` header or Gemini's `retryDelay` field.
+If Gemini gives the wait only in the message, `Please retry in 3.365734019s.` sets
+`err.retryAfterMs` to `3366`. A delay in the header or field takes precedence over the message.
 
 A long one is information, not just a delay: a wait measured in hours is a usage window, not a
 blip, and a run is usually better off failing fast with the reset time than sleeping into the
