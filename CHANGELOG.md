@@ -2,14 +2,14 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
-## [Unreleased]
+## [0.35.1] - 2026-11-20
 
 ### Fixed
 
-- On OpenRouter's Responses API, `usage.reportedCostUsd` now includes the bill for a completed call or one cut short by its output limit. If you bring your own key, it includes both OpenRouter's fee and the upstream charge. Both chat adapters use your rate when either part of that bill is missing or when a different host reports a `cost` in unknown units.
-- Gemini sometimes gives a retry delay only in the error message. Core now reads `Please retry in 3.365734019s.` as 3,366 ms. An explicit header or structured delay still wins.
+- On OpenRouter's Responses API, `usage.reportedCostUsd` now includes the bill for a completed call or one cut short by its output limit. If you bring your own key, it includes both OpenRouter's fee and the upstream charge. Both chat adapters fall back to your own rate when either part of that bill is missing or when another host reports `cost` in unknown units.
+- Retry delays now follow one order across HTTP responses, streamed errors and wrapped SDK errors: HTTP headers and structured fields such as `RetryInfo` always beat prose in the message, and echoed prompt fields are not read as wait times. When Gemini gives a wait only in the error text, Core reads `Please retry in 3.365734019s.` as 3,366 ms, including across multiline error text.
 - On the OpenAI chat adapter, `effort: "none"` now sends `reasoning_effort: "minimal"` for `gpt-5-mini`, which refuses `"none"`. Leaving `effort` unset still omits the field, and other models keep `"none"`.
-- `requireContent` now yields its held usage and finish chunks before throwing `ProviderError` with code `output_cap_before_answer` when a turn hits `length` with no answer, so callers handling the cut still see the finish reason and billed usage even when no reasoning streamed.
+- `requireContent` now yields its held usage and finish chunks before throwing `ProviderError` with code `output_cap_before_answer` when a turn hits `length` with no answer, so callers handling the cut still see the finish reason and billed usage even when no reasoning streamed. On Responses, confirmed usage is also yielded before throwing on a nameless tool call.
 
 ## [0.35.0] - 2026-11-19
 

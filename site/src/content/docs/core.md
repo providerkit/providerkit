@@ -4,7 +4,7 @@ description: Call models, stream answers and handle provider failures with @prov
 ---
 
 Core calls providers and handles their failures. Use it under your own loop or with
-[Agents](/agents/). This site documents **0.35.0**.
+[Agents](/agents/). This site documents **0.35.1**.
 
 ```ts
 isTransient("overload"); // true
