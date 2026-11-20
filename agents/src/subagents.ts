@@ -176,13 +176,15 @@ export function subagentLimits(base: RunLimits, lower?: Partial<RunLimits>): Run
   if (
     lower !== undefined &&
     (!isRecord(lower) ||
-      Object.keys(lower).some((key) => key !== "costUsd" && !Object.hasOwn(base, key)) ||
+      Object.keys(lower).some(
+        (key) => key !== "costUsd" && key !== "activeMs" && !Object.hasOwn(base, key),
+      ) ||
       Object.entries(lower).some(([key, value]) => {
-        // No cost limit is the highest one, so a host may give a helper a cost limit of its own.
-        const ceiling =
-          key === "costUsd"
-            ? (base.costUsd ?? Infinity)
-            : Object.entries(base).find(([name]) => name === key)?.[1];
+        // An absent optional limit is unbounded, so a host may give a helper one of its own.
+        let ceiling: number | undefined;
+        if (key === "costUsd") ceiling = base.costUsd ?? Infinity;
+        else if (key === "activeMs") ceiling = base.activeMs ?? Infinity;
+        else ceiling = Object.entries(base).find(([name]) => name === key)?.[1];
         return typeof value !== "number" || ceiling === undefined || value > ceiling;
       }))
   )
@@ -236,6 +238,7 @@ function readDraft(raw: unknown, host = false): SubagentDraft {
       "turns",
       "toolCalls",
       "elapsedMs",
+      "activeMs",
       "parallelTools",
       "inlineBytes",
       "costUsd",

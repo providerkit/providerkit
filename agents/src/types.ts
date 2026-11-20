@@ -63,8 +63,13 @@ export interface RunLimits {
    * count: it never started. That holds inside a code program too, where the program's own
    * call limit still counts it. */
   toolCalls: number;
-  /** Wall time, including time spent waiting for approval. */
+  /** Wall time, including time spent waiting for approval, across resumed attempts. */
   elapsedMs: number;
+  /** Time this run may spend actively working in one attempt, paused while `host.answerNow`
+   * waits for a person in process. Time spent suspended between attempts never counts, and each
+   * resumed attempt starts with a fresh allowance. `elapsedMs` keeps its wall-clock meaning
+   * across resumes. Absent means no separate active-time cap. */
+  activeMs?: number;
   parallelTools: number;
   /** Decoded bytes of the images and files sent inline, history and new turn together. The
    * snapshot holds them, and every checkpoint writes the whole snapshot again, so large files
@@ -86,6 +91,48 @@ export interface RunLimits {
 /** What would have ended the run when its finish turn saved it: a limit it reached, a turn the
  * output limit cut, or a checked-output answer written as text. */
 export type SalvageReason = "turns" | "toolCalls" | "costUsd" | "outputTokens" | "missing_result";
+
+/** Options for how a turn opens human requests (approvals, questions and client tools). */
+export interface RequestPolicy {
+  /** Open only the first pending request in a turn, then suspend. By default, every remaining
+   * approval-required call in the turn opens together so a person can answer them in one batch. */
+  onePerTurn?: boolean;
+  /** Run each tool's own `accepts(arguments)` before opening an approval for it. A call whose
+   * arguments the tool cannot accept skips approval, runs through `invoke`, and returns
+   * `invalid_input` to the model so nobody is asked to approve a call that would fail. */
+  validateBeforeAsk?: boolean;
+}
+
+/** Opt in to retrying a model call that failed transiently after chunks arrived, for runs whose
+ * stream nobody watches. The default keeps core's invariant 1 (never retry after output). Each
+ * attempt is journaled and priced, counts toward `treeLimits.modelCalls` and `limits.costUsd`,
+ * and refuses agents or runs that declare `hostedTools` (invariant 19). */
+export interface RetryAfterOutputPolicy {
+  /** Maximum transient mid-stream retries per model turn (not counting the initial attempt).
+   * Must be a positive integer up to 10. */
+  maxRetries: number;
+  /** Base delay in ms for full-jitter exponential backoff. Default 1,000. */
+  baseDelayMs?: number;
+  /** Maximum backoff delay in ms. Default 30,000. */
+  maxDelayMs?: number;
+  /** Custom sleep for tests. Not saved in snapshots. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
+
+/** Recorded form of `AgentConfig.retryAfterOutput` in snapshots. */
+export interface RecordedRetryAfterOutputPolicy {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+/** Opt in to running another turn when steering input arrives as the model finishes. */
+export interface SteeringPolicy {
+  /** When true, if steering input arrives before a text answer settles the run (and another
+   * turn fits within the run's and tree's budgets), accept the input and run another model turn
+   * to answer it instead of leaving it queued for recall. */
+  answerLateInput?: boolean;
+}
 
 /** Opt in to a finish turn: one more model call, made instead of ending a run without its
  * answer. A text agent gets it with no tools. A checked-output agent, or a `stopOnlyAtTools`
@@ -394,6 +441,12 @@ export interface RunDefinition {
   stopOnlyAtTools?: { nudge: string };
   /** `AgentConfig.finish`, when set. */
   finish?: { emptyTurns: number; nearEnd?: string };
+  /** `AgentConfig.requests`, when set. */
+  requests?: RequestPolicy;
+  /** `AgentConfig.retryAfterOutput`, when set. */
+  retryAfterOutput?: RecordedRetryAfterOutputPolicy;
+  /** `AgentConfig.steering`, when set. */
+  steering?: SteeringPolicy;
   /** Present for registered code tools, including ones disabled for this run. */
   codeTools?: Record<string, RecordedCodeTool>;
   /** Null refuses interrupted effects. Recorded policy and identities must match on recovery. */
@@ -463,6 +516,14 @@ export interface AgentConfig<H = unknown> {
    * bounded call. A run it saves completes with `salvaged`; otherwise the run ends as it would
    * have. Time limits, the tree's limits and a Stop stay hard. */
   finish?: FinishPolicy;
+  /** Controls how human requests open in a turn: one at a time, and whether a tool validates
+   * arguments with `accepts()` before an approval opens. */
+  requests?: RequestPolicy;
+  /** Opt in to retrying transient mid-stream model failures after chunks arrived, for runs whose
+   * stream nobody watches. Refused when `hostedTools` are declared on the agent or run. */
+  retryAfterOutput?: RetryAfterOutputPolicy;
+  /** Controls how steering input from `host.inbox` interacts with the end of a run. */
+  steering?: SteeringPolicy;
   limits?: Partial<RunLimits>;
   /** Applies when this agent is the root. Descendants share the root's limits. */
   treeLimits?: Partial<TreeLimits>;
@@ -643,8 +704,14 @@ export interface AgentHost {
   ) =>
     | { scope: RequestScope; ask?: ApprovalAsk }
     | Promise<{ scope: RequestScope; ask?: ApprovalAsk }>;
-  /** Optional standing host policy. undefined leaves the request pending. */
-  answerNow?: (request: PendingRequest) => Decision | undefined | Promise<Decision | undefined>;
+  /** Optional standing host policy, or an in-process wait for a person under the run signal.
+   * Returning `undefined` leaves the request pending so the run suspends. While this callback
+   * waits, `limits.activeMs` is paused; `limits.elapsedMs`, `treeLimits.elapsedMs` and the
+   * caller's `signal` still apply. */
+  answerNow?: (
+    request: PendingRequest,
+    options: { signal: AbortSignal },
+  ) => Decision | undefined | Promise<Decision | undefined>;
   /** Authenticate evidence, validate form data and consume it for this exact request. Recovery
    * of the same host claim must return the same decision; another claim must be refused. */
   resolveRequest?: (request: PendingRequest, evidence: unknown) => Resolution | Promise<Resolution>;
@@ -810,6 +877,7 @@ export type LimitReason =
   | "turns"
   | "toolCalls"
   | "elapsedMs"
+  | "activeMs"
   | "outputTokens"
   | "maxChildren"
   | "maxDepth"
@@ -865,6 +933,9 @@ export interface InterruptedModelAttempt extends InterruptedAttempt {
   usage: TokenUsage;
   /** The host's price for that usage, kept from the attempt. Never priced again. */
   costUsd?: number;
+  /** True when this attempt failed transiently after chunks arrived and was retried in place
+   * under `retryAfterOutput`. Keeps crash-recovery counts separate from live retries. */
+  retriedAfterOutput?: true;
 }
 
 /** USD one attempt of a tool call reported, the sum of its `reportCost` calls. Kept apart from

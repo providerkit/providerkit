@@ -306,6 +306,13 @@ export function questionTool(options: { name?: string; description?: string } = 
   return Object.assign(tool, { [QUESTION_TOOL]: true });
 }
 
+export interface ActiveWaitPause {
+  pause(): () => void;
+  /** Signal for an in-process `host.answerNow` wait: carries tree, wall-clock and caller
+   * abort, never the paused `limits.activeMs` timer. */
+  waitSignal: AbortSignal;
+}
+
 /** One call's request receipts. No second store or independent continuation engine. */
 export class RequestJournal<C extends ToolRequest | StepRequest = ToolRequest> {
   constructor(
@@ -319,6 +326,7 @@ export class RequestJournal<C extends ToolRequest | StepRequest = ToolRequest> {
     // Decisions can contain a client result or answer before toolOutput checks it. Keep the
     // authoritative decision in the private journal, never bypass the guard through progress.
     private readonly withholdDecisions = false,
+    private readonly activeWait?: ActiveWaitPause,
   ) {}
 
   latest(ask: Ask): AskRecord | undefined {
@@ -374,11 +382,20 @@ export class RequestJournal<C extends ToolRequest | StepRequest = ToolRequest> {
     emitEvent(this.options, { type: "request", request: record.request });
     // A replacement needs a fresh answer. Reapplying a standing decision here could leave
     // the caller suspended with no open request after expiry or failed form validation.
-    if (!problem) {
-      const answer = await untilAbort(
-        Promise.resolve(this.options.host?.answerNow?.(immutableCopy(record.request))),
-        this.signal,
-      );
+    if (!problem && this.options.host?.answerNow) {
+      const waitSignal = this.activeWait?.waitSignal ?? this.signal;
+      const resume = this.activeWait?.pause();
+      let answer: Decision | undefined;
+      try {
+        answer = await untilAbort(
+          Promise.resolve(
+            this.options.host.answerNow(immutableCopy(record.request), { signal: waitSignal }),
+          ),
+          waitSignal,
+        );
+      } finally {
+        resume?.();
+      }
       if (answer !== undefined) await this.accept(record, answer);
     }
     return record;

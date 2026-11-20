@@ -297,6 +297,7 @@ export function specialistTool<T>(agent: Agent<T>, options: SpecialistToolOption
 const LIMIT_WORDS: Partial<Record<LimitReason, string>> = {
   steps: "step",
   elapsedMs: "time",
+  activeMs: "time",
   outputTokens: "output",
   toolCalls: "tool-call",
   costUsd: "cost",
