@@ -96,6 +96,8 @@ const UNSAFE_SCHEMES = new Set(["javascript", "vbscript", "data"]);
 const NEWLINE = /\r\n?|\n/g;
 // `[\s\S]`, not `.`: a dot stops at U+2028, and the failed match then backtracks over the line.
 const LIST_ITEM = /^\s*(?:[-*+]|(\d{1,9})[.)])\s+([\s\S]*)$/;
+// A line that could still become a list item when more characters stream onto it (e.g. "- " -> "- a").
+const LIST_PREFIX = /^\s*(?:[-*+]|\d{1,9}[.)]?)\s*$/;
 // One space before the closing #s, not `\s+`: that made a long run of spaces quadratic.
 const HEADING = /^\s{0,3}(#{1,6})\s+([\s\S]*?)(?:\s#+)?$/;
 // One class per loop and a count after it: a repeated backreference group falls off a cliff in
@@ -227,9 +229,13 @@ function parseFrom(
     const raw = markdown.slice(position, end);
     const at = position;
     const line = raw.trimEnd();
+    let pushedHeading = false;
     if (fence !== null) {
-      // A fenced block is its words, read as nothing else.
-      if (line.trim().startsWith(fence) && /^[`~]+$/.test(line.trim())) endCode();
+      // A fenced block is its words, read as nothing else. CommonMark requires the closing fence
+      // to use only the opening fence's character, at least as long as the opening run.
+      const trimmed = line.trim();
+      const sameChar = fence[0] === "`" ? /^`+$/ : /^~+$/;
+      if (trimmed.startsWith(fence) && sameChar.test(trimmed)) endCode();
       else code.push(raw);
     } else if (!line.trim()) {
       endParagraph();
@@ -256,7 +262,10 @@ function parseFrom(
         endList();
         const spans = parseInline((heading[2] ?? "").trimEnd(), settings);
         const level = Math.min(6, heading[1]?.length ?? 1) as HeadingLevel;
-        if (spans.length > 0) blocks.push({ kind: "heading", level, spans });
+        if (spans.length > 0) {
+          blocks.push({ kind: "heading", level, spans });
+          pushedHeading = true;
+        }
       } else {
         const item = LIST_ITEM.exec(words);
         const number = item?.[1];
@@ -285,7 +294,32 @@ function parseFrom(
         }
       }
     }
-    if (!newline) break;
+    if (!newline) {
+      // Even without a trailing newline, blocks closed before this line (for example a paragraph
+      // closed by a heading, list or fence on the current line, or a list closed by a paragraph)
+      // can never change on future appends; advance resumeAt to the current block's start so
+      // earlier blocks keep their object identity across every streamed token.
+      // For a newly started paragraph line, wait until it cannot turn into a list marker or
+      // an indented continuation of a preceding list (`" "` -> `"  b"`).
+      const startsParagraph = paragraph.length > 0 && paragraphStart === at;
+      if (fence !== null) {
+        complete = blocks.length;
+        resumeAt = fenceStart;
+      } else if (list) {
+        complete = blocks.length;
+        resumeAt = list.at;
+      } else if (
+        paragraph.length > 0 &&
+        (!startsParagraph || (!/^\s/.test(raw) && !LIST_PREFIX.test(raw)))
+      ) {
+        complete = blocks.length;
+        resumeAt = paragraphStart;
+      } else if (pushedHeading) {
+        complete = blocks.length - 1;
+        resumeAt = at;
+      }
+      break;
+    }
     position = newline.index + newline[0].length;
     // A final CR may still gain its LF. Re-read that line, or the LF would become a blank line.
     if (position === markdown.length && newline[0] === "\r") continue;
