@@ -1,0 +1,12 @@
+{
+  // Typechecks the release-check scripts, and emits nothing. They run under Node/Bun and read
+  // Node built-ins, so they get Node's types; src never does (see ../tsconfig.json).
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "types": ["node"]
+  },
+  "include": ["./**/*", "../src/**/*"],
+  "exclude": []
+}
