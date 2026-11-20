@@ -1,10 +1,10 @@
 ---
 title: Agents API
-description: Public entry points in @providerkit/agents 0.3.0, grouped by the work they do.
+description: Public entry points in @providerkit/agents 0.4.0, grouped by the work they do.
 ---
 
-These signatures match the experimental **@providerkit/agents 0.3.0** release. Use Core
-`^0.33.1`. [Start with the offline quickstart](/agents/getting-started/) or
+These signatures match the experimental **@providerkit/agents 0.4.0** release. Use Core
+`^0.35.1`. [Start with the offline quickstart](/agents/getting-started/) or
 [browse generated exports](/reference/agents/readme/).
 
 | Import path                             | Use                                                                       |

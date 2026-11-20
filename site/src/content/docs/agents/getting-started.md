@@ -16,7 +16,7 @@ It makes no model calls and needs no API key.
 Install the released package and its matching Core peer in a new folder:
 
 ```sh
-bun add @providerkit/agents@0.3.0 @providerkit/core@^0.33.1
+bun add @providerkit/agents@0.4.0 @providerkit/core@^0.35.1
 bun node_modules/@providerkit/agents/examples/basic.ts
 ```
 
@@ -26,7 +26,7 @@ Expected output:
 ["Write a release note", "Check the documentation link"]
 ```
 
-Agents 0.3 uses Core `^0.33.1`. The optional integrations have their own peer dependencies;
+Agents 0.4 uses Core `^0.35.1`. The optional integrations have their own peer dependencies;
 the basic example does not need a server package, MCP, tracing or a code engine.
 
 ## Connect your provider
