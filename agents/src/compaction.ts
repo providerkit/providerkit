@@ -10,7 +10,7 @@ import {
   type ChatMessage,
 } from "@providerkit/core";
 import { conversationOf } from "./input.ts";
-import { copyData, isId, isRecord, nudgeAfter } from "./snapshot.ts";
+import { copyData, isId, isRecord, nearEndBefore, nudgeAfter } from "./snapshot.ts";
 import type {
   AgentMessage,
   CompactionDefinition,
@@ -116,16 +116,18 @@ function cutFor(
   const policy = snapshot.definition.compaction;
   if (!policy) return 0;
   const cut = pickCut(wire(view).messages, policy.keepTokens) + (previousCut ? previousCut - 1 : 0);
-  // A not-yet-delivered steer must reach the model verbatim, and so must the nudge before it.
-  // These are user boundaries between whole rounds, so capping core's cut here cannot split a
-  // call from its result.
+  // A not-yet-delivered steer must reach the model verbatim, and so must the nudge before it and
+  // the finish policy's near-end note after it. These are user boundaries between whole rounds,
+  // so capping core's cut here cannot split a call from its result.
   const full = conversationOf(snapshot, beforeModel, true);
-  const nudged = nudgeAfter(snapshot.definition, snapshot.models[beforeModel - 1]) ? 1 : 0;
+  const nudged = nudgeAfter(snapshot, beforeModel - 1) ? 1 : 0;
+  const noted = nearEndBefore(snapshot, beforeModel) ? 1 : 0;
   const unread =
     beforeModel === 0
       ? snapshot.history.length
       : full.length -
         nudged -
+        noted -
         snapshot.inputs.filter((input) => input.beforeModel === beforeModel).length;
   return Math.min(cut, unread);
 }
@@ -144,7 +146,9 @@ export function compactionPlan(
   const previous = snapshot.models.at(-1);
   const measured = previous?.status === "completed" && previous.billing === "reported";
   // The last call counted its input, not its newly added answer, tools or steers.
-  const priorCount = previous ? conversationOf(snapshot, snapshot.models.length - 1).length : 0;
+  const priorCount = previous
+    ? conversationOf(snapshot, snapshot.models.length - 1, true).length
+    : 0;
   const count = measured
     ? previous.usage.inputTokens + conversationTokens(wire(full.slice(priorCount)).messages)
     : conversationTokens([{ role: "system", content: snapshot.definition.instructions }, ...core]);

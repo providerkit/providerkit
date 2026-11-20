@@ -79,9 +79,31 @@ A turn that writes text and calls no tool no longer ends the run: the model read
 keeps working. A question written as text pauses nothing, so this keeps the model on its tools.
 `done` may share its turn with other calls. Once it succeeds, the calls after it get a result
 that says they did not run. When `done` comes back with an empty summary, the turn's text is the
-answer. A turn cut by the output limit still ends the run with `limited: outputTokens`. The turn
-limit is a hard cap, with no tool-free final call. A run that turns off every stopping tool, with
-`enabledTools` or `toolChoice: "none"`, throws before it starts.
+answer. A turn cut by the output limit ends the run with `limited: outputTokens`, and the turn
+limit is a hard cap, unless the agent sets `finish` (below). A run that turns off every stopping
+tool, with `enabledTools` or `toolChoice: "none"`, throws before it starts.
+
+## Finish a run that hits a limit or gets cut off
+
+```ts
+const analyst = defineAgent({ ...config, output, limits: { turns: 8 }, finish: {} });
+```
+
+With `finish`, a run that would end without its answer gets one more model call, its finish turn.
+It comes when the run reaches its turn, tool-call or own cost limit, when the output limit cut a
+turn off, or when a checked-output agent answered in text instead of calling `submit_result`. The
+model reads a short note that says why. A text agent answers with no tools. Other agents request
+effort `none` and must call their stopping tool. Only that call runs. None of a cut turn's calls
+run. A provider block or a stream with no finish reason does not trigger a finish turn.
+
+A saved run completes with `salvaged` naming what would have ended it. When the finish turn
+cannot save it, the run ends as it would have. The finish turn is priced and counted like any
+other call, so past `costUsd` the cost limit is soft by that one call. Time limits, the tree's
+limits and a Stop stay hard.
+
+`finish.emptyTurns` lets a few turns in a row come back with no text and no tool call before the
+run fails with `empty_output`. The model reads `finish.nearEnd` on its last turn with tools. The
+note applies to this run only. It stays out of the returned history and the session.
 
 ## Check output
 

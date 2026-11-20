@@ -18,6 +18,7 @@ import {
   isImageMime,
   isPart,
   isRecord,
+  nearEndBefore,
   nudgeAfter,
 } from "./snapshot.ts";
 import type {
@@ -237,25 +238,28 @@ export function repairConversation(
 }
 
 /** The history, the new turn and whole settled rounds. Never half a tool round: the journal
- * keeps unfinished work, and a provider refuses a call without its result. `upcoming` builds
- * the next request's conversation, which carries the nudge answering the last turn; a finished
- * run's history leaves that nudge out, since no request sent it. */
+ * keeps unfinished work, and a provider refuses a call without its result. The model view
+ * includes notes for the call at `beforeModel`; the returned transcript includes only nudges
+ * already sent and never includes a note about this run's remaining budget. */
 export function conversationOf(
   snapshot: RunSnapshot,
   beforeModel = snapshot.models.length,
-  upcoming = false,
+  forModel = false,
 ): AgentMessage[] {
   const messages: AgentMessage[] = [...snapshot.history, { role: "user", content: snapshot.input }];
   for (let position = 0; position <= beforeModel; position++) {
     // A turn that wrote text and called no tool, under stopOnlyAtTools, is answered with the
     // nudge, ahead of any steer that joins at the same boundary.
-    const nudge = nudgeAfter(snapshot.definition, snapshot.models[position - 1]);
-    if (nudge !== undefined && (position < snapshot.models.length || upcoming))
+    const nudge = nudgeAfter(snapshot, position - 1);
+    if (nudge !== undefined && (position < snapshot.models.length || forModel))
       messages.push({ role: "user", content: nudge });
     // Steering joins only between whole rounds. Its saved position survives attempts and
     // preserves the exact prefix even when the host later offers more input.
     for (const input of snapshot.inputs)
       if (input.beforeModel === position) messages.push({ role: "user", content: input.content });
+    // Keep the cached prefix for later calls in this run. A new run has its own budget.
+    const nearEnd = forModel ? nearEndBefore(snapshot, position) : undefined;
+    if (nearEnd !== undefined) messages.push({ role: "user", content: nearEnd });
     const model = position < beforeModel ? snapshot.models[position] : undefined;
     if (
       !model ||

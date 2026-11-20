@@ -1109,6 +1109,8 @@ describe("effortParams", () => {
     // gpt-5 and everything before it defaults to `medium`, and those tokens
     // come out of the answer's budget.
     expect(effortParams("openai", "none")).toEqual({ reasoning_effort: "none" });
+    expect(effortParams("openai", "none", "gpt-5-mini")).toEqual({ reasoning_effort: "minimal" });
+    expect(effortParams("openai", undefined, "gpt-5-mini")).toEqual({});
     expect(effortParams("off", "high")).toEqual({});
   });
 

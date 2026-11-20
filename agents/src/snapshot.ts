@@ -8,6 +8,7 @@ import { CODE_LIMITS, programJson, textBytes, type CodeTool } from "./code.ts";
 import type { TreeNode, WorkflowSnapshot, StepRequest, ProgramCall } from "./types.ts";
 import {
   HOSTED_TOOL_TYPES,
+  isCompleteJson,
   isEffort,
   parseToolArgs,
   type ChatMessage,
@@ -56,6 +57,7 @@ import type {
   RunOptions,
   RunSnapshot,
   RunState,
+  SalvageReason,
   Session,
   SessionStatus,
   ToolCost,
@@ -162,6 +164,32 @@ function isLimits(value: unknown): value is RunLimits {
     Number.isSafeInteger(value.inlineBytes) &&
     optional(value.costUsd, finite)
   );
+}
+
+function isFinishDefinition(value: unknown): value is NonNullable<RunDefinition["finish"]> {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) => key === "emptyTurns" || key === "nearEnd") &&
+    finite(value.emptyTurns) &&
+    Number.isSafeInteger(value.emptyTurns) &&
+    optional(value.nearEnd, isId)
+  );
+}
+
+/** `AgentConfig.finish` as the run records it. Unknown keys stay, so the check refuses them. */
+export function readFinishPolicy(value: unknown): RunDefinition["finish"] {
+  if (value === undefined) return undefined;
+  const { emptyTurns, nearEnd, ...rest } = isRecord(value) ? value : {};
+  const policy = {
+    ...rest,
+    emptyTurns: emptyTurns ?? 0,
+    ...(nearEnd !== undefined ? { nearEnd } : {}),
+  };
+  if (!isRecord(value) || !isFinishDefinition(policy))
+    throw new TypeError(
+      "finish takes emptyTurns, a whole number of 0 or more, and nearEnd, the text the model reads one turn before the turn limit.",
+    );
+  return policy;
 }
 
 const IMAGE_TYPES: readonly ImageMimeType[] = [
@@ -609,6 +637,7 @@ function isRunDefinition(value: unknown): value is RunDefinition {
       value.stopOnlyAtTools,
       (mode) => isRecord(mode) && Object.keys(mode).length === 1 && isId(mode.nudge),
     ) &&
+    optional(value.finish, isFinishDefinition) &&
     optional(value.codeTools, isRecordedCodeTools) &&
     isGuardDefinition(value.guardrails) &&
     isCompactionDefinition(value.compaction) &&
@@ -943,6 +972,7 @@ function isModel(value: unknown): value is ModelExecution {
     (value.billing !== "unknown" && value.billing !== "reported") ||
     (value.status === "running" && value.billing !== "unknown") ||
     !optional(value.costUsd, finite) ||
+    !optional(value.finish, (reason) => SALVAGE_REASONS.some((known) => known === reason)) ||
     !isInterrupted(value.interrupted) ||
     value.interrupted.some(
       (attempt) =>
@@ -1167,21 +1197,125 @@ export function callOrder(
 }
 
 /** The nudge that answers a turn under `stopOnlyAtTools`: one that wrote text and called no
- * tool, so the run goes on. Ported from TabRunner's loop, whose nudge also steers a question
- * the model wrote as prose back to its question tool: written down, it pauses nothing. */
+ * tool, so the run goes on, or one that came back empty within `finish.emptyTurns`. Ported from
+ * TabRunner's loop, whose nudge also steers a question the model wrote as prose back to its
+ * question tool: written down, it pauses nothing. */
 export function nudgeAfter(
-  definition: RunDefinition,
-  model: ModelExecution | undefined,
+  snapshot: Pick<RunSnapshot, "definition" | "models">,
+  position: number,
 ): string | undefined {
+  const { definition } = snapshot;
+  const model = snapshot.models[position];
   if (
     !definition.stopOnlyAtTools ||
     model?.status !== "completed" ||
+    model.finish !== undefined ||
     model.turn.message.toolCalls?.length ||
-    !model.turn.message.content.trim() ||
-    (model.turn.finishReason !== "stop" && model.turn.finishReason !== "tool_calls")
+    (model.turn.finishReason !== "stop" && model.turn.finishReason !== "tool_calls") ||
+    (!model.turn.message.content.trim() && !allowedEmpty(snapshot, position))
   )
     return undefined;
   return definition.stopOnlyAtTools.nudge;
+}
+
+const SALVAGE_REASONS: readonly SalvageReason[] = [
+  "turns",
+  "toolCalls",
+  "costUsd",
+  "outputTokens",
+  "missing_result",
+];
+
+/** Whether the output limit cut this turn: the provider says so, or a call's arguments do not
+ * parse, which is how a cut the provider did not report shows. Ported from a private adopter's
+ * engine (wasCutOff): a cut turn is not the agent's answer, and no call in it is a call. Read
+ * leniently, cut arguments become `{}`, which a tool whose schema defaults every field takes as
+ * a real, empty submission. An empty argument string is a call with none, not a cut. */
+export function wasCutOff(turn: Turn): boolean {
+  if (turn.finishReason === "length") return true;
+  // Partial arguments on a blocked or unfinished stream are not permission to ask again.
+  if (turn.finishReason !== "stop" && turn.finishReason !== "tool_calls") return false;
+  return (turn.message.toolCalls ?? []).some(
+    (call) => call.arguments.trim() !== "" && !isCompleteJson(call.arguments),
+  );
+}
+
+function isEmptyTurn(model: ModelExecution | undefined): boolean {
+  return (
+    model?.status === "completed" &&
+    model.finish === undefined &&
+    !model.turn.message.toolCalls?.length &&
+    !model.turn.message.content.trim() &&
+    (model.turn.finishReason === "stop" || model.turn.finishReason === "tool_calls")
+  );
+}
+
+/** Whether `finish.emptyTurns` lets the run go on from the empty turn at `position`. Ported
+ * from TabRunner's loop (MAX_EMPTY_TURNS): a model gone mute still bills a full prompt each
+ * turn, so a few in a row end the run instead of spending its whole budget on silence. Counted
+ * in a row: a turn with text or a call starts the count again. Core's history repair drops the
+ * empty turn from every request, so without a nudge the next request is the same one again. */
+export function allowedEmpty(
+  snapshot: Pick<RunSnapshot, "definition" | "models">,
+  position: number,
+): boolean {
+  let count = 0;
+  for (let index = position; index >= 0 && isEmptyTurn(snapshot.models[index]); index--) count++;
+  return count > 0 && count <= (snapshot.definition.finish?.emptyTurns ?? 0);
+}
+
+/** `finish.nearEnd`, for the model call it goes with: the last one with tools. Ported from
+ * TabRunner's near-end note, which offers a clean way out one step before the budget ends. */
+export function nearEndBefore(
+  snapshot: Pick<RunSnapshot, "definition" | "limits">,
+  position: number,
+): string | undefined {
+  return position === snapshot.limits.turns - 1 ? snapshot.definition.finish?.nearEnd : undefined;
+}
+
+/** The finish turn the turn at `position` calls for under a finish policy, read from that turn
+ * alone, so a run saved before its finish turn restores: `outputTokens` after a turn the output
+ * limit cut, `missing_result` after a checked answer written as text. A limit can call for one
+ * after any other turn. */
+export function finishAfter(
+  snapshot: Pick<RunSnapshot, "definition" | "models">,
+  position: number,
+  resultTool?: string,
+): SalvageReason | undefined {
+  const { definition } = snapshot;
+  const model = snapshot.models[position];
+  if (!definition.finish || model?.status !== "completed" || model.finish !== undefined)
+    return undefined;
+  if (wasCutOff(model.turn)) return "outputTokens";
+  if (
+    resultTool &&
+    !definition.stopOnlyAtTools &&
+    !model.turn.message.toolCalls?.length &&
+    model.turn.message.content.trim() &&
+    (model.turn.finishReason === "stop" || model.turn.finishReason === "tool_calls")
+  )
+    return "missing_result";
+  return undefined;
+}
+
+/** The tools a finish turn makes the model call: `submit_result` for checked output, or the
+ * enabled stopping tools under `stopOnlyAtTools`. None for a text agent, which answers in text. */
+export function finishTools(definition: RunDefinition, resultTool?: string): string[] {
+  if (resultTool) return [resultTool];
+  if (!definition.stopOnlyAtTools) return [];
+  return definition.stopAtTools.filter((name) => definition.enabledTools.includes(name));
+}
+
+/** The one call a finish turn runs, as a position in its turn: the first call of a tool it made
+ * the model call, or -1. Ported from a private adopter's loop (finalTool): tool choice is a
+ * request to the provider, not permission to execute, so every other call is cancelled. */
+export function finishCall(
+  definition: RunDefinition,
+  model: Extract<ModelExecution, { status: "completed" }>,
+  resultTool?: string,
+): number {
+  const allowed = finishTools(definition, resultTool);
+  return (model.turn.message.toolCalls ?? []).findIndex((call) => allowed.includes(call.name));
 }
 
 export function childRunId(operationId: string, key: string): string {
@@ -1617,17 +1751,19 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
 }
 
 /** The selected result is journal data, not a second invocation of the tool. Model order
- * wins even when a later tool in a parallel batch finishes first. */
+ * wins even when a later tool in a parallel batch finishes first. On a finish turn
+ * `submit_result` may share its turn: every other call there was cancelled before it ran. */
 export function finalToolResult(
   model: Extract<ModelExecution, { status: "completed" }>,
   stopAtTools: readonly string[],
   resultTool?: string,
 ): { candidate: unknown } | undefined {
   const calls = model.turn.message.toolCalls ?? [];
+  const alone = calls.length === 1 || model.finish !== undefined;
   for (const [index, call] of calls.entries()) {
     const tool = model.tools[index];
     if (tool?.status !== "completed" || !tool.result.ok) continue;
-    if ((calls.length === 1 && call.name === resultTool) || stopAtTools.includes(call.name))
+    if ((alone && call.name === resultTool) || stopAtTools.includes(call.name))
       if (tool.result.final) return tool.result.final;
   }
   return undefined;
@@ -1958,12 +2094,20 @@ export function readSnapshot(
     throw new TypeError("The snapshot belongs to a different agent definition or version.");
   if (!equalData(raw.limits, limits))
     throw new TypeError("The snapshot limits do not match this agent version.");
-  // Neither can end on a tool-free answer, so neither gets the extra final turn.
+  // Neither can end on a tool-free answer, so neither gets the extra final turn, unless a finish
+  // policy makes that call every agent's finish turn.
   const hardCap = !!resultTool || !!raw.definition.stopOnlyAtTools;
-  // A turn the run answered and went on from: with tool results, or with the nudge.
-  const goesOn = (model: ModelExecution) =>
+  const policy = raw.definition.finish;
+  // A turn the run answered and went on from: with tool results, with the nudge, as an empty
+  // turn the finish policy allows, or on to the finish turn it calls for.
+  const goesOn = (model: ModelExecution, index: number) =>
     (model.status === "completed" && model.tools.length > 0) ||
-    nudgeAfter(raw.definition, model) !== undefined;
+    nudgeAfter(raw, index) !== undefined ||
+    allowedEmpty(raw, index) ||
+    finishAfter(raw, index, resultTool) !== undefined;
+  // A turn the output limit cut ends the run, unless it calls for a finish turn.
+  const cut = (model: Extract<ModelExecution, { status: "completed" }>, index: number) =>
+    model.turn.finishReason === "length" && finishAfter(raw, index, resultTool) === undefined;
   let calls = 0;
   for (const [index, model] of raw.models.entries()) {
     if (model.id !== modelId(raw.runId, index))
@@ -1977,16 +2121,34 @@ export function readSnapshot(
       throw new TypeError("Model attempts exceed the recorded recovery policy.");
     const last = index === raw.models.length - 1;
     // A plain-text run gets one last answer with no tools. It is still a model operation
-    // counted by the tree. No receipt on that extra turn may claim a tool was executed.
-    if (
-      index >= limits.turns &&
-      (hardCap ||
-        index !== limits.turns ||
-        (model.status === "completed" && model.tools.some((tool) => tool.status !== "pending")))
-    )
+    // counted by the tree. No receipt on that extra turn may claim a tool was executed. Under a
+    // finish policy that call is every agent's finish turn, checked below.
+    const allowedPastLimit = policy
+      ? model.finish !== undefined
+      : !hardCap &&
+        (model.status !== "completed" || model.tools.every((tool) => tool.status === "pending"));
+    if (index >= limits.turns && (index !== limits.turns || !allowedPastLimit))
       throw new TypeError(
         "The final tool-free turn cannot execute tools or exceed the turn allowance.",
       );
+    if (model.finish !== undefined) {
+      // A cut or an answer without a result is read from the turn before. A limit applies only
+      // after a turn that calls for neither, as the loop decides.
+      const called = finishAfter(raw, index - 1, resultTool) ?? "limit";
+      const claimed =
+        model.finish === "outputTokens" || model.finish === "missing_result"
+          ? model.finish
+          : "limit";
+      if (
+        !policy ||
+        !last ||
+        claimed !== called ||
+        (model.finish === "turns" && index !== limits.turns)
+      )
+        throw new TypeError(
+          "A finish turn must be the run's last call, made for a reason its journal shows.",
+        );
+    }
     if (model.status === "running") {
       if (!last) throw new TypeError("A model operation has an unknown outcome before later work.");
       continue;
@@ -1998,6 +2160,9 @@ export function readSnapshot(
     if (!equalData(model.usage, model.turn.usage))
       throw new TypeError("The model usage does not match its completed turn.");
     let pending = false;
+    const cutOff = !!policy && wasCutOff(model.turn);
+    const unfinished =
+      cutOff || (model.turn.finishReason !== "stop" && model.turn.finishReason !== "tool_calls");
     // Calls run in this order, so no call may start after one that has not. A call the host
     // refused or a batch cancelled never started, so it may.
     for (const position of callOrder(tools, raw.definition.runFirst)) {
@@ -2022,13 +2187,21 @@ export function readSnapshot(
       ) {
         throw new TypeError("A successful tool result must have complete arguments.");
       }
+      // No call of a cut turn runs. Under a finish policy each one is answered without running,
+      // so its finish turn reads a whole history.
       if (
         tool.status !== "pending" &&
-        model.turn.finishReason !== "stop" &&
-        model.turn.finishReason !== "tool_calls"
-      ) {
+        unfinished &&
+        !(cutOff && model.finish === undefined && skipped(tool))
+      )
         throw new TypeError("An unfinished model turn cannot have executed tools.");
-      }
+      if (
+        model.finish !== undefined &&
+        tool.status !== "pending" &&
+        !skipped(tool) &&
+        position !== finishCall(raw.definition, model, resultTool)
+      )
+        throw new TypeError("A finish turn runs one call: the stopping call it asked for.");
       if (tool.status === "completed" && tool.result.ok) {
         if (
           !raw.definition.enabledTools.includes(call.name) ||
@@ -2086,7 +2259,8 @@ export function readSnapshot(
         call.name === resultTool &&
         tool.status === "completed" &&
         tool.result.ok &&
-        (tools.length !== 1 || !equalData(tool.result.final?.candidate, clientArguments))
+        ((tools.length !== 1 && model.finish === undefined) ||
+          !equalData(tool.result.final?.candidate, clientArguments))
       )
         throw new TypeError("The submitted result does not match its effective arguments.");
       if (
@@ -2136,13 +2310,16 @@ export function readSnapshot(
         throw new TypeError(
           "The admitted code source does not fit its saved limit or input schema.",
         );
-      calls += toolAttempts(tool) + checkProgramJournal(raw, tool, code);
+      // The finish turn's one stopping call runs past the tool-call budget: that turn is the one
+      // bounded call a finish policy allows past the run's limits.
+      const attempts = toolAttempts(tool) + checkProgramJournal(raw, tool, code);
+      if (model.finish === undefined) calls += attempts;
     }
     if (
       !last &&
-      (!goesOn(model) ||
+      (!goesOn(model, index) ||
         model.turn.finishReason === null ||
-        model.turn.finishReason === "length" ||
+        cut(model, index) ||
         model.turn.finishReason === "content_filter" ||
         finalToolResult(model, raw.definition.stopAtTools, resultTool))
     ) {
@@ -2156,12 +2333,12 @@ export function readSnapshot(
       raw.models
         .slice(0, input.beforeModel)
         .some(
-          (model) =>
+          (model, position) =>
             model.status !== "completed" ||
             model.tools.some((tool) => tool.status !== "completed") ||
-            !goesOn(model) ||
+            !goesOn(model, position) ||
             model.turn.finishReason === null ||
-            model.turn.finishReason === "length" ||
+            cut(model, position) ||
             model.turn.finishReason === "content_filter" ||
             finalToolResult(model, raw.definition.stopAtTools, resultTool) ||
             finalHandoffResult(raw, model),
@@ -2172,7 +2349,7 @@ export function readSnapshot(
       );
   }
   if (
-    raw.models.length > limits.turns + (hardCap ? 0 : 1) ||
+    raw.models.length > limits.turns + (hardCap && !policy ? 0 : 1) ||
     calls > limits.toolCalls ||
     snapshotInlineBytes(raw) > limits.inlineBytes
   )
@@ -2209,11 +2386,12 @@ export function readSnapshot(
       raw.models
         .slice(0, entry.beforeModel)
         .some(
-          (model) =>
+          (model, position) =>
             model.status !== "completed" ||
-            !goesOn(model) ||
+            !goesOn(model, position) ||
             model.tools.some((tool) => tool.status !== "completed") ||
-            !["stop", "tool_calls"].includes(model.turn.finishReason ?? "") ||
+            !["stop", "tool_calls", "length"].includes(model.turn.finishReason ?? "") ||
+            cut(model, position) ||
             finalToolResult(model, raw.definition.stopAtTools, resultTool) ||
             finalHandoffResult(raw, model),
         )

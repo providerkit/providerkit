@@ -206,9 +206,9 @@ export function treeUsage(root: TreeNode): TokenUsage {
   return usage;
 }
 
-/** USD of the known calls under this node, from the prices saved with them, never priced
- * again, plus what tools reported. Counted the way treeUsage counts usage. */
-export function knownCostUsd(root: TreeNode): number {
+/** A run's limit includes prices saved for its whole subtree, never recalculated on resume. */
+export function costLimitReached(root: TreeNode): boolean {
+  if (root.kind !== "agent" || root.limits.costUsd === undefined) return false;
   let cost = 0;
   const seen = new Set<string>();
   for (const snapshot of snapshots(root)) {
@@ -221,7 +221,7 @@ export function knownCostUsd(root: TreeNode): number {
     }
     for (const entry of snapshot.toolCosts ?? []) cost += entry.costUsd;
   }
-  return cost;
+  return cost >= root.limits.costUsd;
 }
 
 /** A cost limit counts prices only the host knows. Without them no call would ever count, so
@@ -304,8 +304,11 @@ export class ExecutionTree {
 
   /** Checks the caller and every agent above it, found by the caller's scope path, against
    * its own cost limit, so a helper stops once its creator's budget is spent. Synchronous like
-   * reserveModel, so the check and the receipt it admits never straddle an await. */
-  reserveCost(path: readonly ChildPathStep[]): void {
+   * reserveModel, so the check and the receipt it admits never straddle an await. `own: false`
+   * leaves out the caller's own limit, for its finish turn: the one call a finish policy buys
+   * past that limit. An ancestor's spent budget still stops it, so a tree goes past its root's
+   * limit by at most the root's own finish turn. */
+  reserveCost(path: readonly ChildPathStep[], own = true): void {
     let node: TreeNode = this.root;
     const lineage = [node];
     for (const step of path) {
@@ -318,13 +321,8 @@ export class ExecutionTree {
     }
     // ponytail: each check walks the bounded subtree again, as reserveModel does, so the
     // saved prices stay the only ledger across resume.
-    for (const holder of lineage)
-      if (
-        holder.kind === "agent" &&
-        holder.limits.costUsd !== undefined &&
-        knownCostUsd(holder) >= holder.limits.costUsd
-      )
-        throw new Halt({ status: "limited", limit: "costUsd" });
+    for (const holder of own ? lineage : lineage.slice(0, -1))
+      if (costLimitReached(holder)) throw new Halt({ status: "limited", limit: "costUsd" });
   }
 
   /** Preflight only. reserveChild rechecks against the live journal at each admission. */

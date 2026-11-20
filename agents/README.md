@@ -901,7 +901,8 @@ const browser = defineAgent({
 A turn that writes text and calls no tool no longer ends the run. The model reads your `nudge` as
 the next user message and keeps working. The nudge stays in the conversation the run returns,
 right after the turn it answered. A turn with no text and no tool call still fails with
-`empty_output`.
+`empty_output`, unless [`finish.emptyTurns`](#finish-a-run-that-hits-a-limit-or-gets-cut-off)
+allows a few.
 
 A stopping tool may share its turn with other calls. The calls before it run as usual. Once it
 succeeds, each call after it gets a cancelled result that reads "The run ended earlier this turn
@@ -912,13 +913,65 @@ handoffs still run alone.
 When a text agent's stopping tool returns an empty summary, the turn's text is the answer. That
 covers a model that writes its answer as text and calls `done` with nothing in it. When both are
 empty, the model gets the empty result back and tries again. A turn cut by the output limit is
-different: it still ends the run with `limited: outputTokens`, before any of its calls run.
+different: it ends the run with `limited: outputTokens`, before any of its calls run. With
+`finish`, it gets a finish turn instead.
 
 The stopping tool can be one named in `stopAtTools`, a tool with `isTerminal: true`, or
 `submit_result` with an output contract. Without one, `defineAgent` throws. So does a run that
 turns off every stopping tool, through `enabledTools` or `toolChoice: "none"`: it could never
 end. The turn limit is a hard cap in this mode: there is no tool-free final call, because it
-could not end the run.
+could not end the run. With `finish`, the run's last call makes the model call its stopping tool.
+
+### Finish a run that hits a limit or gets cut off
+
+By default a run that reaches a limit stops there, with no answer for the work it paid for. Set
+`finish` and the run gets one more model call to give its answer:
+
+```ts
+const analyst = defineAgent({ ...config, output, limits: { turns: 8 }, finish: {} });
+```
+
+That call, the finish turn, comes when:
+
+- the run reaches `limits.turns`, `limits.toolCalls` or its own `limits.costUsd`
+- the output limit cut a turn off. A tool call with incomplete arguments also counts as cut if
+  the provider ended the turn normally. None of a cut turn's calls run. A blocked answer or a
+  stream with no finish reason gets no finish turn
+- a checked-output agent answered in text instead of calling `submit_result`
+
+The model reads a short note that says why. A text agent then answers with no tools, and after a
+cut it is asked for a shorter answer. A checked-output agent is made to call `submit_result`, and
+a `stopOnlyAtTools` agent its stopping tool. Those calls request effort `none` and leave out
+reasoning from earlier turns. On models that require reasoning, Core uses the lowest known
+setting when it has one. Only the first stopping call runs. Other calls get a result that says
+they did not run. The finish note goes with that request only, not in the returned conversation.
+
+A run the finish turn saves completes as usual, and `outcome.salvaged` says what would have ended
+it: `"turns"`, `"toolCalls"`, `"costUsd"`, `"outputTokens"` or `"missing_result"`. If the finish turn
+produces no usable answer or the provider refuses the call, the run keeps its original limit or
+missing-result error. The finish turn is always the run's last call.
+
+It is a model call like any other: priced, counted in `usage` and in the tree's call limit, and
+given its own receipt. After `costUsd` that makes the cost limit soft by one bounded call. A
+helper whose creator's budget is spent gets no finish turn, so a tree goes over its root's limit
+by at most the root's own finish turn. Time limits, the tree's limits and a Stop stay hard.
+
+Two more settings help a run end well:
+
+```ts
+const browser = defineAgent({
+  ...config,
+  finish: {
+    emptyTurns: 2,
+    nearEnd: "You are near the end of your budget. Call done now, or ask whether to continue.",
+  },
+});
+```
+
+`emptyTurns` lets that many turns in a row come back with no text and no tool call before the run
+fails with `empty_output`. Each one still costs a full request, so keep it small. The model reads
+`nearEnd` on its last turn with tools, one before `limits.turns`. Later calls in the same run
+keep the note. The returned history and the session leave it out.
 
 ### Refuse a call before it runs
 
@@ -1863,7 +1916,9 @@ does not count as a tool call. Once a text agent uses all its model turns, it ge
 one final call with no tools to answer from what it found. That call still counts against the
 tree's model-call and time budgets. Any tool calls it returns are refused. Checked-output agents
 keep the hard turn cap because a tool-free call cannot submit their result. So do agents with
-`stopOnlyAtTools`, whose run a tool-free call cannot end.
+`stopOnlyAtTools`, whose run a tool-free call cannot end. With
+[`finish`](#finish-a-run-that-hits-a-limit-or-gets-cut-off), every agent gets that one last call,
+and so does a run that reaches its tool-call or cost limit.
 
 The root's `treeLimits` apply across all descendants:
 
@@ -1913,7 +1968,10 @@ failed tool result to its parent. A workflow's `ctx.agent` returns the `limited`
 next step still runs.
 
 It limits starting calls, not the bill. Calls already running when the limit is reached, such as
-parallel helpers, can finish above it. A call that never reported usage adds nothing.
+parallel helpers, can finish above it. A call that never reported usage adds nothing. With
+[`finish`](#finish-a-run-that-hits-a-limit-or-gets-cut-off), reaching the run's own limit buys one
+more call to give its answer, so the limit is soft by that one bounded call. It is priced and
+counted like any other.
 
 `priceModelCall` runs when a call's usage arrives and again when the call completes. It gets the
 usage and the provider and model that served it, and must return a finite amount of 0 or more
