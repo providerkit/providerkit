@@ -46,7 +46,7 @@
     },
     "core": {
       "name": "@providerkit/core",
-      "version": "0.35.0",
+      "version": "0.35.1",
       "devDependencies": {
         "@opentelemetry/api": "^1.10.0",
         "@types/node": "^24.13.3",
