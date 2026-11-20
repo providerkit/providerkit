@@ -131,6 +131,15 @@ function cutOffset(snapshot: RunSnapshot, cut: number): number {
   );
 }
 
+/** True when a cut under task pinning would only drop the pinned task itself, removing nothing. */
+function isNoOpPinnedCut(snapshot: RunSnapshot, previousCut: number, cut: number): boolean {
+  return (
+    snapshot.definition.compaction?.retryOnContextLimit === true &&
+    previousCut === snapshot.history.length &&
+    cut === previousCut + 1
+  );
+}
+
 function cutFor(
   snapshot: RunSnapshot,
   beforeModel: number,
@@ -145,11 +154,8 @@ function cutFor(
   let cut = pickCut(messages, policy.keepTokens) + offset;
   // A length rejection overrides the advertised window. If that budget keeps everything,
   // ask core for just its newest intact round rather than retry the same request.
-  const onlyTask =
-    policy.retryOnContextLimit &&
-    snapshot.history.length === previousCut &&
-    cut === previousCut + 1;
-  if (rejected && (cut <= previousCut || onlyTask)) cut = pickCut(messages, 0) + offset;
+  if (rejected && (cut <= previousCut || isNoOpPinnedCut(snapshot, previousCut, cut)))
+    cut = pickCut(messages, 0) + offset;
   // A not-yet-delivered steer must reach the model verbatim, and so must the nudge before it and
   // the finish policy's near-end note after it. These are user boundaries between whole rounds,
   // so capping core's cut here cannot split a call from its result.
@@ -203,7 +209,7 @@ export function compactionPlan(
   const offset = cutOffset(snapshot, previousCut);
   const removed = view.slice(0, cut - offset);
   if (policy.retryOnContextLimit && cut > snapshot.history.length) {
-    if (previousCut === snapshot.history.length && cut === previousCut + 1) return;
+    if (isNoOpPinnedCut(snapshot, previousCut, cut)) return;
     const pinnedIndex =
       previousCut > snapshot.history.length ? 1 : snapshot.history.length - offset;
     removed.splice(pinnedIndex, 1);
@@ -235,7 +241,8 @@ export function checkCompactions(snapshot: RunSnapshot): void {
       source.length -
       snapshot.inputs.filter((input) => input.beforeModel === entry.beforeModel).length;
     const view = modelConversation(snapshot, full, previous ?? null);
-    const cut = cutFor(snapshot, entry.beforeModel, view, previous?.cut, !!entry.rejectedAttemptId);
+    const previousCut = previous?.cut ?? 0;
+    const cut = cutFor(snapshot, entry.beforeModel, view, previousCut, !!entry.rejectedAttemptId);
     const turn = snapshot.models[entry.beforeModel];
     const pendingRetry = turn?.status === "running" && turn.attemptId === entry.rejectedAttemptId;
     if (entry.rejectedAttemptId) {
@@ -273,10 +280,8 @@ export function checkCompactions(snapshot: RunSnapshot): void {
       full.length !== entry.sourceCount ||
       entry.sourceCount < minimumSource ||
       entry.cut !== cut ||
-      entry.cut <= (previous?.cut ?? 0) ||
-      (policy.retryOnContextLimit &&
-        previous?.cut === snapshot.history.length &&
-        entry.cut === previous.cut + 1) ||
+      entry.cut <= previousCut ||
+      isNoOpPinnedCut(snapshot, previousCut, entry.cut) ||
       entry.cut >= full.length ||
       (entry.status === "running" &&
         (index !== snapshot.compactions.length - 1 ||

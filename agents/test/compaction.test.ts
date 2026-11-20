@@ -748,6 +748,42 @@ describe("reactive compaction under pressure", () => {
     expect(abortWire.requests).toHaveLength(1);
   });
 
+  it("refuses a no-op cut that would only pin the task when history is empty, both live and on restore", async () => {
+    // With no prior history and one tool round after the task, pickCut returns 1 (index of asst0),
+    // which would only cut the pinned task itself and remove nothing.
+    const wire = scripted([call(), rejectContext()]);
+    const read = defineTool({
+      name: "read",
+      description: "Read",
+      inputSchema: { type: "object" },
+      run: async () => "Result " + "detail ".repeat(40),
+    });
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      compaction: reactive,
+      tools: [read],
+    });
+    const result = await agent.run("Only task");
+    expect(result).toMatchObject({ status: "failed", error: { code: "model_failed" } });
+    expect(wire.requests).toHaveLength(2);
+    expect(result.snapshot.compactions).toEqual([]);
+
+    // Restore must reject a forged cut=1 on an empty history for the same reason.
+    const forged = structuredClone(result.snapshot);
+    forged.compactions.push({
+      id: `${forged.runId}/compaction/1`,
+      beforeModel: 1,
+      sourceCount: 3,
+      cut: 1,
+      status: "completed",
+      summary: "Forged",
+    });
+    await expect(agent.resume(forged, { host: { authorizeResume } })).rejects.toThrow(
+      "Invalid compaction",
+    );
+  });
+
   it("does not retry on context limit or change default behavior without retryOnContextLimit", async () => {
     const wire = scripted([rejectContext(), text("Must not run")]);
     const onContextLimit = vi.fn();
