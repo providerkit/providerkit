@@ -16,12 +16,15 @@
     "@astrojs/starlight": "^0.42.0",
     "@fontsource-variable/archivo": "^5.3.0",
     "@fontsource/commit-mono": "^5.3.0",
-    "@providerkit/core": "workspace:*",
-    "@providerkit/agents": "0.3.0",
-    "@providerkit/react": "0.1.1",
+    "@providerkit/agents": "0.4.0",
+    "@providerkit/core": "0.35.1",
+    "@providerkit/react": "0.2.0",
+    "@shadcn/react": "^0.3.1",
     "astro": "^7.2.10",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "starlight-llms-txt": "^0.11.0"
   },
   "devDependencies": {

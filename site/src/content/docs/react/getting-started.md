@@ -15,7 +15,7 @@ delivery, the client marks the message as unconfirmed. It does not send it again
 React 19 is required. Add Core when using the SSE adapter:
 
 ```sh
-bun add @providerkit/react@0.1.1 @providerkit/core@^0.33.1
+bun add @providerkit/react@0.2.0 @providerkit/core@^0.35.1
 ```
 
 Configure a transport once for the conversation:

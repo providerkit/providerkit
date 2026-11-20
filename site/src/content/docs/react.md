@@ -9,7 +9,7 @@ Send a message through your app's transport:
 await chat.send("Summarize this page.");
 ```
 
-**React 0.1.1** is the experimental chat package. It keeps messages and connection state, handles
+**React 0.2.0** is the experimental chat package. It keeps messages and connection state, handles
 requests and provides optional components. You can use its hooks, keep your own state owner, or
 use both. [Set up your first chat](/react/getting-started/).
 

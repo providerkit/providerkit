@@ -15,7 +15,7 @@ uses a real QuickJS runtime and sample tools, not a paid model.
 ## Install the optional engine
 
 ```sh
-bun add @providerkit/agents@0.3.0 @providerkit/core@^0.33.1
+bun add @providerkit/agents@0.4.0 @providerkit/core@^0.35.1
 bun add quickjs-emscripten-core@^0.32.0 @jitl/quickjs-wasmfile-release-sync@^0.32.0
 ```
 

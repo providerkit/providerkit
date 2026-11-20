@@ -12,7 +12,7 @@ await assistant.run("List the tasks.");
 [Set up this offline assistant](/agents/getting-started/). It returns two example tasks without
 calling a live model.
 
-**Agents 0.3.0** is an experimental package built on Core. It runs tools, coordinates specialists
+**Agents 0.4.0** is an experimental package built on Core. It runs tools, coordinates specialists
 and records execution so your host can save and resume work. Its API may change before 1.0.
 
 ## Build the execution you need
@@ -43,7 +43,7 @@ Core owns provider routing and stream retries. Agents adds explicit policies for
 
 ## Upgrade from 0.1
 
-Use Core `^0.33.1`. Finish old runs before upgrading: format-2 snapshots are not accepted by the
+Use Core `^0.35.1`. Finish old runs before upgrading: format-2 snapshots are not accepted by the
 format-3 runtime. Replace the old single approval decision with the request-keyed host contract.
 Execution trees can contain `agent`, `workflow` and `remote` nodes; check `kind` before reading
 model journals or workflow steps.
