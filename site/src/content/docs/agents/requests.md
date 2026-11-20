@@ -29,6 +29,27 @@ request-keyed evidence and the current host policy. Partial answers remain pendi
 expired or changed request does not authorize the original action. An edited approval is checked
 against the arguments that will actually execute, not just the earlier proposal.
 
+## One ask per turn, checked first
+
+By default, every remaining approval-required call in a turn opens together so a person can answer
+them in one batch. Pass `requests` on `defineAgent` to narrow that:
+
+- `requests: { onePerTurn: true }` opens only the first pending request in a turn and suspends,
+  opening the next one on resume after the first settles.
+- `requests: { validateBeforeAsk: true }` runs each tool's `accepts(arguments)` (or a client tool's
+  argument validator) before opening an approval for it. A call with invalid arguments skips
+  approval and returns `invalid_input` to the model so nobody is asked to approve a call that would
+  fail.
+
+## Active time and in-process waits
+
+`limits.elapsedMs` is the wall-clock limit across resumes, including time spent waiting for a
+person. Set `limits.activeMs` to cap the working time of each attempt separately: it pauses while
+`host.answerNow(request, { signal })` waits for a person in process, never counts time suspended
+between attempts, and starts fresh on each resume. While `answerNow` waits, `limits.elapsedMs`,
+`treeLimits.elapsedMs` and the caller's signal still abort the wait through `signal`. Reaching
+`activeMs` ends the run with `status: "limited"` and `limit: "activeMs"`.
+
 ## Browser actions
 
 A non-repeatable client action needs a host claim before it runs and a saved completion before

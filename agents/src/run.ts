@@ -1,7 +1,11 @@
 import {
   EMPTY_USAGE,
+  backoffMs,
+  isRetryable,
   parseContextOverflow,
+  parseRetryAfterMs,
   ProviderError,
+  sleep,
   ToolRegistry,
   collectTurn,
   createGate,
@@ -95,6 +99,7 @@ import {
   isClientTool,
   isInputRequired,
   requestHash,
+  type ActiveWaitPause,
   type ClientTool,
 } from "./request.ts";
 import { acknowledgeInputs, acceptInputs, inputReceipts } from "./steering.ts";
@@ -145,6 +150,9 @@ import {
   modelId,
   nudgeAfter,
   readFinishPolicy,
+  readRequestPolicy,
+  readRetryAfterOutputPolicy,
+  readSteeringPolicy,
   recordCodeTools,
   readLimits,
   readModelSettings,
@@ -220,6 +228,21 @@ function finishNote(reason: SalvageReason, tools: readonly string[]): string {
   return `${why} ${ask} from what you have already gathered. Do not request any more tools.`;
 }
 
+function retryDelayMs(
+  error: ProviderError,
+  attempt: number,
+  policy: { baseDelayMs: number; maxDelayMs: number },
+): number | null {
+  const asked = parseRetryAfterMs(error);
+  const resetWait =
+    error.resetAtMs !== undefined ? Math.max(0, error.resetAtMs - Date.now()) : undefined;
+  if (asked !== undefined || resetWait !== undefined) {
+    const wait = Math.max(asked ?? 0, resetWait ?? 0);
+    return wait > policy.maxDelayMs ? null : wait;
+  }
+  return backoffMs(attempt, policy.baseDelayMs, policy.maxDelayMs);
+}
+
 /** Core reports a length finish and its usage, then throws if no answer fit. The finish policy
  * handles that turn itself. All other provider errors must still fail the call. */
 async function* allowEmptyLength(
@@ -281,14 +304,16 @@ function recordOf(snapshot: RunSnapshot) {
     const refusal = saved.compactions.find(
       (entry) => saved.models[entry.beforeModel]?.id === model.id,
     )?.rejectedAttemptId;
-    for (const attempt of model.interrupted)
+    for (const attempt of model.interrupted) {
+      const { retriedAfterOutput: _retried, ...rest } = attempt;
       receipts.push({
         kind: "model",
         id: model.id,
-        ...attempt,
+        ...rest,
         status: attempt.attemptId === refusal ? "context_rejected" : "interrupted",
         billing: "unknown",
       });
+    }
     receipts.push({
       kind: "model",
       ...(summary ? { purpose: "compaction" as const } : {}),
@@ -539,6 +564,14 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     );
   const stopOnlyAtTools = stopOnly && { nudge: stopOnly.nudge };
   const finish = readFinishPolicy(definition.finish);
+  const requestPolicy = readRequestPolicy(definition.requests);
+  const steeringPolicy = readSteeringPolicy(definition.steering);
+  const retryAfterOutputConfig = readRetryAfterOutputPolicy(definition.retryAfterOutput);
+  const retryAfterOutput = retryAfterOutputConfig?.recorded;
+  const retryAfterOutputSleep = retryAfterOutputConfig?.sleep ?? sleep;
+  const HOSTED_RETRY_ERROR =
+    "retryAfterOutput cannot be used with hostedTools: a hosted delta commits the stream and replaying it would rerun and rebill the vendor's tool.";
+  if (retryAfterOutput && settings.hostedTools?.length) throw new TypeError(HOSTED_RETRY_ERROR);
   if (output) {
     tools.push(
       defineTool({
@@ -713,6 +746,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       (typeof choice === "object" && !enabled.includes(choice.name))
     )
       throw new TypeError("toolChoice must name an enabled tool; required needs at least one.");
+    if (retryAfterOutput && modelSettings.hostedTools?.length)
+      throw new TypeError(HOSTED_RETRY_ERROR);
     const toolHashes = Object.fromEntries(
       await Promise.all(
         (recovery?.readOnlyTools ?? []).map(async (name) => {
@@ -742,6 +777,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       ...(runFirst.length ? { runFirst: [...runFirst] } : {}),
       ...(stopOnlyAtTools ? { stopOnlyAtTools: { ...stopOnlyAtTools } } : {}),
       ...(finish ? { finish: { ...finish } } : {}),
+      ...(requestPolicy ? { requests: { ...requestPolicy } } : {}),
+      ...(retryAfterOutput ? { retryAfterOutput: { ...retryAfterOutput } } : {}),
+      ...(steeringPolicy ? { steering: { ...steeringPolicy } } : {}),
       ...(codeTools.size ? { codeTools: recordCodeTools(codeTools) } : {}),
       guardrails: copyData(guardPolicy),
       compaction: copyData(compaction),
@@ -833,11 +871,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     scope: ExecutionScope,
     signal: AbortSignal,
     effectiveCall?: ToolRequest,
+    activeWait?: ActiveWaitPause,
   ): RequestJournal {
     const call = requestFor(snapshot, model, index);
     const execution = model.tools[index];
     if (!execution) throw new TypeError("Missing tool journal.");
-    return requestsFor(call, execution, options, scope, signal, effectiveCall);
+    return requestsFor(call, execution, options, scope, signal, effectiveCall, activeWait);
   }
 
   function requestsFor(
@@ -847,6 +886,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     scope: ExecutionScope,
     signal: AbortSignal,
     effectiveCall?: ToolRequest,
+    activeWait?: ActiveWaitPause,
   ): RequestJournal {
     const tool =
       tools.find((tool) => tool.name === call.call.name) ?? capabilities.get(call.call.name);
@@ -880,6 +920,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         }
       },
       !!guardrails?.toolOutput,
+      activeWait,
     );
   }
 
@@ -963,15 +1004,70 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     const limits = snapshot.limits;
     const deadline = snapshot.startedAt + limits.elapsedMs;
     const timeout = new AbortController();
-    const signal = AbortSignal.any([
+    const waitSignal = AbortSignal.any([
       scope.tree.signal,
       timeout.signal,
       ...(options.signal ? [options.signal] : []),
     ]);
+    const activeLimit = new AbortController();
+    const signal =
+      limits.activeMs === undefined
+        ? waitSignal
+        : AbortSignal.any([waitSignal, activeLimit.signal]);
     const timer = setTimeout(
       () => timeout.abort(new Error("The run reached its time limit.")),
       Math.max(0, deadline - Date.now()),
     );
+    // Active-time clock for this attempt only. Paused while `host.answerNow` waits for a person in
+    // process, and fresh on every resumed attempt so suspended time between attempts never counts.
+    let activeRemaining = limits.activeMs;
+    let activeStartedAt = limits.activeMs === undefined ? undefined : Date.now();
+    let activeTimer: ReturnType<typeof setTimeout> | undefined;
+    let pausedWaits = 0;
+    const clearActiveTimer = () => {
+      if (activeTimer !== undefined) {
+        clearTimeout(activeTimer);
+        activeTimer = undefined;
+      }
+    };
+    const armActiveTimer = () => {
+      clearActiveTimer();
+      if (activeRemaining === undefined || pausedWaits > 0 || activeLimit.signal.aborted) return;
+      if (activeRemaining <= 0) {
+        activeLimit.abort(new Error("The run reached its active time limit."));
+        return;
+      }
+      activeStartedAt = Date.now();
+      activeTimer = setTimeout(
+        () => activeLimit.abort(new Error("The run reached its active time limit.")),
+        activeRemaining,
+      );
+    };
+    const activeRemainingNow = (): number => {
+      if (activeRemaining === undefined) return Infinity;
+      if (activeStartedAt === undefined) return activeRemaining;
+      return Math.max(0, activeRemaining - (Date.now() - activeStartedAt));
+    };
+    const activeWait: ActiveWaitPause = {
+      waitSignal,
+      pause() {
+        if (activeRemaining === undefined) return () => {};
+        if (pausedWaits === 0 && activeStartedAt !== undefined) {
+          activeRemaining = Math.max(0, activeRemaining - (Date.now() - activeStartedAt));
+          activeStartedAt = undefined;
+          clearActiveTimer();
+        }
+        pausedWaits++;
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          pausedWaits = Math.max(0, pausedWaits - 1);
+          if (pausedWaits === 0) armActiveTimer();
+        };
+      },
+    };
+    armActiveTimer();
     let release = () => {};
     let completed: { output: T | string | H } | undefined;
     let started = false;
@@ -981,6 +1077,8 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       if (options.signal?.aborted) throw new Halt({ status: "cancelled" });
       if (timeout.signal.aborted || Date.now() >= deadline)
         throw new Halt({ status: "limited", limit: "elapsedMs" });
+      if (activeLimit.signal.aborted || activeRemainingNow() <= 0)
+        throw new Halt({ status: "limited", limit: "activeMs" });
     }
 
     function emit(event: AgentEvent): void {
@@ -1665,7 +1763,15 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         let dispatch: Promise<Awaited<ReturnType<Tool["invoke"]>>> | undefined;
         async function invoke() {
           invocationActive(slot);
-          const journal = requestsFor(slot.request(), slot.get(), options, scope, callSignal);
+          const journal = requestsFor(
+            slot.request(),
+            slot.get(),
+            options,
+            scope,
+            callSignal,
+            undefined,
+            activeWait,
+          );
           try {
             await beforeTool(request, callSignal);
             if (slot.get().retries.length) await checkToolRetry(slot);
@@ -1780,7 +1886,15 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             retries: slot.get().retries,
             interrupted: slot.get().interrupted,
           });
-          const journal = requestsFor(request, slot.get(), options, scope, signal);
+          const journal = requestsFor(
+            request,
+            slot.get(),
+            options,
+            scope,
+            signal,
+            undefined,
+            activeWait,
+          );
           const previous = journal.latest(outcome.cause.ask);
           if (previous?.decision) previous.closed = "invalid";
           await journal.open(
@@ -1905,7 +2019,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         retries: previous.retries,
       });
       await save();
-      const requests = journalFor(snapshot, model, index, options, scope, signal);
+      const requests = journalFor(
+        snapshot,
+        model,
+        index,
+        options,
+        scope,
+        signal,
+        undefined,
+        activeWait,
+      );
       try {
         await beforeTool(request);
         await requests.recheck(request);
@@ -1926,6 +2049,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       const programDeadline = Math.min(
         Date.now() + code.limits.timeoutMs,
         deadline,
+        Date.now() + activeRemainingNow(),
         snapshot.tree.startedAt + snapshot.tree.limits.elapsedMs,
       );
       const timer = setTimeout(
@@ -2092,8 +2216,19 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
                   await finishExecution(inner, effective, skip);
                   break;
                 }
-                const journal = requestsFor(effective, call, options, scope, programSignal);
-                if (await needsApproval(effective, options, programSignal)) {
+                const journal = requestsFor(
+                  effective,
+                  call,
+                  options,
+                  scope,
+                  programSignal,
+                  undefined,
+                  activeWait,
+                );
+                if (
+                  acceptsForApproval(tool, call, effective.arguments) &&
+                  (await needsApproval(effective, options, programSignal))
+                ) {
                   let refusal: ToolResult | undefined;
                   if (!host?.prepareRequest || !host.beforeTool)
                     refusal = {
@@ -2285,7 +2420,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         });
         return;
       }
-      const requests = journalFor(snapshot, model, index, options, scope, signal);
+      const requests = journalFor(
+        snapshot,
+        model,
+        index,
+        options,
+        scope,
+        signal,
+        undefined,
+        activeWait,
+      );
       refuseGuardedReplay(snapshot, request.operationId);
       await beforeTool(request);
       await requests.recheck(request);
@@ -2318,6 +2462,28 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       await finishTool(model, index, request, result);
     }
 
+    /** Whether a call's tool accepts its raw arguments before opening an approval. Only checks
+     * when `requests.validateBeforeAsk` is enabled and no approval exists yet for this call: a
+     * call with bad arguments skips approval and runs through `invoke` to return `invalid_input`
+     * to the model. Ported from an adopter's batch gate (`firstNeedingApproval`). */
+    function acceptsForApproval(
+      tool: Tool | Delegation | ClientTool | CodeTool | Handoff<H> | undefined,
+      execution: ToolExecution | undefined,
+      args: Record<string, unknown>,
+    ): boolean {
+      if (!snapshot.definition.requests?.validateBeforeAsk || execution?.asks?.length) return true;
+      if (!tool || isDelegation(tool) || isHandoff(tool) || isCodeTool(tool)) return true;
+      if (isClientTool(tool)) {
+        try {
+          tool.validateArguments(args);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return tool.accepts(copyData(args));
+    }
+
     /** Opens the approvals the rest of the turn needs, so a person answers them together.
      * `order` is the turn's model positions in run order, and `from` the first one left. */
     async function openApprovals(
@@ -2325,6 +2491,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       order: readonly number[],
       from: number,
     ): Promise<void> {
+      if (snapshot.definition.requests?.onePerTurn) return;
       for (let at = from; at < order.length; at++) {
         const index = order[at];
         const execution = index === undefined ? undefined : model.tools[index];
@@ -2341,6 +2508,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           !snapshot.definition.enabledTools.includes(tool.name) ||
           snapshot.definition.modelSettings.toolChoice === "none" ||
           !completeArguments(request.call.arguments) ||
+          !acceptsForApproval(tool, execution, request.arguments) ||
           (isHandoff(tool) && model.tools.length !== 1) ||
           (!isDelegation(tool) &&
             !isHandoff(tool) &&
@@ -2361,7 +2529,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           if (preview?.kind === "cancelled") return;
           if (preview) continue;
         }
-        await journalFor(snapshot, model, index, options, scope, signal).ensure({
+        await journalFor(
+          snapshot,
+          model,
+          index,
+          options,
+          scope,
+          signal,
+          undefined,
+          activeWait,
+        ).ensure({
           type: "approval",
         });
       }
@@ -2387,7 +2564,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       }
       if (!host?.beforeTool)
         fail("request_host_missing", "Provide host.beforeTool before dispatching a client tool.");
-      const requests = journalFor(snapshot, model, index, options, scope, signal, request);
+      const requests = journalFor(
+        snapshot,
+        model,
+        index,
+        options,
+        scope,
+        signal,
+        request,
+        activeWait,
+      );
       refuseGuardedReplay(snapshot, request.operationId);
       await beforeTool(request);
       await requests.recheck(request);
@@ -2469,7 +2655,35 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
             model.id,
           );
         // A checked answer in prose buys a finish turn. Silence did not produce one.
-        if (!output) snapshot.state = { status: "completed", candidate: message.content };
+        if (!output) {
+          // Opt-in late steering: if the user queued input while the model was writing its final
+          // answer (and another normal turn fits in the run's and tree's budgets), accept it and
+          // run another turn instead of ending with the message still queued for recall. Never
+          // consume the post-limit tool-free finalTurn slot for late input: that slot exists only
+          // to close out work already done at limits.turns, not to start answering new user input
+          // with tools stripped.
+          if (snapshot.definition.steering?.answerLateInput) {
+            const nextPos = snapshot.models.length;
+            if (nextPos < limits.turns) {
+              let hasRoom = true;
+              try {
+                scope.tree.reserveModel();
+                scope.tree.reserveCost(scope.path, true);
+              } catch (error) {
+                if (error instanceof Halt && error.state.status === "limited") hasRoom = false;
+                else throw error;
+              }
+              if (hasRoom) {
+                const alreadyAccepted = snapshot.inputs.some(
+                  (input) => input.beforeModel === nextPos,
+                );
+                if (alreadyAccepted || (await acceptInputs(snapshot, scope, options, signal)))
+                  return;
+              }
+            }
+          }
+          snapshot.state = { status: "completed", candidate: message.content };
+        }
         return;
       }
 
@@ -2607,11 +2821,25 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         const tool = registry.get(request.call.name);
         const client = clients.get(request.call.name);
         const code = codeTools.get(request.call.name);
-        const requests = journalFor(snapshot, model, index, options, scope, signal);
+        const requests = journalFor(
+          snapshot,
+          model,
+          index,
+          options,
+          scope,
+          signal,
+          undefined,
+          activeWait,
+        );
         if (
           (tool || descriptor || client || code) &&
           completeArguments(request.call.arguments) &&
           (!tool || !runsAlone(tool) || model.tools.length === 1) &&
+          acceptsForApproval(
+            tool ?? client ?? descriptor ?? code,
+            model.tools[index],
+            request.arguments,
+          ) &&
           (await needsApproval(request, options, signal))
         )
           await requests.ensure({ type: "approval" });
@@ -3034,6 +3262,15 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
     }
 
+    class StreamRetryable extends Error {
+      constructor(
+        readonly error: ProviderError,
+        readonly current: Extract<ModelExecution, { status: "running" }>,
+      ) {
+        super(error.message);
+      }
+    }
+
     async function nextTurn(
       previous?: Extract<ModelExecution, { status: "running" }>,
     ): Promise<CompletedModel> {
@@ -3055,7 +3292,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         requireRecovery(
           snapshot.definition.recovery?.policy.inferenceOnly === true &&
             !snapshot.definition.modelSettings.hostedTools?.length,
-          previous.interrupted.filter((attempt) => attempt.attemptId !== rejectedId).length,
+          previous.interrupted.filter(
+            (attempt) => attempt.attemptId !== rejectedId && !attempt.retriedAfterOutput,
+          ).length,
           snapshot.definition.recovery,
           previous.id,
         );
@@ -3100,6 +3339,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       const dispatch = async (
         prior?: Extract<ModelExecution, { status: "running" }>,
         attemptId?: string,
+        retriedAfterOutput = false,
       ): Promise<CompletedModel> => {
         active();
         // Media is read before the receipt below exists, so a missing loader or file fails the
@@ -3148,33 +3388,66 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           false,
           attemptId,
           finish,
+          retriedAfterOutput,
         );
       };
+      const retryPolicy = snapshot.definition.retryAfterOutput;
       let done: CompletedModel;
-      try {
-        done = await dispatch(previous);
-      } catch (thrown) {
-        if (!(thrown instanceof ContextRejected)) throw thrown;
-        reportContextLimit(operationId, thrown.served, thrown.error);
-        const canRetry =
-          snapshot.definition.compaction?.retryOnContextLimit === true &&
-          !snapshot.definition.modelSettings.hostedTools?.length &&
-          !snapshot.compactions.some((entry) => entry.rejectedAttemptId !== undefined) &&
-          (await compact(position, thrown.current.attemptId));
-        if (!canRetry) {
-          if (finish !== undefined) unsaved(finish, operationId);
-          failModel(operationId, !!guardrails?.modelOutput, thrown.error);
-        }
+      let prior = previous;
+      let nextAttemptId: string | undefined;
+      let markRetried = false;
+      for (;;) {
         try {
-          done = await dispatch(
-            thrown.current,
-            `${snapshot.attemptId}/model-attempt/${thrown.current.interrupted.length + 1}`,
-          );
-        } catch (retryError) {
-          if (!(retryError instanceof ContextRejected)) throw retryError;
-          reportContextLimit(operationId, retryError.served, retryError.error);
-          if (finish !== undefined) unsaved(finish, operationId);
-          failModel(operationId, !!guardrails?.modelOutput, retryError.error);
+          done = await dispatch(prior, nextAttemptId, markRetried);
+          break;
+        } catch (thrown) {
+          if (thrown instanceof StreamRetryable) {
+            const retried = thrown.current.interrupted.filter(
+              (attempt) => attempt.retriedAfterOutput === true,
+            ).length;
+            if (
+              !retryPolicy ||
+              snapshot.definition.modelSettings.hostedTools?.length ||
+              retried >= retryPolicy.maxRetries
+            ) {
+              if (finish !== undefined) unsaved(finish, operationId);
+              failModel(operationId, !!guardrails?.modelOutput, thrown.error);
+            }
+            const delay = retryDelayMs(thrown.error, retried + 1, retryPolicy);
+            if (delay === null) {
+              if (finish !== undefined) unsaved(finish, operationId);
+              failModel(operationId, !!guardrails?.modelOutput, thrown.error);
+            }
+            if (delay > 0) {
+              try {
+                await retryAfterOutputSleep(delay, signal);
+              } catch (sleepError) {
+                active();
+                if (signal.aborted) throw new Halt({ status: "cancelled" });
+                throw sleepError;
+              }
+            }
+            active();
+            prior = thrown.current;
+            nextAttemptId = `${snapshot.attemptId}/model-attempt/${thrown.current.interrupted.length + 1}`;
+            markRetried = true;
+            continue;
+          }
+          if (!(thrown instanceof ContextRejected)) throw thrown;
+          reportContextLimit(operationId, thrown.served, thrown.error);
+          const canRetry =
+            snapshot.definition.compaction?.retryOnContextLimit === true &&
+            !snapshot.definition.modelSettings.hostedTools?.length &&
+            !snapshot.compactions.some((entry) => entry.rejectedAttemptId !== undefined) &&
+            (await compact(position, thrown.current.attemptId));
+          if (!canRetry) {
+            if (finish !== undefined) unsaved(finish, operationId);
+            failModel(operationId, !!guardrails?.modelOutput, thrown.error);
+          }
+          prior = thrown.current;
+          nextAttemptId = `${snapshot.attemptId}/model-attempt/${thrown.current.interrupted.length + 1}`;
+          markRetried = false;
+          continue;
         }
       }
       for (const receipt of inputReceipts(snapshot).filter(
@@ -3197,6 +3470,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       summary = false,
       attemptId = snapshot.attemptId,
       finish?: SalvageReason,
+      retriedAfterOutput = false,
     ): Promise<CompletedModel> {
       const { messages: request, settings: modelSettings } = modelInput;
       await guards.check("modelInput", operationId, attemptId, modelInput);
@@ -3226,6 +3500,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
                 usage: copyData(previous.usage),
                 // The lost attempt keeps the price it was given, never a new one.
                 ...(previous.costUsd !== undefined ? { costUsd: previous.costUsd } : {}),
+                ...(retriedAfterOutput ? { retriedAfterOutput: true as const } : {}),
               },
             ]
           : [],
@@ -3343,6 +3618,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         }
         if (error.kind === "context" && !summary && !sawChunk)
           throw new ContextRejected(error, model, served);
+        // Opt-in retry after emitted output for runs whose stream nobody watches. Hosted tools are
+        // refused at definition and run start (invariant 19), and checked again here as a belt.
+        if (
+          !summary &&
+          sawChunk &&
+          snapshot.definition.retryAfterOutput &&
+          !snapshot.definition.modelSettings.hostedTools?.length &&
+          isRetryable(error)
+        )
+          throw new StreamRetryable(error, model);
         if (finish !== undefined) unsaved(finish, model.id);
         failModel(model.id, guarded, error);
       }
@@ -3488,6 +3773,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       release();
       if (started) await observe({ type: "run_end", state: snapshot.state });
       clearTimeout(timer);
+      clearActiveTimer();
     }
     emit({
       type: "state",
@@ -3665,6 +3951,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         ...(runFirst.length ? { runFirst } : {}),
         ...(stopOnlyAtTools ? { stopOnlyAtTools } : {}),
         ...(finish ? { finish } : {}),
+        ...(requestPolicy ? { requests: requestPolicy } : {}),
+        ...(retryAfterOutput ? { retryAfterOutput } : {}),
+        ...(steeringPolicy ? { steering: steeringPolicy } : {}),
         recovery,
         guardrails: guardPolicy,
         compaction,
@@ -3806,6 +4095,9 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         !equalData(snapshot.definition.runFirst ?? [], runFirst) ||
         !equalData(snapshot.definition.stopOnlyAtTools, stopOnlyAtTools) ||
         !equalData(snapshot.definition.finish, finish) ||
+        !equalData(snapshot.definition.requests, requestPolicy) ||
+        !equalData(snapshot.definition.retryAfterOutput, retryAfterOutput) ||
+        !equalData(snapshot.definition.steering, steeringPolicy) ||
         (output && !snapshot.definition.enabledTools.includes(RESULT_TOOL_NAME))
       )
         throw new TypeError("The recorded tool behavior does not match this agent version.");

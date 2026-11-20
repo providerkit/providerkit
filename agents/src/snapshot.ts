@@ -58,6 +58,8 @@ import type {
   PendingRequest,
   RecordedModelSettings,
   RecordedCodeTool,
+  RecordedRetryAfterOutputPolicy,
+  RequestPolicy,
   RunDefinition,
   RunFailure,
   RunLimits,
@@ -67,6 +69,7 @@ import type {
   SalvageReason,
   Session,
   SessionStatus,
+  SteeringPolicy,
   ToolCost,
   ToolExecution,
   ToolRequest,
@@ -147,13 +150,14 @@ export function readLimits(value: unknown = {}): RunLimits {
     turns: value.turns ?? 12,
     toolCalls: value.toolCalls ?? 32,
     elapsedMs: value.elapsedMs ?? 300_000,
+    ...(value.activeMs !== undefined ? { activeMs: value.activeMs } : {}),
     parallelTools: value.parallelTools ?? 3,
     inlineBytes: value.inlineBytes ?? 5_000_000,
     ...(value.costUsd !== undefined ? { costUsd: value.costUsd } : {}),
   };
   if (!isLimits(limits)) {
     throw new TypeError(
-      "Agent limits must be positive finite integers (inlineBytes may be 0, and costUsd is a finite USD amount of 0 or more); elapsedMs must fit a timer.",
+      "Agent limits must be positive finite integers (inlineBytes may be 0, and costUsd is a finite USD amount of 0 or more); elapsedMs and activeMs must fit a timer.",
     );
   }
   return limits;
@@ -166,6 +170,7 @@ function isLimits(value: unknown): value is RunLimits {
     positive(value.toolCalls) &&
     positive(value.elapsedMs) &&
     value.elapsedMs <= 2_147_483_647 &&
+    optional(value.activeMs, (ms) => positive(ms) && ms <= 2_147_483_647) &&
     positive(value.parallelTools) &&
     finite(value.inlineBytes) &&
     Number.isSafeInteger(value.inlineBytes) &&
@@ -197,6 +202,100 @@ export function readFinishPolicy(value: unknown): RunDefinition["finish"] {
       "finish takes emptyTurns, a whole number of 0 or more, and nearEnd, the text the model reads one turn before the turn limit.",
     );
   return policy;
+}
+
+function isRequestPolicy(value: unknown): value is RequestPolicy {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) => key === "onePerTurn" || key === "validateBeforeAsk") &&
+    optional(value.onePerTurn, (item) => typeof item === "boolean") &&
+    optional(value.validateBeforeAsk, (item) => typeof item === "boolean")
+  );
+}
+
+/** `AgentConfig.requests` as the run records it. Only enabled flags are stored so unset defaults
+ * stay absent from snapshots and keep format compatibility. */
+export function readRequestPolicy(value: unknown): RequestPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (!isRequestPolicy(value))
+    throw new TypeError("requests takes boolean onePerTurn and validateBeforeAsk options.");
+  const policy: RequestPolicy = {
+    ...(value.onePerTurn === true ? { onePerTurn: true } : {}),
+    ...(value.validateBeforeAsk === true ? { validateBeforeAsk: true } : {}),
+  };
+  return Object.keys(policy).length ? policy : undefined;
+}
+
+function isRecordedRetryAfterOutput(value: unknown): value is RecordedRetryAfterOutputPolicy {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every(
+      (key) => key === "maxRetries" || key === "baseDelayMs" || key === "maxDelayMs",
+    ) &&
+    positive(value.maxRetries) &&
+    value.maxRetries <= 10 &&
+    finite(value.baseDelayMs) &&
+    Number.isSafeInteger(value.baseDelayMs) &&
+    value.baseDelayMs <= 2_147_483_647 &&
+    finite(value.maxDelayMs) &&
+    Number.isSafeInteger(value.maxDelayMs) &&
+    value.maxDelayMs <= 2_147_483_647 &&
+    value.maxDelayMs >= value.baseDelayMs
+  );
+}
+
+/** `AgentConfig.retryAfterOutput` as the run records it. Keeps `sleep` out of snapshots. */
+export function readRetryAfterOutputPolicy(value: unknown): {
+  recorded: RecordedRetryAfterOutputPolicy;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+} | null {
+  if (value === undefined) return null;
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(
+      (key) =>
+        key !== "maxRetries" && key !== "baseDelayMs" && key !== "maxDelayMs" && key !== "sleep",
+    )
+  )
+    throw new TypeError(
+      "retryAfterOutput takes maxRetries (1 to 10), optional baseDelayMs, maxDelayMs and sleep.",
+    );
+  const sleep = value.sleep;
+  if (sleep !== undefined && typeof sleep !== "function")
+    throw new TypeError(
+      "retryAfterOutput takes maxRetries (1 to 10), optional baseDelayMs, maxDelayMs and sleep.",
+    );
+  const recorded = {
+    maxRetries: value.maxRetries,
+    baseDelayMs: value.baseDelayMs ?? 1_000,
+    maxDelayMs: value.maxDelayMs ?? 30_000,
+  };
+  if (!isRecordedRetryAfterOutput(recorded))
+    throw new TypeError(
+      "retryAfterOutput.maxRetries must be an integer from 1 to 10, and baseDelayMs/maxDelayMs must be non-negative integers fitting a timer with maxDelayMs >= baseDelayMs.",
+    );
+  return {
+    recorded,
+    ...(sleep
+      ? { sleep: (ms: number, signal?: AbortSignal) => Promise.resolve(sleep(ms, signal)) }
+      : {}),
+  };
+}
+
+function isSteeringPolicy(value: unknown): value is SteeringPolicy {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) => key === "answerLateInput") &&
+    optional(value.answerLateInput, (item) => typeof item === "boolean")
+  );
+}
+
+/** `AgentConfig.steering` as the run records it. Unset defaults stay absent from snapshots. */
+export function readSteeringPolicy(value: unknown): SteeringPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (!isSteeringPolicy(value))
+    throw new TypeError("steering takes a boolean answerLateInput option.");
+  return value.answerLateInput === true ? { answerLateInput: true } : undefined;
 }
 
 const IMAGE_TYPES: readonly ImageMimeType[] = [
@@ -644,6 +743,9 @@ function isRunDefinition(value: unknown): value is RunDefinition {
       (mode) => isRecord(mode) && Object.keys(mode).length === 1 && isId(mode.nudge),
     ) &&
     optional(value.finish, isFinishDefinition) &&
+    optional(value.requests, isRequestPolicy) &&
+    optional(value.retryAfterOutput, isRecordedRetryAfterOutput) &&
+    optional(value.steering, isSteeringPolicy) &&
     optional(value.codeTools, isRecordedCodeTools) &&
     isGuardDefinition(value.guardrails) &&
     isCompactionDefinition(value.compaction) &&
@@ -989,7 +1091,8 @@ function isModel(value: unknown): value is ModelExecution {
         attempt.attemptId === value.attemptId ||
         !("usage" in attempt) ||
         !isUsage(attempt.usage) ||
-        ("costUsd" in attempt && !finite(attempt.costUsd)),
+        ("costUsd" in attempt && !finite(attempt.costUsd)) ||
+        ("retriedAfterOutput" in attempt && attempt.retriedAfterOutput !== true),
     )
   )
     return false;
@@ -1043,6 +1146,7 @@ export function isState(value: unknown): value is RunState {
         "turns",
         "toolCalls",
         "elapsedMs",
+        "activeMs",
         "outputTokens",
         "maxChildren",
         "maxDepth",
@@ -1527,13 +1631,23 @@ export function checkTree(root: TreeNode): void {
 function checkAttemptProgress(
   previous: {
     attemptId?: string;
-    interrupted: { attemptId: string; usage?: TokenUsage; costUsd?: number }[];
+    interrupted: {
+      attemptId: string;
+      usage?: TokenUsage;
+      costUsd?: number;
+      retriedAfterOutput?: true;
+    }[];
     usage?: TokenUsage;
     costUsd?: number;
   },
   next: {
     attemptId?: string;
-    interrupted: { attemptId: string; usage?: TokenUsage; costUsd?: number }[];
+    interrupted: {
+      attemptId: string;
+      usage?: TokenUsage;
+      costUsd?: number;
+      retriedAfterOutput?: true;
+    }[];
   },
 ): void {
   if (previous.interrupted.some((attempt, index) => !equalData(attempt, next.interrupted[index])))
@@ -1542,14 +1656,22 @@ function checkAttemptProgress(
   if (previous.attemptId === next.attemptId) {
     if (previous.interrupted.length !== next.interrupted.length)
       throw new TypeError("The host changed a current attempt's history.");
-  } else if (
-    !equalData(next.interrupted[previous.interrupted.length], {
-      attemptId: previous.attemptId,
-      ...(previous.usage ? { usage: previous.usage } : {}),
-      ...(previous.costUsd !== undefined ? { costUsd: previous.costUsd } : {}),
-    })
-  )
-    throw new TypeError("The host changed an attempt without retaining its receipt.");
+  } else {
+    const saved = next.interrupted[previous.interrupted.length];
+    let withoutRetry: Omit<NonNullable<typeof saved>, "retriedAfterOutput"> | undefined;
+    if (saved) {
+      const { retriedAfterOutput: _retried, ...rest } = saved;
+      withoutRetry = rest;
+    }
+    if (
+      !equalData(withoutRetry, {
+        attemptId: previous.attemptId,
+        ...(previous.usage ? { usage: previous.usage } : {}),
+        ...(previous.costUsd !== undefined ? { costUsd: previous.costUsd } : {}),
+      })
+    )
+      throw new TypeError("The host changed an attempt without retaining its receipt.");
+  }
 }
 
 /** A host cache may fill a missing receipt, never erase or replace a known effect. */
@@ -2135,11 +2257,23 @@ export function readSnapshot(
   const hardCap = !!resultTool || !!raw.definition.stopOnlyAtTools;
   const policy = raw.definition.finish;
   // A turn the run answered and went on from: with tool results, with the nudge, as an empty
-  // turn the finish policy allows, or on to the finish turn it calls for.
+  // turn the finish policy allows, with late steering input accepted right after it, or on to the
+  // finish turn it calls for.
+  const lateInputAfter = (model: ModelExecution, index: number) =>
+    raw.definition.steering?.answerLateInput === true &&
+    index + 1 < limits.turns &&
+    model.status === "completed" &&
+    model.finish === undefined &&
+    model.tools.length === 0 &&
+    !resultTool &&
+    (model.turn.finishReason === "stop" || model.turn.finishReason === "tool_calls") &&
+    model.turn.message.content.trim().length > 0 &&
+    raw.inputs.some((input) => input.beforeModel === index + 1);
   const goesOn = (model: ModelExecution, index: number) =>
     (model.status === "completed" && model.tools.length > 0) ||
     nudgeAfter(raw, index) !== undefined ||
     allowedEmpty(raw, index) ||
+    lateInputAfter(model, index) ||
     finishAfter(raw, index, resultTool) !== undefined;
   // A turn the output limit cut ends the run, unless it calls for a finish turn.
   const cut = (model: Extract<ModelExecution, { status: "completed" }>, index: number) =>
@@ -2151,8 +2285,18 @@ export function readSnapshot(
     const rejected = raw.compactions.find(
       (entry) => entry.beforeModel === index,
     )?.rejectedAttemptId;
+    const retriedAfterOutput = model.interrupted.filter(
+      (attempt) => attempt.retriedAfterOutput === true,
+    ).length;
+    if (
+      retriedAfterOutput &&
+      (!raw.definition.retryAfterOutput ||
+        !!raw.definition.modelSettings.hostedTools?.length ||
+        retriedAfterOutput > raw.definition.retryAfterOutput.maxRetries)
+    )
+      throw new TypeError("Model retries after output exceed the recorded policy.");
     const interrupted = model.interrupted.filter(
-      (attempt) => attempt.attemptId !== rejected,
+      (attempt) => attempt.attemptId !== rejected && !attempt.retriedAfterOutput,
     ).length;
     if (
       interrupted &&

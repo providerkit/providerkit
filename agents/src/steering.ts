@@ -250,14 +250,14 @@ export async function acceptInputs(
   scope: ExecutionScope,
   options: RunOptions,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   const inbox = options.host?.inbox;
   if (
     !inbox ||
     scope.tree.root.kind !== "agent" ||
     conversationOwner(scope.tree.root).runId !== snapshot.runId
   )
-    return;
+    return false;
   const recorded = [...snapshots(scope.tree.root)].flatMap((node) =>
     node.kind === "agent" ? node.inputs : [],
   );
@@ -265,7 +265,7 @@ export async function acceptInputs(
     count: Math.min(INPUT_LIMITS.pending, INPUT_LIMITS.count - recorded.length),
     bytes: INPUT_LIMITS.bytes - recorded.reduce((total, input) => total + inputBytes(input), 0),
   };
-  if (limit.count <= 0 || limit.bytes <= 0) return;
+  if (limit.count <= 0 || limit.bytes <= 0) return false;
   let offered: unknown;
   try {
     offered = await untilAbort(
@@ -308,7 +308,7 @@ export async function acceptInputs(
       fail("invalid_inbox", "The host inbox returned more bytes than the requested limit.");
     accepted.push({ ...input, beforeModel: snapshot.models.length });
   }
-  if (!accepted.length) return;
+  if (!accepted.length) return false;
   const history = [
     ...conversationOf(snapshot),
     ...accepted.map((input) => ({ role: "user" as const, content: input.content })),
@@ -326,4 +326,5 @@ export async function acceptInputs(
   ))
     emitEvent(options, { type: "input", receipt });
   await acknowledgeInputs(snapshot, options, signal);
+  return true;
 }

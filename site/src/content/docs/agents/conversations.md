@@ -64,7 +64,12 @@ because a reference exists. Uploading an attachment is still your app's job.
 
 Steering lets a host queue input for the next model call. `createMemoryInbox` is a process-local
 reference implementation. Accepted input is journaled before acknowledgement; accepted does not
-mean consumed. The host owns retention, ordering and any input left when the run ends.
+mean consumed. By default, messages arriving as the model finishes stay queued for recall, and the
+host owns retention, ordering and any input left when the run ends.
+
+Set `steering: { answerLateInput: true }` on `defineAgent` to run another turn when steering input
+arrives before a text answer settles, as long as the run's turn, cost and tree model-call budgets
+still have room. If no budget remains, the completed answer settles and late messages stay queued.
 
 Run the [conversation example](https://github.com/providerkit/providerkit/blob/340d8af/agents/examples/conversation.ts)
 or [steering example](https://github.com/providerkit/providerkit/blob/340d8af/agents/examples/steering.ts).

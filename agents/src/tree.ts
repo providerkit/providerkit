@@ -29,7 +29,7 @@ export class Halt extends Error {
 export function isLocalStop(state: RunState): boolean {
   return (
     (state.status === "limited" &&
-      ["turns", "toolCalls", "elapsedMs", "outputTokens", "steps", "costUsd"].includes(
+      ["turns", "toolCalls", "elapsedMs", "activeMs", "outputTokens", "steps", "costUsd"].includes(
         state.limit,
       )) ||
     (state.status === "failed" &&

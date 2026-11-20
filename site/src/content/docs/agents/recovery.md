@@ -9,8 +9,16 @@ external action whose outcome is unknown.
 ## Provider streams
 
 Core may retry a transient provider failure only before any output is emitted. Once output has
-started, the stream is committed. Agents uses the provider you supply rather than adding another
-provider retry loop. [Core's retry guide](/guides/retries/) covers routing and fallback.
+started, the stream is committed. By default, Agents uses the provider you supply rather than
+adding another retry loop. [Core's retry guide](/guides/retries/) covers routing and fallback.
+
+For background runs whose stream nobody watches, you can opt in with
+`retryAfterOutput: { maxRetries, baseDelayMs?, maxDelayMs? }` on `defineAgent`. When a transient
+`ProviderError` fails a turn after chunks arrived, Agents drops the partial turn, waits with
+full-jitter backoff and calls the provider again up to `maxRetries` times (1 to 10). Each attempt
+is journaled, priced and counted toward `limits.costUsd` and `treeLimits.modelCalls`. The option
+is refused when `hostedTools` are configured on the agent or run, because a hosted delta commits
+the stream and replaying it would rerun and rebill the vendor's tool.
 
 ## Interrupted execution
 
