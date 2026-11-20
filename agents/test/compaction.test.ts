@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   defineTool,
+  ProviderError,
   type ChatMessage,
   type Provider,
   type ProviderChunk,
@@ -474,5 +475,327 @@ describe("model-only compaction", () => {
     const only = await agent.run("Only turn ".repeat(100));
     expect(only.snapshot.compactions).toEqual([]);
     expect(wire.requests[1]?.messages[1]?.content).toBe("Only turn ".repeat(100));
+  });
+});
+
+describe("reactive compaction under pressure", () => {
+  type Step = ProviderChunk[] | (() => AsyncIterable<ProviderChunk>);
+
+  function scripted(steps: Step[]) {
+    const requests: { messages: ChatMessage[]; options?: StreamOptions }[] = [];
+    const provider: Provider = {
+      id: "offline",
+      model: "fake",
+      async *createStream(messages, _tools, options) {
+        const step = steps[requests.length];
+        requests.push({ messages: structuredClone(messages), options });
+        if (!step) throw new Error("Unexpected model call");
+        if (typeof step === "function") yield* step();
+        else yield* step;
+      },
+    };
+    return { provider, requests };
+  }
+
+  function reject(error: () => ProviderError): Step {
+    return () => ({
+      [Symbol.asyncIterator]: () => ({
+        async next() {
+          throw error();
+        },
+      }),
+    });
+  }
+
+  function rejectContext(message = "prompt is too long: 137500 tokens > 135000 maximum"): Step {
+    return reject(() => new ProviderError("offline", "context", message, { status: 400 }));
+  }
+
+  const reactive = {
+    identity: "reactive-1",
+    contextWindow: 100_000,
+    keepTokens: 5,
+    retryOnContextLimit: true,
+  } as const;
+
+  it("folds once and retries on the same turn without spending a turn, reporting measured overflow", async () => {
+    const wire = scripted([rejectContext(), text("Recovered")]);
+    const onContextLimit = vi.fn();
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      compaction: reactive,
+      limits: { turns: 1 },
+    });
+    const result = await agent.run(input, { host: { onContextLimit } });
+    expect(result).toMatchObject({ status: "completed", output: "Recovered" });
+    expect(wire.requests).toHaveLength(2);
+    expect(result.snapshot.models).toHaveLength(1);
+    expect(result.snapshot.models[0]?.interrupted).toHaveLength(1);
+    expect(result.receipts).toContainEqual(
+      expect.objectContaining({ kind: "model", status: "context_rejected" }),
+    );
+    expect(result.receipts).toContainEqual(
+      expect.objectContaining({ kind: "model", status: "completed" }),
+    );
+    expect(onContextLimit).toHaveBeenCalledWith({
+      runId: result.runId,
+      operationId: `${result.runId}/model/1`,
+      provider: "offline",
+      model: "fake",
+      inputTokens: 137_500,
+      contextLimit: 135_000,
+    });
+    expect(wire.requests[1]?.messages).toEqual([
+      { role: "system", content: base.instructions },
+      { role: "user", content: expect.stringContaining("No summary was generated") },
+      { role: "user", content: "New question" },
+    ]);
+    expect((await agent.resume(result.snapshot, { host: { authorizeResume } })).status).toBe(
+      "completed",
+    );
+  });
+
+  it("retries at most once per run and fails if the shortened request is still rejected", async () => {
+    const wire = scripted([rejectContext(), rejectContext()]);
+    const onContextLimit = vi.fn();
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      compaction: reactive,
+    });
+    const result = await agent.run(input, { host: { onContextLimit } });
+    expect(result).toMatchObject({ status: "failed", error: { code: "model_failed" } });
+    expect(wire.requests).toHaveLength(2);
+    expect(onContextLimit).toHaveBeenCalledTimes(2);
+    expect(result.snapshot.compactions).toHaveLength(1);
+  });
+
+  it("never retries a context rejection after output chunks were emitted or when hostedTools are configured", async () => {
+    const partial = scripted([
+      async function* () {
+        yield { type: "delta", content: "Partial" };
+        throw new ProviderError("offline", "context", "model_context_window_exceeded");
+      },
+    ]);
+    const partialAgent = defineAgent({
+      ...base,
+      provider: partial.provider,
+      compaction: reactive,
+    });
+    const partialResult = await partialAgent.run(input);
+    expect(partialResult).toMatchObject({ status: "failed", error: { code: "model_failed" } });
+    expect(partial.requests).toHaveLength(1);
+    expect(partialResult.snapshot.compactions).toEqual([]);
+
+    const hosted = scripted([rejectContext()]);
+    const hostedAgent = defineAgent({
+      ...base,
+      provider: hosted.provider,
+      compaction: reactive,
+      modelSettings: { hostedTools: [{ type: "web_search" }] },
+    });
+    const hostedResult = await hostedAgent.run(input);
+    expect(hostedResult).toMatchObject({ status: "failed", error: { code: "model_failed" } });
+    expect(hosted.requests).toHaveLength(1);
+    expect(hostedResult.snapshot.compactions).toEqual([]);
+  });
+
+  it("pins the run task through compaction cuts and keeps call/result pairs intact", async () => {
+    const wire = scripted([call(), call(), rejectContext(), text("Finished")]);
+    let count = 0;
+    const read = defineTool({
+      name: "read",
+      description: "Read",
+      inputSchema: { type: "object" },
+      run: async () => `Result ${++count} ` + "detail ".repeat(40),
+    });
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      compaction: reactive,
+      tools: [read],
+    });
+    const result = await agent.run({
+      messages: [...old, { role: "user", content: "Keep this exact task." }],
+    });
+    expect(result).toMatchObject({ status: "completed", output: "Finished" });
+    const retried = wire.requests[3]?.messages ?? [];
+    expect(retried[1]).toMatchObject({
+      role: "user",
+      content: expect.stringContaining("No summary was generated"),
+    });
+    expect(retried[2]).toEqual({ role: "user", content: "Keep this exact task." });
+    for (const [index, message] of retried.entries()) {
+      if (message.role !== "tool") continue;
+      expect(
+        retried
+          .slice(0, index)
+          .some(
+            (item) =>
+              item.role === "assistant" &&
+              item.toolCalls?.some((toolCall) => toolCall.id === message.toolCallId),
+          ),
+      ).toBe(true);
+    }
+    expect((await agent.resume(result.snapshot, { host: { authorizeResume } })).status).toBe(
+      "completed",
+    );
+  });
+
+  it("prunes old tool text before paying for a summary when retryOnContextLimit is on", async () => {
+    const summary = fake([text("Compact summary")]);
+    const wire = scripted([call(), call(), call(), text("Done")]);
+    const outputs = ["a".repeat(60_000), "b".repeat(60_000), "c".repeat(35_000)];
+    const read = defineTool({
+      name: "read",
+      description: "Read",
+      inputSchema: { type: "object" },
+      run: async () => outputs.shift()!,
+    });
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [read],
+      compaction: {
+        identity: "prune-before-summary",
+        contextWindow: 50_000,
+        keepTokens: 5,
+        retryOnContextLimit: true,
+        summarize: { provider: summary.provider, instructions: "Summarize.", maxTokens: 40 },
+      },
+    });
+    const result = await agent.run("Read files");
+    expect(result).toMatchObject({ status: "completed", output: "Done" });
+    // Turn 2's 35k result trips A5's 120k text ceiling and prunes earlier tool results, keeping
+    // the view under the 50k token window without buying a summary.
+    expect(summary.requests).toHaveLength(0);
+    expect(
+      wire.requests[3]?.messages.some(
+        (m) => m.role === "tool" && m.content.includes("Look it up again"),
+      ),
+    ).toBe(true);
+  });
+
+  it("falls back to the deterministic trim note when a paid summary is interrupted on restart", async () => {
+    const summary = fake([text("Never saved")]);
+    const wire = scripted([rejectContext(), text("Answered after trim")]);
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      compaction: {
+        ...reactive,
+        summarize: { provider: summary.provider, instructions: "Summarize.", maxTokens: 40 },
+      },
+    });
+    let checkpoint: RunSnapshot | undefined;
+    const crashed = await agent.run(input, {
+      host: {
+        checkpoint(node) {
+          assertAgent(node);
+          const entry = node.compactions[0];
+          if (entry?.status === "completed") throw new Error("Worker lost");
+          checkpoint = structuredClone(node);
+        },
+      },
+    });
+    expect(crashed.status).toBe("failed");
+    expect(summary.requests).toHaveLength(1);
+    expect(wire.requests).toHaveLength(1);
+    const resumed = await agent.resume(saved(checkpoint), { host: { authorizeResume } });
+    expect(resumed).toMatchObject({ status: "completed", output: "Answered after trim" });
+    expect(summary.requests).toHaveLength(1);
+    expect(wire.requests).toHaveLength(2);
+    expect(wire.requests[1]?.messages[1]?.content).toContain("No summary was generated");
+    expect(resumed.snapshot.compactions[0]).toMatchObject({
+      status: "completed",
+      interruptedSummary: true,
+    });
+    expect(resumed.receipts).toContainEqual(
+      expect.objectContaining({ kind: "model", purpose: "compaction", status: "interrupted" }),
+    );
+    expect(resumed.usage).toMatchObject({ inputTokens: 16, outputTokens: 4 });
+    checkChildProgress(saved(checkpoint), resumed.snapshot);
+  });
+
+  it("honors tree modelCalls budget and caller abort during context retry", async () => {
+    const budgetWire = scripted([rejectContext(), text("Must not run")]);
+    const budgetAgent = defineAgent({
+      ...base,
+      provider: budgetWire.provider,
+      compaction: reactive,
+      treeLimits: { modelCalls: 1 },
+    });
+    const limited = await budgetAgent.run(input);
+    expect(limited).toMatchObject({ status: "limited", limit: "modelCalls" });
+    expect(budgetWire.requests).toHaveLength(1);
+
+    const controller = new AbortController();
+    const abortWire = scripted([
+      reject(() => {
+        controller.abort("Stopped");
+        return new ProviderError("offline", "context", "prompt is too long: 2000 > 1000");
+      }),
+      text("Must not run"),
+    ]);
+    const abortAgent = defineAgent({
+      ...base,
+      provider: abortWire.provider,
+      compaction: reactive,
+    });
+    const cancelled = await abortAgent.run(input, { signal: controller.signal });
+    expect(cancelled).toMatchObject({ status: "cancelled" });
+    expect(abortWire.requests).toHaveLength(1);
+  });
+
+  it("refuses a no-op cut that would only pin the task when history is empty, both live and on restore", async () => {
+    // With no prior history and one tool round after the task, pickCut returns 1 (index of asst0),
+    // which would only cut the pinned task itself and remove nothing.
+    const wire = scripted([call(), rejectContext()]);
+    const read = defineTool({
+      name: "read",
+      description: "Read",
+      inputSchema: { type: "object" },
+      run: async () => "Result " + "detail ".repeat(40),
+    });
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      compaction: reactive,
+      tools: [read],
+    });
+    const result = await agent.run("Only task");
+    expect(result).toMatchObject({ status: "failed", error: { code: "model_failed" } });
+    expect(wire.requests).toHaveLength(2);
+    expect(result.snapshot.compactions).toEqual([]);
+
+    // Restore must reject a forged cut=1 on an empty history for the same reason.
+    const forged = structuredClone(result.snapshot);
+    forged.compactions.push({
+      id: `${forged.runId}/compaction/1`,
+      beforeModel: 1,
+      sourceCount: 3,
+      cut: 1,
+      status: "completed",
+      summary: "Forged",
+    });
+    await expect(agent.resume(forged, { host: { authorizeResume } })).rejects.toThrow(
+      "Invalid compaction",
+    );
+  });
+
+  it("does not retry on context limit or change default behavior without retryOnContextLimit", async () => {
+    const wire = scripted([rejectContext(), text("Must not run")]);
+    const onContextLimit = vi.fn();
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      compaction: { identity: "default-1", contextWindow: 100_000, keepTokens: 5 },
+    });
+    const result = await agent.run(input, { host: { onContextLimit } });
+    expect(result).toMatchObject({ status: "failed", error: { code: "model_failed" } });
+    expect(wire.requests).toHaveLength(1);
+    expect(result.snapshot.compactions).toEqual([]);
+    expect(onContextLimit).toHaveBeenCalledTimes(1);
   });
 });

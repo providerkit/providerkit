@@ -23,7 +23,7 @@ import {
   type Specialist,
 } from "./delegation.ts";
 import type { RemoteAgent, RemoteInput, RemoteOutcome } from "./a2a/remote.ts";
-import { admitChild, startChild, childOptions, prepareChild } from "./child.ts";
+import { admitChild, matchesChildInput, startChild, childOptions, prepareChild } from "./child.ts";
 import { checkMemoryBinding, memoryScopes, readMemoryBinding } from "./memory.ts";
 import { RequestJournal, isAsk, requestHash } from "./request.ts";
 import {
@@ -1204,12 +1204,8 @@ export function defineWorkflow<I, O>(spec: WorkflowSpec<I, O>): Workflow<I, O> {
           if (child.snapshot.kind !== specialist.kind || nodeId(child.snapshot) !== specialist.id)
             throw new TypeError("The saved child identity changed.");
           child.snapshot = runtimeOf(specialist).restore(child.snapshot, snapshot.tree);
-          const recordedInput =
-            child.snapshot.kind === "agent"
-              ? { history: child.snapshot.history, input: child.snapshot.input }
-              : child.snapshot.input;
           if (
-            !equalData(recordedInput, step.definition.input) ||
+            !matchesChildInput(child.snapshot, step.definition.input) ||
             !equalData(step.definition.configuration, specialist[AGENT_RUNTIME].configuration())
           )
             throw new TypeError("The workflow child input or configuration changed.");

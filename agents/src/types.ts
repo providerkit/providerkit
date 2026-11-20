@@ -118,7 +118,18 @@ export type UserContent = string | InputPart[];
  * hold media references. */
 export type AgentMessage =
   | { role: "user"; content: UserContent }
-  | Extract<ChatMessage, { role: "assistant" | "tool" }>;
+  | Extract<ChatMessage, { role: "assistant" }>
+  | (Extract<ChatMessage, { role: "tool" }> & ToolImageHistory);
+
+/** Only the types of retired tool images remain. Their bytes are no longer in the checkpoint. */
+export interface ToolImageHistory {
+  omittedImages?: ImageMimeType[];
+}
+
+export interface ToolHistoryPolicy {
+  /** Keep this many of the newest tool images. User images do not count. */
+  keepImages: number;
+}
 
 /** A new turn, or a whole conversation whose last message is the new user turn. */
 export type AgentInput =
@@ -262,6 +273,10 @@ export interface CompactionPolicy {
   identity: string;
   /** Supply the actual window for the configured model. No model-name guessing. */
   contextWindow: number;
+  /** Keep the run's task through every cut. A length rejection before the first chunk can
+   * buy one shorter retry per run, using the same turn. Never retries a hosted-tool request.
+   * After a restart, use a trim note rather than resend an interrupted summary. */
+  retryOnContextLimit?: boolean;
   /** Recent tokens to keep. Core's historyBudgetTokens(contextWindow) is the default. */
   keepTokens?: number;
   /** Omit to trim without a paid call. This provider must do inference only. The SDK sends
@@ -271,6 +286,7 @@ export interface CompactionPolicy {
 export interface CompactionDefinition {
   identity: string;
   contextWindow: number;
+  retryOnContextLimit?: true;
   keepTokens: number;
   summarize: {
     provider: { id: string; model: string };
@@ -284,8 +300,10 @@ export type CompactionExecution = {
   /** Count and cut in the full conversation, not in the shortened model view. */
   sourceCount: number;
   cut: number;
+  /** The turn attempt the provider refused before any chunk. A retry stays in that turn's slot. */
+  rejectedAttemptId?: string;
   model?: ModelExecution;
-} & ({ status: "running" } | { status: "completed"; summary: string });
+} & ({ status: "running" } | { status: "completed"; summary: string; interruptedSummary?: true });
 
 /** Per-operation budgets adapted from PydanticAI's tool_manager.py (MIT). No retries by
  * default. These retry settled failures only; crash recovery remains a separate policy. */
@@ -364,6 +382,8 @@ export interface RecordedCodeTool {
 export interface RunDefinition {
   instructions: string;
   modelSettings: RecordedModelSettings;
+  supportsVision?: false;
+  toolHistory?: ToolHistoryPolicy;
   /** `RunOptions.providerSessionId`, when the run named one. */
   providerSessionId?: string;
   enabledTools: string[];
@@ -394,6 +414,13 @@ export interface AgentConfig<H = unknown> {
   /** Already composed with whatever routing, retries and watchdog the caller needs. */
   provider: Provider;
   modelSettings?: ModelSettings;
+  /** Set false if this agent's model calls cannot read images. They get text notes instead.
+   * User attachments stay in the transcript; image references need no loader for these calls. */
+  supportsVision?: boolean;
+  /** Opt in to trimming old tool results. Above 120,000 characters the model view drops older
+   * text toward 60,000, keeping the newest result. The journal keeps the original text.
+   * Only the newest `keepImages` tool images keep their bytes in the snapshot. */
+  toolHistory?: ToolHistoryPolicy;
   /** Opt in before starting a run. Never retries a settled failure or an unknown write. */
   recovery?: RecoveryPolicy;
   guardrails?: Guardrails;
@@ -669,6 +696,16 @@ export interface AgentHost {
    * run never prices a saved call again, even when the host's prices change by time of day.
    * Synchronous; return a finite amount of 0 or more. */
   priceModelCall?: (call: MeasuredModelCall) => number;
+  /** Reports a length rejection from a turn. Counts are present only if the provider supplied
+   * them; the configured window and earlier calls are not measurements of this request. */
+  onContextLimit?: (limit: {
+    runId: string;
+    operationId: string;
+    provider: string;
+    model: string;
+    inputTokens?: number;
+    contextLimit?: number;
+  }) => void;
 }
 
 /** One model call's usage and the endpoint that served it: the turn's source when a fallback
@@ -794,7 +831,7 @@ export type RunState =
 export type ToolResult =
   /** final keeps the raw stopping-tool output (or summary for text agents), not the
    * validator's possibly non-JSON return value. Restoring can validate without replay. */
-  | {
+  | (ToolImageHistory & {
       ok: true;
       content: string;
       /** Core image parts, forwarded with the text in the next tool message. */
@@ -803,7 +840,7 @@ export type ToolResult =
        * arrays use content/images instead so inline bytes are not stored twice. */
       output?: unknown;
       final?: { candidate: unknown };
-    }
+    })
   | {
       ok: false;
       content: string;
@@ -937,9 +974,11 @@ export interface RunSnapshot {
   subagent?: SubagentRecord;
   /** Private model-input data, recorded once. Never part of the session transcript. */
   recall?: MemoryRecall;
-  /** The conversation before the new turn, repaired once when the run was created and never
-   * read again, so every request starts with the same bytes. Never a system message. */
+  /** The conversation before the new turn, repaired once when the run starts. A tool image
+   * may give way to its media type under `toolHistory`. Never a system message. */
   history: AgentMessage[];
+  /** Original child history identity when later tool images can displace its bytes. */
+  historyHash?: string;
   /** The new user turn. */
   input: UserContent;
   /** Accepted user messages, in order at safe model boundaries. Never replaces frozen input. */
@@ -970,7 +1009,7 @@ export type OperationReceipt =
       purpose?: "compaction";
       id: string;
       attemptId: string;
-      status: "running" | "completed" | "interrupted";
+      status: "running" | "completed" | "interrupted" | "context_rejected";
       /** reported means a stream with usage ended, not that the SDK verified the vendor's bill. */
       billing: "unknown" | "reported";
       usage: TokenUsage;
@@ -1087,6 +1126,9 @@ export type AgentEvent =
       operationId: string;
       chunk: ProviderChunk;
     }
+  /** The request uses notes instead of these images because the model cannot read them.
+   * One count per affected model request. No image data or media ids leave through this event. */
+  | { type: "images_omitted"; runId: string; attemptId: string; operationId: string; count: number }
   | { type: "request"; request: PendingRequest }
   | { type: "decision"; requestId: string; decision: Decision }
   | { type: "tool_start"; request: ToolRequest }

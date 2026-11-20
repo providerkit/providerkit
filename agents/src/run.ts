@@ -1,5 +1,6 @@
 import {
   EMPTY_USAGE,
+  parseContextOverflow,
   ProviderError,
   ToolRegistry,
   collectTurn,
@@ -25,12 +26,14 @@ import {
   recallMemory,
   withMemoryRecall,
 } from "./memory.ts";
+import { imageBudgets, isToolHistory, keepImages, retainHistoryImages } from "./model-view.ts";
 import {
   allModels,
   compactionDefinition,
   compactionId,
   compactionPlan,
   modelConversation,
+  TRIM_NOTE,
 } from "./compaction.ts";
 import {
   bindSubagentTool,
@@ -274,22 +277,29 @@ function recordOf(snapshot: RunSnapshot) {
   const receipts: OperationReceipt[] = [];
   const usage = modelsUsage(allModels(saved));
   for (const model of allModels(saved)) {
+    const summary = saved.compactions.find((entry) => entry.id === model.id);
+    const refusal = saved.compactions.find(
+      (entry) => saved.models[entry.beforeModel]?.id === model.id,
+    )?.rejectedAttemptId;
     for (const attempt of model.interrupted)
       receipts.push({
         kind: "model",
         id: model.id,
         ...attempt,
-        status: "interrupted",
+        status: attempt.attemptId === refusal ? "context_rejected" : "interrupted",
         billing: "unknown",
       });
     receipts.push({
       kind: "model",
-      ...(saved.compactions.some((entry) => entry.id === model.id)
-        ? { purpose: "compaction" as const }
-        : {}),
+      ...(summary ? { purpose: "compaction" as const } : {}),
       id: model.id,
       attemptId: model.attemptId,
-      status: model.status,
+      status:
+        summary?.status === "completed" && summary.interruptedSummary
+          ? "interrupted"
+          : model.attemptId === refusal
+            ? "context_rejected"
+            : model.status,
       billing: model.billing,
       usage: model.usage,
       ...(model.costUsd !== undefined ? { costUsd: model.costUsd } : {}),
@@ -424,6 +434,16 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
     throw new TypeError("An agent needs an id, version, instructions and provider.");
   }
   const settings = readModelSettings(definition.modelSettings);
+  if (definition.supportsVision !== undefined && typeof definition.supportsVision !== "boolean")
+    throw new TypeError("Set supportsVision to true or false.");
+  if (definition.toolHistory !== undefined && !isToolHistory(definition.toolHistory))
+    throw new TypeError("toolHistory.keepImages must be a whole number of 0 or more.");
+  const modelView: Pick<RunDefinition, "supportsVision" | "toolHistory"> = {
+    ...(definition.supportsVision === false && { supportsVision: false }),
+    ...(definition.toolHistory && {
+      toolHistory: { keepImages: definition.toolHistory.keepImages },
+    }),
+  };
   const memory = memoryPolicy(definition.memory);
   const compaction = compactionDefinition(definition.compaction);
   const summarizer = definition.compaction?.summarize?.provider;
@@ -716,6 +736,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       ...(options.providerSessionId !== undefined
         ? { providerSessionId: options.providerSessionId }
         : {}),
+      ...modelView,
       enabledTools: enabled,
       stopAtTools: [...stopAtTools],
       ...(runFirst.length ? { runFirst: [...runFirst] } : {}),
@@ -1574,30 +1595,6 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         result,
       });
       invocationActive(slot);
-      // Check after callbacks: another concurrent result may have consumed the remaining bytes.
-      if (
-        result.ok &&
-        result.images &&
-        snapshotInlineBytes(snapshot) +
-          inlineBytes(
-            [
-              {
-                role: "tool",
-                name: request.call.name,
-                toolCallId: request.call.id,
-                content: result.content,
-                images: result.images,
-              },
-            ],
-            "",
-          ) >
-          limits.inlineBytes
-      )
-        fail(
-          "tool_media_limit",
-          "Tool images exceed this run's inline byte limit. Return fewer or smaller images before starting new work.",
-          request.operationId,
-        );
       if (slot.inner) result = slot.inner.record(result);
       const previous = slot.get();
       slot.set({
@@ -1610,6 +1607,22 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         status: "completed",
         result,
       });
+      if (result.ok && result.images?.length) {
+        // No await between inserting the candidate and committing its image window. A parallel
+        // sibling sees either the old window or the new one, never a half-retired batch.
+        const budgets = imageBudgets(snapshot);
+        if (snapshotInlineBytes(snapshot, budgets) > limits.inlineBytes) {
+          slot.set(previous);
+          fail(
+            "tool_media_limit",
+            "Tool images exceed this run's inline byte limit. Return fewer or smaller images before starting new work.",
+            request.operationId,
+          );
+        }
+        for (const [source, keep] of budgets) {
+          if ((source.images?.length ?? 0) > keep) Object.assign(source, keepImages(source, keep));
+        }
+      }
       await save();
       emit({ type: "tool_result", request, result });
     }
@@ -2827,21 +2840,68 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       return data;
     }
 
-    async function compact(): Promise<void> {
+    class ContextRejected extends Error {
+      constructor(
+        readonly error: ProviderError,
+        readonly current: Extract<ModelExecution, { status: "running" }>,
+        readonly served: { provider: string; model: string },
+      ) {
+        super(error.message);
+      }
+    }
+
+    function prepareModelView(
+      operationId: string,
+      instructions = snapshot.definition.instructions,
+      view = withMemoryRecall(snapshot, modelConversation(snapshot)),
+      attemptId = snapshot.attemptId,
+    ) {
+      return requestOf(
+        instructions,
+        view,
+        loadMedia,
+        snapshot.definition.supportsVision === false
+          ? (count) =>
+              emit({
+                type: "images_omitted",
+                runId: snapshot.runId,
+                attemptId,
+                operationId,
+                count,
+              })
+          : undefined,
+      );
+    }
+
+    async function compact(beforeModel: number, rejectedAttemptId?: string): Promise<boolean> {
       const last = snapshot.compactions.at(-1);
-      if (last?.status === "running")
+      if (last?.status === "running") {
+        if (snapshot.definition.compaction?.retryOnContextLimit) {
+          // The paid call's final bill may be unknown. Keep its receipt and last usage; only
+          // the model view settles, with a fixed note in place of an unavailable answer.
+          snapshot.compactions[snapshot.compactions.length - 1] = {
+            ...last,
+            status: "completed",
+            interruptedSummary: true,
+            summary: TRIM_NOTE,
+          };
+          await save();
+          return true;
+        }
         fail(
           "interrupted_compaction",
           "The summary has no saved result and may have been billed. Reconcile it with the host before continuing.",
           last.id,
         );
-      const plan = compactionPlan(snapshot);
-      if (!plan) return;
+      }
+      const plan = compactionPlan(snapshot, beforeModel, !!rejectedAttemptId);
+      if (!plan) return false;
       const { removed, ...position } = plan;
       const index = snapshot.compactions.length;
       const entry: CompactionExecution = {
         id: compactionId(snapshot.runId, index),
-        beforeModel: snapshot.models.length,
+        beforeModel,
+        ...(rejectedAttemptId && { rejectedAttemptId }),
         ...position,
         status: "running",
       };
@@ -2850,21 +2910,21 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         snapshot.compactions.push({
           ...entry,
           status: "completed",
-          summary: "Earlier messages were omitted. No summary was generated.",
+          summary: TRIM_NOTE,
         });
         await save();
-        return;
+        return true;
       }
       // Past the cost cap the finish turn is the only paid call left. Keep the current view
       // rather than journal a summary that cannot be sent.
-      if (snapshot.definition.finish && costLimitReached(snapshot)) return;
+      if (snapshot.definition.finish && costLimitReached(snapshot)) return false;
       if (!summarizer) fail("invalid_journal", "The recorded summary provider is missing.");
       // A separate receipt freezes this cut before any paid work. A crash, even before
       // dispatch, fails closed instead of silently purchasing the same summary twice.
       snapshot.compactions.push(entry);
       await save();
       active();
-      const messages = await requestOf(summary.instructions, removed, loadMedia);
+      const messages = await prepareModelView(entry.id, summary.instructions, removed);
       await callModel(
         entry.id,
         {
@@ -2903,6 +2963,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         undefined,
         true,
       );
+      return true;
     }
 
     /** Whether a forced choice has done its job, read from the journal so a resume agrees and
@@ -2941,26 +3002,68 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       return undefined;
     }
 
+    function reportContextLimit(
+      operationId: string,
+      served: { provider: string; model: string },
+      error: ProviderError,
+    ): void {
+      if (!host?.onContextLimit) return;
+      const overflow = parseContextOverflow(error);
+      try {
+        host.onContextLimit(
+          immutableCopy({
+            runId: snapshot.runId,
+            operationId,
+            ...served,
+            ...(overflow?.inputTokens !== undefined && { inputTokens: overflow.inputTokens }),
+            ...(overflow ? { contextLimit: overflow.contextLimit } : {}),
+          }),
+        );
+      } catch {
+        // Like onEvent and onLifecycle, an observer never changes execution.
+      }
+    }
+
+    function failModel(id: string, guarded: boolean, error: ProviderError): never {
+      fail(
+        "model_failed",
+        guarded
+          ? `The model call failed (${error.kind}). Check the provider before starting new work.`
+          : `The model call failed (${error.kind}): ${error.message}`,
+        id,
+      );
+    }
+
     async function nextTurn(
       previous?: Extract<ModelExecution, { status: "running" }>,
     ): Promise<CompletedModel> {
       active();
+      const position = previous ? snapshot.models.indexOf(previous) : snapshot.models.length;
+      const resumedRefusal =
+        previous &&
+        snapshot.compactions.some(
+          (entry) =>
+            entry.beforeModel === position && entry.rejectedAttemptId === previous.attemptId,
+        );
       // Hosted actions may run before any local tool call appears. Their explicit presence
       // overrides a profile's inference-only claim when an interrupted call is recovered.
-      if (previous) {
+      if (previous && !resumedRefusal) {
         refuseGuardedReplay(snapshot, previous.id);
+        const rejectedId = snapshot.compactions.find(
+          (entry) => entry.beforeModel === position,
+        )?.rejectedAttemptId;
         requireRecovery(
           snapshot.definition.recovery?.policy.inferenceOnly === true &&
             !snapshot.definition.modelSettings.hostedTools?.length,
-          previous.interrupted.length,
+          previous.interrupted.filter((attempt) => attempt.attemptId !== rejectedId).length,
           snapshot.definition.recovery,
           previous.id,
         );
       }
-      const position = previous ? snapshot.models.indexOf(previous) : snapshot.models.length;
       const selected = definitionsFor(snapshot.definition.enabledTools);
       if (
         previous &&
+        !resumedRefusal &&
         (await requestHash(selected)) !== snapshot.definition.recovery?.modelToolsHash
       )
         fail(
@@ -2984,59 +3087,96 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       );
       if (!previous) {
         await acceptInputs(snapshot, scope, options, signal);
-        await compact();
+        await compact(position);
+      } else if (snapshot.compactions.at(-1)?.status === "running") {
+        await compact(position);
       }
       // A summary may just have spent the remaining budget. A replay keeps its recorded reason.
       const finish = previous ? previous.finish : finishFor(position);
-      active();
-      // Media is read before the receipt below exists, so a missing loader or file fails the
-      // run with no model operation left running and nothing to reconcile.
-      const request = await requestOf(
-        snapshot.definition.instructions,
-        withMemoryRecall(snapshot, modelConversation(snapshot)),
-        loadMedia,
-      );
-      active();
+      const operationId = modelId(snapshot.runId, position);
       const modelSettings = copyData(snapshot.definition.modelSettings);
       if (choiceDone(modelSettings.toolChoice)) modelSettings.toolChoice = "auto";
       if (finalTurn) modelSettings.toolChoice = "none";
-      const operationId = modelId(snapshot.runId, position);
-      const modelInput: ModelInput = {
-        messages: request,
-        tools: finalTurn ? [] : copyData(selected),
-        settings: modelSettings,
-      };
-      if (finish !== undefined) {
-        const stopping = finishTools(snapshot.definition, resultTool);
-        const [only] = stopping;
-        if (only === undefined) {
-          modelSettings.toolChoice = "none";
-          modelInput.tools = [];
-        } else {
-          // Ported from a private adopter's engine: this turn only writes down what the run
-          // already found, so it runs at the lowest effort and leaves the whole output budget to
-          // the answer. Reasoning from turns at another effort is left out, since a provider can
-          // refuse it on a turn that does not think. Hosted tools go too: core refuses a forced
-          // choice beside them. The tool list stays, and with it the cached prefix.
-          modelInput.messages = stripReasoning(request);
-          modelSettings.toolChoice = stopping.length === 1 ? { name: only } : "required";
-          modelSettings.effort = "none";
-          modelSettings.hostedTools = [];
+      const dispatch = async (
+        prior?: Extract<ModelExecution, { status: "running" }>,
+        attemptId?: string,
+      ): Promise<CompletedModel> => {
+        active();
+        // Media is read before the receipt below exists, so a missing loader or file fails the
+        // run with no model operation left running and nothing to reconcile.
+        const request = await prepareModelView(
+          operationId,
+          snapshot.definition.instructions,
+          withMemoryRecall(snapshot, modelConversation(snapshot)),
+          attemptId,
+        );
+        active();
+        const settingsForCall = copyData(modelSettings);
+        const modelInput: ModelInput = {
+          messages: request,
+          tools: finalTurn ? [] : copyData(selected),
+          settings: settingsForCall,
+        };
+        if (finish !== undefined) {
+          const stopping = finishTools(snapshot.definition, resultTool);
+          const [only] = stopping;
+          if (only === undefined) {
+            settingsForCall.toolChoice = "none";
+            modelInput.tools = [];
+          } else {
+            // Ported from a private adopter's engine: this turn only writes down what the run
+            // already found, so it runs at the lowest effort and leaves the whole output budget to
+            // the answer. Reasoning from turns at another effort is left out, since a provider can
+            // refuse it on a turn that does not think. Hosted tools go too: core refuses a forced
+            // choice beside them. The tool list stays, and with it the cached prefix.
+            modelInput.messages = stripReasoning(request);
+            settingsForCall.toolChoice = stopping.length === 1 ? { name: only } : "required";
+            settingsForCall.effort = "none";
+            settingsForCall.hostedTools = [];
+          }
+          // This call only: the finish turn is the run's last, so no later request carries it.
+          modelInput.messages.push({ role: "user", content: finishNote(finish, stopping) });
         }
-        // This call only: the finish turn is the run's last, so no later request carries it.
-        modelInput.messages.push({ role: "user", content: finishNote(finish, stopping) });
+        return callModel(
+          operationId,
+          modelInput,
+          provider,
+          (model) => {
+            snapshot.models[position] = model;
+          },
+          prior,
+          false,
+          attemptId,
+          finish,
+        );
+      };
+      let done: CompletedModel;
+      try {
+        done = await dispatch(previous);
+      } catch (thrown) {
+        if (!(thrown instanceof ContextRejected)) throw thrown;
+        reportContextLimit(operationId, thrown.served, thrown.error);
+        const canRetry =
+          snapshot.definition.compaction?.retryOnContextLimit === true &&
+          !snapshot.definition.modelSettings.hostedTools?.length &&
+          !snapshot.compactions.some((entry) => entry.rejectedAttemptId !== undefined) &&
+          (await compact(position, thrown.current.attemptId));
+        if (!canRetry) {
+          if (finish !== undefined) unsaved(finish, operationId);
+          failModel(operationId, !!guardrails?.modelOutput, thrown.error);
+        }
+        try {
+          done = await dispatch(
+            thrown.current,
+            `${snapshot.attemptId}/model-attempt/${thrown.current.interrupted.length + 1}`,
+          );
+        } catch (retryError) {
+          if (!(retryError instanceof ContextRejected)) throw retryError;
+          reportContextLimit(operationId, retryError.served, retryError.error);
+          if (finish !== undefined) unsaved(finish, operationId);
+          failModel(operationId, !!guardrails?.modelOutput, retryError.error);
+        }
       }
-      const done = await callModel(
-        operationId,
-        modelInput,
-        provider,
-        (model) => {
-          snapshot.models[position] = model;
-        },
-        previous,
-        false,
-        finish,
-      );
       for (const receipt of inputReceipts(snapshot).filter(
         (receipt) => receipt.modelId === done.id,
       ))
@@ -3055,14 +3195,15 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       record: (model: ModelExecution) => void,
       previous?: Extract<ModelExecution, { status: "running" }>,
       summary = false,
+      attemptId = snapshot.attemptId,
       finish?: SalvageReason,
     ): Promise<CompletedModel> {
       const { messages: request, settings: modelSettings } = modelInput;
-      await guards.check("modelInput", operationId, snapshot.attemptId, modelInput);
+      await guards.check("modelInput", operationId, attemptId, modelInput);
       await observe({
         type: "model_start",
         operationId,
-        attemptId: snapshot.attemptId,
+        attemptId,
         input: modelInput,
       });
       active();
@@ -3072,7 +3213,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       scope.tree.reserveCost(scope.path, finish === undefined);
       const model: ModelExecution = {
         id: operationId,
-        attemptId: snapshot.attemptId,
+        attemptId,
         status: "running",
         billing: "unknown",
         usage: { ...EMPTY_USAGE },
@@ -3091,9 +3232,10 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       };
       record(model);
       await save();
-      if (previous) restart("model", model.id, previous.attemptId);
+      if (previous) restart("model", model.id, previous.attemptId, model.attemptId);
       active();
       let reportedUsage = false;
+      let sawChunk = false;
       let bufferedChunks = 0;
       let bufferedBytes = 0;
       const guarded = !!guardrails?.modelOutput;
@@ -3141,6 +3283,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         });
         const chunks = snapshot.definition.finish && !summary ? allowEmptyLength(stream) : stream;
         for await (const chunk of chunks) {
+          sawChunk = true;
           active();
           if (chunk.usage) {
             if (!isUsage(chunk.usage))
@@ -3163,12 +3306,12 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
               bufferedBytes > (guardPolicy?.maxOutputBytes ?? 0) ||
               bufferedChunks > GUARDED_CHUNK_LIMIT
             )
-              await guards.overflow("modelOutput", model.id);
+              await guards.overflow("modelOutput", model.id, model.attemptId);
           } else if (!summary) {
             emit({
               type: "model_chunk",
               runId: snapshot.runId,
-              attemptId: snapshot.attemptId,
+              attemptId: model.attemptId,
               operationId: model.id,
               chunk,
             });
@@ -3198,14 +3341,10 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
           scope.tree.stop();
           throw new Halt({ status: "cancelled" });
         }
+        if (error.kind === "context" && !summary && !sawChunk)
+          throw new ContextRejected(error, model, served);
         if (finish !== undefined) unsaved(finish, model.id);
-        fail(
-          "model_failed",
-          guarded
-            ? `The model call failed (${error.kind}). Check the provider before starting new work.`
-            : `The model call failed (${error.kind}): ${error.message}`,
-          model.id,
-        );
+        failModel(model.id, guarded, error);
       }
       let turn;
       try {
@@ -3385,10 +3524,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
   function freeze(start: RunStart): RunStart {
     // Once, here: adapters repair every request again, and repair is idempotent, so the
     // bytes a provider caches never change between turns or across a resume.
-    const history = repairConversation(
+    const repaired = repairConversation(
       start.history,
       (name) => (registry.get(name) ?? codeTools.get(name))?.isReadOnly === true,
     );
+    const history = retainHistoryImages(repaired, modelView);
     checkInline({ history, input: start.input });
     return { ...start, history };
   }
@@ -3440,6 +3580,11 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
       definition: resolved,
       ...(record ? { subagent: record } : {}),
       history: copyData(history),
+      ...(tree &&
+      resolved.toolHistory &&
+      history.some((message) => message.role === "tool" && message.images?.length)
+        ? { historyHash: await requestHash(history) }
+        : {}),
       input: copyData(input),
       inputs: [],
       guards: [],
@@ -3513,6 +3658,7 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         instructions: typeof instructions === "string" ? instructions : null,
         enabledTools: Array.isArray(enabledTools) ? enabledTools : null,
         modelSettings,
+        ...modelView,
         limits,
         output: output?.schema ?? null,
         stopAtTools,
@@ -3624,6 +3770,13 @@ export function defineAgent<T, H>(definition: AgentDefinition<T, H>): Agent<T | 
         codeTools,
       );
       checkNames(snapshot.definition.enabledTools);
+      if (
+        snapshot.definition.supportsVision !== modelView.supportsVision ||
+        !equalData(snapshot.definition.toolHistory, modelView.toolHistory)
+      )
+        throw new TypeError(
+          "Restore the same image support and tool history settings before resuming.",
+        );
       if (!equalData(snapshot.definition.memory, memory))
         throw new TypeError("Restore the same memory recall policy before resuming.");
       if (

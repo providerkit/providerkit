@@ -27,6 +27,13 @@ import {
   isMemoryScopes,
   readMemoryBinding,
 } from "./memory.ts";
+import {
+  imageBudgets,
+  isToolHistory,
+  keepImages,
+  retainHistoryImages,
+  toolMediaOf,
+} from "./model-view.ts";
 import { allModels, checkCompactions, isCompactionDefinition } from "./compaction.ts";
 import { isSubagentRecord } from "./subagents.ts";
 import { fresh, isToolRetryDefinition, retryBudget, skipped, toolAttempts } from "./tool-retry.ts";
@@ -244,31 +251,27 @@ export function inlineBytes(history: readonly AgentMessage[], input: UserContent
 }
 
 /** All retained inline media, including results of a partially settled tool batch. */
-export function snapshotInlineBytes(snapshot: RunSnapshot): number {
-  return inlineBytes(
-    [
-      ...snapshot.history,
-      ...snapshot.inputs.map((input) => ({ role: "user" as const, content: input.content })),
-      ...snapshot.models.flatMap((model) =>
-        model.status === "completed"
-          ? model.tools.flatMap((tool) =>
-              tool.status === "completed" && tool.result.ok && tool.result.images
-                ? [
-                    {
-                      role: "tool" as const,
-                      name: "",
-                      toolCallId: "",
-                      content: "",
-                      images: tool.result.images,
-                    },
-                  ]
-                : [],
-            )
-          : [],
-      ),
-    ],
+export function snapshotInlineBytes(
+  snapshot: RunSnapshot,
+  budgets?: ReturnType<typeof imageBudgets>,
+): number {
+  let bytes = inlineBytes(
+    snapshot.history.filter((item) => item.role === "user"),
     snapshot.input,
   );
+  for (const input of snapshot.inputs) bytes += inlineBytes([], input.content);
+  for (const source of toolMediaOf(snapshot)) {
+    const images = source.images;
+    if (!images) continue;
+    const keep = budgets?.get(source) ?? images.length;
+    for (let i = Math.max(0, images.length - keep); i < images.length; i++)
+      bytes += decodedBytes(images[i]!.data);
+  }
+  return bytes;
+}
+
+function isOmittedImages(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every(isImageMime);
 }
 
 function isImage(value: unknown): value is ImagePart {
@@ -329,6 +332,7 @@ export function isAgentMessage(value: unknown): value is AgentMessage {
         isId(value.toolCallId) &&
         isId(value.name) &&
         typeof value.content === "string" &&
+        optional(value.omittedImages, isOmittedImages) &&
         optional(value.images, (v) => Array.isArray(v) && v.every(isImage))
       );
     default:
@@ -629,6 +633,8 @@ function isRunDefinition(value: unknown): value is RunDefinition {
     isRecord(value) &&
     typeof value.instructions === "string" &&
     isRecordedModelSettings(value.modelSettings) &&
+    (value.supportsVision === undefined || value.supportsVision === false) &&
+    optional(value.toolHistory, isToolHistory) &&
     optional(value.providerSessionId, isId) &&
     isNames(value.enabledTools) &&
     isNames(value.stopAtTools) &&
@@ -715,6 +721,8 @@ export function checkOptions(
       "canRunConcurrently",
       "child",
       "loadMedia",
+      "priceModelCall",
+      "onContextLimit",
     ]) {
       if (!optional(value.host[key], (fn) => typeof fn === "function")) {
         throw new TypeError(`host.${key} must be a function.`);
@@ -866,11 +874,13 @@ function isToolResult(value: unknown): value is ToolResult {
     typeof value.content === "string" &&
     (value.ok === true
       ? value.kind === undefined &&
+        optional(value.omittedImages, isOmittedImages) &&
         optional(value.images, (images) => Array.isArray(images) && images.every(isImage)) &&
         optional(value.output, serializable) &&
         optional(value.final, (final) => isRecord(final) && serializable(final.candidate))
       : value.ok === false &&
         value.images === undefined &&
+        value.omittedImages === undefined &&
         value.output === undefined &&
         value.final === undefined &&
         [
@@ -1000,6 +1010,9 @@ function isCompaction(value: unknown): value is CompactionExecution {
     Number.isSafeInteger(value.beforeModel) &&
     positive(value.sourceCount) &&
     positive(value.cut) &&
+    optional(value.rejectedAttemptId, isId) &&
+    (value.interruptedSummary === undefined ||
+      (value.status === "completed" && value.interruptedSummary === true)) &&
     optional(value.model, isModel) &&
     (value.status === "running" || (value.status === "completed" && isId(value.summary)))
   );
@@ -1096,6 +1109,10 @@ function isSnapshot(value: unknown): value is RunSnapshot {
     ) &&
     Array.isArray(value.history) &&
     value.history.every(isAgentMessage) &&
+    optional(
+      value.historyHash,
+      (hash) => typeof hash === "string" && /^sha256:[a-f0-9]{64}$/.test(hash),
+    ) &&
     isTurnContent(value.input) &&
     Array.isArray(value.inputs) &&
     value.inputs.every(isRunInput) &&
@@ -1569,7 +1586,8 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
     !equalData(previous.subagent, next.subagent) ||
     (previous.recall !== undefined && !equalData(previous.recall, next.recall)) ||
     !equalData(previous.limits, next.limits) ||
-    !equalData(previous.history, next.history) ||
+    previous.historyHash !== next.historyHash ||
+    !equalData(retainHistoryImages(previous.history, next.definition, next.models), next.history) ||
     !equalData(previous.input, next.input) ||
     !equalData(previous.session, next.session) ||
     previous.startedAt !== next.startedAt ||
@@ -1604,6 +1622,7 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
       entry.cut !== saved.cut ||
       entry.sourceCount !== saved.sourceCount ||
       entry.beforeModel !== saved.beforeModel ||
+      entry.rejectedAttemptId !== saved.rejectedAttemptId ||
       (entry.status === "completed" && !equalData(entry, saved)) ||
       (entry.model && (!saved.model || entry.model.attemptId !== saved.model.attemptId))
     )
@@ -1612,7 +1631,15 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
   if (
     next.compactions
       .slice(previous.compactions.length)
-      .some((entry) => entry.beforeModel < previous.models.length)
+      .some(
+        (entry) =>
+          entry.beforeModel < previous.models.length &&
+          !(
+            entry.rejectedAttemptId &&
+            entry.beforeModel === previous.models.length - 1 &&
+            previous.models[entry.beforeModel]?.status === "running"
+          ),
+      )
   )
     throw new TypeError("The child host changed an admitted model's context.");
   // A charge only grows while its attempt runs, and is never dropped.
@@ -1636,6 +1663,7 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
     !equalData(previous.state, next.state)
   )
     throw new TypeError("The child host replaced a settled outcome.");
+  const budgets = imageBudgets(next);
   for (const [index, model] of previous.models.entries()) {
     const saved = next.models[index];
     if (!saved || saved.id !== model.id)
@@ -1718,9 +1746,17 @@ export function checkChildProgress(previous: TreeNode, next: TreeNode): void {
           : restored.retries
               .slice(tool.retries.length)
               .find((attempt) => attempt.attemptId === tool.attemptId);
+      const keep =
+        restored.status === "completed" && restored.result.ok
+          ? budgets.get(restored.result)
+          : undefined;
+      const expected =
+        keep !== undefined && tool.status === "completed" && tool.result.ok
+          ? { ...tool, result: keepImages(tool.result, keep) }
+          : tool;
       if (
         tool.status === "completed" &&
-        !equalData(tool, restored) &&
+        !equalData(expected, restored) &&
         (!retained || tool.result.ok || !equalData(retained.result, tool.result))
       )
         throw new TypeError("The child host replaced a completed tool receipt.");
@@ -2112,11 +2148,17 @@ export function readSnapshot(
   for (const [index, model] of raw.models.entries()) {
     if (model.id !== modelId(raw.runId, index))
       throw new TypeError("Invalid model operation identity.");
+    const rejected = raw.compactions.find(
+      (entry) => entry.beforeModel === index,
+    )?.rejectedAttemptId;
+    const interrupted = model.interrupted.filter(
+      (attempt) => attempt.attemptId !== rejected,
+    ).length;
     if (
-      model.interrupted.length &&
+      interrupted &&
       (!raw.definition.recovery?.policy.inferenceOnly ||
         !!raw.definition.modelSettings.hostedTools?.length ||
-        model.interrupted.length >= raw.definition.recovery.policy.maxAttempts)
+        interrupted >= raw.definition.recovery.policy.maxAttempts)
     )
       throw new TypeError("Model attempts exceed the recorded recovery policy.");
     const last = index === raw.models.length - 1;
@@ -2351,7 +2393,8 @@ export function readSnapshot(
   if (
     raw.models.length > limits.turns + (hardCap && !policy ? 0 : 1) ||
     calls > limits.toolCalls ||
-    snapshotInlineBytes(raw) > limits.inlineBytes
+    snapshotInlineBytes(raw) > limits.inlineBytes ||
+    [...imageBudgets(raw)].some(([source, keep]) => (source.images?.length ?? 0) > keep)
   )
     throw new TypeError("The snapshot exceeds this agent's limits.");
   const last = raw.models.at(-1);

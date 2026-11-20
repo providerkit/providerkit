@@ -1,6 +1,7 @@
 import { evidenceFor } from "./fixtures/requests.ts";
 import { describe, expect, it, vi } from "vitest";
 import { assertAgent } from "./fixtures/assertions.ts";
+import { checkChildProgress, snapshotInlineBytes } from "../src/snapshot.ts";
 import {
   defineTool,
   type ChatMessage,
@@ -12,6 +13,7 @@ import {
 import {
   createMemorySession,
   defineAgent,
+  defineDelegation,
   toClientMessages,
   type AgentEvent,
   type AgentInput,
@@ -480,6 +482,308 @@ describe("media references", () => {
       host: { loadMedia: async () => PNG },
     });
     expect(viaRef.status).toBe("completed");
+  });
+});
+
+describe("model views", () => {
+  const shot = (value: string): ImagePart => ({
+    type: "image",
+    mimeType: "image/webp",
+    data: btoa(value),
+  });
+  const toolMessages = (request: ChatMessage[] = []) =>
+    request.filter((message) => message.role === "tool");
+  const history = (images: ImagePart[], input: InputPart[]): AgentMessage[] => [
+    { role: "assistant", content: "", toolCalls: [call("read", "earlier")] },
+    { role: "tool", name: "read", toolCallId: "earlier", content: "Earlier page", images },
+    { role: "user", content: input },
+  ];
+
+  it("keeps one stable text prefix between cuts and never trims the journal or call ids", async () => {
+    const results = [
+      "a".repeat(60_000),
+      "b".repeat(60_000),
+      "c".repeat(35_000),
+      "d".repeat(25_000),
+    ];
+    const read = readTool(vi.fn(async () => results.shift()!));
+    const wire = fake([0, 1, 2, 3].map((n) => calls(call("read", `c${n}`))).concat([text("Done")]));
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [read],
+      toolHistory: { keepImages: 2 },
+    });
+    const done = await agent.run("Read them");
+    expect(done.status).toBe("completed");
+    expect(toolMessages(wire.requests[2]).map((m) => m.content.length)).toEqual([60_000, 60_000]);
+    const cut = toolMessages(wire.requests[3]);
+    expect(cut.map((m) => m.toolCallId)).toEqual(["c0", "c1", "c2"]);
+    expect(cut.map((m) => m.content)).toEqual([
+      expect.stringContaining("Look it up again"),
+      expect.stringContaining("Look it up again"),
+      "c".repeat(35_000),
+    ]);
+    expect(wire.requests[4]?.slice(0, wire.requests[3]?.length)).toEqual(wire.requests[3]);
+    expect(done.history.filter((m) => m.role === "tool").map((m) => m.content.length)).toEqual([
+      60_000, 60_000, 35_000, 25_000,
+    ]);
+    expect((await agent.resume(done.snapshot, { host: { authorizeResume } })).status).toBe(
+      "completed",
+    );
+  });
+
+  it("evicts in model order, even when the newest call finishes first, before checking retained bytes", async () => {
+    const release = Promise.withResolvers<void>();
+    const imageTool = (name: string, images: ImagePart[], wait = false) =>
+      defineTool({
+        name,
+        description: name,
+        inputSchema: { type: "object" },
+        isConcurrencySafe: true,
+        run: async () => {
+          if (wait) await release.promise;
+          return images;
+        },
+      });
+    const old = shot("a"),
+      recent = shot("b"),
+      user = shot("u"),
+      first = shot("c"),
+      last = shot("d");
+    const messages = history([old, recent], [user]);
+    const before = structuredClone(messages);
+    const wire = fake([calls(call("first"), call("last")), text("Done")]);
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [imageTool("first", [first], true), imageTool("last", [first, last])],
+      toolHistory: { keepImages: 1 },
+      limits: { inlineBytes: 2 },
+    });
+    const checkpoints: RunSnapshot[] = [];
+    const done = await agent.run(
+      { messages },
+      {
+        host: {
+          canRunConcurrently: () => true,
+          checkpoint(node) {
+            assertAgent(node);
+            checkpoints.push(node);
+          },
+        },
+        onEvent(event) {
+          if (event.type === "tool_result" && event.request.call.name === "last") release.resolve();
+        },
+      },
+    );
+    expect(done.status).toBe("completed");
+    expect(messages).toEqual(before);
+    expect(toolMessages(wire.requests[0])[0]?.images).toEqual([recent]);
+    const tools = toolMessages(wire.requests[1]);
+    expect(tools.map((m) => [m.toolCallId, m.images])).toEqual([
+      ["earlier", []],
+      ["call-first", []],
+      ["call-last", [last]],
+    ]);
+    expect(tools[0]?.content).toContain("[image omitted: image/webp]");
+    expect(wire.requests[1]).toContainEqual({ role: "user", content: [user] });
+    expect(snapshotInlineBytes(done.snapshot)).toBe(2);
+    for (const image of [old, recent, first])
+      expect(JSON.stringify(done.snapshot)).not.toContain(`"data":"${image.data}"`);
+    for (const [i, saved] of checkpoints.entries()) {
+      expect(snapshotInlineBytes(saved)).toBeLessThanOrEqual(2);
+      if (i) checkChildProgress(checkpoints[i - 1]!, saved);
+    }
+    expect((await agent.resume(done.snapshot, { host: { authorizeResume } })).status).toBe(
+      "completed",
+    );
+  });
+
+  it("replaces all images for an explicit text-only model, without loading image refs or deleting user attachments", async () => {
+    const attachment = shot("u");
+    const parts: InputPart[] = [
+      attachment,
+      { type: "media", id: "photo", mimeType: "image/png" },
+      { type: "media", id: "doc", mimeType: "application/pdf" },
+    ];
+    const messages = history([shot("a")], parts);
+    const wire = fake([calls(call("photo")), text("Done")]);
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      supportsVision: false,
+      limits: { inlineBytes: 1, turns: 1 },
+      tools: [
+        defineTool({
+          name: "photo",
+          description: "Get the photo.",
+          inputSchema: { type: "object" },
+          run: async () => [shot("b")],
+        }),
+      ],
+    });
+    const loadMedia = vi.fn(async (ref: MediaRef) => {
+      expect(ref.id).toBe("doc");
+      return PDF;
+    });
+    const events: AgentEvent[] = [];
+    const done = await agent.run(
+      { messages },
+      {
+        host: { loadMedia },
+        onEvent: (event) => {
+          events.push(event);
+        },
+      },
+    );
+    expect(done.status).toBe("completed");
+    expect(wire.requests).toHaveLength(2); // Includes the existing tool-free final turn.
+    for (const request of wire.requests) {
+      expect(JSON.stringify(request)).not.toContain('"type":"image"');
+      expect(request).toContainEqual({
+        role: "user",
+        content: [
+          { type: "text", text: expect.stringContaining("cannot read images") },
+          { type: "text", text: expect.stringContaining("image/png") },
+          { type: "file", mimeType: "application/pdf", data: PDF },
+        ],
+      });
+      expect(toolMessages(request).every((m) => m.content.includes("cannot read images"))).toBe(
+        true,
+      );
+    }
+    expect(events.filter((event) => event.type === "images_omitted")).toEqual(
+      done.snapshot.models.map((model, index) => ({
+        type: "images_omitted",
+        runId: done.runId,
+        attemptId: done.attemptId,
+        operationId: model.id,
+        count: index + 3,
+      })),
+    );
+    expect(loadMedia).toHaveBeenCalledTimes(1);
+    expect(done.snapshot.input).toEqual(parts);
+    expect(snapshotInlineBytes(done.snapshot)).toBe(1);
+  });
+
+  it("reuses a child after image retirement only for its original input", async () => {
+    const childWire = fake([calls(call("photo")), text("Child answer")]);
+    const child = defineAgent({
+      ...base,
+      id: "reader",
+      provider: childWire.provider,
+      toolHistory: { keepImages: 1 },
+      tools: [
+        defineTool({
+          name: "photo",
+          description: "Get a photo.",
+          inputSchema: { type: "object" },
+          run: async () => [shot("b")],
+        }),
+      ],
+    });
+    let page = "a";
+    const inspect = defineDelegation({
+      name: "inspect",
+      description: "Read a page.",
+      inputSchema: { type: "object" },
+      validate: () => null,
+      specialists: [child],
+      async run(_, ctx) {
+        const result = await ctx
+          .child("page", child, {
+            messages: history([shot(page)], [{ type: "text", text: "Read the page." }]),
+          })
+          .join();
+        return result.status;
+      },
+    });
+    const root = defineAgent({
+      ...base,
+      provider: fake([calls(call("inspect")), text("Done"), text("Resumed")]).provider,
+      tools: [inspect],
+    });
+    let midway: RunSnapshot | undefined;
+    const done = await root.run("Read", {
+      host: {
+        checkpoint(node) {
+          assertAgent(node);
+          const tool = node.models[0];
+          if (
+            tool?.status === "completed" &&
+            tool.tools[0]?.status === "delegating" &&
+            node.delegations[0]?.children[0]?.snapshot.state.status === "completed"
+          )
+            midway = node;
+        },
+      },
+    });
+    expect(done.status).toBe("completed");
+    if (!midway) throw new Error("Missing completed child checkpoint");
+    expect((await root.resume(midway, { host: { authorizeResume } })).status).toBe("completed");
+    page = "x";
+    const other = await root.resume(midway, { host: { authorizeResume } });
+    expect(other).toMatchObject({ status: "failed", error: { code: "child_key_conflict" } });
+    expect(childWire.requests).toHaveLength(2);
+  });
+
+  it("rejects an oversized retained shot without evicting an earlier one", async () => {
+    const saved = shot("a");
+    const wire = fake([calls(call("large"))]);
+    const options = {
+      ...base,
+      provider: wire.provider,
+      limits: { inlineBytes: 2 },
+      tools: [
+        defineTool({
+          name: "large",
+          description: "Get the large image.",
+          inputSchema: { type: "object" },
+          run: async () => [shot("too big")],
+        }),
+      ],
+    };
+    const agent = defineAgent({ ...options, toolHistory: { keepImages: 1 } });
+    const result = await agent.run({ messages: history([saved], [shot("u")]) });
+    expect(result).toMatchObject({ status: "failed", error: { code: "tool_media_limit" } });
+    expect(result.snapshot.history.at(-1)).toMatchObject({ images: [saved] });
+    expect(snapshotInlineBytes(result.snapshot)).toBe(2);
+    const changed = defineAgent({ ...options, toolHistory: { keepImages: 2 } });
+    await expect(changed.resume(result.snapshot, { host: { authorizeResume } })).rejects.toThrow(
+      "same image support and tool history",
+    );
+  });
+
+  it("does not change text or images without either opt-in", async () => {
+    const large = "a".repeat(125_000);
+    const images = [shot("a"), shot("b"), shot("c")];
+    const messages = history(images, [shot("u")]);
+    const old = messages[1];
+    if (old?.role !== "tool") throw new Error("Expected a tool result");
+    old.content = large;
+    const later = call("read", "later");
+    const wire = fake([calls(later), text("Done")]);
+    const events: AgentEvent[] = [];
+    const agent = defineAgent({
+      ...base,
+      provider: wire.provider,
+      tools: [readTool(vi.fn(async () => large))],
+    });
+    const done = await agent.run(
+      { messages },
+      {
+        onEvent(event) {
+          events.push(event);
+        },
+      },
+    );
+    expect(done.status).toBe("completed");
+    expect(wire.requests[0]).toEqual([system, ...messages]);
+    expect(wire.requests[1]?.slice(0, wire.requests[0]?.length)).toEqual(wire.requests[0]);
+    expect(toolMessages(wire.requests[1]).at(-1)?.content).toBe(large);
+    expect(snapshotInlineBytes(done.snapshot)).toBe(4);
+    expect(events.some((event) => event.type === "images_omitted")).toBe(false);
   });
 });
 
