@@ -95,6 +95,14 @@ export function Composer<F extends AttachmentFile>({
   const [picking, setPicking] = useState(false);
   const [pickFailed, setPickFailed] = useState(false);
   const [stopIssue, setStopIssue] = useState<{ run?: string; message: string }>();
+  const [unconfirmedRevision, setUnconfirmedRevision] = useState<number>();
+  const unconfirmed =
+    composer.error?.code === "unconfirmed" &&
+    (unconfirmedRevision === undefined || composer.revision === unconfirmedRevision);
+  if (composer.error?.code === "unconfirmed" && unconfirmedRevision === undefined)
+    setUnconfirmedRevision(composer.revision);
+  else if (composer.error?.code !== "unconfirmed" && unconfirmedRevision !== undefined)
+    setUnconfirmedRevision(undefined);
   const uploading = composer.attachments.some(
     (item) => item.state === "queued" || item.state === "uploading",
   );
@@ -104,8 +112,8 @@ export function Composer<F extends AttachmentFile>({
     uploading,
     submitting: composer.submitting,
     canSubmit: composer.canSubmit,
+    unconfirmed,
     status: chat?.status,
-    parked: chat?.run.status === "waiting" && chat.run.waitingFor !== "continuation",
     canSend: chat?.canSend,
     canStop: chat?.canStop,
     offline,

@@ -14,13 +14,15 @@ import {
   MessageList,
   RequestCard,
   RunBand,
+  ToolRow,
   type MessageListChat,
 } from "../src/ui/index.ts";
 
-const { lists, announce, scroll } = vi.hoisted(() => ({
+const { lists, announce, scroll, scrollHandler } = vi.hoisted(() => ({
   lists: vi.fn(),
   announce: vi.fn(),
   scroll: vi.fn(),
+  scrollHandler: { current: undefined as ((event: unknown) => void) | undefined },
 }));
 interface HostProps {
   children?: ReactNode;
@@ -80,17 +82,20 @@ vi.mock("react-native", () => ({
   FlatList: ({
     data,
     renderItem,
+    onScroll,
     ListEmptyComponent,
     ListFooterComponent,
     ref,
   }: {
     data: readonly DisplayMessage[];
     renderItem: (item: { item: DisplayMessage; index: number }) => ReactNode;
+    onScroll?: (event: unknown) => void;
     ListEmptyComponent: ReactNode;
     ListFooterComponent: ReactNode;
     ref: Ref<{ scrollToEnd: typeof scroll }>;
   }) => {
     lists();
+    scrollHandler.current = onScroll;
     useImperativeHandle(ref, () => ({ scrollToEnd: scroll }), []);
     return (
       <>
@@ -375,4 +380,279 @@ it("keeps an oversized paste and sends the phone picker's file through the app u
   await press("Add files");
   expect(upload.mock.calls[0]?.[0]).toBe(photo);
   expect(node.textContent).toContain(photo.name);
+});
+
+it("disables Send after an unknown delivery outcome until the user edits the text", async () => {
+  const send = vi.fn(async () => ({
+    ok: true as const,
+    messageId: "m-1",
+    outcome: "unknown" as const,
+  }));
+  function Screen() {
+    const composer = useComposer({
+      scope: { principalId: "person", conversationId: "room" },
+      initialText: "Check this",
+      send,
+    });
+    return <Composer composer={composer} />;
+  }
+  await draw(<Screen />);
+  await press("Send");
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(node.textContent).toContain("Delivery is not confirmed");
+  const sendButton = node.querySelector<HTMLButtonElement>('[aria-label="Send"]');
+  expect(sendButton?.disabled).toBe(true);
+  await act(() => sendButton?.click());
+  expect(send).toHaveBeenCalledTimes(1);
+});
+
+it("surfaces a retry refusal and hands taken-back input to the app in MessageList", async () => {
+  const refused = { code: "closed", message: "This chat is closed." };
+  const input = { clientId: "u-1", text: "Retry me" };
+  const retry = vi.fn(async () => ({ ok: false as const, error: refused, input }));
+  const onRetryRefused = vi.fn();
+  const userMessage: DisplayMessage = {
+    id: "u-1",
+    role: "user",
+    state: "sending",
+    parts: [{ id: "p1", type: "text", text: "Retry me", settled: true }],
+  };
+  await draw(
+    <MessageList
+      onRetryRefused={onRetryRefused}
+      chat={{
+        messages: [userMessage],
+        status: "ready",
+        run: { status: "idle" },
+        connection: "open",
+        requests: [],
+        canRetry: true,
+        retry,
+        messageErrors: {
+          "u-1": { code: "unconfirmed", message: "Delivery is not confirmed." },
+        },
+      }}
+    />,
+  );
+  await press("Try again");
+  expect(retry).toHaveBeenCalledExactlyOnceWith("u-1");
+  expect(onRetryRefused).toHaveBeenCalledExactlyOnceWith(refused, input);
+  expect(node.textContent).toContain("This chat is closed.");
+});
+
+it("renders run.error details in RunBand when a run fails or stops at a limit", async () => {
+  const runError = { code: "budget", message: "Token limit reached." };
+  await draw(
+    <RunBand
+      describeError={() => ({
+        cause: "The run hit its budget.",
+        fix: "Raise the limit and try again.",
+        reference: "ref-99",
+      })}
+      chat={{
+        run: { status: "limited", id: "r1", error: runError },
+        status: "ready",
+        canStop: false,
+        requests: [],
+        stop: async () => ({ ok: true as const }),
+      }}
+    />,
+  );
+  expect(node.textContent).toContain("Stopped at a limit");
+  expect(node.textContent).toContain("The run hit its budget. Raise the limit and try again.");
+  expect(node.textContent).toContain("Reference: ref-99");
+});
+
+it("recovers RequestCard from local submitting when a custom review host reports part.problem", async () => {
+  const respond = vi.fn(
+    async (_id: string, _response: RequestResponse, _version: number | string) => ({
+      ok: true as const,
+      outcome: "accepted" as const,
+    }),
+  );
+  const show = (problem?: { code: string; message: string }) =>
+    draw(
+      <RequestCard
+        request={{
+          messageId: "m",
+          part: {
+            type: "approval",
+            id: "ask",
+            title: "Run tool?",
+            state: "pending",
+            ...(problem && { problem }),
+          },
+        }}
+        review={{ version: 1, respond }}
+      />,
+    );
+  await show();
+  await press("Approve");
+  expect(respond).toHaveBeenCalledTimes(1);
+  expect(node.querySelector<HTMLButtonElement>('[aria-label="Approve"]')?.disabled).toBe(true);
+  await show({ code: "stale_input", message: "Input changed, confirm again." });
+  expect(node.textContent).toContain("Input changed, confirm again.");
+  expect(node.querySelector<HTMLButtonElement>('[aria-label="Approve"]')?.disabled).toBe(false);
+  await press("Approve");
+  expect(respond).toHaveBeenCalledTimes(2);
+});
+
+it("switches Composer between Stop and Queue during a run and handles waiting runs", async () => {
+  const stop = vi.fn(async () => ({ ok: true as const }));
+  const send = vi.fn(async () => ({
+    ok: true as const,
+    messageId: "m-q",
+    outcome: "accepted" as const,
+  }));
+  function Screen({
+    status,
+    canSend,
+    initialText = "",
+  }: {
+    status: "running" | "waiting";
+    canSend: boolean;
+    initialText?: string;
+  }) {
+    const composer = useComposer({
+      scope: { principalId: "person", conversationId: `${status}-${canSend}-${initialText}` },
+      initialText,
+      canSend,
+      send,
+    });
+    return (
+      <Composer
+        composer={composer}
+        chat={{
+          status,
+          run: { status, id: "r1" },
+          canSend,
+          canStop: true,
+          stop,
+        }}
+      />
+    );
+  }
+  await draw(<Screen status="running" canSend />);
+  await press("Stop");
+  expect(stop).toHaveBeenCalledTimes(1);
+
+  await draw(<Screen status="running" canSend initialText="Steer" />);
+  await press("Queue");
+  expect(send).toHaveBeenCalledTimes(1);
+
+  await draw(<Screen status="waiting" canSend={false} initialText="Wait" />);
+  await press("Stop");
+  expect(stop).toHaveBeenCalledTimes(2);
+});
+
+it("shows Jump to latest when scrolled away in MessageList and announces Answer ready", async () => {
+  const base: MessageListChat = {
+    messages: [reply("live", "Working...", true)],
+    status: "running",
+    run: { status: "running", id: "r" },
+    connection: "open",
+    requests: [],
+  };
+  await draw(<MessageList chat={base} />);
+  await act(() => {
+    scrollHandler.current?.({
+      nativeEvent: {
+        contentOffset: { y: 0 },
+        contentSize: { height: 1000 },
+        layoutMeasurement: { height: 400 },
+      },
+    });
+  });
+  expect(node.querySelector('[aria-label="Jump to latest"]')).not.toBeNull();
+  await draw(
+    <MessageList
+      chat={{
+        ...base,
+        status: "ready",
+        run: { status: "completed", id: "r" },
+        messages: [reply("live", "Finished.", false)],
+      }}
+    />,
+  );
+  await press("Answer ready");
+  expect(scroll).toHaveBeenCalled();
+  expect(node.querySelector('[aria-label="Answer ready"]')).toBeNull();
+});
+
+it("renders ToolRow non-quiet and failed states with detail", async () => {
+  await draw(
+    <ToolRow
+      tool={{
+        type: "tool",
+        id: "t1",
+        name: "file_ticket",
+        label: "File ticket",
+        state: "failed",
+        detail: "Permission denied",
+      }}
+      tools={{ byName: { file_ticket: { failed: "Ticket failed", quiet: false } } }}
+    />,
+  );
+  expect(node.textContent).toContain("Ticket failed");
+  expect(node.textContent).toContain("Failed");
+  expect(node.textContent).toContain("Permission denied");
+});
+
+it("handles question choices and expiry timer in RequestCard", async () => {
+  vi.useFakeTimers();
+  try {
+    const respond = vi.fn(async () => ({ ok: true as const, outcome: "accepted" as const }));
+    const now = Date.now();
+    await draw(
+      <RequestCard
+        request={{
+          messageId: "m",
+          part: {
+            type: "question",
+            id: "q1",
+            title: "Pick one",
+            state: "pending",
+            choices: [
+              { id: "a", label: "Alpha" },
+              { id: "b", label: "Beta" },
+            ],
+            freeText: false,
+            expiresAt: now + 5_000,
+          },
+        }}
+        respond={respond}
+      />,
+    );
+    await press("Alpha");
+    expect(respond).toHaveBeenCalledExactlyOnceWith("q1", {
+      type: "answer",
+      answer: { choices: ["a"] },
+    });
+
+    await draw(
+      <RequestCard
+        request={{
+          messageId: "m",
+          part: {
+            type: "question",
+            id: "q2",
+            title: "Expiring",
+            state: "pending",
+            choices: [{ id: "a", label: "Alpha" }],
+            freeText: false,
+            expiresAt: Date.now() + 1_000,
+          },
+        }}
+        respond={respond}
+      />,
+    );
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Alpha"]')?.disabled).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(node.textContent).toContain("This request expired");
+    expect(node.querySelector('[aria-label="Alpha"]')).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });

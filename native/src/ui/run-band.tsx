@@ -10,12 +10,13 @@
  */
 import { useEffect, useState, type ReactNode } from "react";
 import { AccessibilityInfo, Text, View } from "react-native";
-import type { ChatStatus, CommandResult, RequestView } from "@providerkit/react";
+import type { ChatStatus, CommandResult, DisplayError, RequestView } from "@providerkit/react";
 import type { RunInfo } from "@providerkit/react/protocol";
 import { Action } from "./action.tsx";
 import { part, root, useSkin, type Appearance } from "./classes.tsx";
+import { ErrorNotice } from "./error-notice.tsx";
 import { useLabels, type ChatLabelOverrides, type ChatLabels } from "./labels.ts";
-import { bandState, type BandMemory } from "./rules.ts";
+import { bandState, isBusy, type BandMemory, type DescribedError } from "./rules.ts";
 
 /** What the band reads from `useChat` or `useAgentRun`. */
 export interface RunBandChat {
@@ -31,12 +32,14 @@ export interface RunBandProps extends Appearance {
   /** Host timestamps, in epoch milliseconds. Opening a conversation late must not restart its clock. */
   startedAt?: number;
   endedAt?: number;
+  /** Your app's error describer, for why a run failed or stopped at a limit. */
+  describeError?: (error: DisplayError) => DescribedError;
   labels?: ChatLabelOverrides;
   icons?: { stop?: ReactNode };
 }
 
-/** One tick a second, only while there is something to tick. */
-function useNow(active: boolean): number {
+/** One tick a second while active, or a single wake-up when the earliest pending request expires. */
+function useClock(active: boolean, wakeAt?: number): number {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!active) return;
@@ -48,6 +51,14 @@ function useNow(active: boolean): number {
       clearInterval(tick);
     };
   }, [active]);
+  useEffect(() => {
+    if (active || wakeAt === undefined || now >= wakeAt) return;
+    const timer = setTimeout(
+      () => setNow(Date.now()),
+      Math.min(Math.max(0, wakeAt - Date.now()), 2_147_483_647),
+    );
+    return () => clearTimeout(timer);
+  }, [active, wakeAt, now]);
   return now;
 }
 
@@ -62,6 +73,7 @@ export function RunBand({
   chat,
   startedAt: start,
   endedAt: end,
+  describeError,
   labels: overrides,
   icons,
   className,
@@ -71,8 +83,22 @@ export function RunBand({
   const words = useLabels(overrides);
   const labels = words.band;
   const [held, setHeld] = useState<Held>({ memory: {}, said: 0 });
+  const waiting = chat.run.status === "waiting" && chat.run.waitingFor !== "continuation";
+  let nextExpiry: number | undefined;
+  if (waiting) {
+    for (const request of chat.requests) {
+      const expiry = request.part.expiresAt;
+      if (
+        request.part.state === "pending" &&
+        expiry !== undefined &&
+        (nextExpiry === undefined || expiry < nextExpiry)
+      )
+        nextExpiry = expiry;
+    }
+  }
+  const now = useClock(start !== undefined && isBusy(chat), nextExpiry);
   const { view, memory, announce } = bandState(
-    { run: chat.run, status: chat.status, canStop: chat.canStop, requests: chat.requests },
+    { run: chat.run, status: chat.status, canStop: chat.canStop, requests: chat.requests, now },
     held.memory,
   );
   if (memory !== held.memory)
@@ -85,8 +111,6 @@ export function RunBand({
     if (held.said > 0 && held.words) AccessibilityInfo.announceForAccessibility(held.words);
   }, [held.said, held.words]);
 
-  const busy = view.phase === "working" || view.phase === "waiting";
-  const now = useNow(busy && start !== undefined);
   if (view.phase === "hidden") return null;
   if (view.phase === "ended") {
     const length = start !== undefined && end !== undefined ? end - start : undefined;
@@ -97,6 +121,9 @@ export function RunBand({
             ? `${labels.result[view.result]} · ${labels.duration(length)}`
             : labels.result[view.result]}
         </Text>
+        {chat.run.error ? (
+          <ErrorNotice error={chat.run.error} describe={describeError} labels={overrides} />
+        ) : null}
       </View>
     );
   }

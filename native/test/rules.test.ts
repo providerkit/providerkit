@@ -97,6 +97,32 @@ describe("bandState", () => {
       }),
     ).toMatchObject({ stop: "ready" });
     expect(
+      view.show({
+        run: parked,
+        status: "waiting",
+        now: 2_000,
+        requests: [request(approval({ expiresAt: 1_000 }))],
+      }),
+    ).toMatchObject({ stop: "ready" });
+    expect(
+      view.show({
+        run: parked,
+        status: "waiting",
+        requests: [request(approval({ edit: { schema: {}, value: {} } }))],
+      }),
+    ).toMatchObject({ stop: "ready" });
+    expect(
+      view.show({
+        run: parked,
+        status: "waiting",
+        requests: [
+          request(approval(), {
+            local: { status: "unconfirmed", response: { type: "approve" } },
+          }),
+        ],
+      }),
+    ).toMatchObject({ stop: "ready" });
+    expect(
       view.show({ run: run("waiting", { waitingFor: "continuation" }), status: "waiting" }),
     ).toEqual({ phase: "waiting", label: "continuation", stop: "ready" });
   });
@@ -136,6 +162,18 @@ describe("bandState", () => {
       result: "failed",
     });
     expect(view.announced).toEqual(["failed"]);
+  });
+
+  it("still announces completion when observation finishes before the send receipt returns", () => {
+    const view = band();
+    view.show({ run: run("running", { id: "r" }), status: "sending" });
+    view.show({ run: run("completed", { id: "r" }), status: "sending" });
+    expect(view.announced).toEqual([]);
+    expect(view.show({ run: run("completed", { id: "r" }), status: "ready" })).toEqual({
+      phase: "ended",
+      result: "completed",
+    });
+    expect(view.announced).toEqual(["completed"]);
   });
 });
 
@@ -198,11 +236,23 @@ describe("composerButton", () => {
     });
   });
 
-  it("is Send while the run waits for the person, because a message answers too", () => {
-    const parked = { ...base, status: "waiting" as const, parked: true, canStop: true };
-    expect(composerButton(parked)).toMatchObject({ action: "send", enabled: true });
-    expect(composerButton({ ...parked, parked: false, text: "" })).toMatchObject({
+  it("treats a waiting run as working: Queue when enqueue is available, Stop otherwise", () => {
+    const waiting = { ...base, status: "waiting" as const, canStop: true, canSend: true };
+    expect(composerButton(waiting)).toMatchObject({ action: "queue", enabled: true });
+    expect(composerButton({ ...waiting, text: "" })).toMatchObject({
       action: "stop",
+      enabled: true,
+    });
+    expect(composerButton({ ...waiting, canSend: false })).toMatchObject({
+      action: "stop",
+      enabled: true,
+    });
+  });
+
+  it("disables Send while the last send is unconfirmed so a tap does not send a duplicate", () => {
+    expect(composerButton({ ...base, unconfirmed: true })).toMatchObject({
+      action: "send",
+      enabled: false,
     });
   });
 

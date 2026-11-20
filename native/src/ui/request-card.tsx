@@ -49,6 +49,11 @@ export function RequestCard(props: RequestCardProps) {
   );
 }
 
+interface LocalFeedback {
+  part: RequestView["part"];
+  local?: RequestView["local"];
+}
+
 function RequestContent({
   request,
   respond,
@@ -62,17 +67,34 @@ function RequestContent({
   const labels = words.request;
   const { part: ask } = request;
   const [now, setNow] = useState(Date.now);
-  const [feedback, setFeedback] = useState<RequestView["local"]>();
-  const shown = { ...request, local: request.local ?? feedback };
+  const [feedback, setFeedback] = useState<LocalFeedback>({ part: ask });
+  // Plain-data / review.respond hosts report rejection through `part.problem` without populating
+  // `request.local`. When a newer part arrives with `problem`, surface it as a retryable failure
+  // instead of staying locked in local `submitting`.
+  if (
+    !request.local &&
+    feedback.part !== ask &&
+    ask.state === "pending" &&
+    ask.problem &&
+    feedback.local
+  ) {
+    setFeedback({
+      part: ask,
+      local: { ...feedback.local, status: "failed", error: ask.problem },
+    });
+  }
+  const shown = { ...request, local: request.local ?? feedback.local };
   const view = requestCard(shown, now, Boolean(review || respond));
   const lock = useRef(false);
   const current = useRef<RequestView | null>(null);
+  const currentVersion = useRef<string | number | undefined>(review?.version);
   useLayoutEffect(() => {
     current.current = request;
+    currentVersion.current = review?.version;
     return () => {
       current.current = null;
     };
-  }, [request]);
+  }, [request, review?.version]);
 
   const { expiresAt } = ask;
   useEffect(() => {
@@ -95,23 +117,29 @@ function RequestContent({
     if (!view.supported && response.type !== "cancel") return;
     const invalid = checkResponse(ask, response); // Recheck expiry at the press, even if a timer slept.
     if (invalid) {
-      setFeedback({ status: "failed", response, error: invalid });
+      setFeedback({ part: ask, local: { status: "failed", response, error: invalid } });
       setNow(Date.now());
       return;
     }
     lock.current = true;
-    setFeedback({ status: "submitting", response });
+    const version = review?.version;
+    const attempt: LocalFeedback = { part: ask, local: { status: "submitting", response } };
+    setFeedback(attempt);
+    const finish = (local: RequestView["local"]) => {
+      if (current.current?.part !== ask || currentVersion.current !== version) return;
+      setFeedback((held) => (held === attempt ? { part: ask, local } : held));
+    };
     try {
       const result = review
         ? await review.respond(ask.id, response, review.version)
         : await respond?.(ask.id, response);
-      if (result && !result.ok) setFeedback({ status: "failed", response, error: result.error });
-      else if (result?.outcome === "unknown") setFeedback({ status: "unconfirmed", response });
+      if (result && !result.ok) finish({ status: "failed", response, error: result.error });
+      else if (result?.outcome === "unknown") finish({ status: "unconfirmed", response });
       // A receipt alone never reopens the buttons. The host confirms the result on the request.
     } catch (error) {
       if (error instanceof TransportError && error.outcome === "refused")
-        setFeedback({ status: "failed", response, error: error.error });
-      else setFeedback({ status: "unconfirmed", response });
+        finish({ status: "failed", response, error: error.error });
+      else finish({ status: "unconfirmed", response });
     } finally {
       lock.current = false;
     }

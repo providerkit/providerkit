@@ -26,6 +26,9 @@ export type BandView =
 export interface BandMemory {
   /** Last busy state. When a send is still naming its run, `from` can be the previous result. */
   from?: RunInfo;
+  /** Once a busy period has seen an active run (`running`/`waiting`), keep that status even if the
+   * run finishes before `status` leaves `sending` (e.g. observation beats the send receipt). */
+  sawActive?: boolean;
 }
 
 export interface BandInput {
@@ -33,9 +36,11 @@ export interface BandInput {
   status: ChatStatus;
   canStop: boolean;
   requests: readonly RequestView[];
+  /** Current clock in epoch ms, used to check whether pending requests have expired. */
+  now?: number;
 }
 
-function isBusy({ run, status }: BandInput): boolean {
+export function isBusy({ run, status }: Pick<BandInput, "run" | "status">): boolean {
   return (
     run.status === "running" ||
     run.status === "waiting" ||
@@ -57,10 +62,10 @@ function workView(input: BandInput): BandView {
   if (run.waitingFor === "continuation")
     return { phase: "waiting", label: "continuation", stop: canStop ? "ready" : "none" };
   // Parked on the person: the card's own buttons answer it, so Stop steps aside, unless no request
-  // here can be answered, and then Stop is the one way on.
-  const answerable = input.requests.filter(
-    (request) => request.canRespond !== false && request.part.canAnswer !== false,
-  );
+  // here can be answered right now (read-only, expired, unsupported or unconfirmed), and then Stop
+  // is the one way on.
+  const now = input.now ?? Date.now();
+  const answerable = input.requests.filter((request) => requestCard(request, now, true).enabled);
   return {
     phase: "waiting",
     label: answerable.some((request) => request.part.type === "approval") ? "approval" : "answer",
@@ -81,8 +86,18 @@ export function bandState(
   memory: BandMemory,
 ): { view: BandView; memory: BandMemory; announce?: RunResult } {
   const { run } = input;
-  if (isBusy(input))
-    return { view: workView(input), memory: memory.from === run ? memory : { from: run } };
+  if (isBusy(input)) {
+    const active = run.status === "running" || run.status === "waiting";
+    const sawActive = memory.sawActive === true || active;
+    // If observation reports the run ended while `send()` is still pending, keep the active run in
+    // memory so the completion still announces once `status` returns to `ready`.
+    if (sawActive && !active && memory.from) return { view: workView(input), memory };
+    return {
+      view: workView(input),
+      memory:
+        memory.from === run && memory.sawActive === sawActive ? memory : { from: run, sawActive },
+    };
+  }
   const result = resultOf(run.status);
   const before = memory.from;
   const next = before ? {} : memory;
@@ -135,9 +150,10 @@ export interface ComposerInput {
   submitting: boolean;
   /** The composer's own `canSubmit`. */
   canSubmit: boolean;
+  /** True when the last send had an unconfirmed delivery outcome and the person has not edited or
+   * resolved it yet, so Send stays off instead of sending a duplicate with a new client id. */
+  unconfirmed?: boolean;
   status?: ChatStatus;
-  /** The run waits for the person: an approval or a question. A message is an answer then. */
-  parked?: boolean;
   /** The client's `canSend`: true during a run when its host takes messages while it works. */
   canSend?: boolean;
   canStop?: boolean;
@@ -154,18 +170,16 @@ export interface ComposerButton {
 }
 
 /**
- * The one button. While a run works, it is Stop while the box is empty and Queue the moment there
- * are words, so the two never share a tap; a host that takes
- * no messages during a run keeps Stop. While the run waits for the person it is Send,
- * because a message answers too. Send and Queue are off while the phone is offline,
- * while a file uploads, and while the text is over `maxLength`. Stop stays on: it is the way out.
+ * The one button. While a run works or waits, it is Stop while the box is empty and Queue the
+ * moment there are words, so the two never share a tap; a host that takes no messages during a run
+ * keeps Stop. Send and Queue are off while the phone is offline, while a file uploads, while the
+ * text is over `maxLength`, and while the last send is unconfirmed. Stop stays on: it is the way
+ * out.
  */
 export function composerButton(input: ComposerInput): ComposerButton {
   const { text, status = "ready", canStop = false } = input;
-  const parked = status === "waiting" && input.parked === true;
   const working =
-    !parked &&
-    (status === "running" || status === "waiting" || status === "sending" || status === "stopping");
+    status === "running" || status === "waiting" || status === "sending" || status === "stopping";
   const filled = text.trim().length > 0 || input.hasFiles;
   let note: ComposerNote | undefined;
   if (input.maxLength !== undefined && text.length > input.maxLength)
@@ -176,7 +190,8 @@ export function composerButton(input: ComposerInput): ComposerButton {
   if (status === "stopping") return { action: "stop", enabled: false, pending: true, note };
   if (working && !(queues && filled) && canStop)
     return { action: "stop", enabled: true, pending: false, note };
-  const ready = filled && input.canSubmit && !input.submitting && note === undefined;
+  const ready =
+    filled && input.canSubmit && !input.submitting && !input.unconfirmed && note === undefined;
   return {
     action: queues ? "queue" : "send",
     enabled: ready && input.canSend !== false && (!working || queues),

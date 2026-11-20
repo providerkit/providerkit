@@ -36,6 +36,7 @@ import type {
   ChatStatus,
   ConnectionStatus,
   DisplayError,
+  MessageInput,
   RequestView,
 } from "@providerkit/react";
 import type {
@@ -113,6 +114,9 @@ export interface MessageListProps extends Appearance {
   markdown?: MarkdownSettings;
   /** Your app's error describer, for the words under a failed message. */
   describeError?: (error: DisplayError) => DescribedError;
+  /** Called when a retried message is refused by the host and taken back out of the list. Restore
+   * the returned input to your composer here if you own the draft separately. */
+  onRetryRefused?: (error: DisplayError, input?: MessageInput) => void;
   /** Turns Retry off while the phone has no connection. */
   offline?: boolean;
   labels?: ChatLabelOverrides;
@@ -153,7 +157,7 @@ interface Shared {
   labels: ChatLabelOverrides | undefined;
   icons: MessageListIcons | undefined;
   respond: MessageListChat["respond"];
-  retry: MessageListChat["retry"];
+  retry: ((messageId: string) => Promise<void>) | undefined;
   discard: MessageListChat["discard"];
 }
 
@@ -210,6 +214,7 @@ const Transcript = memo(function Transcript({
   followDistance = 48,
   markdown,
   describeError,
+  onRetryRefused,
   offline = false,
   labels: overrides,
   icons,
@@ -225,6 +230,21 @@ const Transcript = memo(function Transcript({
   const skin = useSkin();
   const labels = useLabels(overrides).list;
   const { messages, requests, messageErrors, respond, retry, discard } = chat;
+  const [retryRefusal, setRetryRefusal] = useState<DisplayError>();
+  const handleRetry = useCallback(
+    async (messageId: string) => {
+      if (!retry) return;
+      setRetryRefusal(undefined);
+      const result = await retry(messageId);
+      if (!result.ok) {
+        // When the host refuses a retry, the client removes the unconfirmed message and returns its
+        // error and input. Surface the refusal here and hand the input back to the app if asked.
+        setRetryRefusal(result.error);
+        onRetryRefused?.(result.error, result.input);
+      }
+    },
+    [retry, onRetryRefused],
+  );
   // A Retry can start the work twice. Queueing is not permission to retry an active run.
   const canRetry = chat.canRetry === true && chat.status === "ready";
   const shared = useMemo<Shared>(
@@ -239,7 +259,7 @@ const Transcript = memo(function Transcript({
       labels: overrides,
       icons,
       respond,
-      retry,
+      retry: retry ? handleRetry : undefined,
       discard,
     }),
     [
@@ -254,6 +274,7 @@ const Transcript = memo(function Transcript({
       icons,
       respond,
       retry,
+      handleRetry,
       discard,
     ],
   );
@@ -320,9 +341,13 @@ const Transcript = memo(function Transcript({
     [messageErrors, canRetry, working, requests],
   );
 
+  // Clear a previous retry refusal once the user starts a new send or run.
+  if (retryRefusal && chat.status !== "ready") setRetryRefusal(undefined);
+
   const error =
     chat.error ??
     (chat.connection === "lost" ? { code: "connection_lost", message: labels.lost } : undefined);
+  const noticeError = error ?? retryRefusal;
   const connecting = chat.connection === "connecting" || chat.connection === "reconnecting";
   let listState = "ready";
   if (error) listState = "error";
@@ -377,13 +402,13 @@ const Transcript = memo(function Transcript({
           ListFooterComponent={
             <>
               {awaiting && !error ? <Awaiting /> : null}
-              {error ? (
+              {noticeError ? (
                 <ErrorNotice
-                  title={!messages.length ? labels.loadFailed : undefined}
-                  error={error}
+                  title={!messages.length && error ? labels.loadFailed : undefined}
+                  error={noticeError}
                   describe={describeError}
                   offline={offline}
-                  onRetry={chat.canReconnect ? chat.reconnect : undefined}
+                  onRetry={error && chat.canReconnect ? chat.reconnect : undefined}
                   retryLabel={labels.reconnect}
                   labels={overrides}
                 />
