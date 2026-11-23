@@ -5,6 +5,7 @@ import * as hosted from "../src/hosted.ts";
 import { describe, expect, it } from "vitest";
 import { ProviderError } from "../src/errors.ts";
 import type { HostedTool } from "../src/hosted.ts";
+import type { GeminiConfig } from "../src/index.ts";
 import {
   antigravityUserAgent,
   createGeminiProvider,
@@ -434,6 +435,66 @@ describe("gemini adapter", () => {
     for (const model of ["gemini-3.8-flash", "gemini-flash-latest", "gemini-4-pro"]) {
       expect(await thinkingFor(model)).toEqual({ thinkingLevel: "LOW" });
     }
+  });
+
+  it("uses the opt-in legacy thinking settings for the effective effort and model", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    const config = {
+      apiKey: "k",
+      model: "gemini-3.1-flash-lite",
+      fetchImpl,
+      resolveThinkingConfig: (effort, model) => {
+        if (model !== "gemini-3.1-flash-lite") return undefined;
+        return effort === "none"
+          ? { thinkingBudget: 0 }
+          : { includeThoughts: true, thinkingLevel: "LOW" };
+      },
+    } satisfies GeminiConfig;
+    const legacy = createGeminiProvider({ ...config, effort: "none" });
+    await collect(legacy.createStream(HI, []));
+    await collect(legacy.createStream(HI, [], { effort: "low" }));
+    await collect(
+      legacy.createStream(HI, [], { effort: "high", model: "models/gemini-3.1-flash-lite" }),
+    );
+    await collect(legacy.createStream(HI, [], { effort: "high", model: "gemini-3.8-flash" }));
+    await collect(createGeminiProvider(config).createStream(HI, []));
+
+    expect(seen.map(({ body }) => body.generationConfig)).toEqual([
+      { thinkingConfig: { thinkingBudget: 0 } },
+      { thinkingConfig: { includeThoughts: true, thinkingLevel: "LOW" } },
+      { thinkingConfig: { includeThoughts: true, thinkingLevel: "LOW" } },
+      { thinkingConfig: { thinkingLevel: "HIGH" } },
+      {},
+    ]);
+  });
+
+  it("rejects a thinking budget and level together before fetching", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    const invalid = createGeminiProvider({
+      apiKey: "k",
+      model: "gemini-3.1-flash-lite",
+      fetchImpl,
+      effort: "none",
+      // @ts-expect-error Simulate a JavaScript caller passing both fields.
+      resolveThinkingConfig: () => ({ thinkingBudget: 0, thinkingLevel: "LOW" }),
+    });
+
+    await expect(collect(invalid.createStream(HI, []))).rejects.toMatchObject({
+      kind: "invalid",
+      message: expect.stringContaining("not both"),
+    });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("rejects the thinking override on Antigravity", () => {
+    expect(() =>
+      createGeminiProvider({
+        apiKey: "k",
+        model: "gemini-3.8-flash",
+        id: "antigravity",
+        resolveThinkingConfig: () => ({ thinkingLevel: "LOW" }),
+      }),
+    ).toThrow("Antigravity does not support resolveThinkingConfig");
   });
 
   it("omits temperature and topP by default", async () => {

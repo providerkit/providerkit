@@ -39,6 +39,14 @@ import type {
   ToolDefinition,
 } from "../types.ts";
 
+type GeminiThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+
+/** Gemini REST thinking settings. Send a budget or a level, not both. */
+export type GeminiThinkingConfig = { includeThoughts?: boolean } & (
+  | { thinkingBudget?: number; thinkingLevel?: never }
+  | { thinkingBudget?: never; thinkingLevel?: GeminiThinkingLevel }
+);
+
 export interface GeminiConfig extends ProviderFallbackConfig {
   apiKey: string;
   model: string;
@@ -67,6 +75,12 @@ export interface GeminiConfig extends ProviderFallbackConfig {
   settleUsageOnTerminalError?: boolean;
   /** Bound default; a per-call `effort` overrides it. */
   effort?: Effort;
+  /**
+   * Replace the thinking settings for the effective effort and model (without `models/`).
+   * Return `undefined` to use Core's default. Not called when no effort is set.
+   * Use only with Gemini endpoints that accept these settings. Not supported on Antigravity.
+   */
+  resolveThinkingConfig?: (effort: Effort, model: string) => GeminiThinkingConfig | undefined;
   /**
    * How the schema rides on a call that also carries tools. See
    * {@link JsonWithTools}. Note that it is the model's answer, not the
@@ -160,7 +174,7 @@ function cleanAntigravitySystemText(text: string): string {
  * Sent as the REST enum NAMES. The SDK's `ThinkingLevel` members serialize to
  * exactly these strings, so nothing is lost by writing them out.
  */
-const THINKING_LEVEL: Record<Exclude<Effort, "none">, string> = {
+const THINKING_LEVEL: Record<Exclude<Effort, "none">, GeminiThinkingLevel> = {
   low: "LOW",
   medium: "MEDIUM",
   high: "HIGH",
@@ -170,7 +184,7 @@ const THINKING_LEVEL: Record<Exclude<Effort, "none">, string> = {
 const TAKES_MINIMAL_THINKING =
   /^gemini-(?:3(?:\.[056])?-flash(?:-preview|-lite(?:-preview)?)?|3\.1-flash-lite(?:-preview)?|flash-lite-latest)$/i;
 
-function geminiThinkingLevel(model: string, effort: Effort): string {
+function geminiThinkingLevel(model: string, effort: Effort): GeminiThinkingLevel {
   if (effort !== "none") return THINKING_LEVEL[effort];
   return TAKES_MINIMAL_THINKING.test(model) ? "MINIMAL" : "LOW";
 }
@@ -494,6 +508,13 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
   const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
   const id = config.id ?? "gemini";
   const isAntigravity = id === "antigravity";
+  if (isAntigravity && config.resolveThinkingConfig !== undefined) {
+    throw new ProviderError(
+      id,
+      "invalid",
+      "Antigravity does not support resolveThinkingConfig. Leave it unset.",
+    );
+  }
   const instanceSessionId =
     config.sessionHeader || isAntigravity ? (config.instanceSessionId ?? crypto.randomUUID()) : "";
 
@@ -551,9 +572,19 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
       // would switch that off for a caller who never asked, which is the whole
       // reason the seam treats an absent effort as "never sent".
       if (effort && !isAntigravity) {
-        generationConfig.thinkingConfig = isGemini2
-          ? { thinkingBudget: GEMINI_2_THINKING_BUDGET[effort] }
-          : { thinkingLevel: geminiThinkingLevel(model, effort) };
+        const thinking = config.resolveThinkingConfig?.(effort, model);
+        if (thinking?.thinkingBudget !== undefined && thinking.thinkingLevel !== undefined) {
+          throw new ProviderError(
+            id,
+            "invalid",
+            `${id}: resolveThinkingConfig must return either thinkingBudget or thinkingLevel, not both.`,
+          );
+        }
+        generationConfig.thinkingConfig =
+          thinking ??
+          (isGemini2
+            ? { thinkingBudget: GEMINI_2_THINKING_BUDGET[effort] }
+            : { thinkingLevel: geminiThinkingLevel(model, effort) });
       }
       // A schema that shares its call with tools pins the decoder, and a pinned
       // decoder cannot emit a functionCall — the model narrates the call it
