@@ -268,7 +268,13 @@
           {
             "patterns": [
               {
-                "group": ["**/decisions*", "**/zod*", "**/auth/**", "**/*transcription*"],
+                "group": [
+                  "**/decisions*",
+                  "**/zod*",
+                  "**/auth/**",
+                  "**/*transcription*",
+                  "**/embeddings*"
+                ],
                 "message": "Speech imports the shared modules only, never another capability."
               }
             ]
@@ -284,8 +290,36 @@
           {
             "patterns": [
               {
-                "group": ["**/decisions*", "**/zod*", "**/auth/**", "**/*speech*"],
+                "group": [
+                  "**/decisions*",
+                  "**/zod*",
+                  "**/auth/**",
+                  "**/*speech*",
+                  "**/embeddings*"
+                ],
                 "message": "Transcription imports the shared modules only, never another capability."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["core/src/embeddings*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "**/decisions*",
+                  "**/zod*",
+                  "**/auth/**",
+                  "**/*speech*",
+                  "**/*transcription*"
+                ],
+                "message": "Embeddings import the shared modules only, never another capability."
               }
             ]
           }
@@ -300,8 +334,8 @@
           {
             "patterns": [
               {
-                "group": ["**/*speech*", "**/*transcription*"],
-                "message": "A capability imports the shared modules only, never speech or transcription."
+                "group": ["**/*speech*", "**/*transcription*", "**/embeddings*"],
+                "message": "Capabilities import the shared modules only, never each other."
               }
             ]
           }
