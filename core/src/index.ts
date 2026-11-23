@@ -80,6 +80,7 @@ export {
   resolveAntigravityWireModel,
   type GeminiConfig,
   type GeminiContent,
+  type GeminiThinkingConfig,
 } from "./providers/gemini.ts";
 export * from "./providers/zai.ts";
 export {

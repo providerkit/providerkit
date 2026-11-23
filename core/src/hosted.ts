@@ -8,7 +8,12 @@ import {
   anthropicProvider,
   type AnthropicConfig,
 } from "./providers/anthropic.ts";
-import { geminiContents, geminiProvider, type GeminiConfig } from "./providers/gemini.ts";
+import {
+  geminiContents,
+  geminiProvider,
+  type GeminiConfig,
+  type GeminiThinkingConfig,
+} from "./providers/gemini.ts";
 import { openaiProvider, type OpenAIConfig } from "./providers/openai.ts";
 import { responsesProvider, type ResponsesConfig } from "./providers/responses.ts";
 import {
@@ -28,6 +33,7 @@ export { hostedRefused, planHostedTools } from "./hosted/shared.ts";
 export type {
   AnthropicConfig,
   GeminiConfig,
+  GeminiThinkingConfig,
   OpenAIConfig,
   ResponsesConfig,
   PresetProviderConfig,
