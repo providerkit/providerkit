@@ -2,6 +2,11 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.1] - 2026-11-23
+
+- Gemini callers can override the thinking settings for a pinned model without changing Core's defaults.
+- Gemini usage exposes tool prompt tokens separately when Google reports them. They are still included in total input tokens.
+
 ## [0.36.0] - 2026-11-23
 
 - OpenRouter callers can require a fixed list of upstream hosts and opt into the gateway's explicit reasoning-off setting. Callers that track BYOK inference separately can report only the OpenRouter charge.

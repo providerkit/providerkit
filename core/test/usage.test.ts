@@ -198,6 +198,16 @@ describe("reasoningTokens", () => {
   });
 });
 
+describe("toolUsePromptTokens", () => {
+  it("preserves the reported subset when adding or subtracting input totals", () => {
+    const a = usage({ inputTokens: 57, toolUsePromptTokens: 7 });
+    const b = usage({ inputTokens: 20, toolUsePromptTokens: 4 });
+    expect(addUsage(a, b)).toMatchObject({ inputTokens: 77, toolUsePromptTokens: 11 });
+    expect(subtractUsage(a, b)).toMatchObject({ inputTokens: 37, toolUsePromptTokens: 3 });
+    expect(subtractUsage(b, a).toolUsePromptTokens).toBe(0);
+  });
+});
+
 describe("hosted tool calls", () => {
   const searched = usage({ inputTokens: 1_000, outputTokens: 100, hostedCalls: { web_search: 2 } });
   const tokens = (1_000 * FLASH.input + 100 * FLASH.output) / 1_000_000;
