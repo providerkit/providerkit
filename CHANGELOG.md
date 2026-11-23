@@ -2,6 +2,10 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.2] - 2026-11-23
+
+- The `@providerkit/core/embeddings` entry point turns one text or an ordered list into Gemini vectors. It checks the vector count and width, reports token counts when available and never retries or starts a Google Batch job. Chat imports do not load it.
+
 ## [0.36.1] - 2026-11-23
 
 - Gemini callers can override the thinking settings for a pinned model without changing Core's defaults.
