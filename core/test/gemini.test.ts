@@ -11,7 +11,7 @@ import {
   createGeminiProvider,
   toGeminiContents,
 } from "../src/providers/gemini.ts";
-import { collectTurn } from "../src/turn.ts";
+import { collectTurn, drainStream } from "../src/turn.ts";
 import { withStreamRetry } from "../src/retry.ts";
 import { costUsd } from "../src/usage.ts";
 import { withWatchdog } from "../src/watchdog.ts";
@@ -116,11 +116,34 @@ describe("gemini adapter", () => {
     const { fetchImpl } = recorder(TEXT_TURN);
     const chunks = await collect(provider(fetchImpl).createStream(HI, []));
 
-    expect(chunks.find((c) => c.type === "usage")?.usage).toEqual({
+    expect(chunks.find((c) => c.type === "usage")?.usage).toStrictEqual({
       inputTokens: 1_000,
       cachedInputTokens: 800,
       outputTokens: 320,
       reasoningTokens: 300,
+    });
+  });
+
+  it.each([7, 0])("keeps %i tool prompt tokens inside the drained input total", async (count) => {
+    const { fetchImpl } = recorder([
+      candidate([{ text: "hi" }], "STOP"),
+      j({
+        usageMetadata: {
+          promptTokenCount: 50,
+          toolUsePromptTokenCount: count,
+          candidatesTokenCount: 4,
+          thoughtsTokenCount: 3,
+        },
+      }),
+    ]);
+    const gemini = provider(fetchImpl);
+    const { usage } = await drainStream(gemini.createStream(HI, []), gemini.model);
+    expect(usage).toStrictEqual({
+      inputTokens: 50 + count,
+      toolUsePromptTokens: count,
+      cachedInputTokens: 0,
+      outputTokens: 7,
+      reasoningTokens: 3,
     });
   });
 
@@ -1073,7 +1096,11 @@ describe("gemini hosted tools", () => {
     expect(citation).toMatchObject({ anchor: "claim", start: SECOND, end: ANSWER.length });
     expect(turn.message.content.slice(citation?.start, citation?.end)).toBe(CLAIM);
     // The prompt the search results added bills as input too.
-    expect(turn.usage).toMatchObject({ inputTokens: 450, hostedCalls: { web_search: 1 } });
+    expect(turn.usage).toMatchObject({
+      inputTokens: 450,
+      toolUsePromptTokens: 400,
+      hostedCalls: { web_search: 1 },
+    });
     // Nothing to send back: grounding is not a part of the model's turn.
     expect(turn.message.hostedItems).toBeUndefined();
     expect(turn.message.toolCalls).toBeUndefined();
