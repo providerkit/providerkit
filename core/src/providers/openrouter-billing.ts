@@ -34,9 +34,12 @@ function price(value: unknown): number | undefined {
  * Without that second figure there is no whole bill to report, and the
  * caller's rate prices the call instead.
  */
-export function openRouterCostUsd(usage: OpenRouterBill): number | undefined {
+export function openRouterCostUsd(
+  usage: OpenRouterBill,
+  scope: "total" | "reported" = "total",
+): number | undefined {
   const cost = price(usage.cost);
-  if (cost === undefined || usage.is_byok !== true) return cost;
+  if (scope === "reported" || cost === undefined || usage.is_byok !== true) return cost;
   const upstream = price(usage.cost_details?.upstream_inference_cost);
   return upstream === undefined ? undefined : price(cost + upstream);
 }

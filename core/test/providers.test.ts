@@ -1246,13 +1246,17 @@ describe("provider-reported cost", () => {
   const usageFrom = async (
     record: Record<string, unknown>,
     baseUrl = "https://openrouter.ai/api",
+    openRouterCost?: "reported",
   ) => {
     const { fetchImpl } = recorder([j({ choices: [], usage: record })]);
     const chunks = await collect(
-      createOpenAIProvider({ apiKey: "k", model: "m", baseUrl, fetchImpl }).createStream(
-        [{ role: "user", content: "hi" }],
-        [],
-      ),
+      createOpenAIProvider({
+        apiKey: "k",
+        model: "m",
+        baseUrl,
+        fetchImpl,
+        openRouterCost,
+      }).createStream([{ role: "user", content: "hi" }], []),
     );
     return chunks.find((c) => c.type === "usage")?.usage;
   };
@@ -1338,6 +1342,19 @@ describe("provider-reported cost", () => {
     expect(
       await usageFrom({ ...OPENROUTER_USAGE, is_byok: true, cost_details: null }),
     ).not.toHaveProperty("reportedCostUsd");
+  });
+
+  it("can report only the gateway bill for an OpenRouter BYOK call", async () => {
+    const byok = {
+      ...OPENROUTER_USAGE,
+      is_byok: true,
+      cost: 0,
+      cost_details: { upstream_inference_cost: 0.0002 },
+    };
+    expect(await usageFrom(byok, undefined, "reported")).toMatchObject({ reportedCostUsd: 0 });
+    expect(await usageFrom(byok, "https://api.deepseek.com", "reported")).not.toHaveProperty(
+      "reportedCostUsd",
+    );
   });
 
   it.each(["https://api.deepseek.com", "https://openrouter.ai.example.org"])(

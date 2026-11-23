@@ -206,6 +206,27 @@ describe("gemini adapter", () => {
     });
   });
 
+  it.each([
+    [
+      "SAFETY",
+      [j({ promptFeedback: { blockReason: "SAFETY" }, usageMetadata: { promptTokenCount: 9 } })],
+    ],
+    ["OTHER", [candidate([], "OTHER"), j({ usageMetadata: { promptTokenCount: 9 } })]],
+  ])("can settle usage before throwing a terminal %s error", async (code, frames) => {
+    const { fetchImpl } = recorder(frames);
+    const chunks: ProviderChunk[] = [];
+    async function read(): Promise<void> {
+      for await (const chunk of provider(fetchImpl, {
+        settleUsageOnTerminalError: true,
+      }).createStream(HI, []))
+        chunks.push(chunk);
+    }
+    await expect(read()).rejects.toMatchObject({ code });
+    expect(chunks).toEqual([
+      { type: "usage", usage: { inputTokens: 9, outputTokens: 0, cachedInputTokens: 0 } },
+    ]);
+  });
+
   it("finishes as tool_calls even when STOP lands on a LATER chunk", async () => {
     // Gemini reports STOP on the turn that called a tool, and the reason can
     // arrive after the calls did. Reading it literally drops the tool round.

@@ -117,6 +117,9 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
   /** Send `reasoning.enabled: false` for OpenRouter effort `none`. Use only with a model and
    * host known to accept it. Unset keeps the adapter's per-model effort mapping. */
   openRouterDisableReasoning?: boolean;
+  /** Use only OpenRouter's `usage.cost` when the host tracks BYOK inference separately.
+   * The default includes the upstream provider's bill when available. */
+  openRouterCost?: "total" | "reported";
   /**
    * Automatically pin OpenRouter calls to the first-party model vendor's host
    * when hitting openrouter.ai and providerOrder is not passed. Defaults to true.
@@ -758,7 +761,9 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
             chunk.usage.prompt_cache_hit_tokens ??
             chunk.usage.cached_tokens ??
             0;
-          const reportedCostUsd = reportsCost ? openRouterCostUsd(chunk.usage) : undefined;
+          const reportedCostUsd = reportsCost
+            ? openRouterCostUsd(chunk.usage, config.openRouterCost)
+            : undefined;
           const hostedCalls = codecs?.openai.counts(chunk.usage);
           yield {
             type: "usage",
