@@ -59,6 +59,9 @@ export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     inputTokens: a.inputTokens + b.inputTokens,
     cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
     cacheWriteTokens: (a.cacheWriteTokens ?? 0) + (b.cacheWriteTokens ?? 0),
+    ...(a.toolUsePromptTokens !== undefined || b.toolUsePromptTokens !== undefined
+      ? { toolUsePromptTokens: (a.toolUsePromptTokens ?? 0) + (b.toolUsePromptTokens ?? 0) }
+      : {}),
     outputTokens: a.outputTokens + b.outputTokens,
     ...(a.reasoningTokens !== undefined || b.reasoningTokens !== undefined
       ? { reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0) }
@@ -78,6 +81,9 @@ export function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     inputTokens: Math.max(0, a.inputTokens - b.inputTokens),
     cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
     cacheWriteTokens: Math.max(0, (a.cacheWriteTokens ?? 0) - (b.cacheWriteTokens ?? 0)),
+    ...(a.toolUsePromptTokens !== undefined
+      ? { toolUsePromptTokens: Math.max(0, a.toolUsePromptTokens - (b.toolUsePromptTokens ?? 0)) }
+      : {}),
     outputTokens: Math.max(0, a.outputTokens - b.outputTokens),
     ...(a.reasoningTokens !== undefined
       ? { reasoningTokens: Math.max(0, a.reasoningTokens - (b.reasoningTokens ?? 0)) }

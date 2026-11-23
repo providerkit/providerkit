@@ -785,6 +785,9 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
                 // input too, and Gemini reports it apart
                 // (Vercel convert-google-usage.ts:31-36).
                 inputTokens: (usage.promptTokenCount ?? 0) + (usage.toolUsePromptTokenCount ?? 0),
+                ...(usage.toolUsePromptTokenCount !== undefined
+                  ? { toolUsePromptTokens: usage.toolUsePromptTokenCount }
+                  : {}),
                 // Thoughts bill as OUTPUT, and Gemini reports them OUTSIDE
                 // candidatesTokenCount, so leaving them out undercounts a thinking
                 // turn by most of what it cost.
