@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/react",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "React hooks and components for chat and agent runs. Bring your own transport and styles.",
   "type": "module",
   "license": "MIT",
@@ -67,7 +67,7 @@
   },
   "peerDependencies": {
     "@providerkit/agents": "^0.2.0 || ^0.3.0 || ^0.4.0",
-    "@providerkit/core": "^0.35.1",
+    "@providerkit/core": "^0.35.1 || ^0.36.0",
     "@shadcn/react": "^0.3.1",
     "react": "^19",
     "react-markdown": "^10.1.0",
