@@ -59,6 +59,9 @@ export interface GeminiConfig extends ProviderFallbackConfig {
   instanceSessionId?: string;
   /** Names the provider in errors and logs. */
   id?: string;
+  /** Forward explicit sampling on a pinned older model known to accept it. Off by default:
+   * newer models ignore or reject `temperature` and `topP`. */
+  allowLegacySampling?: boolean;
   /** Bound default; a per-call `effort` overrides it. */
   effort?: Effort;
   /**
@@ -534,9 +537,12 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
 
       const generationConfig: Record<string, unknown> = {};
       if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
-      // `temperature` and `topP` are never sent: Gemini 3.6 Flash and later ignore
-      // them and the next models reject them. Dropping them, rather than refusing,
-      // keeps a fallback chain that shares one set of options working.
+      // Newer models ignore or reject sampling controls. An explicitly pinned older
+      // endpoint may use them; a normal fallback chain still omits them.
+      if (config.allowLegacySampling) {
+        if (opts.temperature !== undefined) generationConfig.temperature = opts.temperature;
+        if (opts.topP !== undefined) generationConfig.topP = opts.topP;
+      }
       if (opts.stopSequences?.length) generationConfig.stopSequences = opts.stopSequences;
       // No effort means the model's own dynamic thinking. Sending MINIMAL / 0 here
       // would switch that off for a caller who never asked, which is the whole

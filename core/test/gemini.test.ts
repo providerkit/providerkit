@@ -415,7 +415,7 @@ describe("gemini adapter", () => {
     }
   });
 
-  it("never sends temperature or topP", async () => {
+  it("omits temperature and topP by default", async () => {
     // Gemini 3.6 Flash and later ignore them, and the next models reject them.
     for (const model of ["gemini-2.5-flash", "gemini-3.8-flash"]) {
       const { seen, fetchImpl } = recorder(TEXT_TURN);
@@ -424,6 +424,18 @@ describe("gemini adapter", () => {
       );
       expect(seen[0]!.body.generationConfig).toEqual({});
     }
+  });
+
+  it("preserves explicit zero temperature on a pinned legacy model", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    const legacy = provider(fetchImpl, {
+      model: "gemini-3.1-flash-lite",
+      allowLegacySampling: true,
+    });
+    await collect(legacy.createStream(HI, [], { temperature: 0, topP: 0.9 }));
+    await collect(legacy.createStream(HI, []));
+    expect(seen[0]!.body.generationConfig).toEqual({ temperature: 0, topP: 0.9 });
+    expect(seen[1]!.body.generationConfig).toEqual({});
   });
 
   it("sends the JSON schema and the ceiling in generationConfig", async () => {
