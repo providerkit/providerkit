@@ -196,6 +196,9 @@ export interface TokenUsage {
    *  above the input rate; the OpenAI-shape auto-cachers bill them at it.
    *  0 when not reported. */
   cacheWriteTokens?: number;
+  /** Input tokens added by the provider's tools, when reported (Gemini).
+   *  Already included in `inputTokens`. */
+  toolUsePromptTokens?: number;
   outputTokens: number;
   /**
    * The part of `outputTokens` spent thinking, when the provider reports it.
