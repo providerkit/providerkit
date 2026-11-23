@@ -334,11 +334,12 @@ export async function readBounded(
  */
 export async function postBytes(
   opts: RequestInit_ & { maxBytes: number; redactErrors?: boolean },
-): Promise<{ bytes: Uint8Array; contentType: string }> {
+): Promise<{ bytes: Uint8Array; contentType: string; status: number }> {
   const res = await send(opts, "POST", opts.redactErrors);
   if (!res.ok) throw await errorFor(opts.provider, res, opts.redactErrors);
   const contentType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-  return { bytes: await readBounded(res, opts.maxBytes, opts.provider, opts.signal), contentType };
+  const bytes = await readBounded(res, opts.maxBytes, opts.provider, opts.signal);
+  return { bytes, contentType, status: res.status };
 }
 
 /**
@@ -425,12 +426,16 @@ export function noReplay(
  */
 export async function callOnce<T>(
   provider: string,
-  timeoutMs: number,
+  timeoutMs: number | null,
   signal: AbortSignal | undefined,
   call: (signal: AbortSignal) => Promise<T>,
   rebuild?: ErrorRebuild,
 ): Promise<T> {
   try {
+    if (timeoutMs === null) {
+      signal?.throwIfAborted();
+      return await call(signal ?? new AbortController().signal);
+    }
     return await withDeadline(provider, timeoutMs, signal, call);
   } catch (error) {
     throw noReplay(provider, error, signal, rebuild);

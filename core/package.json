@@ -34,6 +34,10 @@
       "types": "./dist/transcription.d.ts",
       "default": "./dist/transcription.js"
     },
+    "./embeddings": {
+      "types": "./dist/embeddings.d.ts",
+      "default": "./dist/embeddings.js"
+    },
     "./auth": {
       "types": "./dist/auth/index.d.ts",
       "default": "./dist/auth/index.js"

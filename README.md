@@ -338,6 +338,22 @@ Deepgram and OpenAI transcribe, and the `openai` preset reaches any server that 
 route through `baseUrl`. Pass `diarize: true` to label who speaks each segment. A paid call is
 sent once and never replayed by the package.
 
+### Embeddings
+
+Turn text into a vector, a list of numbers you can store and compare in a search index.
+
+```ts
+import { createGeminiEmbeddingProvider } from "@providerkit/core/embeddings";
+
+const embeddings = createGeminiEmbeddingProvider({ apiKey, model: "gemini-embedding-2" });
+const { vectors } = await embeddings.embed("Printer paper");
+```
+
+Pass up to 100 texts to get one vector per text, in order. Set `dimensions` to match your index
+and keep the same model you used to build it. The Gemini adapter makes one request, never trims
+text or changes a vector, and does not start a Google Batch job. Key rotation, retries and storage
+stay with your app. `usage` is absent if Gemini did not report a complete token count.
+
 ### Set up providers once
 
 ```ts
