@@ -206,6 +206,27 @@ describe("gemini adapter", () => {
     });
   });
 
+  it.each([
+    [
+      "SAFETY",
+      [j({ promptFeedback: { blockReason: "SAFETY" }, usageMetadata: { promptTokenCount: 9 } })],
+    ],
+    ["OTHER", [candidate([], "OTHER"), j({ usageMetadata: { promptTokenCount: 9 } })]],
+  ])("can settle usage before throwing a terminal %s error", async (code, frames) => {
+    const { fetchImpl } = recorder(frames);
+    const chunks: ProviderChunk[] = [];
+    async function read(): Promise<void> {
+      for await (const chunk of provider(fetchImpl, {
+        settleUsageOnTerminalError: true,
+      }).createStream(HI, []))
+        chunks.push(chunk);
+    }
+    await expect(read()).rejects.toMatchObject({ code });
+    expect(chunks).toEqual([
+      { type: "usage", usage: { inputTokens: 9, outputTokens: 0, cachedInputTokens: 0 } },
+    ]);
+  });
+
   it("finishes as tool_calls even when STOP lands on a LATER chunk", async () => {
     // Gemini reports STOP on the turn that called a tool, and the reason can
     // arrive after the calls did. Reading it literally drops the tool round.
@@ -415,7 +436,7 @@ describe("gemini adapter", () => {
     }
   });
 
-  it("never sends temperature or topP", async () => {
+  it("omits temperature and topP by default", async () => {
     // Gemini 3.6 Flash and later ignore them, and the next models reject them.
     for (const model of ["gemini-2.5-flash", "gemini-3.8-flash"]) {
       const { seen, fetchImpl } = recorder(TEXT_TURN);
@@ -424,6 +445,18 @@ describe("gemini adapter", () => {
       );
       expect(seen[0]!.body.generationConfig).toEqual({});
     }
+  });
+
+  it("preserves explicit zero temperature on a pinned legacy model", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    const legacy = provider(fetchImpl, {
+      model: "gemini-3.1-flash-lite",
+      allowLegacySampling: true,
+    });
+    await collect(legacy.createStream(HI, [], { temperature: 0, topP: 0.9 }));
+    await collect(legacy.createStream(HI, []));
+    expect(seen[0]!.body.generationConfig).toEqual({ temperature: 0, topP: 0.9 });
+    expect(seen[1]!.body.generationConfig).toEqual({});
   });
 
   it("sends the JSON schema and the ceiling in generationConfig", async () => {

@@ -59,6 +59,12 @@ export interface GeminiConfig extends ProviderFallbackConfig {
   instanceSessionId?: string;
   /** Names the provider in errors and logs. */
   id?: string;
+  /** Forward explicit sampling on a pinned older model known to accept it. Off by default:
+   * newer models ignore or reject `temperature` and `topP`. */
+  allowLegacySampling?: boolean;
+  /** Read the trailing usage frames after a terminal model error before throwing it.
+   * Use with a deadline on the request. This does not make a failed reply usable. */
+  settleUsageOnTerminalError?: boolean;
   /** Bound default; a per-call `effort` overrides it. */
   effort?: Effort;
   /**
@@ -534,9 +540,12 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
 
       const generationConfig: Record<string, unknown> = {};
       if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
-      // `temperature` and `topP` are never sent: Gemini 3.6 Flash and later ignore
-      // them and the next models reject them. Dropping them, rather than refusing,
-      // keeps a fallback chain that shares one set of options working.
+      // Newer models ignore or reject sampling controls. An explicitly pinned older
+      // endpoint may use them; a normal fallback chain still omits them.
+      if (config.allowLegacySampling) {
+        if (opts.temperature !== undefined) generationConfig.temperature = opts.temperature;
+        if (opts.topP !== undefined) generationConfig.topP = opts.topP;
+      }
       if (opts.stopSequences?.length) generationConfig.stopSequences = opts.stopSequences;
       // No effort means the model's own dynamic thinking. Sending MINIMAL / 0 here
       // would switch that off for a caller who never asked, which is the whole
@@ -684,6 +693,14 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
       let callIndex = 0;
       let finished = false;
       let emitted = false;
+      let terminalError: ProviderError | undefined;
+      function failTerminal(error: ProviderError): void {
+        if (!config.settleUsageOnTerminalError) throw error;
+        terminalError ??= error;
+        // The server already answered this call. Only usage may follow it.
+        finished = true;
+        emitted = true;
+      }
       const hostedStream = codecs?.gemini.stream(id, hosted?.hosted ?? [], isGemini2);
 
       for (let baseIdx = 0; baseIdx < bases.length; baseIdx++) {
@@ -722,9 +739,11 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
             // stream — retried, into the same block. It is a content failure.
             const blocked = chunk.promptFeedback?.blockReason;
             if (blocked) {
-              throw new ProviderError(id, "content", `${id}: the prompt was blocked (${blocked})`, {
-                code: blocked,
-              });
+              failTerminal(
+                new ProviderError(id, "content", `${id}: the prompt was blocked (${blocked})`, {
+                  code: blocked,
+                }),
+              );
             }
 
             if (chunk.usageMetadata) {
@@ -747,6 +766,7 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
               yield { type: "usage", usage: hostedStream?.usage(tokenUsage) ?? tokenUsage };
             }
 
+            if (terminalError) continue;
             const candidate = chunk.candidates?.[0];
             if (!candidate) continue;
             hostedStream?.candidate(candidate);
@@ -806,7 +826,14 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
 
             if (candidate.finishReason) {
               // Mapped first: a reason that throws must not be dressed as tool_calls.
-              const finishReason = mapFinishReason(id, candidate.finishReason);
+              let finishReason: FinishReason;
+              try {
+                finishReason = mapFinishReason(id, candidate.finishReason);
+              } catch (error) {
+                if (!(error instanceof ProviderError)) throw error;
+                failTerminal(error);
+                continue;
+              }
               finished = true;
               emitted = true;
               if (hostedStream) yield* hostedStream.close();
@@ -821,6 +848,7 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
               };
             }
           }
+          if (terminalError) throw terminalError;
           break;
         } catch (err) {
           const canFallback =

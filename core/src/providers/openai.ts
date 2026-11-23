@@ -109,10 +109,17 @@ export interface OpenAIConfig extends ProviderFallbackConfig {
    * Pin OpenRouter to preferred upstream hosts so the PROMPT CACHE stays warm
    * across rounds. The cache lives on the upstream host's account and default
    * routing hops between them. Every hop is a cold cache, with worse latency
-   * and higher effective input cost. Fallbacks stay on: this is a preference,
-   * not a lock.
+   * and higher effective input cost. By default this is a preference, not a lock.
    */
   providerOrder?: string[];
+  /** Set false to refuse hosts outside an explicit, nonempty OpenRouter `providerOrder`. */
+  allowProviderFallbacks?: boolean;
+  /** Send `reasoning.enabled: false` for OpenRouter effort `none`. Use only with a model and
+   * host known to accept it. Unset keeps the adapter's per-model effort mapping. */
+  openRouterDisableReasoning?: boolean;
+  /** Use only OpenRouter's `usage.cost` when the host tracks BYOK inference separately.
+   * The default includes the upstream provider's bill when available. */
+  openRouterCost?: "total" | "reported";
   /**
    * Automatically pin OpenRouter calls to the first-party model vendor's host
    * when hitting openrouter.ai and providerOrder is not passed. Defaults to true.
@@ -582,8 +589,13 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
       if (opts.stopSequences?.length) request.stop = opts.stopSequences;
       const serviceTier = opts.serviceTier ?? config.serviceTier;
       if (serviceTier) request.service_tier = serviceTier;
-      Object.assign(request, effortParams(config.effortDialect ?? dialectFor(id), effort, model));
       const openRouter = isOpenRouter(baseUrl);
+      Object.assign(
+        request,
+        openRouter && config.openRouterDisableReasoning && effort === "none"
+          ? { reasoning: { enabled: false } }
+          : effortParams(config.effortDialect ?? dialectFor(id), effort, model),
+      );
       const hosted = codecs?.openai.plan(config, baseUrl, id, model, openRouter, opts);
       if (tools.length > 0 || hosted?.tools.length) {
         request.tools = [
@@ -659,6 +671,17 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
           body.push({ role: "system", content: schemaPrompt(opts.json.schema) });
         }
       }
+      if (
+        config.allowProviderFallbacks === false &&
+        (!openRouter ||
+          !config.providerOrder?.length ||
+          config.providerOrder.some((host) => !host.trim()))
+      )
+        throw new ProviderError(
+          id,
+          "invalid",
+          "Strict routing needs an explicit OpenRouter provider order.",
+        );
       const pinOrder = config.providerOrder?.length
         ? config.providerOrder
         : config.pinHost !== false
@@ -668,10 +691,12 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
             })()
           : undefined;
 
-      const dataCollection = isOpenRouter(baseUrl) ? config.dataCollection : undefined;
+      const dataCollection = openRouter ? config.dataCollection : undefined;
       if (pinOrder?.length || dataCollection) {
         request.provider = {
-          ...(pinOrder?.length ? { order: pinOrder, allow_fallbacks: true } : {}),
+          ...(pinOrder?.length
+            ? { order: pinOrder, allow_fallbacks: config.allowProviderFallbacks ?? true }
+            : {}),
           ...(dataCollection ? { data_collection: dataCollection } : {}),
         };
       }
@@ -736,7 +761,9 @@ export function openaiProvider(config: OpenAIConfig, codecs?: HostedCodecs): Pro
             chunk.usage.prompt_cache_hit_tokens ??
             chunk.usage.cached_tokens ??
             0;
-          const reportedCostUsd = reportsCost ? openRouterCostUsd(chunk.usage) : undefined;
+          const reportedCostUsd = reportsCost
+            ? openRouterCostUsd(chunk.usage, config.openRouterCost)
+            : undefined;
           const hostedCalls = codecs?.openai.counts(chunk.usage);
           yield {
             type: "usage",

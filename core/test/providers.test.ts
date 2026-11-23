@@ -969,6 +969,34 @@ describe("openai-shape adapter", () => {
     expect(preset.seen[0]!.body.provider).toEqual({ data_collection: "deny" });
   });
 
+  it("keeps a strict OpenRouter host order and the requested reasoning off switch", async () => {
+    const { seen, fetchImpl } = recorder(OPENAI_TEXT_TURN);
+    const config = {
+      apiKey: "k",
+      model: "deepseek/deepseek-v4-flash",
+      baseUrl: "https://openrouter.ai/api",
+      id: "openrouter",
+      allowProviderFallbacks: false,
+      openRouterDisableReasoning: true,
+      fetchImpl,
+    };
+    const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+    const ordered = createOpenAIProvider({ ...config, providerOrder: ["deepinfra", "together"] });
+    await collect(ordered.createStream(messages, [], { effort: "none" }));
+    expect(seen[0]!.body).toMatchObject({
+      provider: { order: ["deepinfra", "together"], allow_fallbacks: false },
+      reasoning: { enabled: false },
+    });
+    await collect(ordered.createStream(messages, []));
+    expect(seen[1]!.body).not.toHaveProperty("reasoning");
+    for (const invalid of [config, { ...config, providerOrder: [" "] }]) {
+      await expect(
+        collect(createOpenAIProvider(invalid).createStream(messages, [])),
+      ).rejects.toMatchObject({ kind: "invalid" });
+    }
+    expect(seen).toHaveLength(2);
+  });
+
   it("sends NO routing block without a pin — never an empty order array", async () => {
     // An empty `order` on the wire is not "no preference", it is a preference
     // for nothing, and nothing above the adapter can see the difference: one
@@ -1218,13 +1246,17 @@ describe("provider-reported cost", () => {
   const usageFrom = async (
     record: Record<string, unknown>,
     baseUrl = "https://openrouter.ai/api",
+    openRouterCost?: "reported",
   ) => {
     const { fetchImpl } = recorder([j({ choices: [], usage: record })]);
     const chunks = await collect(
-      createOpenAIProvider({ apiKey: "k", model: "m", baseUrl, fetchImpl }).createStream(
-        [{ role: "user", content: "hi" }],
-        [],
-      ),
+      createOpenAIProvider({
+        apiKey: "k",
+        model: "m",
+        baseUrl,
+        fetchImpl,
+        openRouterCost,
+      }).createStream([{ role: "user", content: "hi" }], []),
     );
     return chunks.find((c) => c.type === "usage")?.usage;
   };
@@ -1310,6 +1342,19 @@ describe("provider-reported cost", () => {
     expect(
       await usageFrom({ ...OPENROUTER_USAGE, is_byok: true, cost_details: null }),
     ).not.toHaveProperty("reportedCostUsd");
+  });
+
+  it("can report only the gateway bill for an OpenRouter BYOK call", async () => {
+    const byok = {
+      ...OPENROUTER_USAGE,
+      is_byok: true,
+      cost: 0,
+      cost_details: { upstream_inference_cost: 0.0002 },
+    };
+    expect(await usageFrom(byok, undefined, "reported")).toMatchObject({ reportedCostUsd: 0 });
+    expect(await usageFrom(byok, "https://api.deepseek.com", "reported")).not.toHaveProperty(
+      "reportedCostUsd",
+    );
   });
 
   it.each(["https://api.deepseek.com", "https://openrouter.ai.example.org"])(

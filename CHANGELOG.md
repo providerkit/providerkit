@@ -2,6 +2,11 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.0] - 2026-11-23
+
+- OpenRouter callers can require a fixed list of upstream hosts and opt into the gateway's explicit reasoning-off setting. Callers that track BYOK inference separately can report only the OpenRouter charge.
+- Gemini callers on pinned older models can opt into sending temperature and topP. They can also collect trailing usage on terminal errors without treating the response as successful. The defaults are unchanged.
+
 ## [0.35.1] - 2026-11-20
 
 ### Fixed
