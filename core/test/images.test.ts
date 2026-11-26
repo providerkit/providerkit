@@ -126,10 +126,11 @@ describe("standalone images", () => {
     });
   });
 
-  it("sends OpenAI references in a multipart edit without generation moderation", async () => {
+  it("sends multipart OpenAI edits under the configured API root", async () => {
     const fetchImpl = vi.fn<FetchLike>(async () => openAIReply());
     const provider = createOpenAIImageProvider({
       apiKey: "openai-test",
+      baseUrl: "https://image-proxy.example/tenant/",
       model: "gpt-image",
       inputFidelity: "high",
       moderation: "low",
@@ -141,7 +142,7 @@ describe("standalone images", () => {
       referenceImages: [reference, { ...reference, mimeType: "image/webp" }],
     });
     const [url, init] = fetchImpl.mock.calls[0] ?? [];
-    expect(url).toBe("https://api.openai.com/v1/images/edits");
+    expect(url).toBe("https://image-proxy.example/tenant/images/edits");
     expect(new Headers(init?.headers).has("content-type")).toBe(false);
     const form = init?.body;
     if (!(form instanceof FormData)) throw new Error("Expected multipart edit");

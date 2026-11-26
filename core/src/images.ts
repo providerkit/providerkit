@@ -3,14 +3,7 @@ import { attributionHeaders, type Attribution } from "./attribution.ts";
 import { ProviderError, validateMaxAttempts } from "./errors.ts";
 import type { KeyPool } from "./key-pool.ts";
 import { withRetry } from "./retry.ts";
-import {
-  apiUrl,
-  callOnce,
-  postBytes,
-  versionedPath,
-  withDeadline,
-  type FetchLike,
-} from "./transport.ts";
+import { apiUrl, callOnce, postBytes, withDeadline, type FetchLike } from "./transport.ts";
 import { toDataUri, type ImagePart } from "./types.ts";
 
 export type ImageProviderId = "gemini" | "openai" | "openrouter";
@@ -72,6 +65,7 @@ export type GeminiImageConfig = ImageConfig &
 
 export interface OpenAIImageConfig extends ImageConfig {
   apiKey: string;
+  /** API root before `/images`. Defaults to `https://api.openai.com/v1`. */
   baseUrl?: string;
   quality?: "auto" | "low" | "medium" | "high";
   /** Applied only to generation. */
@@ -292,7 +286,7 @@ function base64Images(id: "openai" | "openrouter", reply: JsonObject): Generated
 
 export function createOpenAIImageProvider(config: OpenAIImageConfig): ImageProvider {
   const id = "openai";
-  const baseUrl = config.baseUrl ?? "https://api.openai.com";
+  const baseUrl = config.baseUrl ?? "https://api.openai.com/v1";
   const headers = { Authorization: `Bearer ${checkedKey(id, config.apiKey)}` };
   validateMaxAttempts(config.maxAttempts);
   return {
@@ -325,7 +319,7 @@ export function createOpenAIImageProvider(config: OpenAIImageConfig): ImageProvi
         });
         body = form;
       }
-      const url = apiUrl(baseUrl, versionedPath(baseUrl, path));
+      const url = apiUrl(baseUrl, path);
       const bytes = await withRetry(() => requestImage(id, config, input, url, headers, body), {
         maxAttempts: input.retry === "never" ? 1 : (config.maxAttempts ?? 1),
         shouldRetry: openAIShouldRetry,
