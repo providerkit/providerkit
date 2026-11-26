@@ -19,6 +19,7 @@ import {
   type ErrorKind,
 } from "../errors.ts";
 import type { HostedToolType } from "../hosted/types.ts";
+import { geminiTokenUsage, type GeminiUsageMetadata } from "./gemini-usage.ts";
 import { refuseHostedTools, type HostedCodecs } from "./hosted-codecs.ts";
 import { schemaPrompt, toAntigravityToolSchema, toGeminiToolSchema } from "../schema.ts";
 import { parseToolArgs, settleToolCalls } from "../tool-args.ts";
@@ -32,7 +33,6 @@ import type {
   Provider,
   ProviderChunk,
   StreamOptions,
-  TokenUsage,
   ToolCall,
   ToolCallDelta,
   ToolChoice,
@@ -485,14 +485,7 @@ export interface GeminiResponse {
     groundingMetadata?: GroundingMetadata;
     urlContextMetadata?: { urlMetadata?: { retrievedUrl?: string; urlRetrievalStatus?: string }[] };
   }[];
-  usageMetadata?: {
-    promptTokenCount?: number;
-    candidatesTokenCount?: number;
-    thoughtsTokenCount?: number;
-    cachedContentTokenCount?: number;
-    /** The prompt the built-in tools' results added, billed as input. */
-    toolUsePromptTokenCount?: number;
-  };
+  usageMetadata?: GeminiUsageMetadata;
   /** Present only on the in-band failure below. Never on a real candidate. */
   error?: GeminiStatus;
   /** A prompt Gemini refused outright: no candidate at all, just the reason. */
@@ -778,25 +771,8 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
             }
 
             if (chunk.usageMetadata) {
-              const usage = chunk.usageMetadata;
               emitted = true;
-              const tokenUsage: TokenUsage = {
-                // What the built-in tools' results added to the prompt bills as
-                // input too, and Gemini reports it apart
-                // (Vercel convert-google-usage.ts:31-36).
-                inputTokens: (usage.promptTokenCount ?? 0) + (usage.toolUsePromptTokenCount ?? 0),
-                ...(usage.toolUsePromptTokenCount !== undefined
-                  ? { toolUsePromptTokens: usage.toolUsePromptTokenCount }
-                  : {}),
-                // Thoughts bill as OUTPUT, and Gemini reports them OUTSIDE
-                // candidatesTokenCount, so leaving them out undercounts a thinking
-                // turn by most of what it cost.
-                outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
-                cachedInputTokens: usage.cachedContentTokenCount ?? 0,
-                ...(usage.thoughtsTokenCount !== undefined
-                  ? { reasoningTokens: usage.thoughtsTokenCount }
-                  : {}),
-              };
+              const tokenUsage = geminiTokenUsage(chunk.usageMetadata);
               yield { type: "usage", usage: hostedStream?.usage(tokenUsage) ?? tokenUsage };
             }
 
