@@ -1,78 +1,60 @@
-<img src="brand/providerkit-mark.svg" alt="" width="76" align="left" hspace="4" vspace="2">
+# <img src="https://raw.githubusercontent.com/providerkit/providerkit/main/brand/providerkit-mark-128.png" alt="" width="36" height="36" align="absmiddle"> providerkit
 
-# providerkit
+Switch between OpenAI, Anthropic and Gemini without rewriting the TypeScript that streams replies
+or handles errors.
 
-**The layer under your agent loop.** One seam for every LLM provider, plus the failure
-handling you only learn in production.
+## Quick start
 
-```bash
-bun add @providerkit/core   # npm / pnpm / yarn all fine
+Try Core's error handling with Node.js 22 or newer. No API key needed:
+
+```sh
+npm install @providerkit/core
+node --input-type=module -e 'import { classify } from "@providerkit/core";
+  console.log(classify("Your credit balance is too low"))' # quota
 ```
 
-Zero runtime dependencies. `fetch` only, with no vendor SDKs and no Node built-ins, so the same
-build runs in Node 22+, Bun, Deno, Cloudflare Workers and a Chrome MV3 service worker.
+`quota` means retrying won't help here: the account needs credit. To call a model with your own
+key, [stream a reply](#stream-a-reply).
 
-## What this is
+## What Core handles
 
-Most "unified LLM interface" libraries stop at the interface. That part is easy, and it is
-not where the time goes. The time goes here:
+- Tell a temporary rate limit from an empty balance, even when both return HTTP 429.
+- Retry a failed stream or switch to a backup model without repeating text you've already shown.
+- Stop a stalled stream even if the provider keeps the connection open.
+- Check the arguments a model sends before your tool runs.
+- Count input and output tokens the same way across providers, including when a prompt is cached.
 
-- a stream that opens, sends nothing, and never ends
-- a socket that dies four `cause` levels down, with no HTTP status to read
-- quota exhaustion arriving as `429` from one vendor, `402` from another, `403` from a
-  third and `400` from a fourth, and "retry" is the wrong advice for all of them
-- a `429` that is really a context overflow, where waiting fixes nothing and compaction
-  fixes everything
-- a plan that never included the API, which neither a new key nor a top-up will fix
-- Anthropic reporting cache tokens _outside_ the input count while OpenAI reports them
-  _inside_ it, so the same conversation costs two different things
-- `reasoning_content` that must be replayed on tool-call turns, and must _not_ be sent
-  when thinking is off
-- a tool call's JSON truncated mid-argument, throwing away an answer that was right there
+Core has no runtime dependencies. The same build runs in Node.js 22+, Bun, Deno, Cloudflare
+Workers and Chrome extension service workers.
 
-providerkit is that knowledge, as a library.
+## Stream a reply
 
-## What this is not
+Set `ANTHROPIC_API_KEY` in your shell. Save this as `chat.mjs` and run `node chat.mjs` to see
+the reply as it arrives. Anthropic may charge for this call.
 
-**Core is not an agent framework.** `@providerkit/core` handles provider calls, not the agent loop,
-prompts, memory or workflow graphs.
+```js
+import { createPresetProvider } from "@providerkit/core";
 
-For agents and workflows, use the separate
-[`@providerkit/agents` package](https://github.com/providerkit/providerkit/tree/main/agents).
-It uses core's public API and leaves application prompts, authorization and storage policy with you.
+const provider = createPresetProvider("anthropic", { apiKey: process.env.ANTHROPIC_API_KEY });
+const stream = provider.createStream([{ role: "user", content: "Say hello in Welsh." }], []);
 
-The experimental [`@providerkit/react` package](https://github.com/providerkit/providerkit/tree/main/react) provides chat hooks,
-streamed messages and agent activity. Its components and stylesheet are optional; Tailwind is not
-required.
-
-## Use
-
-```ts
-import { createAnthropicProvider, ProviderError, isTransient } from "@providerkit/core";
-
-const provider = createAnthropicProvider({
-  apiKey: process.env.ANTHROPIC_API_KEY!,
-  model: "claude-sonnet-5",
-});
-
-try {
-  for await (const chunk of provider.createStream(messages, tools, { effort: "medium" })) {
-    if (chunk.content) write(chunk.content);
-    if (chunk.usage) record(chunk.usage); // one usage shape across every provider
-  }
-} catch (raw) {
-  const err = ProviderError.from("anthropic", raw);
-  if (err.kind === "context") return compactAndRetry();
-  if (isTransient(err.kind)) return retry(err.retryAfterMs);
-  surface(err); // .body has their actual words
+for await (const chunk of stream) {
+  if (chunk.content) process.stdout.write(chunk.content);
 }
 ```
 
-Those words can quote what you sent. Pass `redactErrors: true` to a provider or a registry
-connection to leave them out of every error: it keeps `kind`, `status`, `code` and the retry
-hints, which is all retries and fallbacks read. The
-[errors guide](https://providerkit.dev/guides/errors/#keep-the-providers-words-out) says what
-stays and why.
+[Switch providers](https://providerkit.dev/guides/getting-started/#swapping-the-vendor) and keep
+the same loop. If a call fails, the provider's error message can quote your prompt. Set
+[`redactErrors: true`](https://providerkit.dev/guides/errors/#keep-the-providers-words-out) to
+omit that text but keep the error kind and retry hints.
+
+Core handles the provider call. Keep your own agent loop, or use
+[`@providerkit/agents`](https://github.com/providerkit/providerkit/tree/main/agents) to run tools
+and workflows. For a chat screen, the experimental
+[`@providerkit/react`](https://github.com/providerkit/providerkit/tree/main/react) package has
+hooks and optional components. Your app still owns permissions and storage.
+
+## More examples
 
 ### Prompt caching on the Anthropic shape
 
