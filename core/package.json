@@ -1,7 +1,7 @@
 {
   "name": "@providerkit/core",
-  "version": "0.36.4",
-  "description": "The layer under your agent loop: one seam for every LLM provider, plus the failure handling you only learn in production.",
+  "version": "0.36.5",
+  "description": "Switch between OpenAI, Anthropic and Gemini without rewriting the TypeScript that streams replies or handles errors.",
   "type": "module",
   "license": "MIT",
   "author": "Gustavo Salomé",
