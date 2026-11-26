@@ -338,6 +338,22 @@ Deepgram and OpenAI transcribe, and the `openai` preset reaches any server that 
 route through `baseUrl`. Pass `diarize: true` to label who speaks each segment. A paid call is
 sent once and never replayed by the package.
 
+### Images
+
+Generate an image without starting a chat:
+
+```ts
+import { createOpenAIImageProvider } from "@providerkit/core/images";
+
+const painter = createOpenAIImageProvider({ apiKey, model: "gpt-image-2" });
+const { images } = await painter.generate({ prompt: "A blue circle", aspectRatio: "1:1" });
+```
+
+Pass `referenceImages` to edit or use existing images as a guide. Gemini and OpenRouter offer
+size classes such as `1K` and `2K`; OpenAI picks its nearest pixel size. Results contain bytes,
+not download URLs. OpenRouter also returns the charge when it reports one. Pass `retry: "never"`
+for a paid operation that must not be sent again after an uncertain result.
+
 ### Video
 
 Read one video with Gemini:
