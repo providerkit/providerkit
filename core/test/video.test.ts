@@ -8,11 +8,11 @@ const file = { name: "files/abc", uri: `${origin}/v1beta/files/abc`, state: "ACT
 const bytes = Uint8Array.of(0, 0, 0, 24);
 const input = { bytes, mimeType: "video/mp4", prompt: "Read it." };
 
-function fake(responses: (Response | (() => Response))[]) {
-  const fetchImpl = vi.fn<FetchLike>(async () => {
+function fake(responses: (Response | ((signal?: AbortSignal | null) => Response))[]) {
+  const fetchImpl = vi.fn<FetchLike>(async (_url, init) => {
     const response = responses.shift();
     if (!response) throw new Error("Unexpected request");
-    return typeof response === "function" ? response() : response;
+    return typeof response === "function" ? response(init?.signal) : response;
   });
   const onCleanupError = vi.fn();
   const reader = createGeminiVideoProvider({
@@ -212,6 +212,39 @@ describe("Gemini video", () => {
       method: "DELETE",
       signal: { aborted: false },
     });
+  });
+
+  it("reads the final upload receipt after Stop, deletes the video and never starts inference", async () => {
+    const controller = new AbortController();
+    const stop = new Error("stop");
+    const { reader, fetchImpl } = fake([
+      start(),
+      (signal) =>
+        new Response(
+          new ReadableStream({
+            pull(body) {
+              controller.abort(stop);
+              if (signal?.aborted) {
+                body.error(signal.reason);
+                return;
+              }
+              body.enqueue(new TextEncoder().encode(JSON.stringify({ file })));
+              body.close();
+            },
+          }),
+        ),
+      done(),
+    ]);
+    await expect(reader.read({ ...input, signal: controller.signal })).rejects.toBe(stop);
+    expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual([
+      "POST",
+      "POST",
+      "DELETE",
+    ]);
+    expect(fetchImpl).toHaveBeenLastCalledWith(
+      file.uri,
+      expect.objectContaining({ method: "DELETE" }),
+    );
   });
 
   it("keeps billed usage even when there is no text", async () => {

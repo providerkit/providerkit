@@ -139,11 +139,14 @@ export function createGeminiVideoProvider(config: GeminiVideoConfig): GeminiVide
       ) {
         throw invalid("invalid_video_duration", "Set the number of seconds to a positive integer.");
       }
+      const { signal: callerSignal } = input;
+      callerSignal?.throwIfAborted();
       const uploaded = await callOnce(
         PROVIDER,
         FILE_OPERATION_TIMEOUT_MS,
-        input.signal,
-        async (signal) => {
+        undefined,
+        async (deadline) => {
+          const signal = callerSignal ? AbortSignal.any([callerSignal, deadline]) : deadline;
           const start = await sendChecked({
             ...wire,
             url: ORIGIN + UPLOAD_PATH,
@@ -165,17 +168,20 @@ export function createGeminiVideoProvider(config: GeminiVideoConfig): GeminiVide
             const end = Math.min(offset + UPLOAD_CHUNK_BYTES, input.bytes.byteLength);
             const final = end === input.bytes.byteLength;
             const chunk = Uint8Array.from(input.bytes.subarray(offset, end));
+            // Once finalize is sent, keep reading under our deadline. If the caller stops now,
+            // we still need the returned file name to delete the accepted upload.
+            const chunkSignal = final ? deadline : signal;
             const res = await sendChecked({
               ...wire,
               url: session,
-              signal,
+              signal: chunkSignal,
               headers: {
                 "x-goog-upload-command": final ? "upload, finalize" : "upload",
                 "x-goog-upload-offset": String(offset),
               },
               body: new Blob([chunk], { type: input.mimeType }),
             });
-            if (final) return field(await readJson(res, 64 * 1024, signal), "file");
+            if (final) return field(await readJson(res, 64 * 1024, chunkSignal), "file");
             void res.body?.cancel().catch(() => {});
             if (res.headers.get("x-goog-upload-status") !== "active") {
               throw invalid(
@@ -186,7 +192,10 @@ export function createGeminiVideoProvider(config: GeminiVideoConfig): GeminiVide
             offset = end;
           }
         },
-      );
+      ).catch((error: unknown) => {
+        callerSignal?.throwIfAborted();
+        throw error;
+      });
       const name = field(uploaded, "name");
       if (typeof name !== "string" || !/^files\/[a-z0-9-]+$/i.test(name)) {
         throw invalid("invalid_video_file_name", "Gemini did not return a valid file name.");
