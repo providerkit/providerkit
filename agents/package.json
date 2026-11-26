@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/agents",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "An experimental, provider-independent agent loop with tools and resumable checkpoints.",
   "type": "module",
   "license": "MIT",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./rounds": {
+      "types": "./dist/rounds.d.ts",
+      "default": "./dist/rounds.js"
     },
     "./runs": {
       "types": "./dist/runs.d.ts",
