@@ -2,6 +2,10 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.5] - 2026-11-26
+
+- The README now shows how to classify a provider error without an API key, then stream a reply with your own key. The API and runtime behavior are unchanged.
+
 ## [0.36.4] - 2026-11-26
 
 - `@providerkit/core/images` generates and edits images with Gemini, OpenAI or OpenRouter. The adapters return image bytes, token counts when available and the cost in USD when OpenRouter reports it. Chat imports do not load the image adapters.
