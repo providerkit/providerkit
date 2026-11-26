@@ -233,6 +233,16 @@ async function send(opts: RequestInit_, method = "POST", redact = false): Promis
   }
 }
 
+/** The shared response check for calls that need headers or a bounded body. */
+export async function sendChecked(
+  opts: RequestInit_ & { redactErrors?: boolean },
+  method: "POST" | "GET" | "DELETE" = "POST",
+): Promise<Response> {
+  const res = await send(opts, method, opts.redactErrors);
+  if (!res.ok) throw await errorFor(opts.provider, res, opts.redactErrors);
+  return res;
+}
+
 /** GET and parse JSON with the same transport and HTTP errors as a model call. */
 export async function getJson<T = unknown>(opts: Omit<RequestInit_, "body">): Promise<T> {
   const res = await send({ ...opts, body: undefined }, "GET");
@@ -335,8 +345,7 @@ export async function readBounded(
 export async function postBytes(
   opts: RequestInit_ & { maxBytes: number; redactErrors?: boolean },
 ): Promise<{ bytes: Uint8Array; contentType: string; status: number }> {
-  const res = await send(opts, "POST", opts.redactErrors);
-  if (!res.ok) throw await errorFor(opts.provider, res, opts.redactErrors);
+  const res = await sendChecked(opts);
   const contentType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
   const bytes = await readBounded(res, opts.maxBytes, opts.provider, opts.signal);
   return { bytes, contentType, status: res.status };

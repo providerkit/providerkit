@@ -2,6 +2,10 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.3] - 2026-11-26
+
+- `@providerkit/core/video` reads a video with Gemini's Files API. It uploads the bytes in chunks, waits for the file, reads it once and attempts deletion even if the read fails or is cancelled. The result includes text and token usage.
+
 ## [0.36.2] - 2026-11-23
 
 - The `@providerkit/core/embeddings` entry point turns one text or an ordered list into Gemini vectors. It checks the vector count and width, reports token counts when available and never retries or starts a Google Batch job. Chat imports do not load it.

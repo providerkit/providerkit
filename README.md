@@ -338,6 +338,21 @@ Deepgram and OpenAI transcribe, and the `openai` preset reaches any server that 
 route through `baseUrl`. Pass `diarize: true` to label who speaks each segment. A paid call is
 sent once and never replayed by the package.
 
+### Video
+
+Read one video with Gemini:
+
+```ts
+import { createGeminiVideoProvider } from "@providerkit/core/video";
+
+const video = createGeminiVideoProvider({ apiKey, model: "gemini-3.8-flash" });
+const { text } = await video.read({ bytes, mimeType: "video/mp4", prompt: "What happens?" });
+```
+
+Core uploads the video in chunks, waits for it to be ready and reads it once. It attempts to
+remove the file after the read, even on cancellation. Pass `onCleanupError` when you create the
+provider to record a failed deletion. The result also reports token usage, even if the text is empty.
+
 ### Embeddings
 
 Turn text into a vector, a list of numbers you can store and compare in a search index.
