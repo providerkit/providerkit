@@ -2,6 +2,10 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.4] - 2026-11-26
+
+- `@providerkit/core/images` generates and edits images with Gemini, OpenAI or OpenRouter. The adapters return image bytes, token counts when available and the cost in USD when OpenRouter reports it. Chat imports do not load the image adapters.
+
 ## [0.36.3] - 2026-11-26
 
 - `@providerkit/core/video` reads a video with Gemini's Files API. It uploads the bytes in chunks, waits for the file, reads it once and attempts deletion even if the read fails or is cancelled. The result includes text and token usage.
