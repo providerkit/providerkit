@@ -46,6 +46,12 @@ are separate, as described under [checkpoints and recovery](#checkpoints-and-rec
 Change the agent's version when its instructions, tools or result contract change. A saved run
 from another version is refused rather than resumed under different rules.
 
+## Run tool rounds without a session
+
+`runToolRounds` from `@providerkit/agents/rounds` is for a host that already reads its own provider stream and saves its own conversation. Pass a tool-round limit and an async generator for one model call. The generator receives the round index (starting at zero) and whether to offer tools. Yield the text your reader should see. Return `{ answer }` to finish, or `{ calls, record }` to run tools and ask the model again.
+
+Each call supplies `run()` and can opt into running beside its neighbors with `canRunConcurrently()`. Check permission in `run()` even for a read. `record(results)` receives results in the order the model asked for them. After the last tool round the model gets one call without tools. A limit of zero starts there. Closing the iterator while reading text closes the model stream. Nothing is retried or saved by this helper.
+
 ## Model settings
 
 Give the agent an output ceiling, especially on services that reserve the whole context window
