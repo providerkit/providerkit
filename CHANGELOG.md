@@ -2,6 +2,12 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.6] - 2026-11-26
+
+- On OpenRouter Images, `outputFormat: "svg"` requests a vector image, `size: "provider"` leaves the resolution to the model and `recraft` sets the palette and background of a Recraft image. The defaults are still PNG and 1K.
+- Gemini image results skip thought parts and expose `modelVersion`, `usage.cachedInputTokens` and `usage.reasoningTokens`. `usage.outputTokens` still counts candidate tokens only.
+- Image errors distinguish a finished call with no image (`image_empty`), a Gemini refusal (`image_refused`), an unreadable JSON reply (`image_invalid_json`) and bad image data (`image_invalid_data`). An OpenRouter moderation rejection keeps its HTTP status and has kind `content`.
+
 ## [0.36.5] - 2026-11-26
 
 - The README now shows how to classify a provider error without an API key, then stream a reply with your own key. The API and runtime behavior are unchanged.

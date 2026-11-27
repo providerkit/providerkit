@@ -1,6 +1,6 @@
 {
   "name": "@providerkit/core",
-  "version": "0.36.5",
+  "version": "0.36.6",
   "description": "Switch between OpenAI, Anthropic and Gemini without rewriting the TypeScript that streams replies or handles errors.",
   "type": "module",
   "license": "MIT",
