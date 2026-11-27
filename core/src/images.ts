@@ -1,6 +1,6 @@
 // @providerkit/core/images. Standalone generation and editing, not chat tools.
 import { attributionHeaders, type Attribution } from "./attribution.ts";
-import { ProviderError, validateMaxAttempts } from "./errors.ts";
+import { classifyHttp, ProviderError, validateMaxAttempts } from "./errors.ts";
 import type { KeyPool } from "./key-pool.ts";
 import { withRetry } from "./retry.ts";
 import { apiUrl, callOnce, postBytes, withDeadline, type FetchLike } from "./transport.ts";
@@ -10,11 +10,18 @@ export type ImageProviderId = "gemini" | "openai" | "openrouter";
 export type AspectRatio = "1:1" | "4:5" | "3:4" | "9:16" | "16:9" | "4:3" | "3:2" | "2:3";
 export type ImageSize = "512" | "1K" | "2K" | "4K";
 
-export interface GenerateImagesInput {
+type RequestedSize = ImageSize | "provider";
+type Rgb = readonly [red: number, green: number, blue: number];
+
+export interface GenerateImagesInput<S extends RequestedSize = ImageSize> {
   prompt: string;
   aspectRatio: AspectRatio;
-  /** Requested size class. OpenAI chooses its supported pixel size by aspect ratio. */
-  size?: ImageSize;
+  /** Defaults to 1K. OpenAI uses aspectRatio instead. On OpenRouter, "provider" omits resolution. */
+  size?: S;
+  /** OpenRouter output format. Defaults to PNG. */
+  outputFormat?: "png" | "svg";
+  /** Recraft models on OpenRouter only. Each RGB channel is an integer from 0 to 255. */
+  recraft?: { colors?: readonly Rgb[]; backgroundColor?: Rgb };
   n?: number;
   referenceImages?: readonly ImagePart[];
   /** Unsupported by OpenAI's Images API. */
@@ -31,26 +38,38 @@ export interface GeneratedImage {
   seed?: number;
 }
 
-export interface ImageUsage {
+export interface ImageUsage<S extends RequestedSize = ImageSize> {
   images: number;
   /** Requested size class, not the decoded dimensions. */
-  size: ImageSize;
+  size: S;
   inputTokens?: number;
+  /** On Gemini, candidate tokens only. Add reasoningTokens for the billed output count. */
   outputTokens?: number;
+  /** Already included in inputTokens. */
+  cachedInputTokens?: number;
+  reasoningTokens?: number;
   /** Exact USD charge when the provider reports it. */
   costUsd?: number;
 }
 
-export interface ImageResult {
+export interface ImageResult<S extends RequestedSize = ImageSize> {
   images: GeneratedImage[];
-  usage: ImageUsage;
+  usage: ImageUsage<S>;
   model: string;
+  /** The Gemini version that made every image, when reported and the same for all of them. */
+  modelVersion?: string;
 }
 
 export interface ImageProvider {
   readonly id: ImageProviderId;
   readonly model: string;
   generate(input: GenerateImagesInput): Promise<ImageResult>;
+}
+
+export interface OpenRouterImageProvider extends ImageProvider {
+  generate<S extends RequestedSize = ImageSize>(
+    input: GenerateImagesInput<S>,
+  ): Promise<ImageResult<S | "1K">>;
 }
 
 interface ImageConfig {
@@ -85,8 +104,22 @@ const DEFAULT_TIMEOUT_MS = 180_000;
 const MAX_REPLY_BYTES = 64 * 1024 * 1024;
 type JsonObject = Record<string, unknown>;
 
+function isObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function object(value: unknown): JsonObject {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
+  return isObject(value) ? value : {};
+}
+
+function parseObject(text: string): JsonObject | undefined {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (isObject(value)) return value;
+  } catch {
+    // Never include a prompt or pixels from a malformed response in the error.
+  }
+  return undefined;
 }
 
 function list(value: unknown): unknown[] {
@@ -109,19 +142,18 @@ function decode(
     // The payload can contain private pixels. Do not put it in the error.
   }
   throw new ProviderError(id, "invalid", `${id}: invalid base64 image ${kind}`, {
+    code: kind === "reply" ? "image_invalid_data" : undefined,
     shouldRetry: false,
   });
 }
 
 function readJson(bytes: Uint8Array, id: ImageProviderId): JsonObject {
-  try {
-    const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
-    return object(value);
-  } catch {
-    throw new ProviderError(id, "invalid", `${id}: invalid image response JSON`, {
-      shouldRetry: false,
-    });
-  }
+  const reply = parseObject(new TextDecoder().decode(bytes));
+  if (reply) return reply;
+  throw new ProviderError(id, "invalid", `${id}: invalid image response JSON`, {
+    code: "image_invalid_json",
+    shouldRetry: false,
+  });
 }
 
 function checkedKey(id: ImageProviderId, apiKey: string): string {
@@ -131,7 +163,19 @@ function checkedKey(id: ImageProviderId, apiKey: string): string {
   return apiKey;
 }
 
-function imageCount(id: ImageProviderId, input: GenerateImagesInput): number {
+function validateInput(id: ImageProviderId, input: GenerateImagesInput<RequestedSize>): number {
+  if (id !== "openrouter") {
+    if (input.recraft || input.size === "provider") {
+      throw new ProviderError(
+        id,
+        "invalid",
+        "Recraft controls and provider sizing require OpenRouter Images.",
+      );
+    }
+    if (input.outputFormat !== undefined && !(id === "openai" && input.outputFormat === "png")) {
+      throw new ProviderError(id, "invalid", `${id} cannot request this image format.`);
+    }
+  }
   const count = input.n ?? 1;
   if (!Number.isSafeInteger(count) || count <= 0) {
     throw new ProviderError(id, "invalid", "Set the number of images to a positive integer.");
@@ -139,21 +183,25 @@ function imageCount(id: ImageProviderId, input: GenerateImagesInput): number {
   return count;
 }
 
-function result(
+function result<S extends RequestedSize>(
   id: ImageProviderId,
   model: string,
-  size: ImageSize,
+  size: S,
   images: GeneratedImage[],
   usage: Omit<ImageUsage, "images" | "size">,
-): ImageResult {
-  if (!images.length) throw new ProviderError(id, "overload", `${id}: no image data returned`);
+): ImageResult<S> {
+  if (!images.length)
+    throw new ProviderError(id, "overload", `${id}: no image data returned`, {
+      code: "image_empty",
+      shouldRetry: false,
+    });
   return { model, images, usage: { ...usage, size, images: images.length } };
 }
 
 async function requestImage(
   id: ImageProviderId,
   config: ImageConfig,
-  input: GenerateImagesInput,
+  input: Pick<GenerateImagesInput, "signal" | "retry">,
   url: string,
   headers: Record<string, string>,
   body: unknown,
@@ -166,6 +214,7 @@ async function requestImage(
       body,
       signal,
       maxBytes: MAX_REPLY_BYTES,
+      classifyError: id === "openrouter" ? openRouterImageError : undefined,
       redirect: "error",
       fetchImpl: config.fetchImpl,
     });
@@ -189,7 +238,7 @@ export function createGeminiImageProvider(config: GeminiImageConfig): ImageProvi
         throw new ProviderError(id, "invalid", "Set a Gemini image model name.");
       }
       const size = input.size ?? "1K";
-      const n = imageCount(id, input);
+      const n = validateInput(id, input);
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
       const contents = [
         {
@@ -205,6 +254,9 @@ export function createGeminiImageProvider(config: GeminiImageConfig): ImageProvi
       const images: GeneratedImage[] = [];
       let inputTokens = 0;
       let outputTokens = 0;
+      let cachedInputTokens = 0;
+      let reasoningTokens = 0;
+      let modelVersion: string | undefined;
       for (let i = 0; i < n; i++) {
         const seed = input.seed === undefined ? undefined : input.seed + i;
         const body = {
@@ -225,16 +277,18 @@ export function createGeminiImageProvider(config: GeminiImageConfig): ImageProvi
         const candidate = object(list(reply.candidates)[0]);
         const part = list(object(candidate.content).parts)
           .map(object)
-          .find((part) => part.inlineData);
+          .find((part) => !part.thought && object(part.inlineData).data);
         const blob = object(part?.inlineData);
         if (typeof blob.data !== "string" || !blob.data) {
-          const reason = candidate.finishReason ?? object(reply.promptFeedback).blockReason;
-          const filtered =
-            typeof reason === "string" && /SAFETY|PROHIBITED|BLOCK|RECITATION|SPII/i.test(reason);
+          const filtered = [object(reply.promptFeedback).blockReason, candidate.finishReason].some(
+            (reason) =>
+              typeof reason === "string" && /SAFETY|PROHIBITED|BLOCK|RECITATION|SPII/i.test(reason),
+          );
           throw new ProviderError(
             id,
             filtered ? "content" : "overload",
             "Gemini returned no image.",
+            { code: filtered ? "image_refused" : "image_empty", shouldRetry: false },
           );
         }
         images.push({
@@ -245,8 +299,24 @@ export function createGeminiImageProvider(config: GeminiImageConfig): ImageProvi
         const usage = object(reply.usageMetadata);
         inputTokens += usageNumber(usage.promptTokenCount) ?? 0;
         outputTokens += usageNumber(usage.candidatesTokenCount) ?? 0;
+        cachedInputTokens += usageNumber(usage.cachedContentTokenCount) ?? 0;
+        reasoningTokens += usageNumber(usage.thoughtsTokenCount) ?? 0;
+        if (i === 0 && typeof reply.modelVersion === "string") modelVersion = reply.modelVersion;
+        else if (reply.modelVersion !== modelVersion) modelVersion = undefined;
       }
-      return result(id, model, size, images, { inputTokens, outputTokens });
+      return {
+        model,
+        ...(modelVersion ? { modelVersion } : {}),
+        images,
+        usage: {
+          size,
+          images: images.length,
+          inputTokens,
+          outputTokens,
+          cachedInputTokens,
+          reasoningTokens,
+        },
+      };
     },
   };
 }
@@ -273,13 +343,17 @@ function openAIShouldRetry(error: unknown): boolean {
   );
 }
 
-function base64Images(id: "openai" | "openrouter", reply: JsonObject): GeneratedImage[] {
+function base64Images(
+  id: "openai" | "openrouter",
+  reply: JsonObject,
+  defaultMime = "image/png",
+): GeneratedImage[] {
   return list(reply.data)
     .map(object)
     .flatMap(({ b64_json, media_type }) => {
       if (typeof b64_json !== "string" || !b64_json) return [];
       const mimeType =
-        id === "openrouter" && typeof media_type === "string" ? media_type : "image/png";
+        id === "openrouter" && typeof media_type === "string" ? media_type : defaultMime;
       return [{ bytes: decode(id, b64_json, "reply"), mimeType }];
     });
 }
@@ -300,7 +374,7 @@ export function createOpenAIImageProvider(config: OpenAIImageConfig): ImageProvi
       const fields = {
         model,
         prompt: input.prompt,
-        n: imageCount(id, input),
+        n: validateInput(id, input),
         size: openAIPixelSize(input.aspectRatio),
         quality: config.quality,
         output_format: "png",
@@ -338,7 +412,51 @@ export function createOpenAIImageProvider(config: OpenAIImageConfig): ImageProvi
   };
 }
 
-export function createOpenRouterImageProvider(config: OpenRouterImageConfig): ImageProvider {
+function openRouterImageError(status: number | undefined, body: string) {
+  // A failed moderation service is not a refusal of this prompt.
+  if (status !== undefined && status >= 500) return classifyHttp(status, "");
+  const message = object(parseObject(body)?.error).message;
+  if (
+    typeof message === "string" &&
+    /moderat|safety|content[_ ]polic|flagged|prohibited|(?:prompt|image|content).*not allowed/i.test(
+      message,
+    )
+  ) {
+    return "content";
+  }
+  return classifyHttp(status, body);
+}
+
+function recraftProvider(model: string, recraft: GenerateImagesInput["recraft"]) {
+  if (!recraft) return undefined;
+  if (!model.startsWith("recraft/"))
+    throw new ProviderError("openrouter", "invalid", "Choose a Recraft model to set image colors.");
+  function color(rgb: Rgb) {
+    if (
+      !Array.isArray(rgb) ||
+      rgb.length !== 3 ||
+      !rgb.every((c) => Number.isInteger(c) && c >= 0 && c <= 255)
+    )
+      throw new ProviderError(
+        "openrouter",
+        "invalid",
+        "Use three integers from 0 to 255 for each RGB color.",
+      );
+    return { rgb };
+  }
+  const controls = {
+    colors: recraft.colors?.length ? recraft.colors.map(color) : undefined,
+    background_color:
+      recraft.backgroundColor === undefined ? undefined : color(recraft.backgroundColor),
+  };
+  return controls.colors || controls.background_color
+    ? { options: { recraft: { controls } } }
+    : undefined;
+}
+
+export function createOpenRouterImageProvider(
+  config: OpenRouterImageConfig,
+): OpenRouterImageProvider {
   const id = "openrouter";
   const url = apiUrl(config.baseUrl ?? "https://openrouter.ai/api/v1", "/images");
   const headers = {
@@ -358,16 +476,18 @@ export function createOpenRouterImageProvider(config: OpenRouterImageConfig): Im
       const bytes = await requestImage(id, config, input, url, headers, {
         model,
         prompt: input.prompt,
-        n: imageCount(id, input),
+        n: validateInput(id, input),
         aspect_ratio: input.aspectRatio,
-        resolution: size,
-        output_format: "png",
+        resolution: size === "provider" ? undefined : size,
+        output_format: input.outputFormat ?? "png",
+        provider: recraftProvider(model, input.recraft),
         seed: input.seed,
         ...(inputReferences?.length ? { input_references: inputReferences } : {}),
       });
       const reply = readJson(bytes, id);
       const usage = object(reply.usage);
-      return result(id, model, size, base64Images(id, reply), {
+      const mime = input.outputFormat === "svg" ? "image/svg+xml" : "image/png";
+      return result(id, model, size, base64Images(id, reply, mime), {
         inputTokens: usageNumber(usage.prompt_tokens),
         outputTokens: usageNumber(usage.completion_tokens),
         costUsd: usageNumber(usage.cost),
