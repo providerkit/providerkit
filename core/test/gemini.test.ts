@@ -543,6 +543,36 @@ describe("gemini adapter", () => {
     expect(seen[1]!.body.generationConfig).toEqual({});
   });
 
+  it.each([false, true])("opts into bare JSON and the reported model: %s", async (enabled) => {
+    // Gemini can name the version on an earlier frame and omit it on the finish.
+    const { seen, fetchImpl } = recorder([j({ modelVersion: "served-version" }), ...TEXT_TURN]);
+    const chunks = await collect(
+      provider(fetchImpl, enabled ? { jsonMode: true, reportModelVersion: true } : {}).createStream(
+        HI,
+        [],
+      ),
+    );
+    expect(seen[0]!.body.generationConfig).toEqual(
+      enabled ? { responseMimeType: "application/json" } : {},
+    );
+    expect(chunks.find((chunk) => chunk.type === "finish")?.source).toEqual(
+      enabled ? { provider: "gemini", model: "served-version" } : undefined,
+    );
+  });
+
+  it("refuses tools before sending a schema-free JSON request", async () => {
+    const { seen, fetchImpl } = recorder(TEXT_TURN);
+    const tool: ToolDefinition = {
+      name: "lookup",
+      description: "Read a name",
+      inputSchema: { type: "object" },
+    };
+    await expect(
+      collect(provider(fetchImpl, { jsonMode: true }).createStream(HI, [tool])),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    expect(seen).toHaveLength(0);
+  });
+
   it("sends the JSON schema and the ceiling in generationConfig", async () => {
     const { seen, fetchImpl } = recorder(TEXT_TURN);
     await collect(
