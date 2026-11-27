@@ -2,6 +2,10 @@
 
 All notable changes to `@providerkit/core` will be documented in this file.
 
+## [0.36.7] - 2026-11-26
+
+- On Gemini, set `jsonMode: true` to ask for JSON without a schema when no tools are offered. Set `reportModelVersion: true` to read the model version Gemini reports from the finish chunk's `source`. Both options are off by default.
+
 ## [0.36.6] - 2026-11-26
 
 - On OpenRouter Images, `outputFormat: "svg"` requests a vector image, `size: "provider"` leaves the resolution to the model and `recraft` sets the palette and background of a Recraft image. The defaults are still PNG and 1K.
