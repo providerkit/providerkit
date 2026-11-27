@@ -145,9 +145,14 @@ const MAX_ERROR_BODY_BYTES = 64 * 1024;
 /** Turn a non-2xx response into the classified error every caller branches on.
  *  `redact` classifies from the body but keeps none of its words: a vendor's
  *  error can echo what the caller sent. */
-async function errorFor(provider: string, res: Response, redact = false): Promise<ProviderError> {
+async function errorFor(
+  provider: string,
+  res: Response,
+  redact = false,
+  classifyError = classifyHttp,
+): Promise<ProviderError> {
   const text = await readErrorText(res);
-  const kind = classifyHttp(res.status, text);
+  const kind = classifyError(res.status, text);
   // A window-reset header describes the ACCOUNT, not this failure, and only a
   // throttle or a quota answer is about the window. Claude OAuth stamps the
   // unified reset on every response, so read on any status a 529 said "lifts in
@@ -233,13 +238,18 @@ async function send(opts: RequestInit_, method = "POST", redact = false): Promis
   }
 }
 
+type CheckedRequest = RequestInit_ & {
+  redactErrors?: boolean;
+  classifyError?: typeof classifyHttp;
+};
+
 /** The shared response check for calls that need headers or a bounded body. */
 export async function sendChecked(
-  opts: RequestInit_ & { redactErrors?: boolean },
+  opts: CheckedRequest,
   method: "POST" | "GET" | "DELETE" = "POST",
 ): Promise<Response> {
   const res = await send(opts, method, opts.redactErrors);
-  if (!res.ok) throw await errorFor(opts.provider, res, opts.redactErrors);
+  if (!res.ok) throw await errorFor(opts.provider, res, opts.redactErrors, opts.classifyError);
   return res;
 }
 
@@ -343,7 +353,7 @@ export async function readBounded(
  * the kind, status and retry hints survive, the text does not.
  */
 export async function postBytes(
-  opts: RequestInit_ & { maxBytes: number; redactErrors?: boolean },
+  opts: CheckedRequest & { maxBytes: number },
 ): Promise<{ bytes: Uint8Array; contentType: string; status: number }> {
   const res = await sendChecked(opts);
   const contentType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();

@@ -23,12 +23,19 @@ const geminiReply = () =>
         content: {
           parts: [
             { text: "ignored" },
+            { thought: true, inlineData: { data: "BAUG", mimeType: "image/png" } },
             { inlineData: { data: reference.data, mimeType: "image/webp" } },
           ],
         },
       },
     ],
-    usageMetadata: { promptTokenCount: 6, candidatesTokenCount: 9, thoughtsTokenCount: 12 },
+    modelVersion: "gemini-image-001",
+    usageMetadata: {
+      promptTokenCount: 6,
+      cachedContentTokenCount: 1,
+      candidatesTokenCount: 9,
+      thoughtsTokenCount: 12,
+    },
   });
 
 function wireBody(init: RequestInit | undefined): unknown {
@@ -54,11 +61,19 @@ describe("standalone images", () => {
     });
     expect(reply).toEqual({
       model: "gemini-override",
+      modelVersion: "gemini-image-001",
       images: [
         { bytes, mimeType: "image/webp", seed: 7 },
         { bytes, mimeType: "image/webp", seed: 8 },
       ],
-      usage: { size: "2K", images: 2, inputTokens: 12, outputTokens: 18 },
+      usage: {
+        size: "2K",
+        images: 2,
+        inputTokens: 12,
+        cachedInputTokens: 2,
+        outputTokens: 18,
+        reasoningTokens: 24,
+      },
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     for (const [i, [url, init]] of fetchImpl.mock.calls.entries()) {
@@ -195,6 +210,124 @@ describe("standalone images", () => {
     });
   });
 
+  it("sends Recraft controls and SVG in one OpenRouter call without a resolution", async () => {
+    const svg = "<svg/>";
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      Response.json({ data: [{ b64_json: btoa(svg) }] }),
+    );
+    const provider = createOpenRouterImageProvider({
+      apiKey: "key",
+      model: "recraft/vector",
+      fetchImpl,
+    });
+    const reply = await provider.generate({
+      ...input,
+      size: "provider",
+      outputFormat: "svg",
+      retry: "never",
+      recraft: { colors: [[0, 128, 255]], backgroundColor: [255, 255, 255] },
+      n: 3,
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(wireBody(fetchImpl.mock.calls[0]?.[1])).toEqual({
+      model: "recraft/vector",
+      prompt: input.prompt,
+      aspect_ratio: input.aspectRatio,
+      n: 3,
+      output_format: "svg",
+      provider: {
+        options: {
+          recraft: {
+            controls: {
+              colors: [{ rgb: [0, 128, 255] }],
+              background_color: { rgb: [255, 255, 255] },
+            },
+          },
+        },
+      },
+    });
+    expect(reply.usage.size).toBe("provider");
+    expect(reply.images).toEqual([
+      { bytes: new TextEncoder().encode(svg), mimeType: "image/svg+xml" },
+    ]);
+    await provider.generate(input);
+    expect(wireBody(fetchImpl.mock.calls[1]?.[1])).toMatchObject({
+      resolution: "1K",
+      output_format: "png",
+    });
+  });
+
+  it("rejects unsupported image options and invalid color channels before sending", async () => {
+    const fetchImpl = vi.fn<FetchLike>();
+    const config = { apiKey: "key", model: "recraft/vector", fetchImpl };
+    const router = createOpenRouterImageProvider(config);
+    await expect(
+      router.generate({ ...input, model: "vendor/image", recraft: { colors: [[0, 0, 0]] } }),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    await expect(
+      router.generate({ ...input, recraft: { backgroundColor: [0, -1, 256] } }),
+    ).rejects.toMatchObject({ kind: "invalid" });
+    for (const provider of [createOpenAIImageProvider(config), createGeminiImageProvider(config)]) {
+      await expect(provider.generate({ ...input, outputFormat: "svg" })).rejects.toMatchObject({
+        kind: "invalid",
+      });
+      await expect(
+        provider.generate({ ...input, recraft: { colors: [[0, 0, 0]] } }),
+      ).rejects.toMatchObject({ kind: "invalid" });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      Response.json({ error: { message: "Prompt flagged by moderation" } }, { status: 403 }),
+      { status: 403, kind: "content" },
+    ],
+    [
+      Response.json({ error: { message: "Invalid API key" } }, { status: 403 }),
+      { status: 403, kind: "auth" },
+    ],
+    [
+      Response.json({ error: { message: "Safety service unavailable" } }, { status: 503 }),
+      { status: 503, kind: "overload", shouldRetry: false },
+    ],
+    [Response.json({ data: [] }), { code: "image_empty", kind: "overload", shouldRetry: false }],
+    [new Response("<html>"), { code: "image_invalid_json", kind: "invalid" }],
+    [Response.json(null), { code: "image_invalid_json", kind: "invalid" }],
+  ])(
+    "distinguishes HTTP and finished-image failures without replay",
+    async (response, expected) => {
+      const fetchImpl = vi.fn<FetchLike>(async () => response);
+      const provider = createOpenRouterImageProvider({
+        apiKey: "key",
+        model: "vendor/model",
+        fetchImpl,
+      });
+      await expect(provider.generate({ ...input, retry: "never" })).rejects.toMatchObject(expected);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("does not return a Gemini thought as the answer or miss a prompt-level refusal", async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () =>
+      Response.json({
+        promptFeedback: { blockReason: "IMAGE_SAFETY" },
+        candidates: [
+          {
+            finishReason: "STOP",
+            content: { parts: [{ thought: true, inlineData: { data: "AQID" } }] },
+          },
+        ],
+      }),
+    );
+    const provider = createGeminiImageProvider({ apiKey: "key", model: "image", fetchImpl });
+    await expect(provider.generate({ ...input, retry: "never" })).rejects.toMatchObject({
+      code: "image_refused",
+      kind: "content",
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it("does not return a URL or malformed base64 as an image", async () => {
     const fetchImpl = vi
       .fn<FetchLike>()
@@ -204,6 +337,7 @@ describe("standalone images", () => {
     await expect(provider.generate(input)).rejects.toMatchObject({ kind: "overload" });
     await expect(provider.generate(input)).rejects.toMatchObject({
       kind: "invalid",
+      code: "image_invalid_data",
       shouldRetry: false,
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
