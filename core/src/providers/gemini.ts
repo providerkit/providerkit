@@ -90,6 +90,12 @@ export interface GeminiConfig extends ProviderFallbackConfig {
    * one you actually serve. Overridable per call.
    */
   jsonWithTools?: JsonWithTools;
+  /** Ask for JSON without sending a schema. For calls without tools; an explicit `json`
+   * schema still uses the normal schema and tool policy. */
+  jsonMode?: boolean;
+  /** Include Gemini's reported model version in the finish chunk's source. By default
+   * a registry or fallback keeps reporting the configured model, for its price lookup. */
+  reportModelVersion?: boolean;
   maxTokens?: number;
   fetchImpl?: FetchLike;
   /** Leave the provider's words out of every error. See `PresetProviderConfig.redactErrors`. */
@@ -479,6 +485,7 @@ interface GeminiStatus {
 }
 
 export interface GeminiResponse {
+  modelVersion?: string;
   candidates?: {
     content?: { parts?: GeminiPart[] };
     finishReason?: string;
@@ -599,6 +606,15 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
         // is Gemini's own trimmed dialect and rejects most of what a real
         // schema carries.
         generationConfig.responseJsonSchema = toGeminiToolSchema(opts.json.schema);
+      } else if (!opts.json && config.jsonMode) {
+        if (tools.length || hosted?.tools.length) {
+          throw new ProviderError(
+            id,
+            "invalid",
+            "Gemini JSON mode without a schema requires a call without tools.",
+          );
+        }
+        generationConfig.responseMimeType = "application/json";
       }
 
       if (opts.serviceTier) {
@@ -729,6 +745,7 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
 
       for (let baseIdx = 0; baseIdx < bases.length; baseIdx++) {
         const currentBase = bases[baseIdx]!;
+        let modelVersion: string | undefined;
         try {
           const stream = await openSse({
             // Without `?alt=sse` the response is one long JSON array that only
@@ -754,6 +771,13 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
               continue;
             }
             const chunk = parsed.response ?? parsed;
+            if (
+              config.reportModelVersion &&
+              typeof chunk.modelVersion === "string" &&
+              chunk.modelVersion
+            ) {
+              modelVersion = chunk.modelVersion;
+            }
 
             // `?alt=sse` commits to 200 the moment the headers go out, so a
             // throttle or an overload landing after that arrives here as a
@@ -849,6 +873,7 @@ export function geminiProvider(config: GeminiConfig, codecs?: HostedCodecs): Pro
               if (hostedStream) yield* hostedStream.close();
               yield {
                 type: "finish",
+                ...(modelVersion ? { source: { provider: id, model: modelVersion } } : {}),
                 // Gemini routinely reports STOP on a turn that called tools, and a
                 // caller reading that as "done" drops the tool round entirely.
                 // Only STOP is promoted, as on the other three wires: a length cut
